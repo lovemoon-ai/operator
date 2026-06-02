@@ -59,6 +59,10 @@ var _video_decoder_connected: bool = false
 var _video_decoder_warning_logged: bool = false
 var _configured_width: int = 0
 var _configured_height: int = 0
+# Active codec family ("h264" / "hevc") last passed to the decoder. Defaults to
+# H.264 so a descriptor without a `codec` field keeps the historical behaviour,
+# and so the first configure only restarts the decoder when it actually flips.
+var _configured_codec: String = "h264"
 var _desired_stereo_layout: bool = true
 var _video_layout_stereo: bool = true
 var _pending_access_unit: PackedByteArray = PackedByteArray()
@@ -359,40 +363,51 @@ func configure_video_stream(feed: Dictionary) -> void:
 	var width := int(feed.get("width", 1280))
 	var height := int(feed.get("height", 720))
 	var stereo := bool(feed.get("stereo", false))
+	# The robot always advertises "h264" or "hevc" in the descriptor; default to
+	# h264 so pre-codec robots keep working.
+	var codec_raw := String(feed.get("codec", "h264")).to_lower()
+	var codec := "hevc" if codec_raw in ["hevc", "h265", "x265"] else "h264"
 
 	var decoder_size_changed := width != _configured_width or height != _configured_height
 	var layout_changed := stereo != _desired_stereo_layout
+	var codec_changed := codec != _configured_codec
 
 	var decoder_running := _decoder_is_running()
 
-	if not decoder_size_changed and not layout_changed and decoder_running:
+	if not decoder_size_changed and not layout_changed and not codec_changed and decoder_running:
 		return
 
 	_configured_width = width
 	_configured_height = height
+	_configured_codec = codec
 	_desired_stereo_layout = stereo
 	_pending_access_unit = PackedByteArray()
 	_submitted_video_packets.clear()
 
 	if not _ensure_video_decoder(width, height):
-		if decoder_size_changed or layout_changed:
+		if decoder_size_changed or layout_changed or codec_changed:
 			print("[LiveVideo] Video decoder unavailable; keeping placeholder texture")
 		return
 
-	if decoder_size_changed and decoder_running:
+	if (decoder_size_changed or codec_changed) and decoder_running:
 		_decoder_call_void("stop_decoder")
 		decoder_running = false
 
 	if not decoder_running:
-		# Godot 4 Kotlin plugin reflection does not always populate has_method()
-		# even when the @UsedByGodot method is callable. Call it directly.
-		var started := bool(_video_decoder.call("start_decoder", width, height))
+		# Always call the codec-aware overload. We can't gate on
+		# has_method("start_decoder_with_codec") because Godot 4's Kotlin-plugin
+		# reflection does NOT populate has_method() for @UsedByGodot methods even
+		# when they're perfectly callable — gating on a false reading would
+		# silently downgrade HEVC streams to the AVC MediaCodec. The plugin ships
+		# in the same APK as this script, so the 3-arg method is guaranteed
+		# present and call-by-name dispatches correctly.
+		var started := bool(_video_decoder.call("start_decoder_with_codec", width, height, codec))
 		if not started:
 			print("[LiveVideo] Warning: failed to start video decoder")
 			return
 
-	if decoder_size_changed or layout_changed:
-		print("[LiveVideo] Video stream configured: %dx%d stereo=%s" % [width, height, stereo])
+	if decoder_size_changed or layout_changed or codec_changed:
+		print("[LiveVideo] Video stream configured: %dx%d stereo=%s codec=%s" % [width, height, stereo, codec])
 
 
 ## Convenience API for projects that do not use Teleoperate-Anything feed dictionaries.
@@ -882,13 +897,16 @@ func _apply_video_layout(stereo_layout: bool) -> void:
 const MAX_INFLIGHT_PACKETS: int = 96
 
 
-## Inspect an Annex-B access unit and return true if it contains an
-## IDR (NAL type 5), SPS (7), or PPS (8). Those NALs are mandatory for
-## the decoder to recover; we never drop them even if they're "old".
+## Inspect an Annex-B access unit and return true if it contains a NAL the
+## decoder must not lose: for H.264 an IDR (5), SPS (7) or PPS (8); for HEVC an
+## IRAP slice (16..21) or VPS (32) / SPS (33) / PPS (34). We never drop those
+## even if they're "old".
 func _access_unit_has_keyframe(access_unit: PackedByteArray) -> bool:
-	# Annex B: NAL units are separated by 0x00 00 00 01 (or 0x00 00 01).
-	# The first byte after the start code is the NAL header; lower 5
-	# bits are the NAL type.
+	# Annex B: NAL units are separated by 0x00 00 00 01 (or 0x00 00 01). The
+	# byte(s) after the start code are the NAL header. H.264 puts the type in
+	# the low 5 bits of byte 0; HEVC's header is 2 bytes and the type is bits
+	# 6..1 of byte 0 ((byte >> 1) & 0x3F).
+	var hevc := _configured_codec == "hevc"
 	var n := access_unit.size()
 	if n < 5:
 		return false
@@ -899,18 +917,26 @@ func _access_unit_has_keyframe(access_unit: PackedByteArray) -> bool:
 		var is_3byte := access_unit[i] == 0 and access_unit[i + 1] == 0 \
 				and access_unit[i + 2] == 1
 		if is_4byte:
-			var nal_type_4: int = access_unit[i + 4] & 0x1F
-			if nal_type_4 == 5 or nal_type_4 == 7 or nal_type_4 == 8:
+			if _is_key_nal(access_unit[i + 4], hevc):
 				return true
 			i += 4
 		elif is_3byte:
-			var nal_type_3: int = access_unit[i + 3] & 0x1F
-			if nal_type_3 == 5 or nal_type_3 == 7 or nal_type_3 == 8:
+			if _is_key_nal(access_unit[i + 3], hevc):
 				return true
 			i += 3
 		else:
 			i += 1
 	return false
+
+
+## True if the NAL header byte names a must-keep NAL for the given codec.
+func _is_key_nal(header_byte: int, hevc: bool) -> bool:
+	if hevc:
+		var t: int = (header_byte >> 1) & 0x3F
+		# IRAP slices (BLA/IDR/CRA = 16..21) + VPS/SPS/PPS (32/33/34).
+		return (t >= 16 and t <= 21) or t == 32 or t == 33 or t == 34
+	var nal_type: int = header_byte & 0x1F
+	return nal_type == 5 or nal_type == 7 or nal_type == 8
 
 
 func _submit_video_access_unit(access_unit: PackedByteArray, packet: Dictionary) -> bool:
@@ -1064,6 +1090,7 @@ func clear_video_stream() -> void:
 	_receiving_video = false
 	_configured_width = 0
 	_configured_height = 0
+	_configured_codec = "h264"
 	_desired_stereo_layout = true
 	_apply_video_layout(true)
 	_video_texture = null

@@ -27,6 +27,8 @@ use crate::video::fanout::{serve_udp_broadcast, serve_video_clients};
 use crate::video::nal::ParamSetCache;
 use crate::video::source::{RtspSource, SourceCtx, VideoSource};
 
+pub use crate::video::nal::Codec;
+
 /// One relayed video feed: an RTSP source and the XR-facing ports it serves on.
 #[derive(Debug, Clone)]
 pub struct VideoFeed {
@@ -38,6 +40,10 @@ pub struct VideoFeed {
     pub tcp_port: u16,
     /// Optional UDP fan-out port (Wi-Fi friendly). `None` = TCP only.
     pub udp_port: Option<u16>,
+    /// Codec the upstream RTSP stream carries. The bridge never transcodes;
+    /// this selects the ffmpeg bitstream filter / muxer for the copy and how
+    /// NALs are classified for join-priming. Defaults to H.264.
+    pub codec: Codec,
 }
 
 /// Broadcast channel depth per feed. Generous so a brief consumer stall (e.g.
@@ -62,7 +68,9 @@ pub async fn run(feeds: Vec<VideoFeed>) -> Result<()> {
 
     for feed in feeds {
         let (nal_tx, _) = broadcast::channel::<TimedVideoFrame>(BROADCAST_DEPTH);
-        let params = ParamSetCache::new();
+        // The cache carries the feed's codec — every downstream stage (ffmpeg
+        // args, NAL classification, join-priming) reads it from here.
+        let params = ParamSetCache::with_codec(feed.codec);
 
         // RTSP source supervisor (reconnects internally).
         {
@@ -106,8 +114,9 @@ pub async fn run(feeds: Vec<VideoFeed>) -> Result<()> {
         }
 
         tracing::info!(
-            "Video feed '{}': RTSP {} -> TCP {}{}",
+            "Video feed '{}' [{}]: RTSP {} -> TCP {}{}",
             feed.name,
+            feed.codec.as_str(),
             feed.rtsp_url,
             feed.tcp_port,
             feed.udp_port

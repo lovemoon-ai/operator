@@ -121,6 +121,10 @@ func _ready() -> void:
 	if _robot_view:
 		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
 
+	var xr_interface := XRServer.find_interface("OpenXR")
+	if xr_interface and xr_interface.is_initialized():
+		call_deferred("_on_xr_started")
+
 	print("[Operator] Main scene initialized (UI hidden — awaiting discovery)")
 
 
@@ -182,6 +186,8 @@ func _wire_settings_ui() -> void:
 # --- XR lifecycle -------------------------------------------------------------
 
 func _on_xr_started() -> void:
+	if _xr_started:
+		return
 	_xr_started = true
 	_configure_passthrough()
 	_robot_view.initialize()
@@ -613,17 +619,28 @@ func _connect_video_stream(ip: String) -> void:
 	_video_tcp_handler.disconnect_from_robot()
 	_video_udp_handler.disconnect_from_robot()
 
+	# Reconfigure the decoder for the new transport. We must NOT pass an empty
+	# descriptor: it falls through to the hard-coded {1280x720} default feed,
+	# which has no `codec` field and so silently resets the decoder MIME from
+	# `video/hevc` back to `video/avc` — feeding HEVC NALs into an AVC
+	# MediaCodec produces zero output frames. Wrap the cached `_last_video_feed`
+	# (which carries codec/stereo/dimensions from the real descriptor) in a
+	# descriptor-shape envelope so the same feed is re-extracted unchanged.
+	var configure_arg: Dictionary = {}
+	if not _last_video_feed.is_empty():
+		configure_arg = {"video_feeds": [_last_video_feed]}
+
 	if transport == "udp":
 		print("[Operator] Connecting video stream (UDP) to %s:%d" % [ip, udp_port])
 		_active_video_transport = "udp"
-		_configure_robot_video_stream({})
+		_configure_robot_video_stream(configure_arg)
 		_video_udp_handler.connect_to_video_stream(ip, udp_port)
 		if _robot_view and _robot_view.has_method("set_packet_source"):
 			_robot_view.set_packet_source(_video_udp_handler)
 	else:
 		print("[Operator] Connecting video stream (TCP) to %s:%d" % [ip, tcp_port])
 		_active_video_transport = "tcp"
-		_configure_robot_video_stream({})
+		_configure_robot_video_stream(configure_arg)
 		_video_tcp_handler.connect_to_video_stream(ip, tcp_port)
 		if _robot_view and _robot_view.has_method("set_packet_source"):
 			_robot_view.set_packet_source(_video_tcp_handler)

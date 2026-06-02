@@ -1,0 +1,28 @@
+# xr-bridge config used by `tests/01_rtsp_test.sh --codec hevc`.
+#
+# Identical to bridge_video.yaml except the feed declares `codec: hevc`, so the
+# bridge selects the hevc_mp4toannexb bitstream filter for the stream-copy and
+# advertises "hevc" in the descriptor — the headset then spins up the
+# video/hevc MediaCodec. The publisher (ffmpeg libx265) must encode HEVC to
+# match; the bridge never transcodes.
+
+adapter_link:
+  endpoint: "tcp:127.0.0.1:63910"
+
+bridge:
+  name: "xr-bridge-rtsp-test-hevc"
+  pose_port: 63901
+  video_port: 12345
+  discovery_port: 63900
+  pose_udp_port: 63902
+  telemetry_port: 63903
+  video:
+    feeds:
+      - name: test
+        rtsp_url: "rtsp://127.0.0.1:8554/test"
+        tcp_port: 12345
+        transport: tcp
+        width: 1280
+        height: 720
+        fps: 30
+        codec: hevc

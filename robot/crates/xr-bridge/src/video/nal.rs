@@ -1,13 +1,59 @@
-//! H.264 Annex-B NAL parsing + parameter-set caching.
+//! H.264 / H.265 Annex-B NAL parsing + parameter-set caching.
 //!
 //! `NalParser` is copied verbatim (byte-for-byte behaviour) from
 //! `robot/src/video/ffmpeg.rs` during the bridge/adapter split — it splits a
-//! continuous H.264 Annex-B bytestream into individual NAL units, always
-//! re-emitting a 4-byte start code. `ParamSetCache` is new: it remembers the
-//! most recent SPS (NAL type 7) and PPS (NAL type 8) seen on a stream so a
-//! late-joining headset can be primed before the next IDR.
+//! continuous Annex-B bytestream into individual NAL units, always re-emitting
+//! the stream's original start code. It is codec-agnostic (it only keys on the
+//! `00 00 01` start codes, which both H.264 and H.265 share), so the relay
+//! never rewrites the body regardless of codec.
+//!
+//! Everything *above* the splitter — NAL type classification and the
+//! [`ParamSetCache`] — is codec-aware via [`Codec`], because H.264 and H.265
+//! number their NAL types differently and put the type in different bits of the
+//! header (`byte & 0x1F` for AVC vs `(byte >> 1) & 0x3F` for HEVC), and because
+//! HEVC needs a third parameter set (VPS) cached alongside SPS/PPS to prime a
+//! late-joining headset.
 
 use std::sync::{Arc, Mutex};
+
+/// Codec family of a relayed feed.
+///
+/// The bridge never transcodes (the RTSP source is stream-copied), so this is
+/// purely a *declaration* of what the upstream (Isaac Sim / the test
+/// publisher) is sending. It drives three things: how NAL units are classified
+/// here, which parameter sets the cache keeps, and which bitstream filter +
+/// muxer ffmpeg uses for the copy (see `source.rs`). It is also advertised to
+/// the headset in the descriptor so it spins up the matching MediaCodec MIME
+/// (`video/avc` vs `video/hevc`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Codec {
+    /// H.264 / AVC — the historical default.
+    #[default]
+    H264,
+    /// H.265 / HEVC.
+    Hevc,
+}
+
+impl Codec {
+    /// Parse a YAML / descriptor codec string. Unknown or empty strings fall
+    /// back to [`Codec::H264`] (the historical default) rather than erroring,
+    /// so a typo can't brick a feed — it relays as H.264 and the mismatch is
+    /// visible in the logs / on the headset HUD.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "hevc" | "h265" | "x265" => Codec::Hevc,
+            _ => Codec::H264,
+        }
+    }
+
+    /// Lower-case wire name (`"h264"` / `"hevc"`), as carried in the descriptor.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Codec::H264 => "h264",
+            Codec::Hevc => "hevc",
+        }
+    }
+}
 
 /// Parser that splits a continuous H.264 Annex B bytestream into individual NAL units.
 ///
@@ -110,6 +156,20 @@ pub const NAL_TYPE_PPS: u8 = 8;
 /// H.264 NAL unit type for an IDR (instantaneous decoder refresh) coded slice.
 pub const NAL_TYPE_IDR: u8 = 5;
 
+/// HEVC NAL unit type for a video parameter set.
+pub const HEVC_NAL_VPS: u8 = 32;
+/// HEVC NAL unit type for a sequence parameter set.
+pub const HEVC_NAL_SPS: u8 = 33;
+/// HEVC NAL unit type for a picture parameter set.
+pub const HEVC_NAL_PPS: u8 = 34;
+/// HEVC access-unit delimiter NAL type.
+pub const HEVC_NAL_AUD: u8 = 35;
+/// First HEVC IRAP (intra random-access point) VCL NAL type (BLA_W_LP).
+pub const HEVC_NAL_IRAP_FIRST: u8 = 16;
+/// Last HEVC IRAP VCL NAL type (RSV_IRAP_VCL23). IDR/BLA/CRA all live in
+/// `16..=23`; any of them can start a clean GOP.
+pub const HEVC_NAL_IRAP_LAST: u8 = 23;
+
 /// Length of the Annex-B start code at the front of `nal` (3 or 4 bytes).
 /// Returns 0 if `nal` doesn't begin with a recognisable start code.
 fn start_code_len(nal: &[u8]) -> usize {
@@ -143,42 +203,118 @@ pub fn is_param(nal: &[u8]) -> bool {
     matches!(nal_type(nal), Some(NAL_TYPE_SPS) | Some(NAL_TYPE_PPS))
 }
 
-/// Thread-safe cache of the latest SPS/PPS seen on a single feed.
+/// Codec-aware NAL unit type extraction.
 ///
-/// A late-joining headset needs an SPS + PPS before it can configure its
-/// decoder, and an IDR to start a clean GOP. The fan-out consults this cache
-/// to prime new subscribers (see `fanout.rs`).
+/// H.264 puts the type in the low 5 bits of the byte after the start code
+/// (`byte & 0x1F`); HEVC's NAL header is 2 bytes and the type is bits 6..1 of
+/// the first byte (`(byte >> 1) & 0x3F`). Returns `None` if the NAL is empty.
+pub fn nal_type_of(nal: &[u8], codec: Codec) -> Option<u8> {
+    let sc = start_code_len(nal);
+    // With a start code the header byte follows it; without one (a raw NAL) the
+    // first byte is the header.
+    let header = if sc == 0 { *nal.first()? } else { *nal.get(sc)? };
+    Some(match codec {
+        Codec::H264 => header & 0x1F,
+        Codec::Hevc => (header >> 1) & 0x3F,
+    })
+}
+
+/// True if `nal` is a keyframe slice that can start a clean GOP: an IDR for
+/// H.264, or any IRAP (IDR/BLA/CRA, types `16..=23`) for HEVC.
+pub fn is_keyframe(nal: &[u8], codec: Codec) -> bool {
+    match codec {
+        Codec::H264 => nal_type_of(nal, codec) == Some(NAL_TYPE_IDR),
+        Codec::Hevc => matches!(
+            nal_type_of(nal, codec),
+            Some(HEVC_NAL_IRAP_FIRST..=HEVC_NAL_IRAP_LAST)
+        ),
+    }
+}
+
+/// True if `nal` is a parameter set the headset needs before configuring its
+/// decoder: SPS/PPS for H.264; VPS/SPS/PPS for HEVC.
+pub fn is_param_set(nal: &[u8], codec: Codec) -> bool {
+    match codec {
+        Codec::H264 => matches!(nal_type_of(nal, codec), Some(NAL_TYPE_SPS | NAL_TYPE_PPS)),
+        Codec::Hevc => matches!(
+            nal_type_of(nal, codec),
+            Some(HEVC_NAL_VPS | HEVC_NAL_SPS | HEVC_NAL_PPS)
+        ),
+    }
+}
+
+/// Thread-safe cache of the latest parameter sets seen on a single feed.
+///
+/// A late-joining headset needs the parameter sets (SPS + PPS for H.264; VPS +
+/// SPS + PPS for HEVC) before it can configure its decoder, and a keyframe to
+/// start a clean GOP. The fan-out consults this cache to prime new subscribers
+/// (see `fanout.rs`). The cache carries its feed's [`Codec`] so classification
+/// and the ordered priming output match the stream.
 #[derive(Clone, Default)]
 pub struct ParamSetCache {
     inner: Arc<Mutex<ParamSets>>,
+    codec: Codec,
 }
 
 #[derive(Default)]
 struct ParamSets {
+    /// HEVC only — H.264 has no VPS.
+    vps: Option<Vec<u8>>,
     sps: Option<Vec<u8>>,
     pps: Option<Vec<u8>>,
 }
 
 impl ParamSetCache {
+    /// New cache for an H.264 feed (the historical default).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Inspect a NAL; if it is an SPS or PPS, store it as the latest.
-    ///
-    /// Returns `true` if the NAL was a parameter set (and thus cached).
+    /// New cache for a feed of the given codec.
+    pub fn with_codec(codec: Codec) -> Self {
+        Self {
+            inner: Arc::default(),
+            codec,
+        }
+    }
+
+    /// Codec this cache classifies for.
+    pub fn codec(&self) -> Codec {
+        self.codec
+    }
+
+    /// Inspect a NAL; if it is a parameter set for this feed's codec, store it
+    /// as the latest. Returns `true` if the NAL was a parameter set.
     pub fn observe(&self, nal: &[u8]) -> bool {
-        match nal_type(nal) {
-            Some(NAL_TYPE_SPS) => {
+        let typ = nal_type_of(nal, self.codec);
+        match (self.codec, typ) {
+            (Codec::H264, Some(NAL_TYPE_SPS)) => {
                 self.inner.lock().unwrap().sps = Some(nal.to_vec());
                 true
             }
-            Some(NAL_TYPE_PPS) => {
+            (Codec::H264, Some(NAL_TYPE_PPS)) => {
+                self.inner.lock().unwrap().pps = Some(nal.to_vec());
+                true
+            }
+            (Codec::Hevc, Some(HEVC_NAL_VPS)) => {
+                self.inner.lock().unwrap().vps = Some(nal.to_vec());
+                true
+            }
+            (Codec::Hevc, Some(HEVC_NAL_SPS)) => {
+                self.inner.lock().unwrap().sps = Some(nal.to_vec());
+                true
+            }
+            (Codec::Hevc, Some(HEVC_NAL_PPS)) => {
                 self.inner.lock().unwrap().pps = Some(nal.to_vec());
                 true
             }
             _ => false,
         }
+    }
+
+    /// Latest cached VPS, if any (HEVC only).
+    pub fn vps(&self) -> Option<Vec<u8>> {
+        self.inner.lock().unwrap().vps.clone()
     }
 
     /// Latest cached SPS, if any.
@@ -191,12 +327,32 @@ impl ParamSetCache {
         self.inner.lock().unwrap().pps.clone()
     }
 
-    /// Both parameter sets in (SPS, PPS) order if both are present.
+    /// The SPS + PPS pair in order, if both are present. Kept for the H.264
+    /// readiness checks in tests/examples; for the full ordered priming set
+    /// (which includes the HEVC VPS) use [`Self::ordered_param_nals`].
     pub fn param_nals(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         let g = self.inner.lock().unwrap();
         match (&g.sps, &g.pps) {
             (Some(s), Some(p)) => Some((s.clone(), p.clone())),
             _ => None,
+        }
+    }
+
+    /// All parameter sets in decode order, ready to prime a new client:
+    /// `[SPS, PPS]` for H.264, `[VPS, SPS, PPS]` for HEVC. Empty until every
+    /// required set has been observed (so a client is never primed with a
+    /// partial configuration).
+    pub fn ordered_param_nals(&self) -> Vec<Vec<u8>> {
+        let g = self.inner.lock().unwrap();
+        match self.codec {
+            Codec::H264 => match (&g.sps, &g.pps) {
+                (Some(s), Some(p)) => vec![s.clone(), p.clone()],
+                _ => Vec::new(),
+            },
+            Codec::Hevc => match (&g.vps, &g.sps, &g.pps) {
+                (Some(v), Some(s), Some(p)) => vec![v.clone(), s.clone(), p.clone()],
+                _ => Vec::new(),
+            },
         }
     }
 }
@@ -350,5 +506,97 @@ mod tests {
         assert_eq!(cache.param_nals(), None, "SPS only is not enough");
         cache.observe(&[0x00, 0x00, 0x00, 0x01, 0x68, 0xBB]);
         assert!(cache.param_nals().is_some());
+    }
+
+    #[test]
+    fn ordered_param_nals_h264_is_sps_then_pps() {
+        let cache = ParamSetCache::new();
+        assert!(cache.ordered_param_nals().is_empty());
+        let sps = vec![0x00, 0x00, 0x00, 0x01, 0x67, 0xAA];
+        let pps = vec![0x00, 0x00, 0x00, 0x01, 0x68, 0xBB];
+        cache.observe(&sps);
+        assert!(cache.ordered_param_nals().is_empty(), "SPS only is not enough");
+        cache.observe(&pps);
+        assert_eq!(cache.ordered_param_nals(), vec![sps, pps]);
+    }
+
+    // ---- Codec parsing ----
+
+    #[test]
+    fn codec_parse_is_lenient() {
+        assert_eq!(Codec::parse("hevc"), Codec::Hevc);
+        assert_eq!(Codec::parse("H265"), Codec::Hevc);
+        assert_eq!(Codec::parse("x265"), Codec::Hevc);
+        assert_eq!(Codec::parse(" HEVC "), Codec::Hevc);
+        assert_eq!(Codec::parse("h264"), Codec::H264);
+        assert_eq!(Codec::parse(""), Codec::H264);
+        assert_eq!(Codec::parse("nonsense"), Codec::H264, "typo falls back to H.264");
+        assert_eq!(Codec::default(), Codec::H264);
+        assert_eq!(Codec::H264.as_str(), "h264");
+        assert_eq!(Codec::Hevc.as_str(), "hevc");
+    }
+
+    // ---- HEVC NAL classification ----
+    //
+    // HEVC NAL header is 2 bytes; the type is bits 6..1 of the first byte,
+    // i.e. `(byte0 >> 1) & 0x3F`. The forbidden-zero bit is the MSB. So a
+    // first header byte of `(type << 1)` encodes `type`:
+    //   VPS(32)=0x40  SPS(33)=0x42  PPS(34)=0x44  AUD(35)=0x46
+    //   IDR_W_RADL(19)=0x26  TRAIL_R(1)=0x02  CRA(21)=0x2A
+
+    #[test]
+    fn classifies_hevc_nal_types() {
+        let vps = vec![0x00, 0x00, 0x00, 0x01, 0x40, 0x01];
+        let sps = vec![0x00, 0x00, 0x00, 0x01, 0x42, 0x01];
+        let pps = vec![0x00, 0x00, 0x00, 0x01, 0x44, 0x01];
+        let idr = vec![0x00, 0x00, 0x00, 0x01, 0x26, 0x01];
+        let trail = vec![0x00, 0x00, 0x00, 0x01, 0x02, 0x01];
+
+        assert_eq!(nal_type_of(&vps, Codec::Hevc), Some(HEVC_NAL_VPS));
+        assert_eq!(nal_type_of(&sps, Codec::Hevc), Some(HEVC_NAL_SPS));
+        assert_eq!(nal_type_of(&pps, Codec::Hevc), Some(HEVC_NAL_PPS));
+        assert_eq!(nal_type_of(&idr, Codec::Hevc), Some(19));
+        assert_eq!(nal_type_of(&trail, Codec::Hevc), Some(1));
+
+        assert!(is_param_set(&vps, Codec::Hevc));
+        assert!(is_param_set(&sps, Codec::Hevc));
+        assert!(is_param_set(&pps, Codec::Hevc));
+        assert!(!is_param_set(&idr, Codec::Hevc));
+        assert!(!is_param_set(&trail, Codec::Hevc));
+
+        assert!(is_keyframe(&idr, Codec::Hevc));
+        assert!(!is_keyframe(&trail, Codec::Hevc));
+        assert!(!is_keyframe(&vps, Codec::Hevc));
+
+        // The same bytes interpreted as H.264 must NOT be mistaken for AVC
+        // parameter sets (guards against codec-confusion in the relay).
+        assert!(!is_param_set(&vps, Codec::H264));
+    }
+
+    #[test]
+    fn hevc_param_set_cache_holds_vps_sps_pps() {
+        let cache = ParamSetCache::with_codec(Codec::Hevc);
+        assert!(cache.ordered_param_nals().is_empty());
+
+        let vps = vec![0x00, 0x00, 0x00, 0x01, 0x40, 0x10];
+        let sps = vec![0x00, 0x00, 0x00, 0x01, 0x42, 0x20];
+        let pps = vec![0x00, 0x00, 0x00, 0x01, 0x44, 0x30];
+
+        assert!(cache.observe(&vps));
+        assert!(cache.observe(&sps));
+        assert!(
+            cache.ordered_param_nals().is_empty(),
+            "VPS+SPS without PPS is not enough to prime"
+        );
+        assert!(cache.observe(&pps));
+
+        // HEVC priming order is VPS, SPS, PPS.
+        assert_eq!(cache.ordered_param_nals(), vec![vps.clone(), sps.clone(), pps.clone()]);
+        assert_eq!(cache.vps(), Some(vps));
+        assert_eq!(cache.sps(), Some(sps));
+        assert_eq!(cache.pps(), Some(pps));
+
+        // A trailing (non-param) slice is not cached.
+        assert!(!cache.observe(&[0x00, 0x00, 0x00, 0x01, 0x02, 0x01]));
     }
 }

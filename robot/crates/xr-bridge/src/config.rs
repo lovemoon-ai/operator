@@ -90,6 +90,13 @@ pub struct VideoFeedConfig {
     /// Preferred transport advertised in the descriptor ("tcp" | "udp" | "auto").
     #[serde(default = "default_video_transport")]
     pub transport: String,
+    /// Codec family the upstream RTSP stream carries: "h264" (default) or
+    /// "hevc". The bridge never transcodes — this tells the relay which
+    /// bitstream filter / muxer to copy through and how to classify NALs, and
+    /// is advertised to the headset so it spins up the matching decoder. Omit
+    /// for H.264 (back-compat with configs that pre-date the field).
+    #[serde(default = "default_video_codec")]
+    pub codec: String,
 }
 
 fn default_video_width() -> u32 {
@@ -103,6 +110,9 @@ fn default_video_fps() -> u32 {
 }
 fn default_video_transport() -> String {
     "tcp".to_string()
+}
+fn default_video_codec() -> String {
+    "h264".to_string()
 }
 
 impl Default for BridgeConfig {
@@ -308,6 +318,8 @@ video:
         assert_eq!(wl.width, 640);
         assert_eq!(wl.height, 480);
         assert_eq!(wl.transport, "udp");
+        // Codec defaults to h264 when the field is absent.
+        assert_eq!(wl.codec, "h264");
 
         // Defaults fill in for the second feed.
         let head = &cfg.video.feeds[1];
@@ -318,6 +330,21 @@ video:
         assert_eq!(head.height, 720);
         assert_eq!(head.fps, 30);
         assert_eq!(head.transport, "tcp");
+        assert_eq!(head.codec, "h264");
+    }
+
+    #[test]
+    fn parses_explicit_hevc_codec() {
+        let yaml = "\
+video:
+  feeds:
+    - name: head
+      rtsp_url: \"rtsp://127.0.0.1:8554/head\"
+      tcp_port: 12345
+      codec: hevc
+";
+        let cfg = BridgeConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(cfg.video.feeds[0].codec, "hevc");
     }
 
     #[test]

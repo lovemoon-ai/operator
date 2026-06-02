@@ -15,7 +15,7 @@ use tokio::process::Command;
 use tokio::sync::broadcast;
 
 use crate::protocol::{TimedVideoFrame, VIDEO_PIPELINE_MODE_FFMPEG};
-use crate::video::nal::{nal_type, NalParser, ParamSetCache};
+use crate::video::nal::{nal_type_of, Codec, NalParser, ParamSetCache, HEVC_NAL_AUD};
 
 /// Shared inputs every source needs to publish into a feed.
 #[derive(Clone)]
@@ -48,10 +48,23 @@ impl RtspSource {
         Self { url: url.into() }
     }
 
-    /// ffmpeg args for low-latency RTSP ingest → Annex-B H.264 on stdout.
-    /// No transcode: `-c:v copy` keeps Isaac's bytes; `h264_mp4toannexb`
-    /// guarantees Annex-B start codes regardless of the RTSP container.
+    /// ffmpeg args for low-latency RTSP ingest of an H.264 stream. Equivalent
+    /// to [`Self::ffmpeg_args_for`] with [`Codec::H264`]; kept as a
+    /// convenience for the H.264-only call sites and tests.
     pub fn ffmpeg_args(url: &str) -> Vec<String> {
+        Self::ffmpeg_args_for(url, Codec::H264)
+    }
+
+    /// ffmpeg args for low-latency RTSP ingest → Annex-B bytestream on stdout.
+    /// No transcode: `-c:v copy` keeps the upstream bytes. The bitstream filter
+    /// and output muxer are codec-specific — `h264_mp4toannexb` / `-f h264` for
+    /// AVC, `hevc_mp4toannexb` / `-f hevc` for HEVC — and ffmpeg rejects the
+    /// mismatched pairing, so they stay locked to `codec` here.
+    pub fn ffmpeg_args_for(url: &str, codec: Codec) -> Vec<String> {
+        let (bsf, muxer) = match codec {
+            Codec::H264 => ("h264_mp4toannexb", "h264"),
+            Codec::Hevc => ("hevc_mp4toannexb", "hevc"),
+        };
         [
             "-nostdin",
             "-rtsp_transport",
@@ -66,9 +79,9 @@ impl RtspSource {
             "-c:v",
             "copy",
             "-bsf:v",
-            "h264_mp4toannexb",
+            bsf,
             "-f",
-            "h264",
+            muxer,
             "pipe:1",
         ]
         .iter()
@@ -95,7 +108,11 @@ const BACKOFF_MAX: Duration = Duration::from_secs(2);
 /// (no receivers will ever exist again — which doesn't happen while the
 /// fan-out servers hold the Sender).
 pub async fn run_rtsp_source(url: &str, ctx: SourceCtx) -> Result<()> {
-    run_ffmpeg_source(RtspSource::ffmpeg_args(url), ctx).await
+    // The feed's codec lives on its parameter-set cache (single source of
+    // truth, set from config when the feed is wired up in `mod.rs::run`). Use
+    // it to pick the matching bitstream filter / muxer for the stream-copy.
+    let args = RtspSource::ffmpeg_args_for(url, ctx.params.codec());
+    run_ffmpeg_source(args, ctx).await
 }
 
 /// Supervised ingest loop for arbitrary ffmpeg args that emit an Annex-B H.264
@@ -165,7 +182,7 @@ async fn ingest_once(args: &[String], ctx: &SourceCtx, frame_id: &mut u64) -> Re
         .ok_or_else(|| anyhow::anyhow!("ffmpeg stdout not available"))?;
 
     let mut parser = NalParser::new();
-    let mut access_units = AccessUnitAssembler::new();
+    let mut access_units = AccessUnitAssembler::new(ctx.params.codec());
     let mut buf = [0u8; 65536];
     let mut nal_total: u64 = 0;
 
@@ -211,27 +228,34 @@ async fn ingest_once(args: &[String], ctx: &SourceCtx, frame_id: &mut u64) -> Re
 struct AccessUnitAssembler {
     pending: Vec<Vec<u8>>,
     has_vcl: bool,
+    codec: Codec,
 }
 
 impl AccessUnitAssembler {
-    fn new() -> Self {
+    fn new(codec: Codec) -> Self {
         Self {
             pending: Vec::new(),
             has_vcl: false,
+            codec,
         }
     }
 
     fn push(&mut self, nal: Vec<u8>) -> Vec<Vec<Vec<u8>>> {
         let mut complete = Vec::new();
-        let typ = nal_type(&nal);
-        let is_vcl = matches!(typ, Some(1..=5));
-        let is_aud = typ == Some(9);
+        let typ = nal_type_of(&nal, self.codec);
+        // VCL (coded slice) NAL types: 1..=5 for H.264; 0..=31 for HEVC (the
+        // parameter sets and other non-VCL types start at 32). AUD is type 9
+        // for H.264, 35 for HEVC.
+        let (is_vcl, is_aud) = match self.codec {
+            Codec::H264 => (matches!(typ, Some(1..=5)), typ == Some(9)),
+            Codec::Hevc => (matches!(typ, Some(0..=31)), typ == Some(HEVC_NAL_AUD)),
+        };
 
         if is_aud && !self.pending.is_empty() {
             if let Some(unit) = self.take_pending() {
                 complete.push(unit);
             }
-        } else if is_vcl && self.has_vcl && starts_new_picture(&nal) {
+        } else if is_vcl && self.has_vcl && starts_new_picture(&nal, self.codec) {
             if let Some(unit) = self.take_pending() {
                 complete.push(unit);
             }
@@ -302,12 +326,27 @@ fn publish_access_unit(
 
 /// Best-effort access-unit boundary check for VCL NALs.
 ///
-/// H.264 starts every picture with a VCL slice whose `first_mb_in_slice` is 0.
-/// Multi-slice pictures have subsequent VCL NALs with a non-zero value; those
-/// stay in the same access unit. If parsing fails, assume a new picture so the
-/// relay favours decoder progress over unbounded buffering.
-fn starts_new_picture(nal: &[u8]) -> bool {
-    first_mb_in_slice(nal).map_or(true, |v| v == 0)
+/// H.264 starts every picture with a VCL slice whose `first_mb_in_slice` is 0;
+/// HEVC starts one whose `first_slice_segment_in_pic_flag` is 1. Subsequent
+/// slices of a multi-slice picture have `first_mb_in_slice != 0` (H.264) /
+/// `first_slice_segment_in_pic_flag == 0` (HEVC) and stay in the same access
+/// unit. If parsing fails, assume a new picture so the relay favours decoder
+/// progress over unbounded buffering.
+fn starts_new_picture(nal: &[u8], codec: Codec) -> bool {
+    match codec {
+        Codec::H264 => first_mb_in_slice(nal).map_or(true, |v| v == 0),
+        Codec::Hevc => hevc_first_slice_in_pic(nal).unwrap_or(true),
+    }
+}
+
+/// HEVC `first_slice_segment_in_pic_flag`: the most-significant bit of the slice
+/// segment header, which begins immediately after the 2-byte NAL header. `None`
+/// if the NAL is too short to contain it.
+fn hevc_first_slice_in_pic(nal: &[u8]) -> Option<bool> {
+    let start = start_code_len(nal);
+    // 2-byte NAL header, then the slice segment header's first bit.
+    let first = nal.get(start + 2)?;
+    Some((first & 0x80) != 0)
 }
 
 fn first_mb_in_slice(nal: &[u8]) -> Option<u32> {
@@ -399,5 +438,53 @@ mod tests {
         assert!(joined.contains("-flags low_delay"));
         assert!(joined.ends_with("pipe:1"));
         assert!(joined.contains("rtsp://127.0.0.1:8554/wrist_left"));
+    }
+
+    #[test]
+    fn hevc_ffmpeg_args_use_hevc_bsf_and_muxer() {
+        let args = RtspSource::ffmpeg_args_for("rtsp://127.0.0.1:8554/head", Codec::Hevc);
+        let joined = args.join(" ");
+        // Still a pure stream-copy — only the codec-specific filter/muxer flip.
+        assert!(joined.contains("-c:v copy"));
+        assert!(joined.contains("hevc_mp4toannexb"));
+        assert!(joined.contains("-f hevc"));
+        assert!(!joined.contains("h264_mp4toannexb"));
+        assert!(!joined.contains("-f h264"));
+        assert!(joined.ends_with("pipe:1"));
+        // The H.264 default helper must be unchanged.
+        let h264 = RtspSource::ffmpeg_args("rtsp://127.0.0.1:8554/head").join(" ");
+        assert!(h264.contains("h264_mp4toannexb") && h264.contains("-f h264"));
+    }
+
+    #[test]
+    fn hevc_access_unit_assembler_groups_by_first_slice_flag() {
+        // HEVC bytes (2-byte NAL header). first_slice_segment_in_pic_flag is the
+        // top bit of the byte after the header: 0x80 → new picture, 0x00 → same.
+        let sc = [0x00u8, 0x00, 0x00, 0x01];
+        let mk = |t: u8, first: bool| {
+            let mut v = sc.to_vec();
+            v.push(t << 1); // HEVC NAL type in bits 6..1
+            v.push(0x01); // layer/tid byte
+            v.push(if first { 0x80 } else { 0x00 });
+            v
+        };
+        let vps = mk(32, false);
+        let sps = mk(33, false);
+        let pps = mk(34, false);
+        let idr = mk(19, true); // IDR_W_RADL, first slice of a picture
+        let slice2 = mk(19, false); // second slice of the same picture
+        let next = mk(1, true); // TRAIL_R, first slice of the next picture
+
+        let mut asm = AccessUnitAssembler::new(Codec::Hevc);
+        // VPS/SPS/PPS + IDR + its second slice accumulate into one access unit;
+        // it is only emitted when the next picture's first slice arrives.
+        assert!(asm.push(vps).is_empty());
+        assert!(asm.push(sps).is_empty());
+        assert!(asm.push(pps).is_empty());
+        assert!(asm.push(idr).is_empty());
+        assert!(asm.push(slice2).is_empty());
+        let done = asm.push(next);
+        assert_eq!(done.len(), 1, "first AU completes when next picture starts");
+        assert_eq!(done[0].len(), 5, "VPS,SPS,PPS,IDR,slice2 grouped together");
     }
 }

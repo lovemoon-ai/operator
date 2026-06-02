@@ -219,10 +219,20 @@ pub struct VideoFeedInfo {
     /// pure descriptor-side advertisement of *what's available*.
     #[serde(default)]
     pub udp_port: u16,
+    /// Codec family of the encoded stream: "h264" (AVC, default) or "hevc"
+    /// (H.265). The headset uses this to pick the matching MediaCodec MIME
+    /// (`video/avc` vs `video/hevc`) and codec-specific-data layout. Defaults
+    /// to "h264" so descriptors that pre-date the field keep working.
+    #[serde(default = "default_video_codec")]
+    pub codec: String,
 }
 
 fn default_transport() -> String {
     "tcp".to_string()
+}
+
+fn default_video_codec() -> String {
+    "h264".to_string()
 }
 
 fn default_width() -> u32 {

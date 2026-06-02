@@ -31,7 +31,9 @@ use tokio_util::codec::Framed;
 
 use xr_bridge::protocol::{TimedVideoFrame, TimedVideoFrameCodec};
 use xr_bridge::video::fanout::serve_video_clients_on;
-use xr_bridge::video::nal::{is_idr, nal_type, ParamSetCache};
+use xr_bridge::video::nal::{
+    is_idr, is_keyframe, nal_type, nal_type_of, Codec, ParamSetCache, HEVC_NAL_SPS, HEVC_NAL_VPS,
+};
 use xr_bridge::video::source::{run_ffmpeg_source, run_rtsp_source, RtspSource, SourceCtx};
 
 fn ffmpeg_available() -> bool {
@@ -41,6 +43,15 @@ fn ffmpeg_available() -> bool {
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// True if ffmpeg lists `encoder` (e.g. "libx265") in `-encoders`.
+fn ffmpeg_has_encoder(encoder: &str) -> bool {
+    std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-encoders"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(encoder))
         .unwrap_or(false)
 }
 
@@ -66,6 +77,38 @@ fn lavfi_h264_args() -> Vec<String> {
         "h264_mp4toannexb",
         "-f",
         "h264",
+        "pipe:1",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// ffmpeg args producing a self-contained Annex-B HEVC stream on stdout.
+/// `repeat-headers=1` re-emits VPS/SPS/PPS at every IDR so a late TCP client is
+/// reliably primed; `keyint=15` keeps a keyframe arriving quickly.
+fn lavfi_hevc_args() -> Vec<String> {
+    [
+        "-nostdin",
+        "-re",
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=320x240:rate=15",
+        "-c:v",
+        "libx265",
+        "-preset",
+        "ultrafast",
+        "-tune",
+        "zerolatency",
+        "-x265-params",
+        "keyint=15:min-keyint=15:repeat-headers=1:bframes=0",
+        "-pix_fmt",
+        "yuv420p",
+        "-bsf:v",
+        "hevc_mp4toannexb",
+        "-f",
+        "hevc",
         "pipe:1",
     ]
     .iter()
@@ -162,6 +205,105 @@ async fn ffmpeg_ingest_relays_real_h264() {
     let start = std::time::Instant::now();
     run_feed_and_assert(lavfi_h264_args(), Duration::from_secs(15)).await;
     eprintln!("ffmpeg_ingest_relays_real_h264 took {:?}", start.elapsed());
+}
+
+/// HEVC counterpart of [`ffmpeg_ingest_relays_real_h264`]: drives the live
+/// ffmpeg ingest with a real libx265 stream through the HEVC NAL classification
+/// + VPS-aware param cache + codec-aware fan-out priming, and asserts a TCP
+/// client sees VPS + SPS + a keyframe + several frames. Skips (does not fail)
+/// if ffmpeg or the libx265 encoder is unavailable.
+#[tokio::test]
+async fn ffmpeg_ingest_relays_real_hevc() {
+    if !ffmpeg_available() {
+        eprintln!("SKIP ffmpeg_ingest_relays_real_hevc: ffmpeg not on PATH");
+        return;
+    }
+    if !ffmpeg_has_encoder("libx265") {
+        eprintln!("SKIP ffmpeg_ingest_relays_real_hevc: libx265 encoder not built into ffmpeg");
+        return;
+    }
+    let start = std::time::Instant::now();
+    run_hevc_feed_and_assert(lavfi_hevc_args(), Duration::from_secs(20)).await;
+    eprintln!("ffmpeg_ingest_relays_real_hevc took {:?}", start.elapsed());
+}
+
+/// HEVC variant of [`run_feed_and_assert`]: the cache (and thus the whole
+/// relay) is configured for HEVC, and the client-side checks use HEVC NAL
+/// classification.
+async fn run_hevc_feed_and_assert(args: Vec<String>, budget: Duration) {
+    let (tx, _) = tokio::sync::broadcast::channel::<TimedVideoFrame>(256);
+    let params = ParamSetCache::with_codec(Codec::Hevc);
+
+    let src_ctx = SourceCtx {
+        nal_tx: tx.clone(),
+        params: params.clone(),
+        name: "test-hevc".to_string(),
+    };
+    let src_handle = tokio::spawn(async move {
+        let _ = run_ffmpeg_source(args, src_ctx).await;
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fanout_addr = listener.local_addr().unwrap();
+    let s_tx = tx.clone();
+    let s_params = params.clone();
+    let fanout_handle = tokio::spawn(async move {
+        let _ = serve_video_clients_on(listener, s_tx, s_params).await;
+    });
+
+    let result = tokio::time::timeout(budget, async {
+        // Wait until the source has primed the full VPS+SPS+PPS set.
+        loop {
+            if !params.ordered_param_nals().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        let client = loop {
+            match TcpStream::connect(fanout_addr).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        };
+
+        let mut framed = Framed::new(client, TimedVideoFrameCodec);
+        let mut saw_vps = false;
+        let mut saw_sps = false;
+        let mut saw_key = false;
+        let mut total = 0usize;
+
+        while let Some(Ok(f)) = framed.next().await {
+            total += 1;
+            match nal_type_of(&f.nal, Codec::Hevc) {
+                Some(HEVC_NAL_VPS) => saw_vps = true,
+                Some(HEVC_NAL_SPS) => saw_sps = true,
+                _ => {}
+            }
+            if is_keyframe(&f.nal, Codec::Hevc) {
+                saw_key = true;
+            }
+            if saw_vps && saw_sps && saw_key && total >= 6 {
+                break;
+            }
+        }
+        (saw_vps, saw_sps, saw_key, total)
+    })
+    .await;
+
+    src_handle.abort();
+    fanout_handle.abort();
+
+    match result {
+        Ok((saw_vps, saw_sps, saw_key, total)) => {
+            assert!(saw_vps, "expected at least one VPS (HEVC)");
+            assert!(saw_sps, "expected at least one SPS (HEVC)");
+            assert!(saw_key, "expected at least one IRAP/keyframe (HEVC)");
+            assert!(total >= 6, "expected several frames, got {total}");
+            eprintln!("hevc ingest OK: vps={saw_vps} sps={saw_sps} key={saw_key} total={total}");
+        }
+        Err(_) => panic!("timed out waiting for HEVC VPS+SPS+keyframe+frames"),
+    }
 }
 
 /// Real RTSP server variant. Ignored by default because ffmpeg alone cannot

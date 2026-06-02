@@ -25,7 +25,7 @@ use tokio::sync::broadcast;
 use tokio_util::codec::{Encoder, Framed};
 
 use crate::protocol::{TimedVideoFrame, TimedVideoFrameCodec, TIMED_VIDEO_HEADER_BYTES};
-use crate::video::nal::{is_idr, is_param, ParamSetCache};
+use crate::video::nal::{is_keyframe, is_param_set, Codec, ParamSetCache};
 
 /// [opt 9] UDP fan-out maximum payload (NAL + header). See legacy pipeline.
 const UDP_MAX_PAYLOAD: usize = 60 * 1024;
@@ -62,6 +62,7 @@ pub enum PrimeAction {
 /// are dropped. Once started, every frame is forwarded.
 pub struct JoinPrimer {
     started: bool,
+    codec: Codec,
 }
 
 impl Default for JoinPrimer {
@@ -71,41 +72,51 @@ impl Default for JoinPrimer {
 }
 
 impl JoinPrimer {
+    /// New primer for an H.264 client (the historical default).
     pub fn new() -> Self {
-        Self { started: false }
+        Self {
+            started: false,
+            codec: Codec::H264,
+        }
     }
 
-    /// The SPS/PPS NALs (as `Vec<u8>`) to push to a new client before
-    /// streaming, derived from the cache. Empty if the cache has no params yet
-    /// (the client will then start on the next live SPS/IDR pair).
-    pub fn priming_nals(cache: &ParamSetCache) -> Vec<Vec<u8>> {
-        match cache.param_nals() {
-            Some((sps, pps)) => vec![sps, pps],
-            None => Vec::new(),
+    /// New primer for a client of the given codec.
+    pub fn with_codec(codec: Codec) -> Self {
+        Self {
+            started: false,
+            codec,
         }
+    }
+
+    /// The parameter-set NALs to push to a new client before streaming, in
+    /// decode order: `[SPS, PPS]` for H.264, `[VPS, SPS, PPS]` for HEVC. Empty
+    /// if the cache hasn't seen the full set yet (the client then starts on the
+    /// next live parameter sets + keyframe).
+    pub fn priming_nals(cache: &ParamSetCache) -> Vec<Vec<u8>> {
+        cache.ordered_param_nals()
     }
 
     /// Decide whether to forward `nal` to this client.
     ///
-    /// - Before the GOP has started: forward param sets (SPS/PPS) and IDR
-    ///   slices (the IDR flips us into the "started" state); skip everything
-    ///   else (P-frames).
+    /// - Before the GOP has started: forward parameter sets and keyframe slices
+    ///   (the keyframe flips us into the "started" state); skip everything else
+    ///   (inter frames).
     /// - After start: forward everything.
     pub fn on_frame(&mut self, nal: &[u8]) -> PrimeAction {
         if self.started {
             return PrimeAction::Send;
         }
-        if is_idr(nal) {
+        if is_keyframe(nal, self.codec) {
             // First keyframe after join: open the stream from here on.
             self.started = true;
             return PrimeAction::Send;
         }
-        if is_param(nal) {
-            // Fresh SPS/PPS arriving live: forward it (harmless, keeps the
-            // decoder's params current) but don't start on it alone.
+        if is_param_set(nal, self.codec) {
+            // Fresh parameter sets arriving live: forward them (harmless, keeps
+            // the decoder's params current) but don't start on them alone.
             return PrimeAction::Send;
         }
-        // A P-frame (or any non-key slice) before the first IDR: drop it.
+        // An inter frame (or any non-key slice) before the first keyframe: drop.
         PrimeAction::Skip
     }
 
@@ -151,7 +162,7 @@ pub async fn serve_video_clients_on(
 
         tokio::spawn(async move {
             let mut framed = Framed::new(socket, TimedVideoFrameCodec);
-            let mut primer = JoinPrimer::new();
+            let mut primer = JoinPrimer::with_codec(params.codec());
 
             // 1. Prime with cached SPS+PPS as one access unit so MediaCodec
             // sees both parameter sets before it configures.
@@ -225,7 +236,7 @@ pub async fn serve_udp_broadcast_on(
                     let payload = &hello_buf[..n];
                     if payload.starts_with(b"Hello") && !clients.contains_key(&addr) {
                         tracing::info!("UDP video client registered: {addr}");
-                        clients.insert(addr, JoinPrimer::new());
+                        clients.insert(addr, JoinPrimer::with_codec(params.codec()));
                         // Prime the new client with cached SPS+PPS as one
                         // access unit.
                         for frame in priming_frames(JoinPrimer::priming_nals(&params), now_ns()) {
@@ -371,6 +382,9 @@ fn now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These H.264 assertion helpers are no longer imported at file scope (the
+    // fan-out now uses the codec-aware variants), so bring them in here.
+    use crate::video::nal::{is_idr, is_param};
 
     fn sps() -> Vec<u8> {
         vec![0x00, 0x00, 0x00, 0x01, 0x67, 0xAA]
@@ -452,5 +466,52 @@ mod tests {
         assert!(is_param(&delivered[0]));
         assert!(is_param(&delivered[1]));
         assert!(is_idr(&delivered[2]));
+    }
+
+    // ---- HEVC primer ----
+
+    // HEVC NAL bytes (2-byte header; type in bits 6..1 of byte 0).
+    fn h_vps() -> Vec<u8> {
+        vec![0x00, 0x00, 0x00, 0x01, 0x40, 0x01]
+    }
+    fn h_sps() -> Vec<u8> {
+        vec![0x00, 0x00, 0x00, 0x01, 0x42, 0x01]
+    }
+    fn h_pps() -> Vec<u8> {
+        vec![0x00, 0x00, 0x00, 0x01, 0x44, 0x01]
+    }
+    fn h_idr() -> Vec<u8> {
+        vec![0x00, 0x00, 0x00, 0x01, 0x26, 0x01] // IDR_W_RADL (type 19)
+    }
+    fn h_trail(n: u8) -> Vec<u8> {
+        vec![0x00, 0x00, 0x00, 0x01, 0x02, n] // TRAIL_R (type 1)
+    }
+
+    #[test]
+    fn hevc_full_join_sequence_primes_with_vps_sps_pps() {
+        let cache = ParamSetCache::with_codec(Codec::Hevc);
+        // Priming needs the full VPS+SPS+PPS set; partial → nothing yet.
+        cache.observe(&h_vps());
+        cache.observe(&h_sps());
+        assert!(JoinPrimer::priming_nals(&cache).is_empty());
+        cache.observe(&h_pps());
+
+        let mut delivered: Vec<Vec<u8>> = JoinPrimer::priming_nals(&cache);
+        assert_eq!(delivered, vec![h_vps(), h_sps(), h_pps()], "VPS,SPS,PPS order");
+
+        // Live HEVC stream: trail, trail, IDR, trail — skip the leading inter
+        // frames, start on the IDR, then forward everything.
+        let live = [h_trail(1), h_trail(2), h_idr(), h_trail(3)];
+        let mut primer = JoinPrimer::with_codec(Codec::Hevc);
+        for nal in &live {
+            if primer.on_frame(nal) == PrimeAction::Send {
+                delivered.push(nal.clone());
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec![h_vps(), h_sps(), h_pps(), h_idr(), h_trail(3)]
+        );
+        assert!(primer.started());
     }
 }

@@ -28,10 +28,11 @@
 #   bash tests/rtsp_test.sh --launch-app       # also start the Quest activity
 #   bash tests/rtsp_test.sh --skip-build       # don't rebuild xr-bridge
 #   bash tests/rtsp_test.sh --frame-wait 30    # wait up to 30s for frames
+#   bash tests/rtsp_test.sh --codec hevc       # publish H.265 (libx265) instead of H.264
 #   bash tests/rtsp_test.sh --keep             # keep mediamtx/ffmpeg/xr-bridge running after test
 #
 # Requirements (auto-checked at startup):
-#   - ffmpeg (with libx264)
+#   - ffmpeg (with libx264; libx265 too for --codec hevc)
 #   - mediamtx  (brew install mediamtx)
 #   - adb (with a Quest device attached, in developer mode)
 #   - cargo (only if --skip-build is not used)
@@ -45,7 +46,6 @@ set -euo pipefail
 
 # --- Paths -------------------------------------------------------------------
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CFG="$ROOT/tests/configs/bridge_video.yaml"
 PKG="org.xrobotoolkit.client"
 ACT="com.godot.game.GodotApp"
 RTSP_URL="rtsp://127.0.0.1:8554/test"
@@ -57,6 +57,10 @@ SKIP_BUILD=0
 FRAME_WAIT=20
 KEEP=0
 MIN_FRAMES=30
+# Codec under test. h264 (default) publishes libx264 + bridge_video.yaml;
+# hevc publishes libx265 and uses bridge_video_hevc.yaml (feed codec: hevc),
+# exercising the video/hevc MediaCodec path on the headset.
+CODEC=h264
 
 usage() {
     sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
@@ -69,11 +73,18 @@ while (("$#")); do
     --skip-build) SKIP_BUILD=1; shift ;;
     --frame-wait) FRAME_WAIT="$2"; shift 2 ;;
     --min-frames) MIN_FRAMES="$2"; shift 2 ;;
+    --codec) CODEC="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     -h | --help) usage 0 ;;
     *) echo "unknown arg: $1" >&2; usage 1 ;;
     esac
 done
+
+case "$CODEC" in
+h264) CFG="$ROOT/tests/configs/bridge_video.yaml" ;;
+hevc) CFG="$ROOT/tests/configs/bridge_video_hevc.yaml" ;;
+*) echo "unknown --codec: $CODEC (use h264 or hevc)" >&2; exit 1 ;;
+esac
 
 # --- Pretty logging ---------------------------------------------------------
 if [ -t 1 ]; then
@@ -247,16 +258,26 @@ fi
 ok "mediamtx pid=$PID_MEDIAMTX listening :8554"
 
 # --- 2. ffmpeg publisher ----------------------------------------------------
-step "2/4  ffmpeg publisher (testsrc2 1280x720@30 → $RTSP_URL)"
+step "2/4  ffmpeg publisher (testsrc2 1280x720@30 $CODEC → $RTSP_URL)"
 
 # `-re` paces real-time, `-tune zerolatency`/`-preset ultrafast` keep encoder
-# delay minimal, `-bf 0` + baseline profile keeps the bitstream MediaCodec-
-# friendly. `-rtsp_transport tcp` so RTP doesn't drop frames over the loopback
-# (UDP loopback is unreliable on some macOS configs).
+# delay minimal, `-bf 0` keeps the bitstream MediaCodec-friendly.
+# `-rtsp_transport tcp` so RTP doesn't drop frames over the loopback (UDP
+# loopback is unreliable on some macOS configs). The encoder + RTSP codec flip
+# with --codec; the bridge stream-copies whatever it receives.
+if [ "$CODEC" = "hevc" ]; then
+    # libx265: re-emit VPS/SPS/PPS at each IDR (repeat-headers) so a headset
+    # joining mid-stream is primed. `-tag:v hvc1` keeps the RTSP/MediaCodec
+    # side on the standard HEVC sample entry.
+    VENC=(-c:v libx265 -preset ultrafast -tune zerolatency
+        -x265-params "keyint=30:min-keyint=30:repeat-headers=1:bframes=0"
+        -tag:v hvc1)
+else
+    VENC=(-c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -bf 0)
+fi
 ffmpeg -hide_banner -loglevel warning -nostats \
     -re -f lavfi -i "testsrc2=size=1280x720:rate=30" \
-    -an -c:v libx264 -preset ultrafast -tune zerolatency \
-    -profile:v baseline -pix_fmt yuv420p -g 30 -bf 0 \
+    -an "${VENC[@]}" -pix_fmt yuv420p -g 30 \
     -f rtsp -rtsp_transport tcp "$RTSP_URL" \
     > "$LOG_DIR/ffmpeg.log" 2>&1 &
 PID_FFMPEG=$!

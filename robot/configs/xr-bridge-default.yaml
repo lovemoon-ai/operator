@@ -30,10 +30,16 @@ bridge:
 
   # ── Video relay ──
   # Isaac Sim runs an RTSP server co-located with the bridge and exposes three
-  # H.264 streams. The bridge pulls each (ffmpeg stream-copy, no transcode) and
+  # streams. The bridge pulls each (ffmpeg stream-copy, no transcode) and
   # relays it to the headset over the existing XR video wire protocol. Each feed
   # is independent: one RTSP URL -> one TCP fan-out port (+ optional UDP port).
   # Remove or empty this block to run the bridge without video.
+  #
+  # `codec` declares what the upstream RTSP stream carries: "h264" (default) or
+  # "hevc". The bridge never transcodes — this only selects the matching ffmpeg
+  # bitstream filter / muxer for the copy and tells the headset which decoder
+  # (video/avc vs video/hevc) to spin up. It must match what the publisher
+  # actually encodes.
   video:
     feeds:
       - name: wrist_left
@@ -43,6 +49,7 @@ bridge:
         height: 720
         fps: 30
         transport: tcp
+        codec: h264
       - name: wrist_right
         rtsp_url: "rtsp://127.0.0.1:8554/wrist_right"
         tcp_port: 12346

@@ -32,7 +32,7 @@ use teleop_protocol::{
 use xr_bridge::adapter_client::AdapterClient;
 use xr_bridge::config::{BridgeConfig, VideoFeedConfig};
 use xr_bridge::pose_udp_server::UdpDropStats;
-use xr_bridge::video::VideoFeed;
+use xr_bridge::video::{Codec, VideoFeed};
 use xr_bridge::wire_runtime::TimedCommand;
 use xr_bridge::{
     discovery, forward, latency, pose_server, pose_udp_server, runtime, telemetry_server, video,
@@ -265,6 +265,7 @@ fn feed_config_to_relay(fc: &VideoFeedConfig) -> VideoFeed {
         tcp_port: fc.tcp_port,
         // Treat 0 as "no UDP" too, matching descriptor conventions.
         udp_port: fc.udp_port.filter(|&p| p != 0),
+        codec: Codec::parse(&fc.codec),
     }
 }
 
@@ -280,6 +281,9 @@ fn feed_config_to_info(fc: &VideoFeedConfig) -> VideoFeedInfo {
         stereo: false,
         transport: fc.transport.clone(),
         udp_port: fc.udp_port.unwrap_or(0),
+        // Normalise to the lower-case wire name so the headset's MIME lookup
+        // is exact regardless of how the YAML spelled it.
+        codec: Codec::parse(&fc.codec).as_str().to_string(),
     }
 }
 

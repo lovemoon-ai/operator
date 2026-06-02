@@ -26,7 +26,12 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
 private const val TAG = "KotlinVideoDecoder"
-private const val MIME_TYPE = "video/avc"
+// MIME defaults to H.264 (`video/avc`); HEVC feeds switch to `video/hevc` via
+// the codec-aware `start_decoder_with_codec` overload. The active value is
+// captured per-instance in `configuredMime` so a reconfigure between codecs
+// (e.g. the descriptor flips a feed to HEVC) picks the right MediaCodec.
+private const val MIME_AVC = "video/avc"
+private const val MIME_HEVC = "video/hevc"
 private const val QUEUE_CAPACITY = 2
 private const val INPUT_TIMEOUT_US = 10_000L
 private const val TIMING_MAP_MAX_AGE_NS = 10_000_000_000L
@@ -169,6 +174,14 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	@Volatile
 	private var configuredHeight: Int = 0
 
+	// Active codec MIME — set by `start_decoder_with_codec` and consulted by
+	// `configureCodec` (picks `createDecoderByType`) and the csd extraction
+	// (HEVC needs VPS+SPS+PPS concatenated in csd-0; H.264 splits SPS into
+	// csd-0 and PPS into csd-1). Defaults to H.264 so the legacy 2-arg
+	// `start_decoder(w, h)` keeps working unchanged.
+	@Volatile
+	private var configuredMime: String = MIME_AVC
+
 	override fun getPluginName(): String = "KotlinVideoDecoderPlugin"
 
 	override fun getPluginSignals(): MutableSet<SignalInfo> =
@@ -207,8 +220,26 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	@Suppress("FunctionName")
 	@UsedByGodot
 	fun start_decoder(width: Int, height: Int): Boolean {
+		// Legacy 2-arg call site (pre-codec descriptor). Default to H.264 to
+		// preserve historical behaviour; new callers use the 3-arg overload.
+		return start_decoder_with_codec(width, height, "h264")
+	}
+
+	/// Codec-aware variant. `codec` accepts "h264" (a.k.a. avc) and "hevc"
+	/// (a.k.a. h265, x265); anything else falls back to H.264 — we'd rather
+	/// degrade to a noisy decode failure than silently spin up the wrong
+	/// MediaCodec. Exposed with an underscore name (and @UsedByGodot) so
+	/// Godot's reflection picks it up regardless of Kotlin name mangling.
+	@Suppress("FunctionName")
+	@UsedByGodot
+	fun start_decoder_with_codec(width: Int, height: Int, codec: String): Boolean {
+		val mime = when (codec.lowercase()) {
+			"hevc", "h265", "x265" -> MIME_HEVC
+			else -> MIME_AVC
+		}
+
 		if (running.get()) {
-			if (configuredWidth == width && configuredHeight == height) {
+			if (configuredWidth == width && configuredHeight == height && configuredMime == mime) {
 				return true
 			}
 			stop_decoder()
@@ -221,6 +252,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 
 			configuredWidth = width
 			configuredHeight = height
+			configuredMime = mime
 			latestFrame = null
 			accessUnitQueue.clear()
 			timingByPtsUs.clear()
@@ -234,7 +266,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		decoderThread = worker
 		worker.start()
 
-		Log.i(TAG, "Decoder started for ${width}x${height}")
+		Log.i(TAG, "Decoder started for ${width}x${height} mime=$mime")
 		return true
 	}
 
@@ -436,7 +468,8 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 
 	private fun configureCodec(firstAccessUnit: ByteArray): Boolean {
 		return try {
-			val format = MediaFormat.createVideoFormat(MIME_TYPE, configuredWidth, configuredHeight)
+			val mime = configuredMime
+			val format = MediaFormat.createVideoFormat(mime, configuredWidth, configuredHeight)
 			format.setInteger(
 				MediaFormat.KEY_MAX_INPUT_SIZE,
 				max(1_048_576, configuredWidth * configuredHeight * 2),
@@ -456,14 +489,28 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
 				format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
 			}
-			val (sps, pps) = extractCodecSpecificData(firstAccessUnit)
-			if (sps != null) {
-				format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
+			// Codec-specific data layout differs by family:
+			//   H.264: csd-0 = SPS, csd-1 = PPS (separate buffers).
+			//   H.265: csd-0 = VPS || SPS || PPS concatenated as Annex-B NALs in
+			//          one buffer; no csd-1.
+			var csdDesc = "none"
+			if (mime == MIME_HEVC) {
+				val concatenated = extractHevcCodecSpecificData(firstAccessUnit)
+				if (concatenated != null) {
+					format.setByteBuffer("csd-0", ByteBuffer.wrap(concatenated))
+					csdDesc = "vps+sps+pps(${concatenated.size}B)"
+				}
+			} else {
+				val (sps, pps) = extractCodecSpecificData(firstAccessUnit)
+				if (sps != null) {
+					format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
+				}
+				if (pps != null) {
+					format.setByteBuffer("csd-1", ByteBuffer.wrap(pps))
+				}
+				csdDesc = "sps=${sps != null}/pps=${pps != null}"
 			}
-			if (pps != null) {
-				format.setByteBuffer("csd-1", ByteBuffer.wrap(pps))
-			}
-			val createdCodec = MediaCodec.createDecoderByType(MIME_TYPE)
+			val createdCodec = MediaCodec.createDecoderByType(mime)
 
 			// Surface-output path: only enable when libahb_decoder.so is
 			// loaded, otherwise we'd lose the YUV plane copy that the
@@ -507,7 +554,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			Log.i(
 				TAG,
 				"Decoder configured ${configuredWidth}x${configuredHeight} " +
-					"csd=${sps != null}/${pps != null} surfaceMode=$surfaceMode"
+					"mime=$mime csd=$csdDesc surfaceMode=$surfaceMode"
 			)
 			true
 		} catch (e: Exception) {
@@ -841,6 +888,59 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		return sps to pps
 	}
 
+	/**
+	 * Walk an HEVC access unit (Annex-B) and return the concatenated
+	 * VPS+SPS+PPS NALs (each keeping its start code) for MediaFormat csd-0.
+	 * Returns null if any of the three is missing — `configure()` then proceeds
+	 * without csd-0 and relies on the parameter sets the fan-out primed inline
+	 * before the first IDR.
+	 *
+	 * HEVC NAL header is 2 bytes; the type is bits 6..1 of the first byte
+	 * (`(byte >> 1) & 0x3F`). VPS=32, SPS=33, PPS=34.
+	 */
+	private fun extractHevcCodecSpecificData(accessUnit: ByteArray): ByteArray? {
+		var vps: ByteArray? = null
+		var sps: ByteArray? = null
+		var pps: ByteArray? = null
+		var offset = 0
+
+		while (offset < accessUnit.size) {
+			val start = findStartCode(accessUnit, offset)
+			if (start < 0) {
+				break
+			}
+			val prefixLength = startCodeLength(accessUnit, start)
+			val payloadStart = start + prefixLength
+			val next = findStartCode(accessUnit, payloadStart)
+			val end = if (next >= 0) next else accessUnit.size
+			if (end > payloadStart) {
+				val nal = accessUnit.copyOfRange(start, end)
+				when (hevcNalType(nal)) {
+					32 -> if (vps == null) vps = nal
+					33 -> if (sps == null) sps = nal
+					34 -> if (pps == null) pps = nal
+				}
+			}
+			offset = if (next >= 0) next else accessUnit.size
+		}
+
+		if (vps == null || sps == null || pps == null) {
+			Log.i(
+				TAG,
+				"HEVC csd incomplete (vps=${vps != null} sps=${sps != null} " +
+					"pps=${pps != null}); relying on inline parameter sets",
+			)
+			return null
+		}
+
+		val out = ByteArray(vps.size + sps.size + pps.size)
+		var p = 0
+		System.arraycopy(vps, 0, out, p, vps.size); p += vps.size
+		System.arraycopy(sps, 0, out, p, sps.size); p += sps.size
+		System.arraycopy(pps, 0, out, p, pps.size)
+		return out
+	}
+
 	private fun findStartCode(data: ByteArray, fromIndex: Int): Int {
 		var index = max(0, fromIndex)
 		while (index + 3 <= data.size) {
@@ -888,6 +988,27 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			else -> 0
 		}
 		return if (nal.size > prefixLength) nal[prefixLength].toInt() and 0x1F else -1
+	}
+
+	/**
+	 * HEVC NAL type — bits 6..1 of the byte after the start code
+	 * (`(byte >> 1) & 0x3F`). Compare to H.264's `nalType` which uses the low 5
+	 * bits of the same byte. Returns -1 if the NAL is too short to parse.
+	 */
+	private fun hevcNalType(nal: ByteArray): Int {
+		val prefixLength = when {
+			nal.size >= 4 &&
+				nal[0] == 0.toByte() &&
+				nal[1] == 0.toByte() &&
+				nal[2] == 0.toByte() &&
+				nal[3] == 1.toByte() -> 4
+			nal.size >= 3 &&
+				nal[0] == 0.toByte() &&
+				nal[1] == 0.toByte() &&
+				nal[2] == 1.toByte() -> 3
+			else -> 0
+		}
+		return if (nal.size > prefixLength) (nal[prefixLength].toInt() shr 1) and 0x3F else -1
 	}
 
 	private var firstFrameLogged = false
