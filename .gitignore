@@ -1,0 +1,49 @@
+# Rust
+robot/target/
+
+# Godot
+xr/.godot/
+xr/.gradle/
+xr/android/build/build/
+xr/android/build/.gradle/
+xr/android/build/assets/
+xr/android/build/libs/
+xr/android/build/outputs/
+xr/android/build/intermediates/
+xr/build/
+xr/addons/ahb_decoder/*.so
+xr/native/ahb_decoder/build-*/
+*.import
+*.uid
+
+# Local agent/session files
+.conductor/
+conductor.log
+crash.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# conductor
+conductor-terminal.log
+conductor.log
+./conductor/state
+./conductor/worktrees
+
+# tests output
+tests/logs
+
+# SO-101 mesh STLs (fetched by examples/mujuco-arm-so101/prepare.sh
+# from upstream mujoco_menagerie — kept out of the repo to save ~17 MB)
+examples/mujuco-arm-so101/assets/so101/assets/*.stl
+
+# godot_openxr_vendors prebuilt binaries (fetched by
+# xr/addons/godotopenxrvendors/prepare.sh from upstream release —
+# kept out of the repo to save ~18 MB).
+xr/addons/godotopenxrvendors/.bin/
