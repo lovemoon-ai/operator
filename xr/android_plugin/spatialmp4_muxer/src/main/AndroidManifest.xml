@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!--
+            Registers SpatialMp4MuxerPlugin as a Godot Android v2 plugin so
+            GDScript can resolve `Engine.get_singleton("SpatialMp4MuxerPlugin")`.
+            Mirrors the questcapture module's QuestCapturePlugin meta-data.
+        -->
+        <meta-data
+            android:name="org.godotengine.plugin.v2.SpatialMp4MuxerPlugin"
+            android:value="com.spatialmp4.questcapture.SpatialMp4MuxerPlugin" />
+    </application>
+</manifest>

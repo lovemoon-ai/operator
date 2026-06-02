@@ -26,8 +26,28 @@ if [[ -z "${ANDROID_NDK:-}" ]]; then
 fi
 
 if [[ ! -f "godot-cpp/SConstruct" ]]; then
-    echo "godot-cpp submodule not initialised; running 'git submodule update --init'..." >&2
-    (cd ../../.. && git submodule update --init --depth=1 xr/native/ahb_decoder/godot-cpp)
+    REPO_ROOT="$(cd ../../.. && pwd)"
+    if git -C "$REPO_ROOT" ls-files --error-unmatch xr/native/ahb_decoder/godot-cpp >/dev/null 2>&1; then
+        echo "godot-cpp submodule not initialised; running 'git submodule update --init'..." >&2
+        git -C "$REPO_ROOT" submodule update --init --depth=1 xr/native/ahb_decoder/godot-cpp
+    else
+        # Submodule is declared in .gitmodules but the gitlink was never
+        # committed, so `submodule update` can't resolve the path. Clone the
+        # matching branch directly. Clone into a PID-suffixed temp dir, then
+        # atomically move into place so a partial/interrupted clone never
+        # leaves a half-populated godot-cpp/ that the SConstruct check accepts.
+        echo "godot-cpp submodule not tracked; cloning godot-cpp (branch 4.5) fallback..." >&2
+        tmp="godot-cpp.$$.tmp"
+        rm -rf "$tmp"
+        if git clone --depth 1 --branch 4.5 https://github.com/godotengine/godot-cpp.git "$tmp"; then
+            rm -rf godot-cpp
+            mv "$tmp" godot-cpp
+        else
+            rm -rf "$tmp"
+            echo "ERROR: godot-cpp clone failed" >&2
+            exit 1
+        fi
+    fi
 fi
 
 BUILD_DIR="build-arm64"

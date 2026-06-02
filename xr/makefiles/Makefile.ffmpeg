@@ -1,0 +1,105 @@
+# Cross-compiled FFmpeg for spatialmp4_muxer (Android arm64-v8a).
+#
+# Included from xr/Makefile (via Makefile.addons). The actual heavy lifting
+# — clone, patch, configure, make — lives in
+#   android_plugin/scripts/build_android_ffmpeg.sh
+# which is shared between Makefile-driven and ad-hoc invocations. This file
+# layers idempotency, sibling-repo auto-discovery, and clean wiring on top.
+#
+# Targets exposed here:
+#   build-ffmpeg   — build & install (no-op if libavformat.a already there)
+#   clean-ffmpeg   — nuke the install tree and the script's checkout/build dir
+#   ffmpeg-info    — print where ffmpeg would be built and its current status
+#
+# Variables (override on the make command line or in the environment):
+#   FFMPEG_VERSION   default 8.1.1     — git tag = n${FFMPEG_VERSION}
+#   ANDROID_ABI      default arm64-v8a — only arm64-v8a is wired today
+#   ANDROID_API      default 29
+#   SPATIALMP4_ROOT  default = first match below
+#                    Used as the source of the two patches
+#                    scripts/ffmpeg_8_1_1_{read,enc}.patch.
+#   ANDROID_NDK_HOME / ANDROID_NDK_ROOT
+#                    NDK location; one of them must be set.
+
+FFMPEG_VERSION ?= 8.1.1
+ANDROID_ABI    ?= arm64-v8a
+ANDROID_API    ?= 29
+
+# Where the final static archives + headers land. Both this path and the
+# CMakeLists FATAL_ERROR check in spatialmp4_muxer's CMakeLists.txt have to
+# stay in sync.
+FFMPEG_INSTALL := android_plugin/spatialmp4_muxer/src/main/cpp/third_party/ffmpeg/$(ANDROID_ABI)
+FFMPEG_LIB     := $(FFMPEG_INSTALL)/lib/libavformat.a
+
+# Build script (single source of truth for the configure flags + toolchain
+# setup). Make stays out of its way and just decides when to invoke it.
+FFMPEG_BUILD_SCRIPT := android_plugin/scripts/build_android_ffmpeg.sh
+
+# SpatialMP4 sibling repo holds the two ffmpeg patches we apply on top of
+# vanilla n8.1.1. Try a handful of conventional locations; if none match we
+# bail out with a clear error pointing at the override knob.
+SPATIALMP4_CANDIDATES := \
+	$(HOME)/ws/spatialmp4-quest/SpatialMP4 \
+	$(HOME)/ws/SpatialMP4 \
+	../spatialmp4-quest/SpatialMP4 \
+	../SpatialMP4 \
+	../../spatialmp4-quest/SpatialMP4 \
+	../../SpatialMP4
+
+# Resolve SPATIALMP4_ROOT at parse time if not pre-set. We look specifically
+# for the `read` patch as the canary — both patches always ship together.
+ifeq ($(strip $(SPATIALMP4_ROOT)),)
+SPATIALMP4_ROOT := $(firstword $(foreach p,$(SPATIALMP4_CANDIDATES), \
+	$(if $(wildcard $(p)/scripts/ffmpeg_8_1_1_read.patch),$(p),)))
+endif
+
+.PHONY: build-ffmpeg clean-ffmpeg ffmpeg-info
+
+build-ffmpeg: $(FFMPEG_LIB)
+
+# Sentinel rule. Real prerequisite list is the build script + the two
+# patches — touch any of them and we rebuild. The clone/configure/make
+# inside the script takes several minutes, so we leave it to the script's
+# own incremental-make behaviour rather than tearing down on every Make
+# invocation.
+$(FFMPEG_LIB): $(FFMPEG_BUILD_SCRIPT) \
+               $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch) \
+               $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_enc.patch)
+	@if [ -z "$(SPATIALMP4_ROOT)" ]; then \
+		echo "[ffmpeg] SpatialMP4 patches not found. Searched:" >&2; \
+		for p in $(SPATIALMP4_CANDIDATES); do echo "  $$p" >&2; done; \
+		echo "Override with: make build-ffmpeg SPATIALMP4_ROOT=/path/to/SpatialMP4" >&2; \
+		exit 1; \
+	fi
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
+		echo "[ffmpeg] ANDROID_NDK / ANDROID_NDK_HOME / ANDROID_NDK_ROOT must be set" >&2; \
+		exit 1; \
+	fi
+	@echo "[ffmpeg] building $(FFMPEG_VERSION) for $(ANDROID_ABI) (API $(ANDROID_API))"
+	@echo "[ffmpeg] SPATIALMP4_ROOT = $(SPATIALMP4_ROOT)"
+	SPATIALMP4_ROOT="$(SPATIALMP4_ROOT)" \
+	FFMPEG_VERSION="$(FFMPEG_VERSION)" \
+	ANDROID_ABI="$(ANDROID_ABI)" \
+	ANDROID_API="$(ANDROID_API)" \
+		$(FFMPEG_BUILD_SCRIPT)
+	@test -f "$@" || { echo "[ffmpeg] build script finished but $@ is missing" >&2; exit 1; }
+
+# Hose both the install tree and the script's working checkout.
+# `build_ffmpeg_android/` is what build_android_ffmpeg.sh uses as its
+# clone + build root (see BUILD_ROOT in that script).
+clean-ffmpeg:
+	rm -rf $(FFMPEG_INSTALL) \
+	       android_plugin/scripts/build_ffmpeg_android
+
+ffmpeg-info:
+	@echo "FFMPEG_VERSION  = $(FFMPEG_VERSION)"
+	@echo "ANDROID_ABI     = $(ANDROID_ABI)"
+	@echo "ANDROID_API     = $(ANDROID_API)"
+	@echo "SPATIALMP4_ROOT = $(SPATIALMP4_ROOT)"
+	@echo "FFMPEG_INSTALL  = $(FFMPEG_INSTALL)"
+	@echo "FFMPEG_LIB      = $(FFMPEG_LIB)"
+	@if [ -f "$(FFMPEG_LIB)" ]; then \
+		echo "STATUS          = built ($$(du -h $(FFMPEG_LIB) | awk '{print $$1}'))"; \
+	else \
+		echo "STATUS          = not built — run \`make build-ffmpeg\`"; \
+	fi

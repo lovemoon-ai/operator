@@ -1,0 +1,2 @@
+# ignore ffmpeg artifact
+src/main/cpp/third_party/ffmpeg

@@ -1,0 +1,249 @@
+# Addon / plugin / vendor library build rules for xr/.
+#
+# Included from xr/Makefile. Owns everything that ships INSIDE the APK
+# (Godot addons + native GDExtensions + vendored binaries) but is not
+# the Godot export itself. Project-level concerns (export targets,
+# install, run, logcat, top-level clean) stay in xr/Makefile.
+#
+# Targets exposed here:
+#   setup-vendors          — godot-xr-tools submodule/symlink + godotopenxrvendors prepare.sh
+#   prepare-android-libs   — extract Godot's android template AARs from export_templates
+#   build-ahb              — build the AHardwareBuffer GDExtension and install both copies of the .so
+#   build-capture-plugins  — gradle build the Android capture plugins, drop their .aar/.jar into addons/
+#   prepare-capture-plugins — idempotent guard around build-capture-plugins (rebuilds when stale)
+#   clean-addons           — strip every addon/plugin build artifact; called by `clean` in xr/Makefile
+#
+# Variables this file expects to inherit:
+#   GRADLE_USER_HOME       — set in xr/Makefile (defaults to $(CURDIR)/.gradle)
+#
+# This file `include`s makefiles/Makefile.ffmpeg, which contributes the
+# `build-ffmpeg` / `clean-ffmpeg` targets and the FFMPEG_LIB sentinel
+# that `build-capture-plugins` depends on (spatialmp4_muxer's CMake
+# link step needs libavformat.a/libavcodec.a/libavutil.a to exist
+# before Gradle is invoked).
+
+include makefiles/Makefile.ffmpeg
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+# Gradle binary used to drive android_plugin/ (separate from the godot-android
+# build which uses android/build/gradlew). Override e.g. `make CAPTURE_GRADLE=./gradlew ...`.
+CAPTURE_GRADLE ?= gradle
+
+# Capture-plugin artifacts that end up bundled in the APK. `prepare-capture-plugins`
+# rebuilds when any of these is missing or older than its sources.
+CAPTURE_PLUGIN_ARTIFACTS := \
+	addons/spatial_capture_contract/bin/contract.jar \
+	addons/quest_capture_android/bin/questcapture-debug.aar \
+	addons/quest_capture_android/bin/questcapture-release.aar \
+	addons/spatialmp4_muxer/bin/spatialmp4_muxer-debug.aar \
+	addons/spatialmp4_muxer/bin/spatialmp4_muxer-release.aar
+
+# Where Godot stores its installed export templates. We look in both the macOS
+# and Linux locations; first hit wins.
+TEMPLATE_ZIPS := \
+	"$(HOME)/Library/Application Support/Godot/export_templates/4.5.1.stable/android_source.zip" \
+	"$(HOME)/.local/share/godot/export_templates/4.5.1.stable/android_source.zip"
+
+# AHB (AHardwareBuffer) GDExtension. The native build script lives in native/
+# and is responsible for the actual CMake invocation; we just decide when to
+# re-run it and where to land the resulting .so.
+AHB_DIR      := native/ahb_decoder
+AHB_SRC      := $(AHB_DIR)/CMakeLists.txt $(AHB_DIR)/build.sh $(shell find $(AHB_DIR)/src -type f 2>/dev/null)
+AHB_ADDON_SO := addons/ahb_decoder/libahb_decoder.so
+AHB_JNI_SO   := android/build/libs/release/arm64-v8a/libahb_decoder.so
+
+# ---------------------------------------------------------------------------
+# Phony targets exposed to xr/Makefile
+# ---------------------------------------------------------------------------
+
+.PHONY: setup-vendors prepare-android-libs build-ahb build-capture-plugins prepare-capture-plugins clean-addons
+
+# ---------------------------------------------------------------------------
+# Third-party vendored addons
+# ---------------------------------------------------------------------------
+# Two third-party addons are pulled from upstream instead of being vendored
+# into this repo:
+#
+#   addons/godot-xr-tools     — git submodule at third_party/..., exposed
+#                               here via a symlink (so Godot sees it under
+#                               res://addons/ without bloating the repo).
+#   addons/godotopenxrvendors — prebuilt binaries fetched by `prepare.sh`
+#                               from a pinned GitHub release of
+#                               GodotVR/godot_openxr_vendors.
+#
+# Run this once after `git clone`, and again after a checkout that bumps
+# either pinned version. Both steps are idempotent (fast no-op when already
+# in sync).
+#
+# To upgrade godot-xr-tools:
+#   cd third_party/godot-xr-tools && git fetch --tags && git checkout <new-tag>
+#   git add third_party/godot-xr-tools && git commit
+# To upgrade godotopenxrvendors:
+#   edit UPSTREAM_TAG in addons/godotopenxrvendors/prepare.sh and re-run --force.
+setup-vendors:
+	@if [ ! -d ../third_party/godot-xr-tools/addons/godot-xr-tools ]; then \
+		mkdir -p ../third_party; \
+		if git -C .. ls-files --error-unmatch third_party/godot-xr-tools >/dev/null 2>&1; then \
+			git -C .. submodule update --init --recursive third_party/godot-xr-tools; \
+		else \
+			echo "[setup-vendors] cloning godot-xr-tools fallback"; \
+			tmp="../third_party/.godot-xr-tools.$$$$.tmp"; \
+			rm -rf "$$tmp"; \
+			if git clone --depth 1 --filter=blob:none https://github.com/godotvr/godot-xr-tools.git "$$tmp"; then \
+				rm -rf ../third_party/godot-xr-tools; \
+				mv "$$tmp" ../third_party/godot-xr-tools; \
+			else \
+				rm -rf "$$tmp"; \
+				echo "[setup-vendors] godot-xr-tools clone failed" >&2; \
+				exit 1; \
+			fi; \
+		fi; \
+	fi
+	@test -L addons/godot-xr-tools || ln -sfn ../../third_party/godot-xr-tools/addons/godot-xr-tools addons/godot-xr-tools
+	@echo "[setup-vendors] godot-xr-tools $$(cat addons/godot-xr-tools/plugin.cfg | awk -F'\"' '/^version/{print $$2}') ready"
+	./addons/godotopenxrvendors/prepare.sh
+
+# ---------------------------------------------------------------------------
+# Godot Android template AARs
+# ---------------------------------------------------------------------------
+# The android/build Gradle project depends on godot-lib.template_{debug,release}.aar
+# which Godot ships *inside* its export-template zip rather than in the AAR
+# repo. Extract them on demand from whichever installation path exists.
+prepare-android-libs:
+	@set -e; \
+	LIB_DEBUG="android/build/libs/debug/godot-lib.template_debug.aar"; \
+	LIB_RELEASE="android/build/libs/release/godot-lib.template_release.aar"; \
+	if [ -f $$LIB_DEBUG ] && [ -f $$LIB_RELEASE ]; then exit 0; fi; \
+	for ZIP in $(TEMPLATE_ZIPS); do \
+		if [ -f "$$ZIP" ]; then TEMPLATE_ZIP="$$ZIP"; break; fi; \
+	done; \
+	if [ -z "$$TEMPLATE_ZIP" ]; then echo "Missing Android template zip (4.5.1.stable). Install export templates in Godot."; exit 1; fi; \
+	echo "Extracting Godot Android template AARs from $$TEMPLATE_ZIP"; \
+	mkdir -p android/build/libs/debug android/build/libs/release; \
+	unzip -o "$$TEMPLATE_ZIP" "libs/debug/godot-lib.*.aar" -d android/build >/dev/null; \
+	unzip -o "$$TEMPLATE_ZIP" "libs/release/godot-lib.*.aar" -d android/build >/dev/null
+
+# ---------------------------------------------------------------------------
+# AHB GDExtension (native/ahb_decoder)
+# ---------------------------------------------------------------------------
+# Sources changed → run build.sh (needs ANDROID_NDK). Two install paths:
+#   - addons/ahb_decoder/libahb_decoder.so  — picked up by Godot at runtime
+#   - android/build/libs/release/arm64-v8a/libahb_decoder.so  — packaged
+#     into the APK by Gradle's release.jniLibs.srcDirs
+# We copy the addon .so to the JNI path so build.sh's own (stale) JNI_DST
+# doesn't get in the way.
+$(AHB_ADDON_SO): $(AHB_SRC)
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
+	    if [ -f "$@" ]; then \
+	        echo "[ahb] sources newer than $@ but ANDROID_NDK not set — keeping stale .so. 'export ANDROID_NDK=…' to rebuild."; \
+	        exit 0; \
+	    fi; \
+	    echo "[ahb] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
+	    exit 1; \
+	fi; \
+	$(AHB_DIR)/build.sh Release
+
+$(AHB_JNI_SO): $(AHB_ADDON_SO)
+	@mkdir -p $(@D)
+	@cp -f $< $@
+	@echo "[ahb] installed $@"
+
+build-ahb: $(AHB_ADDON_SO) $(AHB_JNI_SO)
+
+# ---------------------------------------------------------------------------
+# SpatialMP4 capture Android plugins
+# ---------------------------------------------------------------------------
+# Migrated Gradle project lives at android_plugin/. After build, copy the
+# resulting AARs / contract JAR into the matching addons/.../bin/ paths so
+# the Godot Android export picks them up.
+#
+# spatialmp4_muxer's CMake (src/main/cpp/CMakeLists.txt) fails with a
+# FATAL_ERROR if FFmpeg's static libs aren't already on disk, so depend
+# on the ffmpeg sentinel produced by Makefile.ffmpeg.
+build-capture-plugins: $(FFMPEG_LIB)
+	@mkdir -p $(GRADLE_USER_HOME) \
+		addons/spatial_capture_contract/bin \
+		addons/quest_capture_android/bin \
+		addons/spatialmp4_muxer/bin
+	cd android_plugin && GRADLE_USER_HOME=$(GRADLE_USER_HOME) $(CAPTURE_GRADLE) \
+		:contract:jar \
+		:questcapture:assembleDebug :questcapture:assembleRelease \
+		:spatialmp4_muxer:assembleDebug :spatialmp4_muxer:assembleRelease
+	cp -f android_plugin/contract/build/libs/contract.jar \
+		addons/spatial_capture_contract/bin/contract.jar
+	cp -f android_plugin/questcapture/build/outputs/aar/questcapture-debug.aar \
+		addons/quest_capture_android/bin/questcapture-debug.aar
+	cp -f android_plugin/questcapture/build/outputs/aar/questcapture-release.aar \
+		addons/quest_capture_android/bin/questcapture-release.aar
+	cp -f android_plugin/spatialmp4_muxer/build/outputs/aar/spatialmp4_muxer-debug.aar \
+		addons/spatialmp4_muxer/bin/spatialmp4_muxer-debug.aar
+	cp -f android_plugin/spatialmp4_muxer/build/outputs/aar/spatialmp4_muxer-release.aar \
+		addons/spatialmp4_muxer/bin/spatialmp4_muxer-release.aar
+
+# Skip the Gradle build when every artifact is present and newer than the
+# Gradle source tree. Anything else triggers a rebuild.
+prepare-capture-plugins:
+	@set -e; \
+	missing=0; \
+	stale=0; \
+	for artifact in $(CAPTURE_PLUGIN_ARTIFACTS); do \
+		if [ ! -s "$$artifact" ]; then \
+			echo "[capture] missing $$artifact"; \
+			missing=1; \
+		fi; \
+	done; \
+	if [ "$$missing" -eq 0 ]; then \
+		for artifact in $(CAPTURE_PLUGIN_ARTIFACTS); do \
+			newer=$$(find android_plugin -type f \
+				! -path '*/.gradle/*' \
+				! -path '*/.kotlin/*' \
+				! -path '*/build/*' \
+				! -path '*/.cxx/*' \
+				! -path '*/scripts/build_ffmpeg_android/*' \
+				-newer "$$artifact" -print -quit); \
+			if [ -n "$$newer" ]; then \
+				echo "[capture] source newer than $$artifact: $$newer"; \
+				stale=1; \
+				break; \
+			fi; \
+		done; \
+	fi; \
+	if [ "$$missing" -eq 1 ] || [ "$$stale" -eq 1 ]; then \
+		$(MAKE) build-capture-plugins; \
+	else \
+		echo "[capture] addon binaries ready"; \
+	fi
+
+# ---------------------------------------------------------------------------
+# Addon-side clean
+# ---------------------------------------------------------------------------
+# Called by `clean` in xr/Makefile. Strips every artifact owned by this file,
+# leaves project-level outputs (.godot/, .gradle/, build/, android/build/*)
+# to the main Makefile. Chains through to clean-ffmpeg (from Makefile.ffmpeg)
+# which knows about the ffmpeg checkout/install layout.
+clean-addons:
+	@if [ -f android_plugin/settings.gradle.kts ]; then \
+		cd android_plugin && GRADLE_USER_HOME=$(GRADLE_USER_HOME) $(CAPTURE_GRADLE) clean >/dev/null 2>&1 || true; \
+	fi
+	rm -rf \
+		android_plugin/.gradle \
+		android_plugin/.kotlin \
+		android_plugin/build \
+		android_plugin/contract/build \
+		android_plugin/questcapture/.cxx \
+		android_plugin/questcapture/build \
+		android_plugin/spatialmp4_muxer/.cxx \
+		android_plugin/spatialmp4_muxer/build \
+		native/ahb_decoder/build-* \
+		addons/godotopenxrvendors/.bin
+	rm -f \
+		addons/ahb_decoder/*.so \
+		addons/quest_capture_android/bin/*.aar \
+		addons/spatial_capture_contract/bin/*.jar \
+		addons/spatialmp4_muxer/bin/*.aar
+	@if ! cd .. && git ls-files --error-unmatch third_party/godot-xr-tools >/dev/null 2>&1; then \
+		rm -rf ../third_party/godot-xr-tools; \
+	fi
