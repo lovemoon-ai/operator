@@ -1,0 +1,26 @@
+[package]
+name = "teleop-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "Shared wire types + bridge<->adapter boundary protocol + transport abstraction for Teleoperate-Anything"
+
+[dependencies]
+# Async runtime (only the features the protocol crate needs)
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+
+[dev-dependencies]
+# `test-util` enables the paused virtual clock; `full` covers the runtime
+# pieces the transport tests need (TcpListener/UnixListener accept loops).
+tokio = { version = "1", features = ["full", "test-util", "macros"] }
+# `Framed` SinkExt/StreamExt ergonomics for the transport loopback tests.
+futures = "0.3"

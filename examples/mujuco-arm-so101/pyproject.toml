@@ -1,0 +1,45 @@
+# Project metadata for the MuJoCo SO-101 sandbox.
+#
+# This is a script project, not a publishable library — `[tool.uv]
+# package = false` tells uv to skip the build/install step and treat
+# the directory as a runnable sandbox. The `.py` files at the root
+# (sim_so101.py, pick_cube.py) are invoked directly with the venv's
+# python or via `uv run`.
+#
+# Sync the environment with:
+#     uv sync                       # installs the locked versions
+#     uv sync --upgrade             # bumps within the version ranges
+# Run a script in the synced env:
+#     uv run python sim_so101.py viewer
+#     uv run mjpython sim_so101.py bridge --viewer    # macOS GUI bridge
+# Add / remove deps (regenerates uv.lock):
+#     uv add  '<package>=<spec>'
+#     uv remove '<package>'
+
+[project]
+name = "mujoco-arm-so101"
+version = "0.1.0"
+description = "MuJoCo SO-101 pick-and-place sandbox + stdin/stdout JSON bridge for robo-agent"
+readme = "README.md"
+requires-python = ">=3.11"
+# Versions match what was in requirements.txt — lower bounds picked to
+# stay on a 2024+ MuJoCo release that ships `mujoco.viewer.launch_passive`
+# and the matching macOS `mjpython` trampoline.
+#
+# Cap on mujoco: 3.8.1 segfaults inside `mujoco.viewer.launch_passive`
+# on macOS arm64 with uv-managed CPython 3.11 (reproducible with the
+# minimal `m = MjModel.from_xml_string('<mujoco/>'); viewer.launch_passive(m, d)`
+# repro). 3.8.0 works. Drop the upper bound once upstream fixes it
+# (track at https://github.com/google-deepmind/mujoco/issues — search
+# "launch_passive segfault macOS arm64 3.8.1").
+dependencies = [
+    "mujoco>=3.2.0,<3.8.1",
+    "numpy>=1.26",
+    "pillow>=10.0",
+]
+
+[tool.uv]
+# We don't build / install this directory as a Python package — the
+# scripts are run directly. Without this, `uv sync` would refuse
+# because there's no src/ layout or build backend.
+package = false

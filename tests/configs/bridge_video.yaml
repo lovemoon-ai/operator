@@ -1,0 +1,26 @@
+# xr-bridge config used by tests/rtsp_test.sh.
+#
+# Runs in --video-only mode so adapter_link is ignored (the field is here
+# only to satisfy the shared YAML shape). One feed pulls from a local
+# mediamtx (rtsp://127.0.0.1:8554/test) and re-publishes its NALs on
+# TCP :12345 for the Quest app to consume.
+
+adapter_link:
+  endpoint: "tcp:127.0.0.1:63910"
+
+bridge:
+  name: "xr-bridge-rtsp-test"
+  pose_port: 63901
+  video_port: 12345
+  discovery_port: 63900
+  pose_udp_port: 63902
+  telemetry_port: 63903
+  video:
+    feeds:
+      - name: test
+        rtsp_url: "rtsp://127.0.0.1:8554/test"
+        tcp_port: 12345
+        transport: tcp
+        width: 1280
+        height: 720
+        fps: 30

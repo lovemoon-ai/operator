@@ -1,0 +1,48 @@
+#version 450
+// Compute blit: sample the YCbCr (AHB-imported) source and write
+// straight RGBA8 into the persistent destination image that Godot's
+// fragment shader actually displays.
+//
+// Why this exists:
+//   Godot 4.5's RenderingDevice has no way to express an immutable
+//   VkSamplerYcbcrConversion in the pipeline layout for a shader it
+//   generates. So when we hand Godot the AHB-imported VkImage directly,
+//   its fragment shader samples it with a "vanilla" sampler that
+//   ignores the YCbCr conversion, producing the black-screen failure
+//   tracked in issue 008.
+//
+//   Doing the conversion here in our own compute pipeline (where we
+//   control the descriptor set layout) lets us bake the conversion into
+//   the immutable sampler. The output is a plain RGBA8 image Godot can
+//   sample normally.
+//
+// Workgroup size is 8x8 — chosen because Adreno (Pico 4 = Adreno 750)
+// schedules in 64-thread waves and 8x8=64 maps perfectly.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// Combined image sampler. Backed by the YCbCr-imported VkImageView,
+// using an immutable sampler with the conversion attached. Reading
+// `texture(u_src, uv)` here implicitly does YUV->RGB inside the driver.
+layout(set = 0, binding = 0) uniform sampler2D u_src;
+
+// Destination storage image. rgba8 because that's what we expose to
+// Godot via texture_create_from_extension with DATA_FORMAT_R8G8B8A8_UNORM.
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D u_dst;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(u_dst);
+    // Bounds check — dispatch is ceil(w/8) * ceil(h/8) workgroups so
+    // the last row/column will run threads outside the image.
+    if (coord.x >= sz.x || coord.y >= sz.y) {
+        return;
+    }
+    // Sample at pixel centre, normalised. Linear filtering would only
+    // help on upscales; the source is the same resolution as the dest,
+    // so this effectively becomes a one-to-one copy with YCbCr->RGB
+    // conversion applied by the driver.
+    vec2 uv = (vec2(coord) + vec2(0.5)) / vec2(sz);
+    vec4 c = texture(u_src, uv);
+    imageStore(u_dst, coord, vec4(c.rgb, 1.0));
+}

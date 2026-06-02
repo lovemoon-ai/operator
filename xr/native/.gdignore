@@ -1,0 +1,5 @@
+# Tell Godot to ignore this directory entirely. xr/native/ holds the
+# *source* of the GDExtension(s); the runtime-loadable .so + .gdextension
+# manifest live under xr/addons/<name>/. Without this file Godot would
+# scan xr/native/ahb_decoder/ahb_decoder.gdextension as a *second*
+# extension and try to register AhbVideoTexture twice.

@@ -1,0 +1,131 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scenes/ui/connection_panel.gd" id="1_conn"]
+
+[sub_resource type="QuadMesh" id="QuadMesh_conn"]
+size = Vector2(0.8, 0.6)
+
+[sub_resource type="ViewportTexture" id="ViewportTexture_conn"]
+viewport_path = NodePath("SubViewport")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_conn"]
+transparency = 1
+cull_mode = 2
+shading_mode = 0
+albedo_texture = SubResource("ViewportTexture_conn")
+
+[node name="ConnectionPanel" type="Node3D"]
+script = ExtResource("1_conn")
+
+[node name="SubViewport" type="SubViewport" parent="."]
+transparent_bg = true
+size = Vector2i(600, 450)
+render_target_update_mode = 3
+
+[node name="Panel" type="PanelContainer" parent="SubViewport"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="SubViewport/Panel"]
+layout_mode = 2
+
+[node name="TitleLabel" type="Label" parent="SubViewport/Panel/VBoxContainer"]
+layout_mode = 2
+text = "XRoboToolkit — Select Hardware"
+horizontal_alignment = 1
+
+[node name="HSeparator" type="HSeparator" parent="SubViewport/Panel/VBoxContainer"]
+layout_mode = 2
+
+[node name="SelectPage" type="VBoxContainer" parent="SubViewport/Panel/VBoxContainer"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="RobotListLabel" type="Label" parent="SubViewport/Panel/VBoxContainer/SelectPage"]
+layout_mode = 2
+text = "Discovered Hardware (click to select, double-click to enter):"
+
+[node name="RobotList" type="ItemList" parent="SubViewport/Panel/VBoxContainer/SelectPage"]
+layout_mode = 2
+custom_minimum_size = Vector2(0, 160)
+
+[node name="ManualLabel" type="Label" parent="SubViewport/Panel/VBoxContainer/SelectPage"]
+layout_mode = 2
+text = "Manual Connection:"
+
+[node name="IPContainer" type="HBoxContainer" parent="SubViewport/Panel/VBoxContainer/SelectPage"]
+layout_mode = 2
+
+[node name="IPInput" type="LineEdit" parent="SubViewport/Panel/VBoxContainer/SelectPage/IPContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 3.0
+placeholder_text = "IP Address"
+text = "192.168.1.100"
+
+[node name="PortInput" type="LineEdit" parent="SubViewport/Panel/VBoxContainer/SelectPage/IPContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 1.0
+placeholder_text = "Port"
+text = "63901"
+
+[node name="EnterButton" type="Button" parent="SubViewport/Panel/VBoxContainer/SelectPage"]
+layout_mode = 2
+text = "Enter Control"
+
+[node name="ControlPage" type="VBoxContainer" parent="SubViewport/Panel/VBoxContainer"]
+visible = false
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="DeviceNameLabel" type="Label" parent="SubViewport/Panel/VBoxContainer/ControlPage"]
+layout_mode = 2
+text = "Device: --"
+
+[node name="DeviceTypeLabel" type="Label" parent="SubViewport/Panel/VBoxContainer/ControlPage"]
+layout_mode = 2
+text = "Type: --"
+
+[node name="DeviceAddressLabel" type="Label" parent="SubViewport/Panel/VBoxContainer/ControlPage"]
+layout_mode = 2
+text = "Address: --"
+
+[node name="HSeparator2" type="HSeparator" parent="SubViewport/Panel/VBoxContainer/ControlPage"]
+layout_mode = 2
+
+[node name="ControlHintLabel" type="Label" parent="SubViewport/Panel/VBoxContainer/ControlPage"]
+layout_mode = 2
+text = "Driver active. Use controllers to send commands.\nTelemetry shown in HUD."
+horizontal_alignment = 1
+autowrap_mode = 2
+
+[node name="ControlSpacer" type="Control" parent="SubViewport/Panel/VBoxContainer/ControlPage"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="ButtonContainer" type="HBoxContainer" parent="SubViewport/Panel/VBoxContainer/ControlPage"]
+layout_mode = 2
+
+[node name="BackButton" type="Button" parent="SubViewport/Panel/VBoxContainer/ControlPage/ButtonContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Back to Hardware Select"
+
+[node name="DisconnectButton" type="Button" parent="SubViewport/Panel/VBoxContainer/ControlPage/ButtonContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Disconnect"
+
+[node name="StatusLabel" type="Label" parent="SubViewport/Panel/VBoxContainer"]
+layout_mode = 2
+text = "Status: Not connected"
+horizontal_alignment = 1
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, -1.5)
+mesh = SubResource("QuadMesh_conn")
+material_override = SubResource("StandardMaterial3D_conn")

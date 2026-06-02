@@ -1,0 +1,79 @@
+# robot-adapter config — drives the MuJoCo SO-101 simulator over the boundary.
+#
+# Run from the `robot/` directory (the documented CWD; the python/script paths
+# below are relative to it):
+#
+#     cargo run -p robot-adapter -- --config configs/mujoco_so101.yaml
+#
+# or with the built binary:
+#
+#     robot-adapter --config configs/mujoco_so101.yaml
+#
+# First-time sim setup:
+#
+#     cd examples/mujuco-arm-so101 && make env
+#
+# The adapter spawns `python sim_so101.py bridge` as a subprocess and speaks the
+# stdin/stdout JSON-line protocol (see
+# crates/robot-adapter/src/control/drivers/mujoco_so101.rs). The xr-bridge
+# connects on `adapter_link.endpoint` below and forwards sanitized
+# DeviceCommand frames.
+
+adapter_link:
+  # Where the adapter listens for the bridge (UDS or TCP). The bridge uses the
+  # same endpoint as its dial target when both processes run on the same host.
+  endpoint: "tcp:127.0.0.1:63910"
+
+adapter:
+  # Factory dispatch: "mujoco_so101" routes to RobotArmDevice + MujocoSo101Driver.
+  device_type: "mujoco_so101"
+
+  # No descriptor_file: the built-in arm descriptor
+  # (RobotArmDevice::default_descriptor) is used — 6 joints, gripper axis on
+  # right_trigger, end_effector pose on right_hand. Set descriptor_file to a YAML
+  # path to override.
+
+  arm:
+    # Routes to MujocoSo101Driver instead of a serial bus.
+    driver: "mujoco_so101"
+
+    # Unused by the MuJoCo driver; kept for schema symmetry with serial arms.
+    serial_port: ""
+    baudrate: 0
+
+    # SO-101 has 6 actuators (5 arm joints + 1 gripper). servo_ids sizes the
+    # PoseMapper output vector; the values themselves are ignored by this driver.
+    servo_ids: [1, 2, 3, 4, 5, 6]
+
+    # MuJoCo bridge subprocess settings. Both paths are relative to the
+    # adapter's CWD; the recommended CWD is `robot/`. Switch to absolute paths
+    # if you launch from elsewhere.
+    mujoco:
+      python: "../examples/mujuco-arm-so101/.venv/bin/python"
+      script: "../examples/mujuco-arm-so101/sim_so101.py"
+      # mj_step calls per outbound ctrl write. Driver clamps to [1, 50].
+      steps_per_write: 3
+      extra_args: []
+
+    # Joint limits in degrees, applied positionally per joint. ~5° inside the
+    # MuJoCo actuator ranges in examples/mujuco-arm-so101/assets/so101/so101.xml.
+    safety:
+      joint_limits_deg:
+        - [-105.0,  105.0]    # shoulder_pan
+        - [ -95.0,   95.0]    # shoulder_lift
+        - [ -92.0,   92.0]    # elbow_flex
+        - [ -90.0,   90.0]    # wrist_flex
+        - [-150.0,  155.0]    # wrist_roll
+        - [  -5.0,   95.0]    # gripper
+      max_velocity_deg_s: 90.0
+      max_acceleration_deg_s2: 180.0
+
+    pose_mapping:
+      mode: "direct"
+      scale: 1.0
+      mirror: true
+
+    # Sim bridge round-trip is dominated by Python I/O. 60 ms gives comfortable
+    # headroom over the default 20 ms during the spawn → ready → first-step
+    # warm-up window.
+    driver_write_timeout_ms: 60

@@ -1,0 +1,18 @@
+; Godot manifest for the ahb_decoder GDExtension.
+; Pico runs arm64-v8a Vulkan; we only ship that ABI.
+
+[configuration]
+entry_symbol = "ahb_decoder_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+; Godot's feature-tag system uses "arm64" here (NOT "arm64-v8a"); the
+; exporter then internally maps arm64 -> lib/arm64-v8a/ when packaging.
+; Using "arm64-v8a" silently no-matches and the .so never lands in the APK.
+android.debug.arm64   = "res://addons/ahb_decoder/libahb_decoder.so"
+android.release.arm64 = "res://addons/ahb_decoder/libahb_decoder.so"
+
+[dependencies]
+; No runtime dependencies; libahb_decoder.so links system-level
+; libandroid / libvulkan which are present on every Android build.

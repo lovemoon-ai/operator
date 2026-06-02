@@ -1,0 +1,24 @@
+[package]
+name = "e2e-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-process end-to-end tests exercising xr-bridge <-> robot-adapter over the real boundary transport"
+publish = false
+
+[lib]
+name = "e2e_tests"
+path = "src/lib.rs"
+
+# Integration tests live in tests/ and use the dev-dependencies below.
+# This crate intentionally depends on BOTH xr-bridge and robot-adapter so
+# it can drive a real AdapterClient against a real adapter server. Neither
+# product crate depends on the other — the dependency arrow points only
+# inward, from this test-only crate.
+[dev-dependencies]
+teleop-protocol = { path = "../teleop-protocol" }
+robot-adapter = { path = "../robot-adapter" }
+xr-bridge = { path = "../xr-bridge" }
+tokio = { version = "1", features = ["full", "macros", "test-util"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+serde_json = "1"

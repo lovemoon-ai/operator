@@ -1,0 +1,15 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Operator logo: a single "O", orange, light-gray background -->
+  <defs>
+    <linearGradient id="o-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFA52B"/>
+      <stop offset="100%" stop-color="#F26B1D"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" fill="#ECECEC"/>
+  <circle cx="512" cy="512" r="200"
+          fill="none"
+          stroke="url(#o-grad)"
+          stroke-width="120"
+          stroke-linecap="round"/>
+</svg>

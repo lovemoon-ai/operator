@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+renders/
+mujoco_menagerie/
+.conductor/
+conductor.log

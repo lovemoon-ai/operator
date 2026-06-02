@@ -1,0 +1,34 @@
+[package]
+name = "robot-adapter"
+version = "0.1.0"
+edition = "2021"
+description = "Robot-side adapter: translates the bridge boundary protocol into a concrete robot form (dummy/sim/serial)"
+
+[[bin]]
+name = "robot-adapter"
+path = "src/main.rs"
+
+[lib]
+name = "robot_adapter"
+path = "src/lib.rs"
+
+[dependencies]
+teleop-protocol = { path = "../teleop-protocol" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+futures = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+# Math (quaternion -> euler for the pose->joint mapping).
+nalgebra = "0.33"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util", "macros"] }

@@ -1,0 +1,59 @@
+# xr-bridge default configuration.
+#
+# This uses the shared YAML shape. `adapter_link` is the bridge/adapter
+# boundary connection; `bridge` owns only XR-facing network and video settings.
+
+adapter_link:
+  # Where the robot-adapter's boundary protocol is reachable.
+  # Either a Unix domain socket (`uds:/path`) or TCP (`tcp:host:port`).
+  endpoint: "uds:/tmp/teleop-adapter.sock"
+
+bridge:
+  # Human-readable service name advertised over mDNS / UDP discovery.
+  name: "xr-bridge"
+
+  # ── XR-facing network ports (the side that talks to the headset) ──
+  # TCP port for the command/pose channel (Hello handshake + DeviceCommand in +
+  # Telemetry out + clock sync).
+  pose_port: 63901
+  # TCP port for the H.264 video stream.
+  video_port: 12345
+  # UDP port for discovery beacons. The bridge sends subnet broadcasts by default.
+  discovery_port: 63900
+  # Optional headset WiFi IPs for networks that block broadcast/multicast.
+  # discovery_unicast_targets:
+  #   - 192.168.1.42
+  # UDP port for the high-frequency pose data plane (drop-old by seq).
+  pose_udp_port: 63902
+  # TCP port for the dedicated telemetry stream.
+  telemetry_port: 63903
+
+  # ── Video relay ──
+  # Isaac Sim runs an RTSP server co-located with the bridge and exposes three
+  # H.264 streams. The bridge pulls each (ffmpeg stream-copy, no transcode) and
+  # relays it to the headset over the existing XR video wire protocol. Each feed
+  # is independent: one RTSP URL -> one TCP fan-out port (+ optional UDP port).
+  # Remove or empty this block to run the bridge without video.
+  video:
+    feeds:
+      - name: wrist_left
+        rtsp_url: "rtsp://127.0.0.1:8554/wrist_left"
+        tcp_port: 12345
+        width: 1280
+        height: 720
+        fps: 30
+        transport: tcp
+      - name: wrist_right
+        rtsp_url: "rtsp://127.0.0.1:8554/wrist_right"
+        tcp_port: 12346
+        width: 1280
+        height: 720
+        fps: 30
+        transport: tcp
+      - name: head
+        rtsp_url: "rtsp://127.0.0.1:8554/head"
+        tcp_port: 12347
+        width: 1280
+        height: 720
+        fps: 30
+        transport: tcp

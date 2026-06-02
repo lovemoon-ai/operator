@@ -1,0 +1,20 @@
+[workspace]
+# New code lives under crates/. The legacy `robo-agent` package has been
+# moved to deprecated/ — it is still a workspace member so its tests keep
+# running (strangler invariant: legacy stays green until it is finally
+# retired), but no new features should land there.
+members = [
+    "crates/teleop-protocol",
+    "crates/robot-adapter",
+    "crates/xr-bridge",
+    "crates/e2e-tests",
+    "deprecated",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

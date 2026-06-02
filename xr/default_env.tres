@@ -1,0 +1,11 @@
+[gd_resource type="Environment" load_steps=3 format=3 uid="uid://er867l7dl10j"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_qmfyt"]
+
+[sub_resource type="Sky" id="1"]
+sky_material = SubResource("ProceduralSkyMaterial_qmfyt")
+
+[resource]
+background_mode = 2
+sky = SubResource("1")
+sky_rotation = Vector3(0, 2.35619, 0)

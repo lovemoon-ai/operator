@@ -1,0 +1,36 @@
+[package]
+name = "xr-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "XR-facing bridge: serves the XR wire protocol for adapter-backed control or standalone RTSP video relay"
+
+[[bin]]
+name = "xr-bridge"
+path = "src/main.rs"
+
+[lib]
+name = "xr_bridge"
+path = "src/lib.rs"
+
+[dependencies]
+teleop-protocol = { path = "../teleop-protocol" }
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+futures = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+# Service discovery (mDNS + UDP broadcast beacon) for the XR-facing network.
+mdns-sd = "0.11"
+hostname = "0.4"
+get_if_addrs = "0.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util", "macros"] }

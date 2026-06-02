@@ -1,0 +1,36 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/ui/dynamic_hud.gd" id="1_dynhud"]
+
+[sub_resource type="QuadMesh" id="QuadMesh_dynhud"]
+size = Vector2(0.35, 0.2)
+
+[sub_resource type="ViewportTexture" id="ViewportTexture_dynhud"]
+viewport_path = NodePath("SubViewport")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_dynhud"]
+transparency = 1
+cull_mode = 2
+shading_mode = 0
+albedo_texture = SubResource("ViewportTexture_dynhud")
+
+[node name="DynamicHUD" type="Node3D"]
+
+[node name="SubViewport" type="SubViewport" parent="."]
+transparent_bg = true
+size = Vector2i(450, 300)
+render_target_update_mode = 3
+
+[node name="DynamicHudControl" type="Control" parent="SubViewport"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_dynhud")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.4, -0.25, -0.6)
+mesh = SubResource("QuadMesh_dynhud")
+material_override = SubResource("StandardMaterial3D_dynhud")
