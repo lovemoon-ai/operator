@@ -244,6 +244,3 @@ clean-addons:
 		addons/quest_capture_android/bin/*.aar \
 		addons/spatial_capture_contract/bin/*.jar \
 		addons/spatialmp4_muxer/bin/*.aar
-	@if ! cd .. && git ls-files --error-unmatch third_party/godot-xr-tools >/dev/null 2>&1; then \
-		rm -rf ../third_party/godot-xr-tools; \
-	fi

@@ -72,3 +72,6 @@ xr/addons/spatialmp4_muxer/bin/*.aar
 
 # claude
 *.lock
+
+# submodule
+xr/native/ahb_decoder/godot-cpp

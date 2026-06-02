@@ -13,11 +13,6 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-feature tools:node="replace" android:name="android.hardware.vulkan.level" android:required="false" android:version="1" />
     <uses-feature tools:node="replace" android:name="android.hardware.vulkan.version" android:required="true" android:version="0x400003" />
-
-	<uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
-	<uses-feature android:name="android.hardware.camera" android:required="false" />
-	<uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
-	
     <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
     <uses-feature tools:node="replace" android:name="oculus.software.handtracking" android:required="false" />
     <uses-feature tools:node="replace" android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
@@ -27,6 +22,11 @@
     <uses-permission android:name="horizonos.permission.HEADSET_CAMERA"/>
     <uses-feature android:name="android.hardware.camera2.any" android:required="false"/>
 
+
+	<uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
+	<uses-feature android:name="android.hardware.camera" android:required="false" />
+	<uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
+	
     <application android:label="@string/godot_project_name_string"
         android:allowBackup="false"
         android:icon="@mipmap/icon"
