@@ -238,7 +238,6 @@ clean-addons:
 		android_plugin/spatialmp4_muxer/.cxx \
 		android_plugin/spatialmp4_muxer/build \
 		native/ahb_decoder/build-* \
-		addons/godotopenxrvendors/.bin
 	rm -f \
 		addons/ahb_decoder/*.so \
 		addons/quest_capture_android/bin/*.aar \
