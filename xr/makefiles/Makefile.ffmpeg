@@ -13,6 +13,7 @@
 #
 # Variables (override on the make command line or in the environment):
 #   FFMPEG_VERSION   default 8.1.1     — git tag = n${FFMPEG_VERSION}
+#   FFMPEG_TAG       default from ../.gitmodules submodule.third_party/ffmpeg.tag
 #   FFMPEG_SOURCE    default ../third_party/ffmpeg
 #                    Submodule checkout used as the clean source tree.
 #   ANDROID_ABI      default arm64-v8a — only arm64-v8a is wired today
@@ -24,6 +25,7 @@
 #                    NDK location; one of them must be set.
 
 FFMPEG_VERSION ?= 8.1.1
+FFMPEG_TAG     ?= $(shell git config --file ../.gitmodules --get submodule.third_party/ffmpeg.tag 2>/dev/null || echo n$(FFMPEG_VERSION))
 FFMPEG_SOURCE  ?= $(abspath ../third_party/ffmpeg)
 ANDROID_ABI    ?= arm64-v8a
 ANDROID_API    ?= 29
@@ -84,6 +86,7 @@ $(FFMPEG_LIB): $(FFMPEG_BUILD_SCRIPT) \
 	@echo "[ffmpeg] SPATIALMP4_ROOT = $(SPATIALMP4_ROOT)"
 	SPATIALMP4_ROOT="$(SPATIALMP4_ROOT)" \
 	FFMPEG_VERSION="$(FFMPEG_VERSION)" \
+	FFMPEG_TAG="$(FFMPEG_TAG)" \
 	FFMPEG_SOURCE="$(FFMPEG_SOURCE)" \
 	ANDROID_ABI="$(ANDROID_ABI)" \
 	ANDROID_API="$(ANDROID_API)" \
@@ -103,6 +106,7 @@ clean-ffmpeg:
 
 ffmpeg-info:
 	@echo "FFMPEG_VERSION  = $(FFMPEG_VERSION)"
+	@echo "FFMPEG_TAG      = $(FFMPEG_TAG)"
 	@echo "FFMPEG_SOURCE   = $(FFMPEG_SOURCE)"
 	@echo "ANDROID_ABI     = $(ANDROID_ABI)"
 	@echo "ANDROID_API     = $(ANDROID_API)"
