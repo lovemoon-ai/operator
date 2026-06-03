@@ -3,8 +3,12 @@
 	url = https://github.com/godotvr/godot-xr-tools.git
 	branch = master
 	ignore = all
-[submodule "xr/native/ahb_decoder/godot-cpp"]
-	path = xr/native/ahb_decoder/godot-cpp
+[submodule "third_party/godot-cpp"]
+	path = third_party/godot-cpp
 	url = https://github.com/godotengine/godot-cpp.git
 	branch = 4.5
-    ignore = all
+	ignore = all
+[submodule "third_party/ffmpeg"]
+	path = third_party/ffmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git
+	ignore = all

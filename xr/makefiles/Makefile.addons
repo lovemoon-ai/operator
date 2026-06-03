@@ -54,6 +54,7 @@ AHB_DIR      := native/ahb_decoder
 AHB_SRC      := $(AHB_DIR)/CMakeLists.txt $(AHB_DIR)/build.sh $(shell find $(AHB_DIR)/src -type f 2>/dev/null)
 AHB_ADDON_SO := addons/ahb_decoder/libahb_decoder.so
 AHB_JNI_SO   := android/build/libs/release/arm64-v8a/libahb_decoder.so
+GODOT_CPP_BUILD_DIR := ../third_party/godot-cpp-build
 
 # ---------------------------------------------------------------------------
 # Phony targets exposed to xr/Makefile
@@ -238,6 +239,7 @@ clean-addons:
 		android_plugin/spatialmp4_muxer/.cxx \
 		android_plugin/spatialmp4_muxer/build \
 		native/ahb_decoder/build-* \
+		$(GODOT_CPP_BUILD_DIR)
 	rm -f \
 		addons/ahb_decoder/*.so \
 		addons/quest_capture_android/bin/*.aar \
