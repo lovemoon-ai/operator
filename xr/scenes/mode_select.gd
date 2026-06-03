@@ -79,9 +79,16 @@ func _change_scene(path: String) -> void:
 		return
 	_changing_scene = true
 	print("[Operator] Mode selected: %s" % path)
+	_mode_panel.visible = false
+	call_deferred("_change_scene_deferred", path)
+
+
+func _change_scene_deferred(path: String) -> void:
+	await get_tree().process_frame
 	var err := get_tree().change_scene_to_file(path)
 	if err != OK:
 		_changing_scene = false
+		_mode_panel.visible = true
 		push_error("[Operator] Failed to change scene to %s: %s" % [path, err])
 
 
@@ -89,6 +96,7 @@ func _configure_passthrough() -> void:
 	var viewport := get_viewport()
 	if viewport:
 		viewport.transparent_bg = true
+		viewport.physics_object_picking = false
 		var world := viewport.get_world_3d()
 		if world and world.environment:
 			world.environment.background_mode = Environment.BG_CLEAR_COLOR

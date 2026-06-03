@@ -3,7 +3,7 @@
 [ext_resource type="PackedScene" uid="uid://clc5dre31iskm" path="res://addons/godot-xr-tools/xr/start_xr.tscn" id="1_startxr"]
 [ext_resource type="Script" path="res://scenes/main.gd" id="2_main"]
 [ext_resource type="PackedScene" path="res://scenes/robot_view/robot_view.tscn" id="3_robotview"]
-[ext_resource type="PackedScene" uid="uid://clujaf3u776a3" path="res://addons/godot-xr-tools/objects/viewport_2d_in_3d.tscn" id="4_vp2d3d"]
+[ext_resource type="PackedScene" path="res://scenes/ui/viewport_2d_in_3d_clean.tscn" id="4_vp2d3d"]
 [ext_resource type="PackedScene" path="res://scenes/ui/settings_ui.tscn" id="5_settings_ui"]
 [ext_resource type="PackedScene" path="res://scenes/ui/settings_button_ui.tscn" id="6_settings_btn_ui"]
 [ext_resource type="PackedScene" uid="uid://cqhw276realc" path="res://addons/godot-xr-tools/functions/function_pointer.tscn" id="7_fnptr"]
