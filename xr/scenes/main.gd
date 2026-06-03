@@ -4,9 +4,9 @@ extends Node3D
 ## Hello → DeviceDescriptor → DeviceCommand ↔ Telemetry.
 ##
 ## UI model (per issue 004 / settings redesign):
-##  - At launch, world-locked SettingsPanel is visible if discovery needs
-##    manual confirmation. User fills IP / Port / Robot Type / Video window
-##    mode, presses OK.
+##  - At launch, view-locked composition-layer SettingsPanel is visible if
+##    discovery needs manual confirmation. User fills IP / Port / Robot Type /
+##    Video window mode, presses OK.
 ##  - OK → save to user://settings.cfg, hide panel, show face-locked
 ##    floating SettingsButton, kick off TCP connect.
 ##  - The floating button (face-locked, under XRCamera3D) re-opens the
@@ -15,15 +15,23 @@ extends Node3D
 ##    status now goes to print() (logcat-visible) and the panel's own
 ##    status label while the panel is open.
 
-const SettingsUI = preload("res://scenes/ui/settings_ui.gd")
+const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
+const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
+const SettingsInteractionRouterScript = preload("res://scripts/ui/settings_interaction_router.gd")
+const OperatorUIPointerVisualScript = preload("res://scripts/xr/operator_ui_pointer_visual.gd")
+
+const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
+const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 
 @onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
+@onready var _origin: XROrigin3D = $XROrigin3D
+@onready var _camera: XRCamera3D = $XROrigin3D/XRCamera3D
+@onready var _left_controller: XRController3D = $XROrigin3D/LeftController
+@onready var _right_controller: XRController3D = $XROrigin3D/RightController
 @onready var _tracking_provider: Node = $TrackingProvider
 @onready var _tcp_handler: Node = $TcpHandler
 @onready var _discovery: Node = $Discovery
 @onready var _robot_view: Node = $XROrigin3D/RobotView
-@onready var _settings_panel: Node3D = $XROrigin3D/XRCamera3D/SettingsPanel
-@onready var _settings_button: Node3D = $XROrigin3D/XRCamera3D/SettingsButton
 
 ## v2 nodes (created programmatically)
 var _session: Session
@@ -41,11 +49,11 @@ var _last_video_feed: Dictionary = {}
 var _clock_sync: RobotClockSync
 var _known_robots: Dictionary = {}
 
-## Inner 2D Control instance loaded inside the SettingsPanel's
-## Viewport2DIn3D. Lazily fetched in _on_xr_started after the
-## Viewport2DIn3D has had a frame to spawn its scene.
-var _settings_ui: Control = null
-var _settings_button_ui: Control = null
+var _settings_panel: Node3D
+var _settings_button: Node3D
+var _settings_ui: Node = null
+var _settings_interaction_router: Node
+var _settings_pointer_visual: Node3D
 
 ## Selected by the user in the Settings UI; used as a hint until the
 ## DeviceDescriptor arrives and overrides it.
@@ -60,6 +68,7 @@ func _ready() -> void:
 
 	_configure_passthrough()
 	_create_v2_nodes()
+	_create_settings_ui_nodes()
 
 	if _start_xr:
 		_start_xr.xr_started.connect(_on_xr_started)
@@ -109,8 +118,7 @@ func _ready() -> void:
 	# find a robot; the launch decision in `_finalize_launch` will reveal
 	# either the panel (if the user needs to pick / fill IP) or the
 	# floating button (if we auto-connect successfully). Done after the
-	# Viewport2DIn3D scenes have spawned (`_wire_settings_ui` is deferred
-	# to `_on_xr_started`).
+	# composition-layer settings nodes were created above.
 	_settings_panel.visible = false
 	_settings_button.visible = false
 
@@ -127,6 +135,19 @@ func _ready() -> void:
 		call_deferred("_on_xr_started")
 
 	print("[Operator] Main scene initialized (UI hidden — awaiting discovery)")
+
+
+func _process(_delta: float) -> void:
+	if _camera:
+		if _settings_panel:
+			_settings_panel.transform = _camera.transform * SETTINGS_PANEL_OFFSET
+		if _settings_button:
+			_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
+	if _settings_interaction_router:
+		_settings_interaction_router.interaction_mode = "controllers"
+		_settings_interaction_router.busy = false
+		_settings_interaction_router.set_targets([_settings_panel, _settings_button])
+		_settings_interaction_router.update_pointer()
 
 
 func _create_v2_nodes() -> void:
@@ -163,27 +184,30 @@ func _create_v2_nodes() -> void:
 	add_child(_clock_sync)
 
 
-# --- Settings UI wiring (deferred until Viewport2DIn3D has spawned scene) -----
+# --- Settings UI wiring -------------------------------------------------------
 
-func _wire_settings_ui() -> void:
-	# Viewport2DIn3D.get_scene_instance() returns the root Control of the
-	# inner 2D scene. It's null on the first frame after Viewport2DIn3D
-	# itself is _ready; we defer the lookup until xr_started.
-	if _settings_panel and _settings_panel.has_method("get_scene_instance"):
-		_settings_ui = _settings_panel.get_scene_instance() as Control
-	if _settings_button and _settings_button.has_method("get_scene_instance"):
-		_settings_button_ui = _settings_button.get_scene_instance() as Control
+func _create_settings_ui_nodes() -> void:
+	_settings_pointer_visual = OperatorUIPointerVisualScript.new()
+	_settings_pointer_visual.name = "SettingsPointerVisual"
+	_origin.add_child(_settings_pointer_visual)
 
-	if _settings_ui and _settings_ui.has_signal("settings_applied"):
-		_settings_ui.settings_applied.connect(_on_settings_applied)
-		if _settings_ui.has_signal("close_requested"):
-			_settings_ui.close_requested.connect(_on_settings_close_requested)
-		if _settings_ui.has_signal("exit_requested"):
-			_settings_ui.exit_requested.connect(_on_settings_exit_requested)
-	else:
-		push_warning("[Operator] SettingsPanel inner UI not ready — falling back to defaults")
-	if _settings_button_ui and _settings_button_ui.has_signal("pressed"):
-		_settings_button_ui.pressed.connect(_on_settings_button_pressed)
+	_settings_panel = SettingsUI.new()
+	_settings_panel.name = "TeleopSettingsPanel"
+	_settings_panel.settings_applied.connect(_on_settings_applied)
+	_settings_panel.exit_requested.connect(_on_settings_exit_requested)
+	_origin.add_child(_settings_panel)
+	_settings_ui = _settings_panel
+
+	_settings_button = SettingsLauncherButtonScript.new()
+	_settings_button.name = "TeleopSettingsButton"
+	_settings_button.pressed.connect(_on_settings_button_pressed)
+	_origin.add_child(_settings_button)
+
+	_settings_interaction_router = SettingsInteractionRouterScript.new()
+	_settings_interaction_router.name = "SettingsInteractionRouter"
+	_settings_interaction_router.configure(_origin, _camera, _left_controller, _right_controller, _settings_pointer_visual)
+	_settings_interaction_router.set_targets([_settings_panel, _settings_button])
+	_origin.add_child(_settings_interaction_router)
 
 
 # --- XR lifecycle -------------------------------------------------------------
@@ -205,20 +229,6 @@ func _on_xr_started() -> void:
 		if typeof(runtime_any) == TYPE_STRING and not String(runtime_any).is_empty():
 			print("[Operator] OpenXR runtime: %s" % String(runtime_any))
 
-	# Wait for Viewport2DIn3D to spawn its inner `scene`. One process_frame
-	# is enough on the desktop but Pico's first few frames are noisy
-	# (XR session begin, swapchains, etc.) and get_scene_instance() can
-	# return null for several frames. Poll up to ~1 s, bail out otherwise.
-	for i in range(60):
-		await get_tree().process_frame
-		var panel_ready: bool = _settings_panel.has_method("get_scene_instance") \
-				and _settings_panel.get_scene_instance() != null
-		var button_ready: bool = _settings_button.has_method("get_scene_instance") \
-				and _settings_button.get_scene_instance() != null
-		if panel_ready and button_ready:
-			print("[Operator] Viewport2DIn3D scenes ready after %d frame(s)" % (i + 1))
-			break
-	_wire_settings_ui()
 	_begin_launch_window()
 
 
@@ -299,12 +309,20 @@ func _show_settings_panel() -> void:
 	# Re-push the latest discovery snapshot every time we open the panel —
 	# robots may have appeared / disappeared while it was closed.
 	_push_discovery_to_settings_ui()
-	_settings_panel.visible = true
+	if _settings_button and _settings_button.has_method("clear_pointer"):
+		_settings_button.clear_pointer()
+	if _settings_panel and _settings_panel.has_method("open"):
+		_settings_panel.open()
+	else:
+		_settings_panel.visible = true
 	_settings_button.visible = false
 
 
 func _hide_settings_panel() -> void:
-	_settings_panel.visible = false
+	if _settings_panel and _settings_panel.has_method("close"):
+		_settings_panel.close()
+	else:
+		_settings_panel.visible = false
 	_settings_button.visible = true
 
 
@@ -384,7 +402,10 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
 	_user_robot_type_hint = String(info.get("device_type", persisted.get("robot_type", "robot_arm")))
 
-	_settings_panel.visible = false
+	if _settings_panel and _settings_panel.has_method("close"):
+		_settings_panel.close()
+	else:
+		_settings_panel.visible = false
 	_settings_button.visible = true
 	print("[Operator] Auto-connecting to discovered robot @ %s:%d" % [ip, port])
 	_connect_to_robot(ip, port)
@@ -392,7 +413,10 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 
 func _show_settings_panel_with_status(text: String) -> void:
 	_push_discovery_to_settings_ui()
-	_settings_panel.visible = true
+	if _settings_panel and _settings_panel.has_method("open"):
+		_settings_panel.open()
+	else:
+		_settings_panel.visible = true
 	_settings_button.visible = false
 	if _settings_ui and _settings_ui.has_method("set_status"):
 		_settings_ui.set_status(text)

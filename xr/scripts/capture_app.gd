@@ -7,13 +7,11 @@ const ViewLockedCapturePanelScript := preload("res://scripts/view_locked_capture
 const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
 const OperatorUIPointerVisualScript := preload("res://scripts/xr/operator_ui_pointer_visual.gd")
+const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_interaction_router.gd")
 
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
 const DEFAULT_RGB_FPS := 30
-const LEFT_HAND_TRACKER := &"/user/hand_tracker/left"
-const RIGHT_HAND_TRACKER := &"/user/hand_tracker/right"
-const HAND_PINCH_DISTANCE_M := 0.028
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -0.86))
 const STATUS_POPUP_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.92))
@@ -43,6 +41,7 @@ var settings_panel
 var record_control
 var status_popup
 var ui_pointer_visual
+var settings_interaction_router
 var writer: Object
 var pose_sampler: Node
 var depth_sampler: Node
@@ -75,9 +74,6 @@ var _previous_transparent_bg := false
 var _previous_environment_blend_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
 var _previous_background_mode := Environment.BG_CLEAR_COLOR
 var _previous_background_color := Color.BLACK
-var _controller_pointer_down: XRController3D
-var _hand_pointer_down := false
-var _pressed_panel: Object
 
 # 1Hz metrics ticker: tracks how many _process invocations and which phases
 # (pose loop iterations, plugin probes) ran in the last second, then emits a
@@ -343,21 +339,22 @@ func _setup_xr_scene() -> void:
 	left_pointer.name = "LeftAimPointer"
 	left_pointer.tracker = &"left_hand"
 	left_pointer.pose = &"aim"
-	left_pointer.button_pressed.connect(_on_controller_button_pressed.bind(left_pointer))
-	left_pointer.button_released.connect(_on_controller_button_released.bind(left_pointer))
 	origin.add_child(left_pointer)
 
 	right_pointer = XRController3D.new()
 	right_pointer.name = "RightAimPointer"
 	right_pointer.tracker = &"right_hand"
 	right_pointer.pose = &"aim"
-	right_pointer.button_pressed.connect(_on_controller_button_pressed.bind(right_pointer))
-	right_pointer.button_released.connect(_on_controller_button_released.bind(right_pointer))
 	origin.add_child(right_pointer)
 
 	ui_pointer_visual = OperatorUIPointerVisualScript.new()
 	ui_pointer_visual.name = "OperatorUIPointerVisual"
 	origin.add_child(ui_pointer_visual)
+
+	settings_interaction_router = SettingsInteractionRouterScript.new()
+	settings_interaction_router.name = "SettingsInteractionRouter"
+	settings_interaction_router.configure(origin, hmd_camera, left_pointer, right_pointer, ui_pointer_visual)
+	origin.add_child(settings_interaction_router)
 
 	settings_panel = ViewLockedCapturePanelScript.new()
 	settings_panel.name = "ViewLockedSettingsPanel"
@@ -372,6 +369,7 @@ func _setup_xr_scene() -> void:
 	record_control.stop_requested.connect(stop_capture)
 	record_control.settings_requested.connect(_on_settings_requested)
 	origin.add_child(record_control)
+	settings_interaction_router.set_targets([settings_panel, record_control])
 
 	status_popup = ViewLockedStatusPopupScript.new()
 	status_popup.name = "ViewLockedStatusPopup"
@@ -621,155 +619,17 @@ func _update_view_locked_panel() -> void:
 
 
 func _update_ui_pointer() -> void:
-	var panel := _active_pointer_panel()
-	if panel == null:
-		_release_ui_pointer()
+	if settings_interaction_router == null:
 		return
-	var mode := str(capture_options.get("interaction_mode", "controllers"))
-	if settings_panel.visible or mode == "controllers" or (mode == "head" and not _recording):
-		_update_controller_pointer(panel)
-	elif mode == "hands":
-		_update_hand_pointer(panel)
-	else:
-		_release_ui_pointer()
-
-
-func _update_controller_pointer(panel: Object) -> void:
-	if _hand_pointer_down:
-		_release_pressed_panel()
-		_hand_pointer_down = false
-	var pointer: XRController3D = _controller_pointer_down
-	if pointer == null:
-		if right_pointer.get_has_tracking_data():
-			pointer = right_pointer
-		elif left_pointer.get_has_tracking_data():
-			pointer = left_pointer
-	if pointer:
-		var ray_origin := pointer.global_transform.origin
-		var ray_direction := -pointer.global_transform.basis.z
-		if panel.update_pointer_from_ray(ray_origin, ray_direction):
-			_show_ui_pointer_visual(ray_origin, ray_direction, panel, _controller_pointer_down != null)
-		else:
-			_hide_ui_pointer_visual()
-	else:
-		panel.clear_pointer()
-		_hide_ui_pointer_visual()
-
-
-func _update_hand_pointer(panel: Object) -> void:
-	if _controller_pointer_down:
-		_release_pressed_panel()
-		_controller_pointer_down = null
-
-	var tracker := _tracked_hand(RIGHT_HAND_TRACKER)
-	if tracker == null:
-		tracker = _tracked_hand(LEFT_HAND_TRACKER)
-	if tracker == null:
-		if _hand_pointer_down:
-			_release_pressed_panel()
-			_hand_pointer_down = false
-		panel.clear_pointer()
-		_hide_ui_pointer_visual()
-		return
-
-	var index_tip: Vector3 = origin.to_global(tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP).origin)
-	var thumb_tip: Vector3 = origin.to_global(tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_THUMB_TIP).origin)
-	var direction := index_tip - hmd_camera.global_position
-	var has_intersection := false
-	if direction.length_squared() > 0.000001:
-		has_intersection = panel.update_pointer_from_ray(hmd_camera.global_position, direction.normalized())
-	var pressed := has_intersection and index_tip.distance_to(thumb_tip) <= HAND_PINCH_DISTANCE_M
-	if has_intersection:
-		_show_ui_pointer_visual(hmd_camera.global_position, direction.normalized(), panel, pressed)
-	else:
-		_hide_ui_pointer_visual()
-	if pressed != _hand_pointer_down:
-		_hand_pointer_down = pressed
-		if pressed:
-			_press_panel(panel)
-		else:
-			_release_pressed_panel()
-
-
-func _tracked_hand(tracker_name: StringName) -> XRHandTracker:
-	var tracker := XRServer.get_tracker(tracker_name)
-	if tracker is XRHandTracker and (tracker as XRHandTracker).has_tracking_data:
-		return tracker as XRHandTracker
-	return null
-
-
-func _on_controller_button_pressed(action: String, pointer: XRController3D) -> void:
-	var panel := _active_pointer_panel()
-	if panel == null or not _is_pointer_click_action(action):
-		return
-	var mode := str(capture_options.get("interaction_mode", "controllers"))
-	if not settings_panel.visible and mode != "controllers" and not (mode == "head" and not _recording):
-		return
-	if panel.update_pointer_from_ray(pointer.global_transform.origin, -pointer.global_transform.basis.z):
-		_controller_pointer_down = pointer
-		_show_ui_pointer_visual(pointer.global_transform.origin, -pointer.global_transform.basis.z, panel, true)
-		_press_panel(panel)
-
-
-func _on_controller_button_released(action: String, pointer: XRController3D) -> void:
-	if not _is_pointer_click_action(action) or pointer != _controller_pointer_down:
-		return
-	_release_pressed_panel()
-	_controller_pointer_down = null
+	settings_interaction_router.interaction_mode = str(capture_options.get("interaction_mode", "controllers"))
+	settings_interaction_router.busy = _recording
+	settings_interaction_router.set_targets([settings_panel, record_control])
+	settings_interaction_router.update_pointer()
 
 
 func _release_ui_pointer() -> void:
-	_release_pressed_panel()
-	_controller_pointer_down = null
-	_hand_pointer_down = false
-	if settings_panel:
-		settings_panel.clear_pointer()
-	if record_control:
-		record_control.clear_pointer()
-	_hide_ui_pointer_visual()
-
-
-func _active_pointer_panel() -> Object:
-	if settings_panel and settings_panel.visible:
-		return settings_panel
-	if record_control and record_control.visible:
-		return record_control
-	return null
-
-
-func _press_panel(panel: Object) -> void:
-	_pressed_panel = panel
-	panel.set_pointer_pressed(true)
-
-
-func _release_pressed_panel() -> void:
-	if _pressed_panel:
-		_pressed_panel.set_pointer_pressed(false)
-		_pressed_panel = null
-
-
-func _show_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3, panel: Object, pressed: bool) -> void:
-	if ui_pointer_visual == null or not (panel is Node3D):
-		return
-	var hit_point := _panel_hit_point(panel as Node3D, ray_origin, ray_direction)
-	ui_pointer_visual.show_ray(ray_origin, ray_direction, hit_point, pressed)
-
-
-func _hide_ui_pointer_visual() -> void:
-	if ui_pointer_visual:
-		ui_pointer_visual.clear()
-
-
-func _panel_hit_point(panel: Node3D, ray_origin: Vector3, ray_direction: Vector3) -> Vector3:
-	var direction := ray_direction.normalized()
-	if direction.length_squared() < 0.000001:
-		return ray_origin
-	var normal := panel.global_transform.basis.z.normalized()
-	var denominator := normal.dot(direction)
-	if absf(denominator) < 0.0001:
-		return ray_origin + direction * 0.25
-	var distance_m := normal.dot(panel.global_transform.origin - ray_origin) / denominator
-	return ray_origin + direction * maxf(distance_m, 0.001)
+	if settings_interaction_router:
+		settings_interaction_router.release_pointer()
 
 
 func _on_settings_requested() -> void:
@@ -824,10 +684,6 @@ func _ensure_output_storage_ready() -> bool:
 
 func _has_pose_streams_enabled() -> bool:
 	return _stream_enabled("record_head_pose") or _stream_enabled("record_controller_pose") or _stream_enabled("record_hand_data")
-
-
-func _is_pointer_click_action(action: String) -> bool:
-	return action == "trigger_click" or action == "primary_click" or action == "select_button"
 
 
 func _setup_audio_cues() -> void:

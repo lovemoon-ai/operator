@@ -1,17 +1,12 @@
-[gd_scene load_steps=12 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="PackedScene" uid="uid://clc5dre31iskm" path="res://addons/godot-xr-tools/xr/start_xr.tscn" id="1_startxr"]
 [ext_resource type="Script" path="res://scenes/main.gd" id="2_main"]
 [ext_resource type="PackedScene" path="res://scenes/robot_view/robot_view.tscn" id="3_robotview"]
-[ext_resource type="PackedScene" path="res://scenes/ui/viewport_2d_in_3d_clean.tscn" id="4_vp2d3d"]
-[ext_resource type="PackedScene" path="res://scenes/ui/settings_ui.tscn" id="5_settings_ui"]
-[ext_resource type="PackedScene" path="res://scenes/ui/settings_button_ui.tscn" id="6_settings_btn_ui"]
-[ext_resource type="PackedScene" path="res://scenes/ui/operator_function_pointer.tscn" id="7_fnptr"]
 [ext_resource type="Script" path="res://scripts/xr/tracking_provider.gd" id="8_tracking"]
 [ext_resource type="Script" path="res://scripts/network/tcp_handler.gd" id="9_tcp"]
 [ext_resource type="Script" path="res://scripts/network/pose_sender.gd" id="10_pose"]
 [ext_resource type="Script" path="res://scripts/network/discovery.gd" id="11_discovery"]
-[ext_resource type="Script" path="res://scripts/xr/function_pointer_click_bridge.gd" id="12_pointer_click"]
 
 [node name="Main" type="Node3D"]
 script = ExtResource("2_main")
@@ -29,26 +24,7 @@ tracker = &"left_hand"
 [node name="RightController" type="XRController3D" parent="XROrigin3D"]
 tracker = &"right_hand"
 
-[node name="FunctionPointer" parent="XROrigin3D/RightController" instance=ExtResource("7_fnptr")]
-
-[node name="PointerClickBridge" type="Node" parent="XROrigin3D/RightController"]
-script = ExtResource("12_pointer_click")
-pointer_path = NodePath("../FunctionPointer")
-controller_path = NodePath("..")
-
 [node name="RobotView" parent="XROrigin3D" instance=ExtResource("3_robotview")]
-
-[node name="SettingsButton" parent="XROrigin3D/XRCamera3D" instance=ExtResource("4_vp2d3d")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.18, -0.5)
-screen_size = Vector2(0.08, 0.08)
-scene = ExtResource("6_settings_btn_ui")
-viewport_size = Vector2(160, 160)
-
-[node name="SettingsPanel" parent="XROrigin3D/XRCamera3D" instance=ExtResource("4_vp2d3d")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.04, -0.92)
-screen_size = Vector2(0.54, 0.663)
-scene = ExtResource("5_settings_ui")
-viewport_size = Vector2(720, 884)
 
 [node name="TrackingProvider" type="Node" parent="."]
 script = ExtResource("8_tracking")
