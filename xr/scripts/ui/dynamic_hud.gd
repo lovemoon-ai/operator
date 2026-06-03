@@ -45,8 +45,8 @@ func configure_for_device(descriptor: Dictionary):
 	_warn_thresholds.clear()
 
 	var device_info = descriptor.get("device", {})
-	_device_name_label.text = device_info.get("name", "Unknown Device")
-	_device_type_label.text = "Type: %s" % device_info.get("type", "unknown")
+	_device_name_label.text = device_info.get("name", tr("UI_UNKNOWN_DEVICE"))
+	_device_type_label.text = tr("UI_TYPE_LABEL") % _robot_type_display(device_info.get("type", tr("UI_UNKNOWN")))
 
 	var schema = descriptor.get("telemetry_schema", {})
 	var values = schema.get("values", [])
@@ -84,9 +84,9 @@ func update_telemetry(telemetry: Dictionary):
 
 
 func update_status(connected: bool, fps: float):
-	_status_label.text = "Status: %s" % ("Connected" if connected else "Disconnected")
+	_status_label.text = tr("UI_STATUS_PREFIX") % (tr("UI_CONNECTED") if connected else tr("UI_DISCONNECTED"))
 	_status_label.add_theme_color_override("font_color", Color.GREEN if connected else Color.RED)
-	_fps_label.text = "FPS: %.0f" % fps
+	_fps_label.text = tr("UI_FPS_LABEL") % fps
 
 
 func clear():
@@ -95,3 +95,13 @@ func clear():
 	_telemetry_labels.clear()
 	_device_name_label.text = ""
 	_device_type_label.text = ""
+
+
+func _robot_type_display(robot_type: String) -> String:
+	match robot_type:
+		"robot_arm":
+			return tr("UI_DEVICE_TYPE_ROBOT_ARM")
+		"rc_car":
+			return tr("UI_DEVICE_TYPE_RC_CAR")
+		_:
+			return robot_type

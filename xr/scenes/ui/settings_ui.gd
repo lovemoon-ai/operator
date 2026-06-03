@@ -31,7 +31,7 @@ const DEFAULT_TYPE: String = "robot_arm"
 const DEFAULT_FACE_LOCKED: bool = true
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
 
-const MANUAL_LABEL: String = "─ Manual entry ─"
+const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
 
 # --- Palette (from GodotQuestCapture) ----------------------------------------
 const COL_PANEL_BG := Color(0.055, 0.067, 0.08, 0.96)
@@ -90,63 +90,64 @@ func _build_ui() -> void:
 	margin.add_child(content)
 
 	var title := Label.new()
-	title.text = "Operator — Settings"
+	title.text = tr("UI_SETTINGS_TITLE")
 	title.add_theme_font_size_override("font_size", 36)
 	title.add_theme_color_override("font_color", COL_TITLE)
 	content.add_child(title)
 
 	# --- Connect-to section ---
-	content.add_child(_section_label("Connect to"))
+	content.add_child(_section_label("UI_CONNECT_TO"))
 
 	_discovery_option = OptionButton.new()
 	_discovery_option.custom_minimum_size.y = 55
 	_discovery_option.add_theme_font_size_override("font_size", 23)
-	_discovery_option.add_item(MANUAL_LABEL)
+	_discovery_option.add_item(tr(MANUAL_LABEL_KEY))
 	_discovery_option.set_item_metadata(0, "")
 	_discovery_option.item_selected.connect(_on_discovery_selected)
 	_add_interactive(content, _discovery_option)
 
 	_ip_input = LineEdit.new()
-	_ip_input.placeholder_text = "Robot IP"
+	_ip_input.placeholder_text = tr("UI_ROBOT_IP")
 	_ip_input.text = DEFAULT_IP
 	_ip_input.custom_minimum_size.y = 55
 	_ip_input.add_theme_font_size_override("font_size", 21)
 	_add_interactive(content, _ip_input)
 
 	_port_input = LineEdit.new()
-	_port_input.placeholder_text = "Port"
+	_port_input.placeholder_text = tr("UI_PORT")
 	_port_input.text = str(DEFAULT_PORT)
 	_port_input.custom_minimum_size.y = 55
 	_port_input.add_theme_font_size_override("font_size", 21)
 	_add_interactive(content, _port_input)
 
 	# --- Device section ---
-	content.add_child(_section_label("Robot type"))
+	content.add_child(_section_label("UI_ROBOT_TYPE"))
 
 	_type_option = OptionButton.new()
 	_type_option.custom_minimum_size.y = 55
 	_type_option.add_theme_font_size_override("font_size", 23)
 	for t in ROBOT_TYPES:
-		_type_option.add_item(t)
+		_type_option.add_item(_robot_type_display(t))
+		_type_option.set_item_metadata(_type_option.item_count - 1, t)
 	_add_interactive(content, _type_option)
 
 	# --- Video + options toggles ---
 	_video_face_toggle = CheckButton.new()
-	_video_face_toggle.text = "Face-locked video"
+	_video_face_toggle.text = tr("UI_FACE_LOCKED_VIDEO")
 	_video_face_toggle.button_pressed = DEFAULT_FACE_LOCKED
 	_video_face_toggle.custom_minimum_size.y = 47
 	_video_face_toggle.add_theme_font_size_override("font_size", 22)
 	_add_interactive(content, _video_face_toggle)
 
 	_show_on_launch_toggle = CheckButton.new()
-	_show_on_launch_toggle.text = "Show settings on every launch"
+	_show_on_launch_toggle.text = tr("UI_SHOW_SETTINGS_ON_LAUNCH")
 	_show_on_launch_toggle.button_pressed = DEFAULT_SHOW_ON_LAUNCH
 	_show_on_launch_toggle.custom_minimum_size.y = 47
 	_show_on_launch_toggle.add_theme_font_size_override("font_size", 22)
 	_add_interactive(content, _show_on_launch_toggle)
 
 	_status_label = Label.new()
-	_status_label.text = "Status: --"
+	_status_label.text = tr("UI_STATUS_PREFIX") % tr("UI_STATUS_EMPTY")
 	_status_label.add_theme_font_size_override("font_size", 18)
 	_status_label.add_theme_color_override("font_color", COL_STATUS)
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -162,7 +163,7 @@ func _build_ui() -> void:
 	content.add_child(actions)
 
 	var close_button := Button.new()
-	close_button.text = "Close"
+	close_button.text = tr("UI_CLOSE")
 	close_button.custom_minimum_size.y = 68
 	close_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	close_button.add_theme_font_size_override("font_size", 26)
@@ -170,7 +171,7 @@ func _build_ui() -> void:
 	_add_interactive(actions, close_button)
 
 	var ok_button := Button.new()
-	ok_button.text = "OK"
+	ok_button.text = tr("UI_OK")
 	ok_button.custom_minimum_size.y = 68
 	ok_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	ok_button.add_theme_font_size_override("font_size", 28)
@@ -178,9 +179,9 @@ func _build_ui() -> void:
 	_add_interactive(actions, ok_button)
 
 
-func _section_label(text: String) -> Label:
+func _section_label(text_key: String) -> Label:
 	var lbl := Label.new()
-	lbl.text = text
+	lbl.text = tr(text_key)
 	lbl.add_theme_font_size_override("font_size", 21)
 	lbl.add_theme_color_override("font_color", COL_SECTION)
 	return lbl
@@ -253,7 +254,8 @@ func _load_from_disk() -> void:
 	_video_face_toggle.button_pressed = face_locked
 	_show_on_launch_toggle.button_pressed = show_on_launch
 
-	_set_status("Loaded settings" if err == OK else "Using defaults")
+	var status_key := "UI_LOADED_SETTINGS" if err == OK else "UI_USING_DEFAULTS"
+	_set_status(tr(status_key))
 
 
 func _save_to_disk(ip: String, port: int, rtype: String, face_locked: bool, show_on_launch: bool) -> void:
@@ -276,7 +278,7 @@ func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> vo
 	var previously_selected_name := _selected_robot_name()
 
 	_discovery_option.clear()
-	_discovery_option.add_item(MANUAL_LABEL)
+	_discovery_option.add_item(tr(MANUAL_LABEL_KEY))
 	_discovery_option.set_item_metadata(0, "")
 
 	var names: Array = _discovered.keys()
@@ -320,7 +322,7 @@ func _format_robot_label(rname: String, info: Dictionary) -> String:
 	var dtype: String = String(info.get("device_type", ""))
 	var type_suffix := ""
 	if dtype != "":
-		type_suffix = " (%s)" % dtype
+		type_suffix = " (%s)" % _robot_type_display(dtype)
 	return "%s%s — %s:%d" % [head, type_suffix, String(info.get("ip", "?")), int(info.get("pose_port", 0))]
 
 
@@ -338,7 +340,7 @@ func _selected_robot_name() -> String:
 func _on_discovery_selected(idx: int) -> void:
 	if idx <= 0:
 		_apply_mode_lock()
-		_set_status("Manual entry — type IP/Port")
+		_set_status(tr("UI_MANUAL_ENTRY_STATUS"))
 		return
 
 	var rname: String = String(_discovery_option.get_item_metadata(idx))
@@ -353,7 +355,7 @@ func _on_discovery_selected(idx: int) -> void:
 		if t_idx >= 0:
 			_type_option.select(t_idx)
 	_apply_mode_lock()
-	_set_status("Will connect to: %s" % _format_robot_label(rname, info))
+	_set_status(tr("UI_WILL_CONNECT_TO") % _format_robot_label(rname, info))
 
 
 func _apply_mode_lock() -> void:
@@ -366,7 +368,7 @@ func _on_ok_pressed() -> void:
 	var ip := _ip_input.text.strip_edges()
 	var port := _port_input.text.strip_edges().to_int()
 	if ip.is_empty():
-		_set_status("IP is required")
+		_set_status(tr("UI_IP_REQUIRED"))
 		return
 	if port <= 0 or port > 65535:
 		port = DEFAULT_PORT
@@ -374,12 +376,12 @@ func _on_ok_pressed() -> void:
 
 	var rtype := DEFAULT_TYPE
 	if _type_option.selected >= 0:
-		rtype = ROBOT_TYPES[_type_option.selected]
+		rtype = String(_type_option.get_item_metadata(_type_option.selected))
 	var face_locked := _video_face_toggle.button_pressed
 	var show_on_launch := _show_on_launch_toggle.button_pressed
 
 	_save_to_disk(ip, port, rtype, face_locked, show_on_launch)
-	_set_status("Applying…")
+	_set_status(tr("UI_APPLYING"))
 	settings_applied.emit(ip, port, rtype, face_locked, show_on_launch)
 
 
@@ -391,7 +393,17 @@ func set_status(text: String) -> void:
 
 func _set_status(text: String) -> void:
 	if _status_label:
-		_status_label.text = "Status: %s" % text
+		_status_label.text = tr("UI_STATUS_PREFIX") % text
+
+
+func _robot_type_display(robot_type: String) -> String:
+	match robot_type:
+		"robot_arm":
+			return tr("UI_DEVICE_TYPE_ROBOT_ARM")
+		"rc_car":
+			return tr("UI_DEVICE_TYPE_RC_CAR")
+		_:
+			return robot_type
 
 
 static func load_settings() -> Dictionary:

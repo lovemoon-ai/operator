@@ -91,6 +91,8 @@ var _xr_camera: XRCamera3D = null
 func _ready() -> void:
 	# Display starts hidden until XR is ready.
 	_ensure_display_nodes()
+	if _latency_hud:
+		_latency_hud.text = tr("UI_LATENCY_EMPTY")
 	visible = false
 
 
@@ -127,7 +129,7 @@ func _ensure_display_nodes() -> void:
 	_latency_hud.pixel_size = 0.002
 	_latency_hud.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	_latency_hud.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-	_latency_hud.text = "latency: --"
+	_latency_hud.text = tr("UI_LATENCY_EMPTY")
 	_latency_hud.font_size = 32
 	_latency_hud.outline_size = 4
 	_latency_hud.modulate = Color(1, 1, 0.4, 1)
@@ -266,7 +268,7 @@ func _update_latency_hud() -> void:
 	_last_hud_update_ns = now_ns
 
 	if not _receiving_video or _last_video_packet.is_empty():
-		_latency_hud.text = "waiting for video"
+		_latency_hud.text = tr("UI_LATENCY_WAITING")
 		return
 
 	# send_ns is robot-stamped. Clock-sync offset = robot_clock - xr_clock,
@@ -318,16 +320,7 @@ func _update_latency_hud() -> void:
 	# Every value column is 9 chars wide so the labels on the left don't
 	# jump as values change width. `_fmt_ms` produces strings like " 12.3 ms"
 	# / "100.5 ms" / "   -- ms" — same fixed width.
-	_latency_hud.text = (
-		"net     %s\n"
-		+ "decode  %s\n"
-		+ "present %s\n"
-		+ "total   %s\n"
-		+ "frames  %s\n"
-		+ "stale   %s\n"
-		+ "busy    %s\n"
-		+ "udp     %s"
-	) % [
+	_latency_hud.text = tr("UI_LATENCY_FORMAT") % [
 		_fmt_ms(_smoothed_net_ms),
 		_fmt_ms(_smoothed_decode_ms),
 		_fmt_ms(_smoothed_present_ms),

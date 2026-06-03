@@ -220,7 +220,7 @@ func _on_xr_started() -> void:
 
 
 func _on_xr_failed() -> void:
-	_set_status("XR Failed to Start")
+	_set_status(tr("UI_XR_FAILED_START"))
 
 
 func _configure_passthrough() -> void:
@@ -322,11 +322,11 @@ func _finalize_launch() -> void:
 	])
 
 	if show_on_launch:
-		_show_settings_panel_with_status("Show-on-launch enabled")
+		_show_settings_panel_with_status(tr("UI_SHOW_ON_LAUNCH_ENABLED"))
 		return
 
 	if n_robots == 0:
-		_show_settings_panel_with_status("No robots discovered — check WiFi or enter IP manually")
+		_show_settings_panel_with_status(tr("UI_NO_ROBOTS_DISCOVERED"))
 		return
 
 	# Try to match last-used IP first — that's the "silent auto-connect" case.
@@ -337,12 +337,12 @@ func _finalize_launch() -> void:
 			_auto_connect_to_discovered(only_ip, int(only_info.get("pose_port", 63901)), only_info)
 			return
 		# Single robot but it's not the one we used before — surface it for confirmation.
-		_show_settings_panel_with_status("Found robot @ %s — confirm to connect" % only_ip)
+		_show_settings_panel_with_status(tr("UI_FOUND_ROBOT_CONFIRM") % only_ip)
 		return
 
 	# Multiple robots. If one matches last_ip, the panel will pre-select it
 	# (set_discovery_state honors `prefer_ip`).
-	_show_settings_panel_with_status("%d robots found — pick one" % n_robots)
+	_show_settings_panel_with_status(tr("UI_ROBOTS_FOUND_PICK") % n_robots)
 
 
 func _is_loopback_host(host: String) -> bool:
@@ -411,12 +411,12 @@ func _set_status(text: String) -> void:
 # --- Connection lifecycle -----------------------------------------------------
 
 func _connect_to_robot(ip: String, port: int) -> void:
-	_set_status("Connecting to %s:%d..." % [ip, port])
+	_set_status(tr("UI_CONNECTING_TO") % [ip, port])
 	_tcp_handler.connect_to_robot(ip, port)
 
 
 func _on_connected() -> void:
-	_set_status("Connected — handshake…")
+	_set_status(tr("UI_CONNECTED_HANDSHAKE"))
 	_session.on_connected()
 	_connect_video_stream(_tcp_handler.get_host())
 	if _clock_sync:
@@ -424,7 +424,7 @@ func _on_connected() -> void:
 
 
 func _on_disconnected() -> void:
-	_set_status("Disconnected")
+	_set_status(tr("UI_DISCONNECTED"))
 	_command_sender.set_sending(false)
 	_video_tcp_handler.disconnect_from_robot()
 	_video_udp_handler.disconnect_from_robot()
@@ -436,7 +436,7 @@ func _on_disconnected() -> void:
 
 
 func _on_connection_failed(reason: String) -> void:
-	_set_status("Connection failed: %s" % reason)
+	_set_status(tr("UI_CONNECTION_FAILED") % reason)
 
 
 func _on_command_received(command: String, data: PackedByteArray) -> void:
@@ -475,9 +475,9 @@ func _on_video_frame_received(packet: Dictionary) -> void:
 
 
 func _on_device_connected(descriptor: Dictionary) -> void:
-	var device_name: String = descriptor.get("device", {}).get("name", "Unknown")
-	var device_type: String = descriptor.get("device", {}).get("type", "unknown")
-	_set_status("Driver active: %s (%s)" % [device_name, device_type])
+	var device_name: String = descriptor.get("device", {}).get("name", tr("UI_UNKNOWN"))
+	var device_type: String = descriptor.get("device", {}).get("type", tr("UI_UNKNOWN"))
+	_set_status(tr("UI_DRIVER_ACTIVE") % [device_name, _robot_type_display(device_type)])
 	if device_type != _user_robot_type_hint:
 		print("[Operator] Robot type hint (%s) differs from descriptor (%s) — descriptor wins" % [
 			_user_robot_type_hint, device_type,
@@ -644,3 +644,13 @@ func _connect_video_stream(ip: String) -> void:
 		_video_tcp_handler.connect_to_video_stream(ip, tcp_port)
 		if _robot_view and _robot_view.has_method("set_packet_source"):
 			_robot_view.set_packet_source(_video_tcp_handler)
+
+
+func _robot_type_display(robot_type: String) -> String:
+	match robot_type:
+		"robot_arm":
+			return tr("UI_DEVICE_TYPE_ROBOT_ARM")
+		"rc_car":
+			return tr("UI_DEVICE_TYPE_RC_CAR")
+		_:
+			return robot_type

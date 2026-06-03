@@ -18,7 +18,9 @@ enum State { SELECT, CONTROL }
 
 ## --- Select page ---
 @onready var _select_page: VBoxContainer = $SubViewport/Panel/VBoxContainer/SelectPage
+@onready var _robot_list_label: Label = $SubViewport/Panel/VBoxContainer/SelectPage/RobotListLabel
 @onready var _robot_list: ItemList = $SubViewport/Panel/VBoxContainer/SelectPage/RobotList
+@onready var _manual_label: Label = $SubViewport/Panel/VBoxContainer/SelectPage/ManualLabel
 @onready var _ip_input: LineEdit = $SubViewport/Panel/VBoxContainer/SelectPage/IPContainer/IPInput
 @onready var _port_input: LineEdit = $SubViewport/Panel/VBoxContainer/SelectPage/IPContainer/PortInput
 @onready var _enter_button: Button = $SubViewport/Panel/VBoxContainer/SelectPage/EnterButton
@@ -28,6 +30,7 @@ enum State { SELECT, CONTROL }
 @onready var _device_name_label: Label = $SubViewport/Panel/VBoxContainer/ControlPage/DeviceNameLabel
 @onready var _device_type_label: Label = $SubViewport/Panel/VBoxContainer/ControlPage/DeviceTypeLabel
 @onready var _device_address_label: Label = $SubViewport/Panel/VBoxContainer/ControlPage/DeviceAddressLabel
+@onready var _control_hint_label: Label = $SubViewport/Panel/VBoxContainer/ControlPage/ControlHintLabel
 @onready var _back_button: Button = $SubViewport/Panel/VBoxContainer/ControlPage/ButtonContainer/BackButton
 @onready var _disconnect_button: Button = $SubViewport/Panel/VBoxContainer/ControlPage/ButtonContainer/DisconnectButton
 
@@ -48,13 +51,15 @@ const DEFAULT_PORT: int = 63901
 
 
 func _ready() -> void:
+	_apply_static_text()
+
 	# Defaults
 	if _ip_input:
 		_ip_input.text = "127.0.0.1"
-		_ip_input.placeholder_text = "Hardware IP Address"
+		_ip_input.placeholder_text = tr("UI_IP_ADDRESS")
 	if _port_input:
 		_port_input.text = str(DEFAULT_PORT)
-		_port_input.placeholder_text = "Port"
+		_port_input.placeholder_text = tr("UI_PORT")
 
 	if _enter_button:
 		_enter_button.pressed.connect(_on_enter_pressed)
@@ -81,14 +86,14 @@ func _on_enter_pressed() -> void:
 	var port := _port_input.text.strip_edges().to_int()
 
 	if ip.is_empty():
-		_set_status("Please enter or pick a hardware address")
+		_set_status(tr("UI_NO_HARDWARE_ADDRESS"))
 		return
 	if port <= 0 or port > 65535:
 		port = DEFAULT_PORT
 
 	_pending_ip = ip
 	_pending_port = port
-	_set_status("Connecting to %s:%d..." % [ip, port])
+	_set_status(tr("UI_CONNECTING_TO") % [ip, port])
 	connect_requested.emit(ip, port)
 
 
@@ -155,7 +160,7 @@ func _refresh_robot_list() -> void:
 
 		# Display: "[device_name] (device_type) — robot_name @ ip:port"
 		var head: String = device_name if device_name != "" else robot_name
-		var type_suffix := " (%s)" % device_type if device_type != "" else ""
+		var type_suffix := " (%s)" % _robot_type_display(device_type) if device_type != "" else ""
 		var display_text := "%s%s — %s @ %s:%d" % [
 			head, type_suffix, robot_name, info["ip"], info["pose_port"],
 		]
@@ -174,11 +179,11 @@ func _refresh_robot_list() -> void:
 func set_connected(connected: bool) -> void:
 	_connected = connected
 	if connected:
-		_set_status("Connected — handshake…")
+		_set_status(tr("UI_CONNECTED_HANDSHAKE"))
 	else:
 		_pending_ip = ""
 		_pending_port = 0
-		_set_status("Disconnected")
+		_set_status(tr("UI_DISCONNECTED"))
 		_set_state(State.SELECT)
 	_update_ui()
 
@@ -187,18 +192,19 @@ func set_connected(connected: bool) -> void:
 ## Switches us into the driver-control phase.
 func show_device_info(descriptor: Dictionary) -> void:
 	var device_info: Dictionary = descriptor.get("device", {})
-	var dname: String = device_info.get("name", "Unknown Device")
-	var dtype: String = device_info.get("type", "unknown")
+	var dname: String = device_info.get("name", tr("UI_UNKNOWN_DEVICE"))
+	var dtype: String = device_info.get("type", tr("UI_UNKNOWN"))
+	var display_type := _robot_type_display(dtype)
 
 	if _device_name_label:
-		_device_name_label.text = "Device: %s" % dname
+		_device_name_label.text = tr("UI_DEVICE_LABEL") % dname
 	if _device_type_label:
-		_device_type_label.text = "Type: %s" % dtype
+		_device_type_label.text = tr("UI_TYPE_LABEL") % display_type
 	if _device_address_label:
 		var addr := "%s:%d" % [_pending_ip, _pending_port] if _pending_ip != "" else "—"
-		_device_address_label.text = "Address: %s" % addr
+		_device_address_label.text = tr("UI_ADDRESS_LABEL") % addr
 
-	_set_status("Driver active: %s (%s)" % [dname, dtype])
+	_set_status(tr("UI_DRIVER_ACTIVE") % [dname, display_type])
 	_set_state(State.CONTROL)
 
 
@@ -210,7 +216,7 @@ func _set_state(new_state: int) -> void:
 	if _control_page:
 		_control_page.visible = not in_select
 	if _title_label:
-		_title_label.text = "XRoboToolkit — Select Hardware" if in_select else "XRoboToolkit — Driver Control"
+		_title_label.text = tr("UI_CONNECTION_TITLE_SELECT") if in_select else tr("UI_CONNECTION_TITLE_CONTROL")
 
 
 func _update_ui() -> void:
@@ -225,4 +231,37 @@ func _update_ui() -> void:
 
 func _set_status(text: String) -> void:
 	if _status_label:
-		_status_label.text = "Status: %s" % text
+		_status_label.text = tr("UI_STATUS_PREFIX") % text
+
+
+func _apply_static_text() -> void:
+	if _robot_list_label:
+		_robot_list_label.text = tr("UI_DISCOVERED_HARDWARE_HELP")
+	if _manual_label:
+		_manual_label.text = tr("UI_MANUAL_CONNECTION")
+	if _enter_button:
+		_enter_button.text = tr("UI_ENTER_CONTROL")
+	if _device_name_label:
+		_device_name_label.text = tr("UI_DEVICE_LABEL") % "--"
+	if _device_type_label:
+		_device_type_label.text = tr("UI_TYPE_LABEL") % "--"
+	if _device_address_label:
+		_device_address_label.text = tr("UI_ADDRESS_LABEL") % "--"
+	if _control_hint_label:
+		_control_hint_label.text = tr("UI_DRIVER_CONTROL_HINT")
+	if _back_button:
+		_back_button.text = tr("UI_BACK_TO_HARDWARE_SELECT")
+	if _disconnect_button:
+		_disconnect_button.text = tr("UI_DISCONNECT")
+	if _status_label:
+		_status_label.text = tr("UI_STATUS_PREFIX") % tr("UI_NOT_CONNECTED")
+
+
+func _robot_type_display(robot_type: String) -> String:
+	match robot_type:
+		"robot_arm":
+			return tr("UI_DEVICE_TYPE_ROBOT_ARM")
+		"rc_car":
+			return tr("UI_DEVICE_TYPE_RC_CAR")
+		_:
+			return robot_type
