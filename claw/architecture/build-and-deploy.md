@@ -490,7 +490,8 @@ only called once per launch (line 185).
 ### 5.1 One-time submodule init
 
 ```
-git submodule update --init --depth=1 xr/native/ahb_decoder/godot-cpp
+git submodule update --init --depth=1 third_party/godot-cpp
+ln -sfn ../../../third_party/godot-cpp xr/native/ahb_decoder/godot-cpp
 ```
 
 `xr/native/ahb_decoder/build.sh:28-31` runs this automatically if it
@@ -498,11 +499,16 @@ notices `godot-cpp/SConstruct` is missing. The submodule itself is
 declared at `.gitmodules:1-4`:
 
 ```
-[submodule "xr/native/ahb_decoder/godot-cpp"]
-	path = xr/native/ahb_decoder/godot-cpp
+[submodule "third_party/godot-cpp"]
+	path = third_party/godot-cpp
 	url = https://github.com/godotengine/godot-cpp.git
 	branch = 4.5
 ```
+
+`xr/native/ahb_decoder/godot-cpp` is a local symlink to the shared
+checkout. CMake writes godot-cpp's build output to
+`third_party/godot-cpp-build` so future C++ Godot plugins can reuse
+the same build tree.
 
 Branch `4.5` is mandatory — it must match the engine version pinned in
 `xr/project.godot:15`.
@@ -523,7 +529,9 @@ cmake -B build-arm64 \
     -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM=android-29 \
-    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGODOT_CPP_DIR=$SCRIPT_DIR/godot-cpp \
+    -DGODOT_CPP_BUILD_DIR=$REPO_ROOT/third_party/godot-cpp-build
 cmake --build build-arm64 -j4
 ```
 

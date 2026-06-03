@@ -74,5 +74,5 @@ xr/addons/spatialmp4_muxer/bin/*.aar
 *.lock
 settings.local.json
 
-# submodule
-xr/native/ahb_decoder/godot-cpp
+# Shared native dependency build output.
+third_party/godot-cpp-build/

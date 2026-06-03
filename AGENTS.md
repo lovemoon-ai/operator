@@ -103,7 +103,8 @@ The AHB GDExtension (`xr/native/ahb_decoder/`) is a separate build:
 
 ```bash
 # First time only:
-git submodule update --init --depth=1 xr/native/ahb_decoder/godot-cpp
+git submodule update --init --depth=1 third_party/godot-cpp
+ln -sfn ../../../third_party/godot-cpp xr/native/ahb_decoder/godot-cpp
 
 xr/native/ahb_decoder/build.sh          # Release
 xr/native/ahb_decoder/build.sh Debug    # symbol-level debugging
