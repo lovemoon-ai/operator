@@ -53,11 +53,6 @@ examples/mujuco-arm-so101/assets/so101/assets/*.stl
 # kept out of the repo to save ~18 MB).
 xr/addons/godotopenxrvendors/.bin/
 
-# Legacy local dependency checkouts from the old submodule layout.
-third_party/godot-xr-tools/
-third_party/godot-cpp/
-third_party/ffmpeg/
-
 # Android plugin rebuild outputs. Source lives under xr/android_plugin.
 xr/android_plugin/.gradle/
 xr/android_plugin/.kotlin/
@@ -76,7 +71,3 @@ xr/addons/spatialmp4_muxer/bin/*.aar
 # claude
 *.lock
 settings.local.json
-
-# Legacy shared native dependency build output.
-third_party/godot-cpp-build/
-third_party/ffmpeg-build/
