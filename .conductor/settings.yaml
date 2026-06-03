@@ -1,7 +1,7 @@
 worktree:
   sync_branch: false
   symlink:
-    - .deps
+    - .deps/src
     - xr/addons/godotopenxrvendors/.bin
 
 icon: ../xr/icon.png
