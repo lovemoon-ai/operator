@@ -23,7 +23,7 @@ const OperatorUIPointerVisualScript = preload("res://scripts/xr/operator_ui_poin
 
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
-const TELEOP_CONTROLLER_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.078, -0.145))
+const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 
 @onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
 @onready var _origin: XROrigin3D = $XROrigin3D
@@ -208,8 +208,10 @@ func _create_settings_ui_nodes() -> void:
 
 	_teleop_controller_panel = TeleopControllerPanelScript.new()
 	_teleop_controller_panel.name = "TeleopControllerPanel"
-	_teleop_controller_panel.transform = TELEOP_CONTROLLER_PANEL_OFFSET
-	_right_controller.add_child(_teleop_controller_panel)
+	# Keep the controller overlay in origin space and drive its global transform
+	# from the right controller so it stays aligned with the physical controller.
+	_origin.add_child(_teleop_controller_panel)
+	_update_teleop_controller_panel_transform()
 
 	_settings_interaction_router = SettingsInteractionRouterScript.new()
 	_settings_interaction_router.name = "SettingsInteractionRouter"
@@ -221,8 +223,11 @@ func _create_settings_ui_nodes() -> void:
 func _update_teleop_controller_panel() -> void:
 	if _teleop_controller_panel == null:
 		return
+	_update_teleop_controller_panel_transform()
 	var connected: bool = _tcp_handler != null and _tcp_handler.is_connected_to_robot()
 	var grip_value := 0.0
+	var trigger_value := 0.0
+	var a_pressed := false
 	if _tracking_provider and _tracking_provider.has_method("get_controller_input"):
 		var input_any: Variant = _tracking_provider.call("get_controller_input", 1)
 		if input_any is Dictionary:
@@ -230,8 +235,18 @@ func _update_teleop_controller_panel() -> void:
 				float(input_any.get("grip", 0.0)),
 				maxf(float(input_any.get("grip_click", 0.0)), float(input_any.get("grip_force", 0.0)))
 			)
+			trigger_value = float(input_any.get("trigger", 0.0))
+			a_pressed = float(input_any.get("ax_button", 0.0)) >= 0.5
 	_teleop_controller_panel.call("set_bridge_connected", connected)
 	_teleop_controller_panel.call("set_grip_value", grip_value)
+	_teleop_controller_panel.call("set_trigger_value", trigger_value)
+	_teleop_controller_panel.call("set_a_button_pressed", a_pressed)
+
+
+func _update_teleop_controller_panel_transform() -> void:
+	if _teleop_controller_panel == null or _right_controller == null:
+		return
+	_teleop_controller_panel.global_transform = _right_controller.global_transform * TELEOP_CONTROLLER_OVERLAY_OFFSET
 
 
 # --- XR lifecycle -------------------------------------------------------------

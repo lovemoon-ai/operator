@@ -8,12 +8,14 @@
 //! offset from that baseline.
 
 use teleop_protocol::DeviceCommand;
+use teleop_protocol::Pose6D;
 
 use crate::control::pose_mapping::PoseMapper;
 use crate::control::JointAngles;
 
 pub const ENABLE_BUTTON: &str = "enable";
 pub const END_EFFECTOR_POSE: &str = "end_effector";
+pub const OPERATOR_FRAME_POSE: &str = "operator_frame";
 const ENABLE_AXIS_THRESHOLD: f64 = 0.5;
 
 #[derive(Debug, Clone)]
@@ -21,6 +23,13 @@ pub enum TeleopPoseResult {
     Disabled,
     WaitingForPose,
     Active(JointAngles),
+}
+
+#[derive(Debug, Clone)]
+pub enum TeleopEndEffectorResult {
+    Disabled,
+    WaitingForPose,
+    Active(Pose6D),
 }
 
 #[derive(Debug, Default)]
@@ -65,6 +74,40 @@ impl TeleopPoseController {
         }
 
         TeleopPoseResult::Active(mapper.map(pose))
+    }
+
+    pub fn map_end_effector_command(
+        &mut self,
+        cmd: &DeviceCommand,
+        mapper: &mut PoseMapper,
+        current_end_effector_pose: &Pose6D,
+    ) -> TeleopEndEffectorResult {
+        if !command_enable(cmd) {
+            if self.enabled {
+                tracing::info!("Teleop disabled; clearing pose reference");
+                mapper.clear_reference();
+            }
+            self.enabled = false;
+            return TeleopEndEffectorResult::Disabled;
+        }
+
+        let Some(pose) = cmd.poses.get(END_EFFECTOR_POSE) else {
+            return TeleopEndEffectorResult::WaitingForPose;
+        };
+
+        if !self.enabled {
+            mapper.set_base_end_effector_pose(current_end_effector_pose);
+            mapper.set_reference(pose);
+            if let Some(operator_frame) = cmd.poses.get(OPERATOR_FRAME_POSE) {
+                mapper.set_reference_frame(operator_frame);
+            } else {
+                mapper.set_reference_frame(pose);
+            }
+            self.enabled = true;
+            tracing::info!("Teleop enabled; captured relative end-effector baseline");
+        }
+
+        TeleopEndEffectorResult::Active(mapper.map_end_effector_target(pose))
     }
 }
 
@@ -171,6 +214,67 @@ mod tests {
         match controller.map_command(&command(0.49, [0.5, 0.0, 0.0]), &mut mapper, &base) {
             TeleopPoseResult::Disabled => {}
             other => panic!("expected disabled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_enabled_end_effector_pose_captures_baseline() {
+        let mut controller = TeleopPoseController::new();
+        let mut mapper = PoseMapper::new(
+            &PoseMappingConfig {
+                mode: "ik".to_string(),
+                scale: 1.0,
+                mirror: false,
+            },
+            5,
+        );
+        let current_ee = Pose6D {
+            position: [1.0, 2.0, 3.0],
+            rotation: IDENTITY_QUAT,
+        };
+
+        match controller.map_end_effector_command(
+            &command(1.0, [0.5, 0.0, 0.0]),
+            &mut mapper,
+            &current_ee,
+        ) {
+            TeleopEndEffectorResult::Active(target) => assert_eq!(target.position, [1.0, 2.0, 3.0]),
+            other => panic!("expected active target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_end_effector_pose_maps_relative_to_enable_baseline() {
+        let mut controller = TeleopPoseController::new();
+        let mut mapper = PoseMapper::new(
+            &PoseMappingConfig {
+                mode: "ik".to_string(),
+                scale: 1.0,
+                mirror: false,
+            },
+            5,
+        );
+        let current_ee = Pose6D {
+            position: [1.0, 2.0, 3.0],
+            rotation: IDENTITY_QUAT,
+        };
+
+        let _ = controller.map_end_effector_command(
+            &command(1.0, [0.5, 0.0, 0.0]),
+            &mut mapper,
+            &current_ee,
+        );
+        match controller.map_end_effector_command(
+            &command(1.0, [0.6, 0.0, 0.0]),
+            &mut mapper,
+            &current_ee,
+        ) {
+            TeleopEndEffectorResult::Active(target) => {
+                assert!((target.position[0] - 1.0).abs() < 1e-9);
+                assert!((target.position[1] - 2.1).abs() < 1e-9);
+                assert!((target.position[2] - 3.0).abs() < 1e-9);
+            }
+            other => panic!("expected active target, got {other:?}"),
         }
     }
 }

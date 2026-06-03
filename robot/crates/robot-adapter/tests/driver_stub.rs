@@ -15,6 +15,7 @@ use robot_adapter::control::drivers::mujoco_so101::{
 };
 use robot_adapter::control::drivers::ArmDriver;
 use robot_adapter::control::JointAngles;
+use teleop_protocol::Pose6D;
 
 fn python_available() -> bool {
     StdCommand::new("python3")
@@ -53,6 +54,10 @@ async fn driver_round_trips_against_stub_bridge() {
     // The stub seeds q from its HOME on reset.
     let after_reset = driver.last_q_rad();
     assert_eq!(after_reset.len(), NUM_ACTUATORS);
+    assert!(
+        driver.last_end_effector_pose().is_some(),
+        "reset should seed end-effector pose snapshot"
+    );
 
     // Command a non-trivial joint vector (degrees). The stub echoes the ctrl
     // it received (in radians) back as the new snapshot, so last_q_rad should
@@ -105,4 +110,18 @@ async fn driver_round_trips_against_stub_bridge() {
         q[NUM_ACTUATORS - 1],
         GRIPPER_RAD_MIN
     );
+
+    let target = Pose6D {
+        position: [0.33, -0.02, 0.25],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+    };
+    driver
+        .set_end_effector_pose(&target, Some(0.5))
+        .await
+        .expect("set_end_effector_pose");
+    let ee = driver
+        .last_end_effector_pose()
+        .expect("end-effector pose after command");
+    assert_eq!(ee.position, target.position);
+    assert_eq!(ee.rotation, target.rotation);
 }

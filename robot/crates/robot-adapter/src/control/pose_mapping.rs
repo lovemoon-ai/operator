@@ -1,20 +1,17 @@
-//! Map an end-effector [`Pose6D`] (position + quaternion) to joint angles.
+//! Map XR controller poses into robot control targets.
 //!
-//! Refactored from `robot/src/control/pose_mapping.rs`. The original read
-//! `pose.right_controller.position` / `.rotation` off a bulky `HeadsetPose`;
-//! since the bridge already extracts the right-controller pose into a
-//! `teleop_protocol::Pose6D` and forwards it as the `end_effector` pose in a
-//! `DeviceCommand`, this version operates directly on `Pose6D`. The mapping math
-//! (deg_per_meter = 300*scale, per-axis mirror sign, euler-from-quaternion for
-//! the wrist joints, nalgebra w,x,y,z order) is preserved exactly.
+//! Direct mode still emits joint-space deltas for debugging and legacy tests.
+//! IK mode is driver-side: this mapper only converts controller-relative motion
+//! into a MuJoCo base-frame end-effector target pose. The MuJoCo bridge then
+//! solves IK using MuJoCo Jacobians.
 
-use nalgebra::UnitQuaternion;
+use nalgebra::{Matrix3, Rotation3, UnitQuaternion, Vector3};
 
 use crate::config::PoseMappingConfig;
 use crate::control::JointAngles;
 use teleop_protocol::Pose6D;
 
-/// Maps end-effector pose data to robot joint angles.
+/// Maps controller pose data to joint angles or end-effector pose targets.
 pub struct PoseMapper {
     /// Mapping mode.
     mode: MappingMode,
@@ -24,10 +21,18 @@ pub struct PoseMapper {
     mirror: bool,
     /// Number of joints on the arm.
     num_joints: usize,
-    /// Reference pose captured when teleop enable is pressed.
+    /// Reference controller pose captured when teleop enable is pressed.
     reference_pose: Option<Pose6D>,
     /// Base joint angles captured when teleop enable is pressed.
     base_angles: Vec<f64>,
+    /// Base end-effector pose captured when teleop enable is pressed.
+    base_end_effector_pose: Option<Pose6D>,
+    /// Yaw-only operator frame captured when teleop enable is pressed.
+    ///
+    /// This is normally derived from the HMD/head pose. Controller position
+    /// deltas are first interpreted in this local frame, then mapped to the
+    /// robot base frame so the operator's forward direction becomes robot +X.
+    reference_frame_rotation: Option<UnitQuaternion<f64>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,9 +46,9 @@ impl PoseMapper {
     /// Create a new pose mapper from configuration.
     pub fn new(config: &PoseMappingConfig, num_joints: usize) -> Self {
         let mode = match config.mode.as_str() {
-            "ik" => MappingMode::Ik,
+            "direct" => MappingMode::Direct,
             "retarget" => MappingMode::Retarget,
-            _ => MappingMode::Direct,
+            _ => MappingMode::Ik,
         };
 
         Self {
@@ -53,11 +58,12 @@ impl PoseMapper {
             num_joints,
             reference_pose: None,
             base_angles: vec![0.0; num_joints],
+            base_end_effector_pose: None,
+            reference_frame_rotation: None,
         }
     }
 
-    /// Set the calibration reference pose. Called once when tracking starts to
-    /// record the controller's "home" position.
+    /// Set the controller calibration reference pose.
     pub fn set_reference(&mut self, pose: &Pose6D) {
         self.reference_pose = Some(pose.clone());
         tracing::info!(
@@ -67,9 +73,11 @@ impl PoseMapper {
         );
     }
 
-    /// Clear the controller pose reference.
+    /// Clear the controller pose reference and associated end-effector baseline.
     pub fn clear_reference(&mut self) {
         self.reference_pose = None;
+        self.base_end_effector_pose = None;
+        self.reference_frame_rotation = None;
     }
 
     /// Set the joint-space baseline that relative controller motion adds to.
@@ -78,12 +86,56 @@ impl PoseMapper {
         self.base_angles.resize(self.num_joints, 0.0);
     }
 
-    /// Map an end-effector pose to joint angles.
+    /// Set the end-effector pose baseline for driver-side IK.
+    pub fn set_base_end_effector_pose(&mut self, pose: &Pose6D) {
+        self.base_end_effector_pose = Some(pose.clone());
+    }
+
+    /// Capture the operator-local reference frame for relative teleop.
+    ///
+    /// Only yaw is used: head pitch/roll should not tilt the robot control
+    /// plane. If the provided pose is degenerate, identity is used.
+    pub fn set_reference_frame(&mut self, pose: &Pose6D) {
+        let frame = yaw_frame_from_pose(pose);
+        self.reference_frame_rotation = Some(frame);
+        tracing::info!(
+            "Operator alignment frame captured from pose rotation={:?}",
+            pose.rotation
+        );
+    }
+
+    /// Map an end-effector controller pose to joint angles.
+    ///
+    /// In IK mode, concrete IK is implemented by the driver/bridge, not Rust.
+    /// Call [`Self::map_end_effector_target`] for that path.
     pub fn map(&self, pose: &Pose6D) -> JointAngles {
         match self.mode {
             MappingMode::Direct => self.map_direct(pose),
-            MappingMode::Ik => self.map_ik_stub(pose),
-            MappingMode::Retarget => self.map_retarget_stub(pose),
+            MappingMode::Ik => self.map_ik_driver_side_stub(),
+            MappingMode::Retarget => self.map_retarget_stub(),
+        }
+    }
+
+    /// Convert a controller pose into a robot base-frame end-effector target.
+    ///
+    /// Axis convention after the positional delta is expressed in the captured
+    /// operator frame:
+    /// - operator forward (-Z) -> robot +X
+    /// - operator right/left (+X) -> robot +/-Y, controlled by `mirror`
+    /// - operator up (+Y) -> robot +Z
+    ///
+    /// Rotation is relative too, but it is interpreted in the same captured
+    /// operator frame before being applied in robot base coordinates.
+    pub fn map_end_effector_target(&self, pose: &Pose6D) -> Pose6D {
+        let base = self.base_end_effector_pose.as_ref().unwrap_or(pose);
+        let delta = self.controller_delta_robot(pose);
+        Pose6D {
+            position: [
+                base.position[0] + delta[0],
+                base.position[1] + delta[1],
+                base.position[2] + delta[2],
+            ],
+            rotation: self.relative_target_rotation(pose, base),
         }
     }
 
@@ -108,63 +160,126 @@ impl PoseMapper {
 
         let mirror_sign = if self.mirror { -1.0 } else { 1.0 };
 
-        // Map position deltas to base joints.
         if self.num_joints > 0 {
-            angles[0] += dx * deg_per_meter * mirror_sign; // base rotation
+            angles[0] += dx * deg_per_meter * mirror_sign;
         }
         if self.num_joints > 1 {
-            angles[1] += dy * deg_per_meter; // shoulder
+            angles[1] += dy * deg_per_meter;
         }
         if self.num_joints > 2 {
-            angles[2] += dz * deg_per_meter * mirror_sign; // elbow
+            angles[2] += dz * deg_per_meter * mirror_sign;
         }
 
-        // Map controller rotation to wrist joints.
         let reference_quat = quat_from_xyzw(reference.rotation);
         let current_quat = quat_from_xyzw(pose.rotation);
         let relative_quat = reference_quat.inverse() * current_quat;
-        let euler = relative_quat.euler_angles(); // (roll, pitch, yaw) in radians
+        let euler = relative_quat.euler_angles();
 
         if self.num_joints > 3 {
-            angles[3] += euler.0.to_degrees() * self.scale; // wrist roll
+            angles[3] += euler.0.to_degrees() * self.scale;
         }
         if self.num_joints > 4 {
-            angles[4] += euler.1.to_degrees() * self.scale; // wrist pitch
+            angles[4] += euler.1.to_degrees() * self.scale;
         }
         if self.num_joints > 5 {
-            angles[5] += euler.2.to_degrees() * self.scale; // wrist yaw
+            angles[5] += euler.2.to_degrees() * self.scale;
         }
 
         JointAngles { angles }
     }
 
-    /// IK mapping stub — Phase 2.
-    fn map_ik_stub(&self, _pose: &Pose6D) -> JointAngles {
-        tracing::warn!("IK mapping not yet implemented, using home position");
+    fn map_ik_driver_side_stub(&self) -> JointAngles {
+        tracing::warn!("IK mapping is driver-side; holding base joint angles");
         JointAngles {
             angles: self.base_angles.clone(),
         }
     }
 
-    /// Retarget mapping stub — Phase 2.
-    fn map_retarget_stub(&self, _pose: &Pose6D) -> JointAngles {
+    fn map_retarget_stub(&self) -> JointAngles {
         tracing::warn!("Retarget mapping not yet implemented, using home position");
         JointAngles {
             angles: self.base_angles.clone(),
         }
     }
+
+    fn controller_delta_robot(&self, pose: &Pose6D) -> [f64; 3] {
+        let reference = self.reference_pose.as_ref().unwrap_or(pose);
+        let delta_world = Vector3::new(
+            pose.position[0] - reference.position[0],
+            pose.position[1] - reference.position[1],
+            pose.position[2] - reference.position[2],
+        );
+        let frame = self.reference_frame_rotation();
+        let delta_operator = frame.inverse_transform_vector(&delta_world);
+        let lateral_sign = if self.mirror { -1.0 } else { 1.0 };
+        [
+            -delta_operator.z * self.scale,
+            lateral_sign * delta_operator.x * self.scale,
+            delta_operator.y * self.scale,
+        ]
+    }
+
+    fn relative_target_rotation(&self, pose: &Pose6D, base: &Pose6D) -> [f64; 4] {
+        let reference = self.reference_pose.as_ref().unwrap_or(pose);
+        let reference_quat = quat_from_xyzw(reference.rotation);
+        let current_quat = quat_from_xyzw(pose.rotation);
+        let base_quat = quat_from_xyzw(base.rotation);
+        let frame = self.reference_frame_rotation();
+        let operator_to_robot = operator_to_robot_rotation();
+
+        let delta_world = current_quat * reference_quat.inverse();
+        let delta_operator = frame.inverse() * delta_world * frame;
+        let delta_robot = operator_to_robot * delta_operator * operator_to_robot.inverse();
+        let target = delta_robot * base_quat;
+        let q = target.quaternion();
+        [q.i, q.j, q.k, q.w]
+    }
+
+    fn reference_frame_rotation(&self) -> UnitQuaternion<f64> {
+        self.reference_frame_rotation
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(UnitQuaternion::identity)
+    }
 }
 
 fn quat_from_xyzw(rot: [f64; 4]) -> UnitQuaternion<f64> {
-    UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
-        rot[3], rot[0], rot[1], rot[2], // nalgebra uses w,x,y,z order
-    ))
+    UnitQuaternion::new_normalize(nalgebra::Quaternion::new(rot[3], rot[0], rot[1], rot[2]))
+}
+
+fn yaw_frame_from_pose(pose: &Pose6D) -> UnitQuaternion<f64> {
+    let q = quat_from_xyzw(pose.rotation);
+    let forward = q.transform_vector(&Vector3::new(0.0, 0.0, -1.0));
+    let flat_forward = Vector3::new(forward.x, 0.0, forward.z);
+    let Some(flat_forward) = flat_forward.try_normalize(1e-9) else {
+        return UnitQuaternion::identity();
+    };
+
+    let up = Vector3::y_axis().into_inner();
+    let right = flat_forward
+        .cross(&up)
+        .try_normalize(1e-9)
+        .unwrap_or_else(|| Vector3::x_axis().into_inner());
+    let back = -flat_forward;
+    let matrix = Matrix3::from_columns(&[right, up, back]);
+    UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(matrix))
+}
+
+fn operator_to_robot_rotation() -> UnitQuaternion<f64> {
+    // Operator local axes are Godot/OpenXR style: +X right, +Y up, -Z forward.
+    // Robot base axes for the SO-101 sim are: +X forward, +Z up, -Y right.
+    let matrix = Matrix3::from_columns(&[
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(0.0, 0.0, 1.0),
+        Vector3::new(-1.0, 0.0, 0.0),
+    ]);
+    UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(matrix))
 }
 
 /// Extract Euler angles from a quaternion (utility for debugging).
 #[allow(dead_code)]
 pub fn quaternion_to_euler(qx: f64, qy: f64, qz: f64, qw: f64) -> (f64, f64, f64) {
-    let q = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
+    let q = UnitQuaternion::new_normalize(nalgebra::Quaternion::new(qw, qx, qy, qz));
     let (roll, pitch, yaw) = q.euler_angles();
     (roll.to_degrees(), pitch.to_degrees(), yaw.to_degrees())
 }
@@ -184,27 +299,40 @@ mod tests {
         )
     }
 
+    fn ik_mapper(mirror: bool, scale: f64) -> PoseMapper {
+        PoseMapper::new(
+            &PoseMappingConfig {
+                mode: "ik".to_string(),
+                scale,
+                mirror,
+            },
+            5,
+        )
+    }
+
     fn pose(position: [f64; 3], rotation: [f64; 4]) -> Pose6D {
         Pose6D { position, rotation }
+    }
+
+    fn quat_xyzw(q: UnitQuaternion<f64>) -> [f64; 4] {
+        let q = q.quaternion();
+        [q.i, q.j, q.k, q.w]
     }
 
     const IDENTITY_QUAT: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
 
     #[test]
     fn x_delta_drives_joint0_with_mirror_sign() {
-        // deg_per_meter = 300 * scale; mirror flips the sign on joint 0.
         let mut m = mapper(true, 1.0);
         m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
 
         let out = m.map(&pose([0.1, 0.0, 0.0], IDENTITY_QUAT));
-        // 0.1 m * 300 deg/m * (-1 mirror) = -30 deg.
         assert!(
             (out.angles[0] - (-30.0)).abs() < 1e-9,
             "joint0 = {} (expected -30)",
             out.angles[0]
         );
 
-        // Without mirror, same delta is +30 deg.
         let mut m2 = mapper(false, 1.0);
         m2.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
         let out2 = m2.map(&pose([0.1, 0.0, 0.0], IDENTITY_QUAT));
@@ -220,7 +348,6 @@ mod tests {
         let mut m = mapper(true, 1.0);
         m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
         let out = m.map(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
-        // Identity quaternion -> all euler angles zero -> wrist joints zero.
         assert!(out.angles[3].abs() < 1e-9, "wrist roll = {}", out.angles[3]);
         assert!(
             out.angles[4].abs() < 1e-9,
@@ -234,8 +361,6 @@ mod tests {
     fn y_and_z_deltas_drive_shoulder_and_elbow() {
         let mut m = mapper(true, 1.0);
         m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
-        // +0.1 m on y -> joint1 (shoulder), no mirror sign on y.
-        // +0.1 m on z -> joint2 (elbow), mirror sign applies.
         let out = m.map(&pose([0.0, 0.1, 0.1], IDENTITY_QUAT));
         assert!(
             (out.angles[1] - 30.0).abs() < 1e-9,
@@ -251,9 +376,6 @@ mod tests {
 
     #[test]
     fn no_reference_means_zero_position_delta() {
-        // Without a set reference, map_direct uses `current` as the reference,
-        // so position deltas collapse to zero (the bug the reference_set flag
-        // guards against on the device side).
         let m = mapper(true, 1.0);
         let out = m.map(&pose([0.5, 0.5, 0.5], IDENTITY_QUAT));
         assert!(out.angles[0].abs() < 1e-9);
@@ -276,17 +398,117 @@ mod tests {
         let mut m = mapper(false, 1.0);
         let q_ref = UnitQuaternion::from_euler_angles(0.5, 0.0, 0.0);
         let q_current = UnitQuaternion::from_euler_angles(0.75, 0.0, 0.0);
-        let ref_q = q_ref.quaternion();
-        let current_q = q_current.quaternion();
 
-        m.set_reference(&pose([0.0, 0.0, 0.0], [ref_q.i, ref_q.j, ref_q.k, ref_q.w]));
-        let out = m.map(&pose(
-            [0.0, 0.0, 0.0],
-            [current_q.i, current_q.j, current_q.k, current_q.w],
-        ));
+        m.set_reference(&pose([0.0, 0.0, 0.0], quat_xyzw(q_ref)));
+        let out = m.map(&pose([0.0, 0.0, 0.0], quat_xyzw(q_current)));
 
         assert!((out.angles[3] - 0.25_f64.to_degrees()).abs() < 1e-9);
         assert!(out.angles[4].abs() < 1e-9);
         assert!(out.angles[5].abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_mapping_mode_defaults_to_ik() {
+        let m = PoseMapper::new(
+            &PoseMappingConfig {
+                mode: String::new(),
+                scale: 1.0,
+                mirror: false,
+            },
+            5,
+        );
+        assert!(matches!(m.mode, MappingMode::Ik));
+    }
+
+    #[test]
+    fn ik_map_is_driver_side_stub_holding_base_angles() {
+        let mut m = ik_mapper(false, 1.0);
+        let base = [0.0, -68.0, 68.0, 0.0, 0.0];
+        m.set_base_angles(&base);
+        let out = m.map(&pose([0.1, 0.2, 0.3], IDENTITY_QUAT));
+        assert_eq!(out.angles, base);
+    }
+
+    #[test]
+    fn end_effector_target_holds_base_pose_at_reference() {
+        let mut m = ik_mapper(false, 1.0);
+        let controller_ref = pose([0.1, 0.2, 0.3], IDENTITY_QUAT);
+        let base = pose([0.4, -0.2, 0.25], [0.0, 0.0, 0.0, 1.0]);
+        m.set_reference(&controller_ref);
+        m.set_base_end_effector_pose(&base);
+
+        let target = m.map_end_effector_target(&controller_ref);
+        assert_eq!(target.position, base.position);
+        assert_eq!(target.rotation, base.rotation);
+    }
+
+    #[test]
+    fn end_effector_target_maps_controller_delta_to_robot_frame() {
+        let mut m = ik_mapper(true, 0.5);
+        m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+        m.set_base_end_effector_pose(&pose([1.0, 2.0, 3.0], IDENTITY_QUAT));
+
+        let target = m.map_end_effector_target(&pose([0.1, 0.2, -0.3], IDENTITY_QUAT));
+        assert!((target.position[0] - 1.15).abs() < 1e-9);
+        assert!((target.position[1] - 1.95).abs() < 1e-9);
+        assert!((target.position[2] - 3.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn end_effector_target_uses_operator_frame_for_position() {
+        let mut m = ik_mapper(true, 1.0);
+        let operator_yaw_left =
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), std::f64::consts::FRAC_PI_2);
+        m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+        m.set_reference_frame(&pose([0.0, 0.0, 0.0], quat_xyzw(operator_yaw_left)));
+        m.set_base_end_effector_pose(&pose([1.0, 2.0, 3.0], IDENTITY_QUAT));
+
+        // With the operator facing world -X, world -X motion is "forward" and
+        // should therefore become robot +X.
+        let target = m.map_end_effector_target(&pose([-0.2, 0.0, 0.0], IDENTITY_QUAT));
+        assert!((target.position[0] - 1.2).abs() < 1e-9);
+        assert!((target.position[1] - 2.0).abs() < 1e-9);
+        assert!((target.position[2] - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn end_effector_target_applies_relative_controller_rotation() {
+        let mut m = ik_mapper(false, 1.0);
+        let q_ref = UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1);
+        let q_current = UnitQuaternion::from_euler_angles(0.0, 0.0, 0.4);
+        let q_base = UnitQuaternion::from_euler_angles(0.0, 0.0, 1.0);
+        let base = pose([0.0, 0.0, 0.0], quat_xyzw(q_base));
+        m.set_reference(&pose([0.0, 0.0, 0.0], quat_xyzw(q_ref)));
+        m.set_base_end_effector_pose(&base);
+
+        let target = m.map_end_effector_target(&pose([0.0, 0.0, 0.0], quat_xyzw(q_current)));
+        let delta_world = q_current * q_ref.inverse();
+        let axis_map = operator_to_robot_rotation();
+        let expected = (axis_map * delta_world * axis_map.inverse()) * q_base;
+        let actual = quat_from_xyzw(target.rotation);
+        assert!(expected.angle_to(&actual) < 1e-9);
+    }
+
+    #[test]
+    fn end_effector_target_uses_operator_frame_for_rotation() {
+        let mut m = ik_mapper(true, 1.0);
+        let operator_yaw_left =
+            UnitQuaternion::from_axis_angle(&Vector3::y_axis(), std::f64::consts::FRAC_PI_2);
+        let turn = 0.25;
+        let rotate_about_operator_forward_in_world =
+            UnitQuaternion::from_axis_angle(&Vector3::x_axis(), -turn);
+        let base = pose([0.0, 0.0, 0.0], IDENTITY_QUAT);
+        m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+        m.set_reference_frame(&pose([0.0, 0.0, 0.0], quat_xyzw(operator_yaw_left)));
+        m.set_base_end_effector_pose(&base);
+
+        let target = m.map_end_effector_target(&pose(
+            [0.0, 0.0, 0.0],
+            quat_xyzw(rotate_about_operator_forward_in_world),
+        ));
+
+        let expected = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), turn);
+        let actual = quat_from_xyzw(target.rotation);
+        assert!(expected.angle_to(&actual) < 1e-9);
     }
 }

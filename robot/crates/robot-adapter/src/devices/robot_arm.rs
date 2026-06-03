@@ -3,9 +3,10 @@
 //!
 //! Mirrors `robot/src/devices/robot_arm.rs`, but built on the shared
 //! [`teleop_protocol`] types and the adapter's own joint-space control modules.
-//! The bridge already sanitized the inbound command against the descriptor; this
-//! device turns the sanitized `end_effector` pose into safe joint commands and
-//! drives the MuJoCo SO-101 simulator subprocess.
+//! The bridge already sanitized the inbound command against the descriptor. In
+//! direct mode this device maps the sanitized `end_effector` pose to safe joint
+//! commands. In IK mode it sends a robot-frame end-effector target to the driver
+//! so backend-specific IK can run next to the simulator or hardware model.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,7 +17,8 @@ use tokio::sync::Mutex;
 
 use teleop_protocol::{
     AxisDef, ButtonDef, ControlSchema, DeviceCommand, DeviceDescriptor, DeviceInfo,
-    DeviceTelemetry, InputMapping, PoseDef, TelemetrySchema, TelemetryValue, TelemetryValueDef,
+    DeviceTelemetry, InputMapping, Pose6D, PoseDef, TelemetrySchema, TelemetryValue,
+    TelemetryValueDef,
 };
 
 use crate::config::ArmConfig;
@@ -24,7 +26,8 @@ use crate::control::drivers::{self, ArmDriver};
 use crate::control::pose_mapping::PoseMapper;
 use crate::control::safety::{Safety, SafetyResult};
 use crate::control::teleop::{
-    command_enable, TeleopPoseController, TeleopPoseResult, ENABLE_BUTTON, END_EFFECTOR_POSE,
+    command_enable, TeleopEndEffectorResult, TeleopPoseController, TeleopPoseResult, ENABLE_BUTTON,
+    END_EFFECTOR_POSE, OPERATOR_FRAME_POSE,
 };
 use crate::device::Device;
 
@@ -46,6 +49,11 @@ pub struct RobotArmDevice {
     /// Number of joints controlled by the controller pose. SO-101 reserves the
     /// final actuator for the gripper axis, so pose maps only the arm joints.
     pose_joint_count: usize,
+    /// True when pose commands should be sent to the driver as end-effector
+    /// targets instead of mapped to joints in Rust.
+    use_end_effector_pose: bool,
+    /// Latest end-effector pose reported by a driver-side IK backend.
+    last_end_effector_pose: Mutex<Option<Pose6D>>,
     gripper_joint_index: Option<usize>,
     gripper_joint_limits: Option<[f64; 2]>,
     gripper_default: Option<f64>,
@@ -64,6 +72,14 @@ impl RobotArmDevice {
         let num_joints = arm_config.servo_ids.len();
         let gripper_joint_index = gripper_joint_index_for(&descriptor, num_joints);
         let pose_joint_count = pose_joint_count_for(&descriptor, num_joints);
+        let use_end_effector_pose =
+            mapping_uses_driver_end_effector_targets(&arm_config.pose_mapping.mode);
+        if use_end_effector_pose && !driver.supports_end_effector_pose() {
+            anyhow::bail!(
+                "pose_mapping.mode='{}' requires a driver that supports end-effector pose targets",
+                arm_config.pose_mapping.mode
+            );
+        }
         let gripper_joint_limits = gripper_joint_index
             .and_then(|idx| arm_config.safety.joint_limits_deg.get(idx).copied());
         let gripper_default = gripper_axis_default_for(&descriptor);
@@ -79,6 +95,8 @@ impl RobotArmDevice {
             last_angles: Mutex::new(vec![0.0; num_joints]),
             num_joints,
             pose_joint_count,
+            use_end_effector_pose,
+            last_end_effector_pose: Mutex::new(None),
             gripper_joint_index,
             gripper_joint_limits,
             gripper_default,
@@ -92,8 +110,9 @@ impl RobotArmDevice {
 
     /// The built-in 6-DOF SO-101 arm descriptor: one robot `gripper` axis
     /// (0..1), one teleop `enable` deadman, one `end_effector` pose (frame
-    /// `right_hand`), and `joint_angles` / `num_joints` / `connected`
-    /// telemetry. Matches `config/device_robot_arm.yaml`.
+    /// `right_hand`), one `operator_frame` pose (frame `head`) used to align
+    /// operator forward to robot +X, and `joint_angles` / `num_joints` /
+    /// `connected` telemetry. Matches `config/device_robot_arm.yaml`.
     pub fn default_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {
             device: DeviceInfo {
@@ -117,17 +136,33 @@ impl RobotArmDevice {
                     group: None,
                     confirm: false,
                 }],
-                poses: vec![PoseDef {
-                    name: END_EFFECTOR_POSE.to_string(),
-                    display: "End Effector Target".to_string(),
-                    dof: 6,
-                    frame: "right_hand".to_string(),
-                }],
+                poses: vec![
+                    PoseDef {
+                        name: END_EFFECTOR_POSE.to_string(),
+                        display: "End Effector Target".to_string(),
+                        dof: 6,
+                        frame: "right_hand".to_string(),
+                    },
+                    PoseDef {
+                        name: OPERATOR_FRAME_POSE.to_string(),
+                        display: "Operator Alignment Frame".to_string(),
+                        dof: 6,
+                        frame: "head".to_string(),
+                    },
+                ],
             },
             input_mapping: vec![
                 InputMapping {
                     source: "right_controller_pose".to_string(),
                     target: END_EFFECTOR_POSE.to_string(),
+                    scale: 1.0,
+                    invert: false,
+                    offset: 0.0,
+                    mode: "absolute".to_string(),
+                },
+                InputMapping {
+                    source: "head_pose".to_string(),
+                    target: OPERATOR_FRAME_POSE.to_string(),
                     scale: 1.0,
                     invert: false,
                     offset: 0.0,
@@ -209,9 +244,9 @@ impl RobotArmDevice {
         }
     }
 
-    async fn maybe_set_gripper(&mut self, value: Option<f64>) -> Result<()> {
+    fn prepare_gripper_command(&mut self, value: Option<f64>) -> Option<f32> {
         let Some(value) = value else {
-            return Ok(());
+            return None;
         };
         let value = value.clamp(0.0, 1.0);
         if self.last_gripper.is_none()
@@ -225,18 +260,21 @@ impl RobotArmDevice {
                 "RobotArmDevice: seeded gripper default {:.2} without driver write",
                 value
             );
-            return Ok(());
+            return None;
         }
         if self
             .last_gripper
             .map(|last| (last - value).abs() < GRIPPER_COMMAND_EPSILON)
             .unwrap_or(false)
         {
-            return Ok(());
+            return None;
         }
         self.last_gripper = Some(value);
         tracing::info!("RobotArmDevice: gripper command {:.2}", value);
+        Some(value as f32)
+    }
 
+    async fn apply_gripper_telemetry(&self, value: f64) {
         if let Some(angle) = self.gripper_axis_to_joint_degrees(value) {
             if let Some(index) = self.gripper_joint_index {
                 let mut last_angles = self.last_angles.lock().await;
@@ -246,10 +284,17 @@ impl RobotArmDevice {
                 }
             }
         }
+    }
+
+    async fn maybe_set_gripper(&mut self, value: Option<f64>) -> Result<()> {
+        let Some(command) = self.prepare_gripper_command(value) else {
+            return Ok(());
+        };
+        self.apply_gripper_telemetry(command as f64).await;
 
         let driver = self.driver.clone();
         self.with_write_timeout("set_gripper", move || async move {
-            driver.lock().await.set_gripper(value as f32).await
+            driver.lock().await.set_gripper(command).await
         })
         .await
     }
@@ -293,6 +338,10 @@ fn pose_joint_count_for(descriptor: &DeviceDescriptor, num_joints: usize) -> usi
     }
 }
 
+fn mapping_uses_driver_end_effector_targets(mode: &str) -> bool {
+    !matches!(mode, "direct" | "retarget")
+}
+
 #[async_trait]
 impl Device for RobotArmDevice {
     fn descriptor(&self) -> &DeviceDescriptor {
@@ -300,15 +349,22 @@ impl Device for RobotArmDevice {
     }
 
     async fn connect(&mut self) -> Result<()> {
-        let initial_angles = {
+        let (initial_angles, initial_end_effector_pose) = {
             let mut driver = self.driver.lock().await;
             driver.enable_torque().await?;
-            driver.last_joint_angles()
+            (driver.last_joint_angles(), driver.last_end_effector_pose())
         };
         if let Some(joints) = initial_angles {
             let mut last_angles = self.last_angles.lock().await;
             *last_angles = joints.angles;
             last_angles.resize(self.num_joints, 0.0);
+        }
+        if self.use_end_effector_pose && initial_end_effector_pose.is_none() {
+            anyhow::bail!("driver-side IK mode requires an initial end-effector pose snapshot");
+        }
+        {
+            let mut last_pose = self.last_end_effector_pose.lock().await;
+            *last_pose = initial_end_effector_pose;
         }
         self.connected
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -330,6 +386,10 @@ impl Device for RobotArmDevice {
             self.teleop.reset(&mut mapper);
         }
         self.last_gripper = None;
+        {
+            let mut last_pose = self.last_end_effector_pose.lock().await;
+            *last_pose = None;
+        }
         tracing::info!("RobotArmDevice disconnected");
         Ok(())
     }
@@ -339,6 +399,66 @@ impl Device for RobotArmDevice {
         let gripper = cmd.axes.get(GRIPPER_AXIS).copied();
 
         if cmd.poses.contains_key(END_EFFECTOR_POSE) {
+            if self.use_end_effector_pose {
+                let Some(current_end_effector_pose) =
+                    self.last_end_effector_pose.lock().await.clone()
+                else {
+                    if !command_enable(cmd) {
+                        let mut mapper = self.mapper.lock().await;
+                        self.teleop.reset(&mut mapper);
+                    } else {
+                        tracing::warn!(
+                            "RobotArmDevice: no end-effector snapshot yet; dropping pose frame"
+                        );
+                    }
+                    return Ok(());
+                };
+
+                let target = {
+                    let mut mapper = self.mapper.lock().await;
+                    match self.teleop.map_end_effector_command(
+                        cmd,
+                        &mut mapper,
+                        &current_end_effector_pose,
+                    ) {
+                        TeleopEndEffectorResult::Active(target) => target,
+                        TeleopEndEffectorResult::Disabled => return Ok(()),
+                        TeleopEndEffectorResult::WaitingForPose => return Ok(()),
+                    }
+                };
+
+                let gripper_cmd = self.prepare_gripper_command(gripper);
+                if let Some(value) = gripper_cmd {
+                    self.apply_gripper_telemetry(value as f64).await;
+                }
+
+                let driver = self.driver.clone();
+                let target_for_driver = target.clone();
+                self.with_write_timeout("set_end_effector_pose", move || async move {
+                    driver
+                        .lock()
+                        .await
+                        .set_end_effector_pose(&target_for_driver, gripper_cmd)
+                        .await
+                })
+                .await?;
+
+                let (latest_joints, latest_end_effector_pose) = {
+                    let driver = self.driver.lock().await;
+                    (driver.last_joint_angles(), driver.last_end_effector_pose())
+                };
+                if let Some(joints) = latest_joints {
+                    let mut last_angles = self.last_angles.lock().await;
+                    *last_angles = joints.angles;
+                    last_angles.resize(self.num_joints, 0.0);
+                }
+                if let Some(pose) = latest_end_effector_pose {
+                    let mut last_pose = self.last_end_effector_pose.lock().await;
+                    *last_pose = Some(pose);
+                }
+                return Ok(());
+            }
+
             let current_joint_target = self.last_angles.lock().await.clone();
             let joints = {
                 let mut mapper = self.mapper.lock().await;
@@ -419,7 +539,15 @@ impl Device for RobotArmDevice {
 
     async fn emergency_stop(&mut self) -> Result<()> {
         tracing::error!("RobotArmDevice: EMERGENCY STOP");
-        self.driver.lock().await.emergency_stop().await?;
+        let latest_end_effector_pose = {
+            let mut driver = self.driver.lock().await;
+            driver.emergency_stop().await?;
+            driver.last_end_effector_pose()
+        };
+        if let Some(pose) = latest_end_effector_pose {
+            let mut last_pose = self.last_end_effector_pose.lock().await;
+            *last_pose = Some(pose);
+        }
         self.safety.lock().await.reset();
         {
             let mut mapper = self.mapper.lock().await;
@@ -442,9 +570,11 @@ mod tests {
     fn default_descriptor_shape() {
         let d = RobotArmDevice::default_descriptor();
         assert_eq!(d.device.device_type, "robot_arm");
-        assert_eq!(d.control_schema.poses.len(), 1);
+        assert_eq!(d.control_schema.poses.len(), 2);
         assert_eq!(d.control_schema.poses[0].name, "end_effector");
         assert_eq!(d.control_schema.poses[0].frame, "right_hand");
+        assert_eq!(d.control_schema.poses[1].name, "operator_frame");
+        assert_eq!(d.control_schema.poses[1].frame, "head");
         assert_eq!(d.control_schema.axes.len(), 1);
         assert_eq!(d.control_schema.axes[0].name, "gripper");
         assert_eq!(d.control_schema.axes[0].range, (0.0, 1.0));
@@ -455,6 +585,10 @@ mod tests {
             .input_mapping
             .iter()
             .any(|m| m.source == "right_grip" && m.target == "enable"));
+        assert!(d
+            .input_mapping
+            .iter()
+            .any(|m| m.source == "head_pose" && m.target == "operator_frame"));
         let trigger = d
             .input_mapping
             .iter()

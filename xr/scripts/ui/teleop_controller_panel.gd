@@ -1,37 +1,75 @@
-extends "res://scripts/ui/composition_viewport_ui.gd"
+extends Node3D
 class_name TeleopControllerPanel
 
-const VIEWPORT_SIZE := Vector2i(540, 248)
-const QUAD_SIZE_M := Vector2(0.245, 0.112)
 const GRIP_ACTIVE_THRESHOLD := 0.5
 const GRIP_RELEASE_GRACE_MSEC := 100
+const TRIGGER_ACTIVE_THRESHOLD := 0.08
+const BUTTON_ACTIVE_THRESHOLD := 0.5
+const A_TOGGLE_COOLDOWN_MSEC := 180
 
-const COL_BG := Color(0.055, 0.067, 0.08, 0.88)
-const COL_BORDER := Color(0.18, 0.22, 0.26, 0.95)
-const COL_TEXT := Color(0.76, 0.80, 0.84, 1.0)
-const COL_KEY := Color(1.0, 0.647, 0.169, 0.96)
+const STATUS_LAMP_POS := Vector3(0.030, 0.010, -0.018)
+const STATUS_LABEL_POS := Vector3(0.030, 0.030, -0.018)
+const A_BUTTON_POS := Vector3(0.060, 0.004, -0.032)
+const A_LABEL_POS := Vector3(0.084, 0.035, -0.036)
+
+const GRIP_ANCHOR_POS := Vector3(-0.052, -0.055, 0.020)
+const GRIP_TIP_POS := Vector3(-0.155, 0.040, -0.010)
+const TRIGGER_ANCHOR_POS := Vector3(0.000, -0.030, -0.098)
+const TRIGGER_TIP_POS := Vector3(0.025, 0.100, -0.155)
+
 const COL_ACTIVE := Color(0.14, 0.82, 0.45, 1.0)
 const COL_WAITING := Color(1.0, 0.72, 0.18, 1.0)
 const COL_DISCONNECTED := Color(0.43, 0.46, 0.50, 1.0)
+const COL_HELP_TEXT := Color(0.92, 0.95, 0.98, 1.0)
+const COL_HELP_LINE := Color(0.72, 0.84, 1.0, 0.92)
+const COL_HELP_KEY := Color(1.0, 0.65, 0.18, 1.0)
+const COL_TRIGGER := Color(0.28, 0.76, 1.0, 1.0)
+const COL_BUTTON_A := Color(0.40, 0.64, 1.0, 1.0)
+const COL_DIM := Color(0.18, 0.20, 0.23, 0.86)
 
 var _enabled_for_device := false
 var _bridge_connected := false
 var _grip_pressed := false
+var _trigger_pressed := false
+var _help_visible := true
+var _last_a_pressed := false
+var _last_a_toggle_msec := 0
 var _grip_hold_until_msec := 0
 
-var _lamp: Panel
-var _status_label: Label
+var _help_root: Node3D
+var _status_lamp: MeshInstance3D
+var _status_label: Label3D
+var _grip_marker: MeshInstance3D
+var _trigger_marker: MeshInstance3D
+var _a_marker: MeshInstance3D
+var _a_label: Label3D
+
+var _mat_active: StandardMaterial3D
+var _mat_waiting: StandardMaterial3D
+var _mat_disconnected: StandardMaterial3D
+var _mat_help_line: StandardMaterial3D
+var _mat_help_key: StandardMaterial3D
+var _mat_help_text_back: StandardMaterial3D
+var _mat_trigger: StandardMaterial3D
+var _mat_trigger_idle: StandardMaterial3D
+var _mat_button_a: StandardMaterial3D
+var _mat_dim: StandardMaterial3D
 
 
 func _init() -> void:
-	var viewport := _setup_viewport_layer("TeleopControllerPanelViewport", VIEWPORT_SIZE, QUAD_SIZE_M, 4, 1.0)
-	_build_panel(viewport)
+	_build_overlay()
 	visible = false
 
 
 func configure_for_device(descriptor: Dictionary) -> void:
 	_enabled_for_device = _has_controller_teleop_mapping(descriptor)
 	visible = _enabled_for_device
+	var schema: Dictionary = descriptor.get("control_schema", {})
+	print("[TeleopControllerPanel] configured enabled=%s buttons=%d mappings=%d" % [
+		str(_enabled_for_device),
+		schema.get("buttons", []).size(),
+		descriptor.get("input_mapping", []).size(),
+	])
 	_refresh()
 
 
@@ -53,87 +91,200 @@ func set_grip_value(value: float) -> void:
 	_refresh()
 
 
-func _build_panel(viewport: SubViewport) -> void:
-	var panel := PanelContainer.new()
-	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	panel.add_theme_stylebox_override("panel", _panel_style())
-	viewport.add_child(panel)
-
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 22)
-	margin.add_theme_constant_override("margin_right", 22)
-	margin.add_theme_constant_override("margin_top", 18)
-	margin.add_theme_constant_override("margin_bottom", 18)
-	panel.add_child(margin)
-
-	var content := VBoxContainer.new()
-	content.add_theme_constant_override("separation", 10)
-	margin.add_child(content)
-
-	var status_row := HBoxContainer.new()
-	status_row.add_theme_constant_override("separation", 10)
-	content.add_child(status_row)
-
-	_lamp = Panel.new()
-	_lamp.custom_minimum_size = Vector2(24, 24)
-	status_row.add_child(_lamp)
-
-	_status_label = Label.new()
-	_status_label.text = tr("UI_TELEOP_WAITING")
-	_status_label.add_theme_font_size_override("font_size", 24)
-	_status_label.add_theme_color_override("font_color", COL_WAITING)
-	_status_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	status_row.add_child(_status_label)
-
-	content.add_child(_hint_row("GRIP", tr("UI_TELEOP_GRIP_HINT")))
-	content.add_child(_hint_row("TRIGGER", tr("UI_TELEOP_TRIGGER_HINT")))
+func set_trigger_value(value: float) -> void:
+	var pressed := value >= TRIGGER_ACTIVE_THRESHOLD
+	if _trigger_pressed == pressed:
+		return
+	_trigger_pressed = pressed
 	_refresh()
 
 
-func _hint_row(key_text: String, hint_text: String) -> HBoxContainer:
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
+func set_a_button_pressed(pressed: bool) -> void:
+	if pressed and not _last_a_pressed:
+		var now_msec := Time.get_ticks_msec()
+		if now_msec - _last_a_toggle_msec >= A_TOGGLE_COOLDOWN_MSEC:
+			_last_a_toggle_msec = now_msec
+			_help_visible = not _help_visible
+			print("[TeleopControllerPanel] help_visible=%s" % str(_help_visible))
+			_refresh()
+	_last_a_pressed = pressed
 
-	var key := Label.new()
-	key.text = key_text
-	key.custom_minimum_size = Vector2(118, 30)
-	key.add_theme_font_size_override("font_size", 22)
-	key.add_theme_color_override("font_color", COL_KEY)
-	key.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	row.add_child(key)
 
-	var hint := Label.new()
-	hint.text = hint_text
-	hint.add_theme_font_size_override("font_size", 22)
-	hint.add_theme_color_override("font_color", COL_TEXT)
-	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	hint.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(hint)
+func _build_overlay() -> void:
+	_mat_active = _emissive_material(COL_ACTIVE, 1.8)
+	_mat_waiting = _emissive_material(COL_WAITING, 1.45)
+	_mat_disconnected = _material(COL_DISCONNECTED, true)
+	_mat_help_line = _emissive_material(COL_HELP_LINE, 0.7)
+	_mat_help_key = _emissive_material(COL_HELP_KEY, 0.8)
+	_mat_help_text_back = _material(Color(0.02, 0.025, 0.03, 0.62), true)
+	_mat_trigger = _emissive_material(COL_TRIGGER, 1.1)
+	_mat_trigger_idle = _material(Color(COL_TRIGGER.r, COL_TRIGGER.g, COL_TRIGGER.b, 0.42), true)
+	_mat_button_a = _emissive_material(COL_BUTTON_A, 0.85)
+	_mat_dim = _material(COL_DIM, true)
 
-	return row
+	_status_lamp = _sphere("StatusLamp", STATUS_LAMP_POS, 0.010, _mat_disconnected)
+	add_child(_status_lamp)
+
+	_status_label = _label("StatusLabel", "OFF", STATUS_LABEL_POS, 0.00105, 18, COL_HELP_TEXT)
+	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	add_child(_status_label)
+
+	_a_marker = _sphere("AButtonMarker", A_BUTTON_POS, 0.0075, _mat_button_a)
+	add_child(_a_marker)
+
+	_a_label = _label("AHelpToggleLabel", tr("UI_TELEOP_A_HIDE_HELP"), A_LABEL_POS, 0.0010, 16, COL_HELP_TEXT)
+	_a_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	add_child(_a_label)
+
+	_help_root = Node3D.new()
+	_help_root.name = "HelpTips"
+	add_child(_help_root)
+
+	_add_tip(
+		"GripTip",
+		GRIP_ANCHOR_POS,
+		GRIP_TIP_POS,
+		"GRIP\n%s" % tr("UI_TELEOP_GRIP_HINT"),
+		COL_HELP_KEY
+	)
+	_add_tip(
+		"TriggerTip",
+		TRIGGER_ANCHOR_POS,
+		TRIGGER_TIP_POS,
+		"TRIGGER\n%s" % tr("UI_TELEOP_TRIGGER_HINT"),
+		COL_TRIGGER
+	)
+
+	_grip_marker = _sphere("GripAnchor", GRIP_ANCHOR_POS, 0.0065, _mat_help_key)
+	_help_root.add_child(_grip_marker)
+
+	_trigger_marker = _sphere("TriggerAnchor", TRIGGER_ANCHOR_POS, 0.0065, _mat_trigger_idle)
+	_help_root.add_child(_trigger_marker)
+
+
+func _add_tip(node_name: String, anchor_pos: Vector3, tip_pos: Vector3, text: String, key_color: Color) -> void:
+	var root := Node3D.new()
+	root.name = node_name
+	_help_root.add_child(root)
+
+	var line := _dashed_line("%sLine" % node_name, anchor_pos, tip_pos, 10, 0.0032, _mat_help_line)
+	root.add_child(line)
+
+	var back := _label_backplate("%sBack" % node_name, tip_pos + Vector3(0.0, -0.002, 0.0), 0.074, 0.032)
+	root.add_child(back)
+
+	var label := _label("%sLabel" % node_name, text, tip_pos, 0.0011, 18, COL_HELP_TEXT)
+	label.outline_modulate = Color(0, 0, 0, 0.85)
+	root.add_child(label)
+
+	var key_dot := _sphere("%sKeyDot" % node_name, tip_pos + Vector3(-0.046, 0.006, 0.0), 0.0045, _emissive_material(key_color, 0.95))
+	root.add_child(key_dot)
+
+
+func _dashed_line(node_name: String, start: Vector3, end: Vector3, dash_count: int, thickness: float, material: Material) -> Node3D:
+	var root := Node3D.new()
+	root.name = node_name
+	var dash_fraction := 0.58
+	for i in dash_count:
+		var t0 := float(i) / float(dash_count)
+		var t1 := minf((float(i) + dash_fraction) / float(dash_count), 1.0)
+		var a := start.lerp(end, t0)
+		var b := start.lerp(end, t1)
+		root.add_child(_box_segment("Dash%d" % i, a, b, thickness, material))
+	return root
+
+
+func _box_segment(node_name: String, start: Vector3, end: Vector3, thickness: float, material: Material) -> MeshInstance3D:
+	var segment := MeshInstance3D.new()
+	segment.name = node_name
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(thickness, thickness, start.distance_to(end))
+	segment.mesh = mesh
+	segment.material_override = material
+	var direction := (end - start).normalized()
+	var up := Vector3.UP
+	if absf(direction.dot(up)) > 0.96:
+		up = Vector3.RIGHT
+	segment.transform = Transform3D(Basis.looking_at(direction, up), start.lerp(end, 0.5))
+	return segment
+
+
+func _sphere(node_name: String, position: Vector3, radius: float, material: Material) -> MeshInstance3D:
+	var instance := MeshInstance3D.new()
+	instance.name = node_name
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	mesh.radial_segments = 24
+	mesh.rings = 12
+	instance.mesh = mesh
+	instance.material_override = material
+	instance.position = position
+	return instance
+
+
+func _label(node_name: String, text: String, position: Vector3, pixel_size: float, font_size: int, color: Color) -> Label3D:
+	var label := Label3D.new()
+	label.name = node_name
+	label.text = text
+	label.position = position
+	label.pixel_size = pixel_size
+	label.font_size = font_size
+	label.modulate = color
+	label.outline_size = 7
+	label.outline_modulate = Color(0, 0, 0, 0.78)
+	label.no_depth_test = true
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	return label
+
+
+func _label_backplate(node_name: String, position: Vector3, width: float, height: float) -> MeshInstance3D:
+	var backplate := MeshInstance3D.new()
+	backplate.name = node_name
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(width, height, 0.002)
+	backplate.mesh = mesh
+	backplate.position = position
+	backplate.material_override = _mat_help_text_back
+	return backplate
 
 
 func _refresh() -> void:
 	if not _enabled_for_device:
 		visible = false
 		return
+	visible = true
 
-	if not _bridge_connected:
-		_set_status(tr("UI_TELEOP_DISCONNECTED"), COL_DISCONNECTED)
-	elif _grip_pressed:
-		_set_status(tr("UI_TELEOP_ACTIVE"), COL_ACTIVE)
-	else:
-		_set_status(tr("UI_TELEOP_WAITING"), COL_WAITING)
+	var lamp_material := _mat_disconnected
+	var status_text := tr("UI_TELEOP_STATUS_OFF")
+	if _bridge_connected and _grip_pressed:
+		lamp_material = _mat_active
+		status_text = tr("UI_TELEOP_STATUS_ON")
+	elif _bridge_connected:
+		lamp_material = _mat_waiting
+		status_text = tr("UI_TELEOP_STATUS_WAIT")
 
-
-func _set_status(text: String, color: Color) -> void:
+	if _status_lamp:
+		_status_lamp.material_override = lamp_material
 	if _status_label:
-		_status_label.text = text
-		_status_label.add_theme_color_override("font_color", color)
-	if _lamp:
-		_lamp.add_theme_stylebox_override("panel", _lamp_style(color))
+		_status_label.text = status_text
+		_status_label.modulate = _status_color()
+	if _help_root:
+		_help_root.visible = _help_visible
+	if _grip_marker:
+		_grip_marker.material_override = _mat_active if _grip_pressed else _mat_help_key
+	if _trigger_marker:
+		_trigger_marker.material_override = _mat_trigger if _trigger_pressed else _mat_trigger_idle
+	if _a_label:
+		_a_label.text = tr("UI_TELEOP_A_HIDE_HELP") if _help_visible else tr("UI_TELEOP_A_SHOW_HELP")
+
+
+func _status_color() -> Color:
+	if not _bridge_connected:
+		return COL_DISCONNECTED
+	if _grip_pressed:
+		return COL_ACTIVE
+	return COL_WAITING
 
 
 func _has_controller_teleop_mapping(descriptor: Dictionary) -> bool:
@@ -156,19 +307,18 @@ func _has_controller_teleop_mapping(descriptor: Dictionary) -> bool:
 	return has_enable_mapping
 
 
-func _panel_style() -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = COL_BG
-	style.border_color = COL_BORDER
-	style.set_border_width_all(2)
-	style.set_corner_radius_all(8)
-	return style
+func _material(color: Color, transparent: bool = false) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	if transparent or color.a < 1.0:
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	return material
 
 
-func _lamp_style(color: Color) -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = color
-	style.border_color = Color(color.r, color.g, color.b, 0.42)
-	style.set_border_width_all(2)
-	style.set_corner_radius_all(12)
-	return style
+func _emissive_material(color: Color, energy: float) -> StandardMaterial3D:
+	var material := _material(color, color.a < 1.0)
+	material.emission_enabled = true
+	material.emission = color
+	material.emission_energy_multiplier = energy
+	return material

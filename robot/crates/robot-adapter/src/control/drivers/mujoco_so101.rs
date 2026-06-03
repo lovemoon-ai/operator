@@ -15,11 +15,12 @@
 //! * host → sim
 //!     ```text
 //!     {"ctrl":[6 floats], "steps": N}      # apply ctrl, mj_step N times
+//!     {"ee_pose":{...}, "gripper":0.5, "steps": N} # bridge-side IK
 //!     {"reset": true}                      # reset to keyframe "home"
 //!     ```
 //! * sim → host (one line per request)
 //!     ```text
-//!     {"q":[6 floats], "cube":[7 floats], "ts_ns": <i64>}
+//!     {"q":[6 floats], "ctrl":[6 floats], "ee":{...}, "cube":[7 floats], "ts_ns": <i64>}
 //!     ```
 //! * sim → host on error: `{"error":"<msg>"}`
 //!
@@ -47,6 +48,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use teleop_protocol::Pose6D;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::timeout;
@@ -90,8 +92,43 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum BridgeRequest<'a> {
-    Step { ctrl: &'a [f64], steps: u32 },
-    Reset { reset: bool },
+    Step {
+        ctrl: &'a [f64],
+        steps: u32,
+    },
+    EndEffector {
+        ee_pose: BridgePose,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gripper: Option<f32>,
+        steps: u32,
+    },
+    Reset {
+        reset: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct BridgePose {
+    position: [f64; 3],
+    rotation: [f64; 4],
+}
+
+impl From<&Pose6D> for BridgePose {
+    fn from(value: &Pose6D) -> Self {
+        Self {
+            position: value.position,
+            rotation: value.rotation,
+        }
+    }
+}
+
+impl From<&BridgePose> for Pose6D {
+    fn from(value: &BridgePose) -> Self {
+        Self {
+            position: value.position,
+            rotation: value.rotation,
+        }
+    }
 }
 
 /// Inbound response envelope (bridge → host).
@@ -104,6 +141,12 @@ struct BridgeResponse {
     /// Snapshot: joint positions in radians (actuator order).
     #[serde(default)]
     q: Vec<f64>,
+    /// Snapshot: current actuator ctrl in radians (actuator order).
+    #[serde(default)]
+    ctrl: Vec<f64>,
+    /// Snapshot: current `gripperframe` site pose in MuJoCo world/base frame.
+    #[serde(default)]
+    ee: Option<BridgePose>,
     /// Snapshot: red_cube qpos `[x,y,z,qw,qx,qy,qz]`. Unused for control today.
     #[serde(default)]
     #[allow(dead_code)]
@@ -142,6 +185,8 @@ pub struct MujocoSo101Driver {
     last_ctrl: [f64; NUM_ACTUATORS],
     /// Latest joint snapshot returned by the bridge, in radians.
     last_q_rad: [f64; NUM_ACTUATORS],
+    /// Latest `gripperframe` site pose returned by the bridge.
+    last_ee_pose: Option<Pose6D>,
     /// Cleared on construction, set after the `ready` event is read.
     ready: bool,
     /// `mj_step` calls per outbound write. Clamped to `[1, MAX_STEPS_PER_WRITE]`
@@ -200,6 +245,7 @@ impl MujocoSo101Driver {
             stdout,
             last_ctrl: [0.0; NUM_ACTUATORS],
             last_q_rad: [0.0; NUM_ACTUATORS],
+            last_ee_pose: None,
             ready: false,
             steps_per_write,
         })
@@ -209,6 +255,34 @@ impl MujocoSo101Driver {
     /// successful step / reset.
     pub fn last_q_rad(&self) -> [f64; NUM_ACTUATORS] {
         self.last_q_rad
+    }
+
+    fn apply_snapshot(&mut self, resp: &BridgeResponse) {
+        if resp.q.len() == NUM_ACTUATORS {
+            for (i, v) in resp.q.iter().enumerate() {
+                self.last_q_rad[i] = *v;
+            }
+        } else if !resp.q.is_empty() {
+            tracing::warn!(
+                "bridge returned q of unexpected length {} (expected {NUM_ACTUATORS})",
+                resp.q.len()
+            );
+        }
+
+        if resp.ctrl.len() == NUM_ACTUATORS {
+            for (i, v) in resp.ctrl.iter().enumerate() {
+                self.last_ctrl[i] = *v;
+            }
+        } else if !resp.ctrl.is_empty() {
+            tracing::warn!(
+                "bridge returned ctrl of unexpected length {} (expected {NUM_ACTUATORS})",
+                resp.ctrl.len()
+            );
+        }
+
+        if let Some(ee) = &resp.ee {
+            self.last_ee_pose = Some(Pose6D::from(ee));
+        }
     }
 
     /// Map a normalised gripper command in `[0, 1]` (0 = closed, 1 = open) to
@@ -290,16 +364,7 @@ impl MujocoSo101Driver {
         self.stdin.flush().await?;
 
         let resp = self.read_line(RESPONSE_TIMEOUT).await?;
-        if resp.q.len() == NUM_ACTUATORS {
-            for (i, v) in resp.q.iter().enumerate() {
-                self.last_q_rad[i] = *v;
-            }
-        } else if !resp.q.is_empty() {
-            tracing::warn!(
-                "bridge returned q of unexpected length {} (expected {NUM_ACTUATORS})",
-                resp.q.len()
-            );
-        }
+        self.apply_snapshot(&resp);
         Ok(())
     }
 }
@@ -340,10 +405,37 @@ impl ArmDriver for MujocoSo101Driver {
         self.step().await
     }
 
+    fn supports_end_effector_pose(&self) -> bool {
+        true
+    }
+
+    async fn set_end_effector_pose(&mut self, target: &Pose6D, gripper: Option<f32>) -> Result<()> {
+        if !self.ready {
+            anyhow::bail!("MujocoSo101Driver::set_end_effector_pose before enable_torque");
+        }
+        let req = BridgeRequest::EndEffector {
+            ee_pose: BridgePose::from(target),
+            gripper,
+            steps: self.steps_per_write,
+        };
+        let mut line = serde_json::to_vec(&req)?;
+        line.push(b'\n');
+        self.stdin.write_all(&line).await?;
+        self.stdin.flush().await?;
+
+        let resp = self.read_line(RESPONSE_TIMEOUT).await?;
+        self.apply_snapshot(&resp);
+        Ok(())
+    }
+
     fn last_joint_angles(&self) -> Option<JointAngles> {
         Some(JointAngles {
             angles: self.last_q_rad.iter().map(|rad| rad.to_degrees()).collect(),
         })
+    }
+
+    fn last_end_effector_pose(&self) -> Option<Pose6D> {
+        self.last_ee_pose.clone()
     }
 
     async fn emergency_stop(&mut self) -> Result<()> {
@@ -380,11 +472,9 @@ impl ArmDriver for MujocoSo101Driver {
         self.stdin.write_all(&line).await?;
         self.stdin.flush().await?;
         let resp = self.read_line(RESPONSE_TIMEOUT).await?;
-        if resp.q.len() == NUM_ACTUATORS {
-            for (i, v) in resp.q.iter().enumerate() {
-                self.last_q_rad[i] = *v;
-                self.last_ctrl[i] = *v;
-            }
+        self.apply_snapshot(&resp);
+        if resp.ctrl.is_empty() && resp.q.len() == NUM_ACTUATORS {
+            self.last_ctrl = self.last_q_rad;
         }
         tracing::info!(
             "MujocoSo101: torque enabled, home pose seeded q_rad={:?}",
@@ -438,6 +528,30 @@ mod tests {
     }
 
     #[test]
+    fn end_effector_request_serialises_to_expected_shape() {
+        let target = Pose6D {
+            position: [0.1, -0.2, 0.3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        };
+        let req = BridgeRequest::EndEffector {
+            ee_pose: BridgePose::from(&target),
+            gripper: Some(0.25),
+            steps: 3,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(
+            s.contains("\"ee_pose\":{\"position\":[0.1,-0.2,0.3],\"rotation\":[0.0,0.0,0.0,1.0]}"),
+            "got {s}"
+        );
+        assert!(s.contains("\"gripper\":0.25"), "got {s}");
+        assert!(s.contains("\"steps\":3"), "got {s}");
+        assert!(
+            !s.contains("EndEffector"),
+            "untagged variant leaked tag: {s}"
+        );
+    }
+
+    #[test]
     fn reset_request_serialises_to_expected_shape() {
         let req = BridgeRequest::Reset { reset: true };
         let s = serde_json::to_string(&req).unwrap();
@@ -453,15 +567,23 @@ mod tests {
         assert_eq!(resp.nq, Some(13));
         assert_eq!(resp.joint_names.len(), 6);
         assert!(resp.q.is_empty());
+        assert!(resp.ctrl.is_empty());
+        assert!(resp.ee.is_none());
         assert!(resp.error.is_none());
     }
 
     #[test]
     fn snapshot_response_deserialises() {
-        let raw = r#"{"q":[0.0,1.5,0.5,0.0,0.0,0.5],"cube":[0.3,0.0,0.02,1.0,0.0,0.0,0.0],"ts_ns":1234567890}"#;
+        let raw = r#"{"q":[0.0,1.5,0.5,0.0,0.0,0.5],"ctrl":[0.0,1.4,0.4,0.0,0.0,0.2],"ee":{"position":[0.2,0.0,0.3],"rotation":[0.0,0.0,0.0,1.0]},"cube":[0.3,0.0,0.02,1.0,0.0,0.0,0.0],"ts_ns":1234567890}"#;
         let resp: BridgeResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(resp.q.len(), 6);
         assert!((resp.q[1] - 1.5).abs() < 1e-9);
+        assert_eq!(resp.ctrl.len(), 6);
+        assert!((resp.ctrl[1] - 1.4).abs() < 1e-9);
+        assert_eq!(
+            resp.ee.as_ref().map(|ee| ee.position),
+            Some([0.2, 0.0, 0.3])
+        );
         assert_eq!(resp.cube.len(), 7);
         assert_eq!(resp.ts_ns, 1234567890);
         assert!(resp.error.is_none());

@@ -6,8 +6,9 @@ Four modes:
     smoketest - load the model, step a few times, print key info.
     bridge   - stdin/stdout JSON-line protocol used by robo-agent's
                MujocoSo101 device. Acts as the "hardware" side of the
-               teleoperation loop: takes 6 joint targets, steps the sim,
-               returns joint angles + cube pose.
+               teleoperation loop: takes joint targets or end-effector pose
+               targets, steps the sim, returns joint angles + end-effector
+               pose + cube pose.
 
 Examples:
     python sim_so101.py viewer
@@ -174,27 +175,177 @@ def run_smoketest() -> None:
 ##
 ##   request (host → sim):
 ##     {"ctrl":[6 floats], "steps": N}        # apply ctrl, mj_step N times
+##     {"ee_pose":{"position":[x,y,z],
+##                 "rotation":[qx,qy,qz,qw]},
+##      "gripper": 0.5,
+##      "steps": N}                           # solve IK in MuJoCo, then step
 ##     {"reset": true}                        # reset to keyframe "home"
 ##
 ##   response (sim → host):
 ##     {"q":[6 floats],
+##      "ctrl":[6 floats],
+##      "ee":{"position":[x,y,z],
+##            "rotation":[qx,qy,qz,qw]},
 ##      "cube":[x,y,z,qw,qx,qy,qz],            # MuJoCo qpos order (w-first)
 ##      "ts_ns": <int>}                        # wall-clock ns at response
 ##
 ##   error (sim → host): {"error":"<msg>"}
 ##
-## Bridge is intentionally dumb: no IK, no command parsing, no safety.
-## Anything that resembles "logic" lives in the Rust device.
+## The bridge owns MuJoCo-specific IK. Rust sends robot-frame EE targets and
+## normalized gripper commands; the simulator clamps the resulting actuators to
+## the model's limits before stepping.
 ## ---------------------------------------------------------------------------
 
 ARM_ACTUATORS = ["shoulder_pan", "shoulder_lift", "elbow_flex",
                  "wrist_flex", "wrist_roll", "gripper"]
+ARM_JOINTS = ARM_ACTUATORS[:-1]
+GRIPPER_ACTUATOR = "gripper"
+GRIPPER_RAD_MIN = -0.17
+GRIPPER_RAD_MAX = 1.75
+EE_SITE = "gripperframe"
 VIEWER_IDLE_SYNC_PERIOD_S = 1.0 / 30.0
 
 
 def _emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+def _bridge_indices(model: mujoco.MjModel) -> dict:
+    arm_jids = []
+    arm_actids = []
+    for name in ARM_JOINTS:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        if jid < 0 or aid < 0:
+            raise RuntimeError(f"missing actuator/joint '{name}'")
+        arm_jids.append(jid)
+        arm_actids.append(aid)
+
+    grip_actid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, GRIPPER_ACTUATOR)
+    grip_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, GRIPPER_ACTUATOR)
+    site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, EE_SITE)
+    if grip_actid < 0 or grip_jid < 0:
+        raise RuntimeError("missing gripper actuator/joint")
+    if site_id < 0:
+        raise RuntimeError(f"missing site '{EE_SITE}'")
+
+    act_ids = list(arm_actids) + [grip_actid]
+    jids = list(arm_jids) + [grip_jid]
+    return {
+        "act_ids": act_ids,
+        "qadr": [int(model.jnt_qposadr[j]) for j in jids],
+        "arm_jids": arm_jids,
+        "arm_qadr": [int(model.jnt_qposadr[j]) for j in arm_jids],
+        "arm_dofadr": [int(model.jnt_dofadr[j]) for j in arm_jids],
+        "arm_actids": arm_actids,
+        "grip_actid": grip_actid,
+        "site_id": site_id,
+    }
+
+
+def _quat_xyzw_from_mat(mat: np.ndarray) -> list[float]:
+    quat_wxyz = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(quat_wxyz, np.asarray(mat, dtype=np.float64).reshape(9))
+    return [
+        float(quat_wxyz[1]),
+        float(quat_wxyz[2]),
+        float(quat_wxyz[3]),
+        float(quat_wxyz[0]),
+    ]
+
+
+def _mat_from_quat_xyzw(rot: list[float]) -> np.ndarray:
+    quat_wxyz = np.array([rot[3], rot[0], rot[1], rot[2]], dtype=np.float64)
+    norm = np.linalg.norm(quat_wxyz)
+    if norm <= 1.0e-9:
+        quat_wxyz[:] = [1.0, 0.0, 0.0, 0.0]
+    else:
+        quat_wxyz /= norm
+    mat = np.zeros(9, dtype=np.float64)
+    mujoco.mju_quat2Mat(mat, quat_wxyz)
+    return mat.reshape(3, 3)
+
+
+def _target_axis_from_pose(ee_pose: dict) -> np.ndarray | None:
+    rot = ee_pose.get("rotation")
+    if rot is None:
+        return None
+    if not isinstance(rot, list) or len(rot) != 4:
+        raise ValueError("ee_pose.rotation must be [qx,qy,qz,qw]")
+    return _mat_from_quat_xyzw([float(x) for x in rot])[:, 0].copy()
+
+
+def _gripper_value_to_rad(value: float) -> float:
+    v = min(1.0, max(0.0, float(value)))
+    return GRIPPER_RAD_MIN + v * (GRIPPER_RAD_MAX - GRIPPER_RAD_MIN)
+
+
+def _clamp_ctrl(model: mujoco.MjModel, act_id: int, value: float) -> float:
+    if bool(model.actuator_ctrllimited[act_id]):
+        lo, hi = model.actuator_ctrlrange[act_id]
+        return float(np.clip(value, lo, hi))
+    return float(value)
+
+
+def _steps_from_msg(msg: dict) -> int:
+    steps = int(msg.get("steps", 1))
+    if steps < 1:
+        steps = 1
+    if steps > 1000:
+        steps = 1000
+    return steps
+
+
+def ik_pose(model: mujoco.MjModel,
+            data: mujoco.MjData,
+            idx: dict,
+            target_pos: np.ndarray,
+            target_axis_world: np.ndarray | None = None,
+            ori_weight: float = 1.0,
+            max_iters: int = 96,
+            tol: float = 1.0e-3,
+            lam: float = 0.05,
+            step: float = 0.4) -> tuple[np.ndarray, float]:
+    """Damped least-squares IK on the five SO-101 arm joints."""
+    jacp = np.zeros((3, model.nv))
+    jacr = np.zeros((3, model.nv))
+    last_err = np.inf
+
+    for _ in range(max_iters):
+        mujoco.mj_forward(model, data)
+        site_xmat = data.site_xmat[idx["site_id"]].reshape(3, 3)
+        pos_err = target_pos - data.site_xpos[idx["site_id"]]
+
+        if target_axis_world is not None:
+            cur_axis = site_xmat[:, 0]
+            ori_err = np.cross(cur_axis, target_axis_world) * ori_weight
+            err = np.concatenate([pos_err, ori_err])
+            mujoco.mj_jacSite(model, data, jacp, jacr, idx["site_id"])
+            jac = np.vstack([
+                jacp[:, idx["arm_dofadr"]],
+                jacr[:, idx["arm_dofadr"]] * ori_weight,
+            ])
+            damp = (lam ** 2) * np.eye(6)
+        else:
+            err = pos_err
+            mujoco.mj_jacSite(model, data, jacp, jacr, idx["site_id"])
+            jac = jacp[:, idx["arm_dofadr"]]
+            damp = (lam ** 2) * np.eye(3)
+
+        last_err = float(np.linalg.norm(pos_err))
+        if last_err < tol and (target_axis_world is None or np.linalg.norm(err[3:]) < 5.0e-3):
+            break
+
+        dq = jac.T @ np.linalg.solve(jac @ jac.T + damp, err)
+        for k, qpos_addr in enumerate(idx["arm_qadr"]):
+            data.qpos[qpos_addr] += step * dq[k]
+        for k, jid in enumerate(idx["arm_jids"]):
+            lo, hi = model.jnt_range[jid]
+            qpos_addr = idx["arm_qadr"][k]
+            data.qpos[qpos_addr] = np.clip(data.qpos[qpos_addr], lo, hi)
+
+    return np.array([data.qpos[qpos_addr] for qpos_addr in idx["arm_qadr"]]), last_err
 
 
 def run_bridge(viewer_enabled: bool = False) -> None:
@@ -258,27 +409,22 @@ def run_bridge(viewer_enabled: bool = False) -> None:
             print(f"bridge: viewer sync failed ({e}); detaching", file=sys.stderr)
             viewer_handle = None
 
-    # Resolve actuator + joint indices once.
-    act_ids = []
-    qadr = []
-    for name in ARM_ACTUATORS:
-        a = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-        j = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
-        if a < 0 or j < 0:
-            print(f"bridge: missing actuator/joint '{name}'", file=sys.stderr)
-            sys.exit(2)
-        act_ids.append(a)
-        qadr.append(int(model.jnt_qposadr[j]))
+    try:
+        idx = _bridge_indices(model)
+    except RuntimeError as e:
+        print(f"bridge: {e}", file=sys.stderr)
+        sys.exit(2)
 
     cube_jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "red_cube_freejoint")
     cube_qadr = int(model.jnt_qposadr[cube_jid]) if cube_jid >= 0 else -1
 
     home_key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "home")
+    ik_data = mujoco.MjData(model)
 
     # Initialise ctrl to current home pose so the very first step doesn't
     # snap from zero.
-    for k, a in enumerate(act_ids):
-        data.ctrl[a] = float(data.qpos[qadr[k]])
+    for k, a in enumerate(idx["act_ids"]):
+        data.ctrl[a] = float(data.qpos[idx["qadr"][k]])
 
     mujoco.mj_forward(model, data)
     maybe_sync_viewer()
@@ -292,13 +438,22 @@ def run_bridge(viewer_enabled: bool = False) -> None:
     print(f"bridge: ready (nq={model.nq}, nu={model.nu})", file=sys.stderr)
 
     def snapshot() -> dict:
-        q = [float(data.qpos[a]) for a in qadr]
+        mujoco.mj_forward(model, data)
+        q = [float(data.qpos[a]) for a in idx["qadr"]]
+        ctrl = [float(data.ctrl[a]) for a in idx["act_ids"]]
         if cube_qadr >= 0:
             cube = [float(x) for x in data.qpos[cube_qadr:cube_qadr + 7]]
         else:
             cube = []
+        site_id = idx["site_id"]
+        ee = {
+            "position": [float(x) for x in data.site_xpos[site_id]],
+            "rotation": _quat_xyzw_from_mat(data.site_xmat[site_id]),
+        }
         return {
             "q": q,
+            "ctrl": ctrl,
+            "ee": ee,
             "cube": cube,
             "ts_ns": time.time_ns(),
         }
@@ -332,11 +487,50 @@ def run_bridge(viewer_enabled: bool = False) -> None:
                     mujoco.mj_resetDataKeyframe(model, data, home_key)
                 else:
                     mujoco.mj_resetData(model, data)
-                for k, a in enumerate(act_ids):
-                    data.ctrl[a] = float(data.qpos[qadr[k]])
+                for k, a in enumerate(idx["act_ids"]):
+                    data.ctrl[a] = float(data.qpos[idx["qadr"][k]])
                 mujoco.mj_forward(model, data)
                 maybe_sync_viewer()
                 _emit(snapshot())
+                continue
+
+            ee_pose = msg.get("ee_pose")
+            if isinstance(ee_pose, dict):
+                pos = ee_pose.get("position")
+                if not isinstance(pos, list) or len(pos) != 3:
+                    _emit({"error": "ee_pose.position must be [x,y,z]"})
+                    continue
+                try:
+                    target_pos = np.array([float(x) for x in pos], dtype=np.float64)
+                    target_axis = _target_axis_from_pose(ee_pose)
+                except (TypeError, ValueError) as e:
+                    _emit({"error": str(e)})
+                    continue
+
+                ik_data.qpos[:] = data.qpos
+                ik_data.qvel[:] = 0.0
+                ik_data.ctrl[:] = data.ctrl
+                q_target, pos_err = ik_pose(
+                    model,
+                    ik_data,
+                    idx,
+                    target_pos,
+                    target_axis_world=target_axis,
+                )
+                for k, a in enumerate(idx["arm_actids"]):
+                    data.ctrl[a] = _clamp_ctrl(model, a, float(q_target[k]))
+
+                if msg.get("gripper") is not None:
+                    grip = _gripper_value_to_rad(float(msg["gripper"]))
+                    data.ctrl[idx["grip_actid"]] = _clamp_ctrl(model, idx["grip_actid"], grip)
+
+                for _ in range(_steps_from_msg(msg)):
+                    mujoco.mj_step(model, data)
+
+                maybe_sync_viewer()
+                snap = snapshot()
+                snap["ik_error"] = pos_err
+                _emit(snap)
                 continue
 
             ctrl = msg.get("ctrl")
@@ -344,14 +538,10 @@ def run_bridge(viewer_enabled: bool = False) -> None:
                 _emit({"error": f"ctrl must be list of {len(ARM_ACTUATORS)} floats"})
                 continue
 
-            steps = int(msg.get("steps", 1))
-            if steps < 1:
-                steps = 1
-            if steps > 1000:
-                steps = 1000  # safety: don't let the host stall the bridge.
+            steps = _steps_from_msg(msg)
 
-            for k, a in enumerate(act_ids):
-                data.ctrl[a] = float(ctrl[k])
+            for k, a in enumerate(idx["act_ids"]):
+                data.ctrl[a] = _clamp_ctrl(model, a, float(ctrl[k]))
 
             for _ in range(steps):
                 mujoco.mj_step(model, data)

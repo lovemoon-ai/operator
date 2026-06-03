@@ -29,8 +29,9 @@ adapter:
   device_type: "mujoco_so101"
 
   # Descriptor declares the XR input mapping: right_controller_pose drives the
-  # end_effector pose, right_trigger drives gripper closure (released = open),
-  # and right_grip is the momentary teleop enable/deadman.
+  # end_effector pose, head_pose provides the operator alignment frame,
+  # right_trigger drives gripper closure (released = open), and right_grip is
+  # the momentary teleop enable/deadman.
   descriptor_file: "configs/mujoco_so101_descriptor.yaml"
 
   arm:
@@ -69,9 +70,9 @@ adapter:
       max_acceleration_deg_s2: 180.0
 
     pose_mapping:
-      mode: "direct"
-      # Direct mapping is intentionally conservative for live teleop:
-      # 0.1 m controller motion -> 15 deg joint delta.
+      mode: "ik"
+      # IK mapping uses controller-space deltas as MuJoCo base-frame target
+      # deltas. 0.1 m controller motion -> 0.05 m end-effector target motion.
       scale: 0.5
       mirror: true
 

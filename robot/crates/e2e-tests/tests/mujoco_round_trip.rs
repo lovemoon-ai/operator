@@ -4,14 +4,14 @@
 //!
 //! This crosses every layer that matters for the mujoco control chain:
 //!   bridge AdapterClient → BridgeCodec frame → loopback socket
-//!   → AdapterCodec decode → RobotArmDevice → PoseMapper → joint Safety
-//!   → MuJoCo bridge subprocess (python sim_so101.py bridge)
+//!   → AdapterCodec decode → RobotArmDevice → PoseMapper EE target mapping
+//!   → MuJoCo bridge subprocess IK (python sim_so101.py bridge)
 //!   → telemetry frame → bridge watch channel.
 //!
 //! The test holds the teleop `enable` deadman, seeds the PoseMapper reference
 //! with a first pose, then sends poses with a position offset that produce a
-//! non-trivial joint delta, and asserts the reported `joint_angles` telemetry
-//! CHANGES (the sim actually moved).
+//! non-trivial bridge-side IK target, and asserts the reported `joint_angles`
+//! telemetry CHANGES (the sim actually moved).
 //!
 //! Requires the MuJoCo venv (created by `examples/mujuco-arm-so101 make env`).
 //! If the python binary is missing, the test skips (prints + returns) rather
@@ -76,8 +76,8 @@ fn arm_config(python: &str, script: &str) -> ArmConfig {
             max_acceleration_deg_s2: 1_000_000.0,
         },
         pose_mapping: PoseMappingConfig {
-            mode: "direct".to_string(),
-            scale: 1.0,
+            mode: "ik".to_string(),
+            scale: 0.5,
             mirror: true,
         },
         // Generous so the spawn → ready → first-step warm-up never drops frames.
@@ -157,8 +157,13 @@ async fn mujoco_round_trip_moves_joints() {
         // Handshake — assert the arm descriptor crossed the boundary.
         let desc = client.handshake().await.expect("handshake");
         assert_eq!(desc.device.device_type, "robot_arm");
-        assert_eq!(desc.control_schema.poses.len(), 1);
+        assert!(desc.control_schema.poses.len() >= 2);
         assert_eq!(desc.control_schema.poses[0].name, "end_effector");
+        assert!(desc
+            .control_schema
+            .poses
+            .iter()
+            .any(|pose| pose.name == "operator_frame"));
 
         let mut telemetry = client.telemetry();
 
@@ -174,12 +179,12 @@ async fn mujoco_round_trip_moves_joints() {
             .await
             .expect("seed pose");
 
-        // Frames 2..N: move the controller +x / +y / +z by a big delta. With
-        // deg_per_meter = 300, a 0.1 m offset is ~30° on the base joint — well
-        // clear of telemetry noise. Send a handful so the sim integrates.
+        // Frames 2..N: move the controller forward/up. The adapter maps this
+        // to a robot-frame end-effector target; the Python bridge solves IK.
+        // Send a handful so the sim integrates.
         for _ in 0..8 {
             client
-                .send_command(&pose_cmd([0.15, 0.15, 0.0]))
+                .send_command(&pose_cmd([0.0, 0.05, -0.10]))
                 .await
                 .expect("offset pose");
             sleep(Duration::from_millis(30)).await;
@@ -193,12 +198,17 @@ async fn mujoco_round_trip_moves_joints() {
         );
         let after = moved.unwrap();
 
-        // Sanity: joint[0] (base) moved meaningfully (≥ a few degrees), proving
-        // the position-delta → PoseMapper → Safety → driver path is live.
-        let delta0 = (after[0] - seed_angles[0]).abs();
+        // Sanity: at least one arm joint moved meaningfully, proving the
+        // position-delta -> EE target -> bridge-side IK path is live.
+        let max_arm_delta = after
+            .iter()
+            .take(5)
+            .zip(seed_angles.iter().take(5))
+            .map(|(after, seed)| (after - seed).abs())
+            .fold(0.0_f64, f64::max);
         assert!(
-            delta0 > 1.0,
-            "base joint barely moved (Δ={delta0:.3}°); seed={seed_angles:?} after={after:?}"
+            max_arm_delta > 0.5,
+            "arm joints barely moved (max_delta={max_arm_delta:.3} deg); seed={seed_angles:?} after={after:?}"
         );
     })
     .await;

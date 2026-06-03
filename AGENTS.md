@@ -18,7 +18,7 @@ TBD
 ### XR side (Godot + Android)
 
 It costs much time ( > 10 minites )to build godot apk for the first time. Please
-avoid timeout when building project.
+run it in background avoiding timeout when building project.
 
 Run from `xr/`. The build hits `godot --headless` so the `godot`
 binary must be on `PATH` (Godot 4.5.1.stable). Android export
@@ -39,6 +39,9 @@ make log                # adb logcat filtered for Operator/godot
 make crash              # dump full logcat to crash.log
 make godot              # open the project in the Godot editor
 ```
+
+NEVER try to run "godot --headless" mode on desktop to test xr project.
+Android XR device is required to run xr project.
 
 ## Architecture
 See `claw/architecture/overview.md`..

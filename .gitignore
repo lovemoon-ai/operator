@@ -51,7 +51,7 @@ examples/mujuco-arm-so101/assets/so101/assets/*.stl
 # godot_openxr_vendors prebuilt binaries (fetched by
 # xr/addons/godotopenxrvendors/prepare.sh from upstream release —
 # kept out of the repo to save ~18 MB).
-xr/addons/godotopenxrvendors/.bin/
+xr/addons/godotopenxrvendors/.bin
 
 # Android plugin rebuild outputs. Source lives under xr/android_plugin.
 xr/android_plugin/.gradle/

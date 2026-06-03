@@ -21,10 +21,20 @@ control_schema:
       display: "End Effector Target"
       dof: 6
       frame: "right_hand"
+    - name: "operator_frame"
+      display: "Operator Alignment Frame"
+      dof: 6
+      frame: "head"
 
 input_mapping:
   - source: "right_controller_pose"
     target: "end_effector"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "absolute"
+  - source: "head_pose"
+    target: "operator_frame"
     scale: 1.0
     invert: false
     offset: 0.0

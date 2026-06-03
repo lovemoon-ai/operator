@@ -8,6 +8,7 @@ pub mod mujoco_so101;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use teleop_protocol::Pose6D;
 
 use crate::config::MujocoConfig;
 use crate::control::JointAngles;
@@ -25,8 +26,32 @@ pub trait ArmDriver: Send {
     /// Set the gripper opening (0.0 = closed, 1.0 = open).
     async fn set_gripper(&mut self, value: f32) -> Result<()>;
 
+    /// Whether this backend accepts end-effector pose targets and performs IK
+    /// internally.
+    fn supports_end_effector_pose(&self) -> bool {
+        false
+    }
+
+    /// Send a robot base-frame end-effector target pose to the arm.
+    ///
+    /// Backends that implement this are responsible for their own IK and joint
+    /// limit handling. `gripper` is an optional normalized command in `[0, 1]`
+    /// so a single bridge round-trip can apply pose and gripper together.
+    async fn set_end_effector_pose(
+        &mut self,
+        _target: &Pose6D,
+        _gripper: Option<f32>,
+    ) -> Result<()> {
+        anyhow::bail!("driver does not support end-effector pose targets")
+    }
+
     /// Latest known joint angles in degrees, if the backend can report them.
     fn last_joint_angles(&self) -> Option<JointAngles> {
+        None
+    }
+
+    /// Latest known robot base-frame end-effector pose, if available.
+    fn last_end_effector_pose(&self) -> Option<Pose6D> {
         None
     }
 
