@@ -84,6 +84,7 @@ auto-extracts the AAR from `~/Library/Application Support/Godot/...`
 or `~/.local/share/godot/...`.
 
 ```bash
+make sync-submodule     # sync .gitmodules, then init/update all git submodules
 make build              # build-quest — produces build/quest/XRoboToolkit.apk
 make build-pico         # build/pico/XRoboToolkit.apk
 make build-glassxr      # build/glassxr/XRoboToolkit.apk
@@ -103,7 +104,7 @@ The AHB GDExtension (`xr/native/ahb_decoder/`) is a separate build:
 
 ```bash
 # First time only:
-git submodule update --init --depth=1 third_party/godot-cpp
+make -C xr sync-submodule
 ln -sfn ../../../third_party/godot-cpp xr/native/ahb_decoder/godot-cpp
 
 xr/native/ahb_decoder/build.sh          # Release
