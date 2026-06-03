@@ -21,8 +21,6 @@ xr/native/ahb_decoder/build-*/
 *.uid
 
 # Local agent/session files
-.conductor/
-conductor.log
 crash.log
 
 # OS
@@ -37,8 +35,8 @@ Thumbs.db
 # conductor
 conductor-terminal.log
 conductor.log
-./conductor/state
-./conductor/worktrees
+.conductor/state/
+.conductor/worktrees/
 
 # tests output
 tests/logs
