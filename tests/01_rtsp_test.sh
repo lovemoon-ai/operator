@@ -15,7 +15,7 @@
 #       │   - listens on :12345 (video) + :63901 (pose/cmd) for the headset
 #       │
 #       ▼ Quest 3 (same Wi-Fi) discovers + connects automatically
-#   Quest app (org.xrobotoolkit.client)
+#   Quest app (com.lovemoon.operator)
 #       - MediaCodec decodes H.264 NALs
 #       - AHB zero-copy path renders into the OpenXR swapchain
 #       - logs `[LiveVideo] AHB stats: frames=N post_decode=… rx_to_present=…`
@@ -46,7 +46,7 @@ set -euo pipefail
 
 # --- Paths -------------------------------------------------------------------
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PKG="org.xrobotoolkit.client"
+PKG="com.lovemoon.operator"
 ACT="com.godot.game.GodotApp"
 RTSP_URL="rtsp://127.0.0.1:8554/test"
 LOG_DIR="$ROOT/tests/logs/rtsp-$(date +%Y%m%d-%H%M%S)"

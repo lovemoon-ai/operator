@@ -660,7 +660,7 @@ the user's home cache.
 - `[preset.2]` name `"Glass XR"` → `build/glassxr/XRoboToolkit.apk`
   (lines 527-570).
 
-All three share `unique_name=org.xrobotoolkit.client` and package name
+All three share `unique_name=com.lovemoon.operator` and package name
 `XRoboToolkit`. Makefile targets `build-quest`/`build-pico`/`build-glassxr`
 invoke `godot --headless --export-release "<preset>" <apk>`
 (`xr/Makefile:37-47`).

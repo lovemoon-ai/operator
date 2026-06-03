@@ -226,7 +226,7 @@ renderer, OpenXR enabled. Three export presets are declared in
 | `Pico`           | `build/pico/XRoboToolkit.apk`     | `GodotOpenXRPico=true` (`export_presets.cfg:519`) | Pico (`:512`)               | `false`    |
 | `Glass XR`       | `build/glassxr/XRoboToolkit.apk`  | `GodotOpenXRKHR=true` (`export_presets.cfg:779`)  | Khronos generic (`:753`)    | `false`    |
 
-All three presets share: `package/unique_name="org.xrobotoolkit.client"`,
+All three presets share: `package/unique_name="com.lovemoon.operator"`,
 `arm64-v8a` only, signed with the in-repo `res://android/debug.keystore`,
 `permissions/camera=true`, `permissions/internet=true`,
 `xr_features/xr_mode=1` (immersive).
@@ -344,7 +344,7 @@ clean:
 
 `xr/Makefile:51-72`, `xr/Makefile:19-21`. Constants:
 
-- `package = org.xrobotoolkit.client` (`xr/Makefile:9`)
+- `package = com.lovemoon.operator` (`xr/Makefile:9`)
 - `activity = com.godot.game.GodotApp` (`xr/Makefile:10`)
 
 `-r -d` on `adb install` means "reinstall, allow downgrade" — useful
@@ -692,7 +692,7 @@ can't load the Meta plugin or vice versa; obvious symptoms include
 "OpenXR failed to start" in logcat.
 
 **Cause:** Both presets share the same `package/unique_name`
-(`org.xrobotoolkit.client`, `export_presets.cfg:45` and `:308`), so an
+(`com.lovemoon.operator`, `export_presets.cfg:45` and `:308`), so an
 `adb install -r -d` replaces whatever was on the device with the new
 APK — including across vendors.
 

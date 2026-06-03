@@ -16,7 +16,7 @@ GRADLE_USER_HOME?=$(CURDIR)/.gradle
 apk_quest=build/quest/Operator.apk
 apk_pico=build/pico/Operator.apk
 apk_androidxr=build/androidxr/Operator.apk
-package=org.xrobotoolkit.client
+package=com.lovemoon.operator
 activity=com.godot.game.GodotApp
 
 # Plugin/library build rules (setup-vendors, prepare-android-libs, build-ahb,

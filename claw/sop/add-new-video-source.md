@@ -303,8 +303,8 @@ adb shell setprop debug.xrobo.host <your_ip>
 # Start your streamer.
 
 # On Pico / Quest:
-adb shell am force-stop org.xrobotoolkit.client
-adb shell am start -n org.xrobotoolkit.client/com.godot.game.GodotApp
+adb shell am force-stop com.lovemoon.operator
+adb shell am start -n com.lovemoon.operator/com.godot.game.GodotApp
 
 # Watch the handshake:
 adb logcat -d | grep --binary-files=text -E "Discovery|Session|TeleOp|UdpVideoHandler"
