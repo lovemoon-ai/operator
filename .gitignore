@@ -23,6 +23,9 @@ xr/native/ahb_decoder/build-*/
 # Local agent/session files
 crash.log
 
+# Local hidden dependency checkouts and native build output.
+.deps/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -50,8 +53,10 @@ examples/mujuco-arm-so101/assets/so101/assets/*.stl
 # kept out of the repo to save ~18 MB).
 xr/addons/godotopenxrvendors/.bin/
 
-# Local fallback clone for the tracked xr/addons/godot-xr-tools symlink.
+# Legacy local dependency checkouts from the old submodule layout.
 third_party/godot-xr-tools/
+third_party/godot-cpp/
+third_party/ffmpeg/
 
 # Android plugin rebuild outputs. Source lives under xr/android_plugin.
 xr/android_plugin/.gradle/
@@ -72,6 +77,6 @@ xr/addons/spatialmp4_muxer/bin/*.aar
 *.lock
 settings.local.json
 
-# Shared native dependency build output.
+# Legacy shared native dependency build output.
 third_party/godot-cpp-build/
 third_party/ffmpeg-build/

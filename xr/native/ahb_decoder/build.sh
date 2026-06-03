@@ -5,7 +5,7 @@
 #
 # Requirements:
 #   - $ANDROID_NDK pointing at an NDK r25+ install
-#   - godot-cpp submodule initialised at third_party/godot-cpp
+#   - godot-cpp synced by scripts/sync_deps.sh into .deps/src/godot-cpp
 #
 # Usage:
 #   xr/native/ahb_decoder/build.sh [Debug|Release]   # default Release
@@ -15,10 +15,16 @@ set -euo pipefail
 BUILD_TYPE="${1:-Release}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-GODOT_CPP_SOURCE="$REPO_ROOT/third_party/godot-cpp"
+DEPS_ROOT="${DEPS_ROOT:-$REPO_ROOT/.deps}"
+GODOT_CPP_SOURCE="$DEPS_ROOT/src/godot-cpp"
 GODOT_CPP_LINK="$SCRIPT_DIR/godot-cpp"
-GODOT_CPP_LINK_TARGET="../../../third_party/godot-cpp"
-GODOT_CPP_BUILD="$REPO_ROOT/third_party/godot-cpp-build"
+if [[ "$DEPS_ROOT" == "$REPO_ROOT/.deps" ]]; then
+    GODOT_CPP_LINK_TARGET="../../../.deps/src/godot-cpp"
+else
+    GODOT_CPP_LINK_TARGET="$GODOT_CPP_SOURCE"
+fi
+GODOT_CPP_BUILD="$DEPS_ROOT/build/godot-cpp"
+DEPS_SCRIPT="$REPO_ROOT/scripts/sync_deps.sh"
 cd "$SCRIPT_DIR"
 
 if [[ -z "${ANDROID_NDK:-}" ]]; then
@@ -31,16 +37,17 @@ if [[ -z "${ANDROID_NDK:-}" ]]; then
 fi
 
 ensure_godot_cpp_link() {
-    mkdir -p "$REPO_ROOT/third_party"
+    mkdir -p "$DEPS_ROOT/src" "$DEPS_ROOT/build"
 
     if [[ -L "$GODOT_CPP_LINK" ]]; then
-        ln -sfn "$GODOT_CPP_LINK_TARGET" "$GODOT_CPP_LINK"
+        rm -f "$GODOT_CPP_LINK"
+        ln -s "$GODOT_CPP_LINK_TARGET" "$GODOT_CPP_LINK"
         return
     fi
 
     if [[ -e "$GODOT_CPP_LINK" ]]; then
         if [[ -f "$GODOT_CPP_LINK/SConstruct" && ! -e "$GODOT_CPP_SOURCE" ]]; then
-            echo "Migrating local godot-cpp checkout to third_party/godot-cpp..." >&2
+            echo "Migrating local godot-cpp checkout to .deps/src/godot-cpp..." >&2
             mv "$GODOT_CPP_LINK" "$GODOT_CPP_SOURCE"
         elif [[ -d "$GODOT_CPP_LINK" && -z "$(find "$GODOT_CPP_LINK" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
             rmdir "$GODOT_CPP_LINK"
@@ -55,28 +62,7 @@ ensure_godot_cpp_link() {
 }
 
 if [[ ! -f "$GODOT_CPP_SOURCE/SConstruct" ]]; then
-    mkdir -p "$REPO_ROOT/third_party"
-    if git -C "$REPO_ROOT" ls-files --error-unmatch third_party/godot-cpp >/dev/null 2>&1; then
-        echo "godot-cpp submodule not initialised; running 'git submodule update --init'..." >&2
-        git -C "$REPO_ROOT" submodule update --init --depth=1 third_party/godot-cpp
-    else
-        # Submodule is declared in .gitmodules but the gitlink was never
-        # committed, so `submodule update` can't resolve the path. Clone the
-        # matching branch directly. Clone into a PID-suffixed temp dir, then
-        # atomically move into place so a partial/interrupted clone never
-        # leaves a half-populated godot-cpp/ that the SConstruct check accepts.
-        echo "godot-cpp submodule not tracked; cloning godot-cpp (branch 4.5) fallback..." >&2
-        tmp="$REPO_ROOT/third_party/godot-cpp.$$.tmp"
-        rm -rf "$tmp"
-        if git clone --depth 1 --branch 4.5 https://github.com/godotengine/godot-cpp.git "$tmp"; then
-            rm -rf "$GODOT_CPP_SOURCE"
-            mv "$tmp" "$GODOT_CPP_SOURCE"
-        else
-            rm -rf "$tmp"
-            echo "ERROR: godot-cpp clone failed" >&2
-            exit 1
-        fi
-    fi
+    "$DEPS_SCRIPT" godot-cpp
 fi
 
 ensure_godot_cpp_link

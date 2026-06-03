@@ -50,11 +50,13 @@ private data class AccessUnit(
 	val bytes: ByteArray,
 	val receiveNs: Long,
 	val sendNs: Long,
+	val clockOffsetNs: Long,
+	val clockSamples: Int,
 )
 
 private data class AccessUnitTiming(
 	val receiveNs: Long,
-	val sendNs: Long,
+	val sendNsXr: Long,
 	val queuedNs: Long,
 )
 
@@ -128,6 +130,19 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		private var ahbBridgeLatencySumMs = 0.0
 		private var ahbBridgeLatencyMinMs = Double.POSITIVE_INFINITY
 		private var ahbBridgeLatencyMaxMs = 0.0
+		private var ahbLastStatsSeq = 0L
+		private var ahbLastStatsNs = 0L
+		private var ahbLastImportFrames = 0L
+		private var ahbLastImportWindowMs = 0.0
+		private var ahbLastImportFps = 0.0
+		private var ahbLastRxCount = 0
+		private var ahbLastRxAvgMs = Double.NaN
+		private var ahbLastRxMinMs = Double.NaN
+		private var ahbLastRxMaxMs = Double.NaN
+		private var ahbLastBridgeCount = 0
+		private var ahbLastBridgeAvgMs = Double.NaN
+		private var ahbLastBridgeMinMs = Double.NaN
+		private var ahbLastBridgeMaxMs = Double.NaN
 		private val epochOffsetNs =
 			System.currentTimeMillis() * 1_000_000L - SystemClock.elapsedRealtimeNanos()
 
@@ -183,6 +198,20 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	private var configuredMime: String = MIME_AVC
 
 	override fun getPluginName(): String = "KotlinVideoDecoderPlugin"
+
+	override fun getPluginMethods(): MutableList<String> =
+		mutableListOf(
+			"start_decoder",
+			"start_decoder_with_codec",
+			"stop_decoder",
+			"is_running",
+			"submit_access_unit",
+			"submit_access_unit_timed",
+			"submit_access_unit_timed_with_clock",
+			"get_latest_frame",
+			"get_ahb_latency_stats",
+			"probe_hardware_buffer_support",
+		)
 
 	override fun getPluginSignals(): MutableSet<SignalInfo> =
 		mutableSetOf(
@@ -293,16 +322,34 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		@Suppress("FunctionName")
 		@UsedByGodot
 		fun submit_access_unit(access_unit: ByteArray): Boolean {
-			return offerAccessUnit(access_unit, nowNs(), 0L)
+			return offerAccessUnit(access_unit, nowNs(), 0L, 0L, 0)
 		}
 
 		@Suppress("FunctionName")
 		@UsedByGodot
 		fun submit_access_unit_timed(access_unit: ByteArray, receiveNs: Long, sendNs: Long): Boolean {
-			return offerAccessUnit(access_unit, receiveNs, sendNs)
+			return offerAccessUnit(access_unit, receiveNs, sendNs, 0L, if (sendNs > 0L) 1 else 0)
 		}
 
-		private fun offerAccessUnit(access_unit: ByteArray, receiveNs: Long, sendNs: Long): Boolean {
+		@Suppress("FunctionName")
+		@UsedByGodot
+		fun submit_access_unit_timed_with_clock(
+			access_unit: ByteArray,
+			receiveNs: Long,
+			sendNs: Long,
+			clockOffsetNs: Long,
+			clockSamples: Int,
+		): Boolean {
+			return offerAccessUnit(access_unit, receiveNs, sendNs, clockOffsetNs, clockSamples)
+		}
+
+		private fun offerAccessUnit(
+			access_unit: ByteArray,
+			receiveNs: Long,
+			sendNs: Long,
+			clockOffsetNs: Long,
+			clockSamples: Int,
+		): Boolean {
 			if (!running.get()) {
 				return false
 			}
@@ -314,6 +361,8 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 					bytes = access_unit.clone(),
 					receiveNs = receiveNs,
 					sendNs = sendNs,
+					clockOffsetNs = clockOffsetNs,
+					clockSamples = clockSamples,
 				)
 			)
 			if (!accepted) {
@@ -340,6 +389,32 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			dict["y_plane"] = frame.yPlane
 			dict["u_plane"] = frame.uPlane
 			dict["v_plane"] = frame.vPlane
+		}
+		return dict
+	}
+
+	@Suppress("FunctionName")
+	@UsedByGodot
+	fun get_ahb_latency_stats(): Dictionary {
+		val dict = Dictionary()
+		synchronized(ahbLatencyLock) {
+			if (ahbLastStatsSeq <= 0L) {
+				return dict
+			}
+			dict["seq"] = ahbLastStatsSeq
+			dict["reported_ns"] = ahbLastStatsNs
+			dict["import_frames"] = ahbLastImportFrames
+			dict["import_window_ms"] = ahbLastImportWindowMs
+			dict["import_fps"] = ahbLastImportFps
+			dict["rx_to_ahb_count"] = ahbLastRxCount
+			dict["rx_to_ahb_avg_ms"] = ahbLastRxAvgMs
+			dict["rx_to_ahb_min_ms"] = ahbLastRxMinMs
+			dict["rx_to_ahb_max_ms"] = ahbLastRxMaxMs
+			dict["bridge_to_ahb_count"] = ahbLastBridgeCount
+			dict["bridge_to_ahb_avg_ms"] = ahbLastBridgeAvgMs
+			dict["bridge_to_ahb_min_ms"] = ahbLastBridgeMinMs
+			dict["bridge_to_ahb_max_ms"] = ahbLastBridgeMaxMs
+			dict["timing_map"] = timingByPtsUs.size
 		}
 		return dict
 	}
@@ -440,9 +515,15 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 								0,
 							)
 							if (receiveNs > 0L) {
+								val sendNsXr =
+									if (pendingAccessUnit!!.clockSamples > 0 && pendingAccessUnit!!.sendNs > 0L) {
+										pendingAccessUnit!!.sendNs - pendingAccessUnit!!.clockOffsetNs
+									} else {
+										0L
+									}
 								timingByPtsUs[ptsUs] = AccessUnitTiming(
 									receiveNs = receiveNs,
-									sendNs = pendingAccessUnit!!.sendNs,
+									sendNsXr = sendNsXr,
 									queuedNs = queuedNs,
 								)
 								pruneTimingMap(queuedNs)
@@ -599,8 +680,8 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 					val timing = timingByPtsUs.remove(imageTimestampNs / 1_000L)
 					if (timing != null && timing.receiveNs > 0L && nowNsCached >= timing.receiveNs) {
 						val bridgeToAhbMs =
-							if (timing.sendNs > 0L && nowNsCached >= timing.sendNs) {
-								(nowNsCached - timing.sendNs) / 1_000_000.0
+							if (timing.sendNsXr > 0L && timing.receiveNs >= timing.sendNsXr && nowNsCached >= timing.sendNsXr) {
+								(nowNsCached - timing.sendNsXr) / 1_000_000.0
 							} else {
 								Double.NaN
 							}
@@ -627,7 +708,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 							val dtMs = (nowNsCached - last) / 1_000_000.0
 							val fps = n.toDouble() * 1000.0 / dtMs
 							Log.i(TAG, "AHB import: $n frames in %.0f ms (~%.1f fps)".format(dtMs, fps))
-							reportAhbLatencyStats()
+							reportAhbLatencyStats(nowNsCached, n, dtMs, fps)
 							ahbFrameCounter.set(0)
 						}
 					}
@@ -796,6 +877,19 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 				ahbBridgeLatencySumMs = 0.0
 				ahbBridgeLatencyMinMs = Double.POSITIVE_INFINITY
 				ahbBridgeLatencyMaxMs = 0.0
+				ahbLastStatsSeq = 0L
+				ahbLastStatsNs = 0L
+				ahbLastImportFrames = 0L
+				ahbLastImportWindowMs = 0.0
+				ahbLastImportFps = 0.0
+				ahbLastRxCount = 0
+				ahbLastRxAvgMs = Double.NaN
+				ahbLastRxMinMs = Double.NaN
+				ahbLastRxMaxMs = Double.NaN
+				ahbLastBridgeCount = 0
+				ahbLastBridgeAvgMs = Double.NaN
+				ahbLastBridgeMinMs = Double.NaN
+				ahbLastBridgeMaxMs = Double.NaN
 			}
 		}
 
@@ -822,16 +916,43 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			}
 		}
 
-		private fun reportAhbLatencyStats() {
+		private fun reportAhbLatencyStats(reportNs: Long, importFrames: Long, importWindowMs: Double, importFps: Double) {
 			synchronized(ahbLatencyLock) {
+				ahbLastStatsSeq += 1
+				ahbLastStatsNs = reportNs
+				ahbLastImportFrames = importFrames
+				ahbLastImportWindowMs = importWindowMs
+				ahbLastImportFps = importFps
 				if (ahbLatencyCount <= 0) {
+					ahbLastRxCount = 0
+					ahbLastRxAvgMs = Double.NaN
+					ahbLastRxMinMs = Double.NaN
+					ahbLastRxMaxMs = Double.NaN
+					ahbLastBridgeCount = 0
+					ahbLastBridgeAvgMs = Double.NaN
+					ahbLastBridgeMinMs = Double.NaN
+					ahbLastBridgeMaxMs = Double.NaN
 					return
 				}
 				val avgMs = ahbLatencySumMs / ahbLatencyCount.toDouble()
+				ahbLastRxCount = ahbLatencyCount
+				ahbLastRxAvgMs = avgMs
+				ahbLastRxMinMs = ahbLatencyMinMs
+				ahbLastRxMaxMs = ahbLatencyMaxMs
+				ahbLastBridgeCount = ahbBridgeLatencyCount
+				if (ahbBridgeLatencyCount > 0) {
+					ahbLastBridgeAvgMs = ahbBridgeLatencySumMs / ahbBridgeLatencyCount.toDouble()
+					ahbLastBridgeMinMs = ahbBridgeLatencyMinMs
+					ahbLastBridgeMaxMs = ahbBridgeLatencyMaxMs
+				} else {
+					ahbLastBridgeAvgMs = Double.NaN
+					ahbLastBridgeMinMs = Double.NaN
+					ahbLastBridgeMaxMs = Double.NaN
+				}
 				val bridgeStats =
 					if (ahbBridgeLatencyCount > 0) {
 						" bridge_to_ahb avg=%.1f ms min=%.1f ms max=%.1f ms count=%d".format(
-							ahbBridgeLatencySumMs / ahbBridgeLatencyCount.toDouble(),
+							ahbLastBridgeAvgMs,
 							ahbBridgeLatencyMinMs,
 							ahbBridgeLatencyMaxMs,
 							ahbBridgeLatencyCount,

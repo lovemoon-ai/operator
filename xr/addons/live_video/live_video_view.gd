@@ -225,22 +225,30 @@ func _process(_delta: float) -> void:
 			var n: int = int(info.get("frames", 0))
 			if dec_ns > 0:
 				var post_decode_ms := float(now_ns - dec_ns) / 1_000_000.0
-				var packet := _take_latest_ahb_packet(n)
-				var receive_to_present_ms := -1.0
-				var bridge_to_present_ms := -1.0
-				var receive_ns: int = int(packet.get("receive_ns", 0))
-				if receive_ns > 0 and now_ns >= receive_ns:
-					receive_to_present_ms = float(now_ns - receive_ns) / 1_000_000.0
-				var send_ns: int = int(packet.get("send_ns", 0))
-				if _clock_samples > 0 and send_ns > 0:
-					var send_ns_xr: int = send_ns - _clock_offset_ns
-					if now_ns >= send_ns_xr:
-						bridge_to_present_ms = float(now_ns - send_ns_xr) / 1_000_000.0
-				print("[LiveVideo] AHB stats: frames=%d post_decode=%.1f ms rx_to_present=%s bridge_to_present=%s" % [
+				var rx_to_ahb_ms := -1.0
+				var bridge_to_ahb_ms := -1.0
+				var import_fps := -1.0
+				var rx_samples := 0
+				var bridge_samples := 0
+				var timing_map := 0
+				if _video_decoder:
+					var stats: Dictionary = _video_decoder.call("get_ahb_latency_stats")
+					if not stats.is_empty():
+						rx_to_ahb_ms = _stat_ms(stats, "rx_to_ahb_avg_ms", "rx_to_ahb_count")
+						bridge_to_ahb_ms = _stat_ms(stats, "bridge_to_ahb_avg_ms", "bridge_to_ahb_count")
+						import_fps = float(stats.get("import_fps", -1.0))
+						rx_samples = int(stats.get("rx_to_ahb_count", 0))
+						bridge_samples = int(stats.get("bridge_to_ahb_count", 0))
+						timing_map = int(stats.get("timing_map", 0))
+				print("[LiveVideo] AHB stats: frames=%d post_decode=%.1f ms rx_to_ahb=%s bridge_to_ahb=%s import_fps=%s samples=%d/%d timing_map=%d" % [
 					n,
 					post_decode_ms,
-					_fmt_ms(receive_to_present_ms),
-					_fmt_ms(bridge_to_present_ms),
+					_fmt_ms(rx_to_ahb_ms),
+					_fmt_ms(bridge_to_ahb_ms),
+					_fmt_fps(import_fps),
+					rx_samples,
+					bridge_samples,
+					timing_map,
 				])
 
 	if not follow_camera or not _initialized or not _display_mesh or not _xr_camera:
@@ -338,9 +346,24 @@ static func _ewma(prev: float, sample: float) -> float:
 
 static func _fmt_ms(v: float) -> String:
 	# Fixed-width " 12.3 ms" / "100.5 ms" / "   -- ms" — 8 chars.
-	if v < 0.0:
+	if v < 0.0 or is_nan(v) or is_inf(v):
 		return "   -- ms"
 	return "%5.1f ms" % v
+
+
+static func _fmt_fps(v: float) -> String:
+	if v < 0.0 or is_nan(v) or is_inf(v):
+		return "--"
+	return "%.1f" % v
+
+
+static func _stat_ms(stats: Dictionary, value_key: String, count_key: String) -> float:
+	if int(stats.get(count_key, 0)) <= 0:
+		return -1.0
+	var v := float(stats.get(value_key, -1.0))
+	if is_nan(v) or is_inf(v):
+		return -1.0
+	return v
 
 
 static func _fmt_int(v: int) -> String:
@@ -721,13 +744,13 @@ func _on_video_frame_ready(
 		decoded_ns: int = 0,
 		rgba: PackedByteArray = PackedByteArray()
 	) -> void:
-	if _video_decoder and _video_decoder.has_method("is_running") and not bool(_video_decoder.is_running()):
+	if _video_decoder and not _decoder_is_running():
 		return
 
 	if width <= 0 or height <= 0 or rgba.is_empty():
-		if _video_decoder == null or not _video_decoder.has_method("get_latest_frame"):
+		if _video_decoder == null:
 			return
-		var frame: Dictionary = _video_decoder.get_latest_frame()
+		var frame: Dictionary = _video_decoder.call("get_latest_frame")
 		if frame.is_empty():
 			return
 		width = int(frame.get("width", 0))
@@ -953,19 +976,16 @@ func _submit_video_access_unit(access_unit: PackedByteArray, packet: Dictionary)
 	# kept its own reference and rewrote it, which we don't do.
 	_submitted_video_packets.append(packet)
 	# Use call() to avoid relying on Godot's reflection of @UsedByGodot methods.
-	var accepted := false
-	if _video_decoder.has_method("submit_access_unit_timed"):
-		var send_ns_for_decoder: int = int(packet.get("send_ns", 0))
-		if _clock_samples > 0 and send_ns_for_decoder > 0:
-			send_ns_for_decoder -= _clock_offset_ns
-		accepted = bool(_video_decoder.call(
-			"submit_access_unit_timed",
-			access_unit,
-			int(packet.get("receive_ns", 0)),
-			send_ns_for_decoder,
-		))
-	else:
-		accepted = bool(_video_decoder.call("submit_access_unit", access_unit))
+	var receive_ns: int = int(packet.get("receive_ns", 0))
+	var send_ns: int = int(packet.get("send_ns", 0))
+	var accepted := bool(_video_decoder.call(
+		"submit_access_unit_timed_with_clock",
+		access_unit,
+		receive_ns,
+		send_ns,
+		_clock_offset_ns,
+		_clock_samples,
+	))
 	if accepted:
 		return true
 

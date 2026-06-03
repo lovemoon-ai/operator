@@ -487,27 +487,20 @@ only called once per launch (line 185).
 > When to use this: when the C++ Vulkan/AHB native bridge needs to be
 > rebuilt (you've edited `src/*.cpp`, or you're on a fresh clone).
 
-### 5.1 One-time submodule init
+### 5.1 One-time dependency sync
 
 ```
-git submodule update --init --depth=1 third_party/godot-cpp
-ln -sfn ../../../third_party/godot-cpp xr/native/ahb_decoder/godot-cpp
+make -C xr deps
 ```
 
-`xr/native/ahb_decoder/build.sh:28-31` runs this automatically if it
-notices `godot-cpp/SConstruct` is missing. The submodule itself is
-declared at `.gitmodules:1-4`:
-
-```
-[submodule "third_party/godot-cpp"]
-	path = third_party/godot-cpp
-	url = https://github.com/godotengine/godot-cpp.git
-	branch = 4.5
-```
+`scripts/sync_deps.sh` pins and syncs `godot-cpp`,
+`godot-xr-tools`, and FFmpeg into repo-level `.deps/src/`. The AHB
+build script runs `scripts/sync_deps.sh godot-cpp` automatically if it
+notices `godot-cpp/SConstruct` is missing.
 
 `xr/native/ahb_decoder/godot-cpp` is a local symlink to the shared
 checkout. CMake writes godot-cpp's build output to
-`third_party/godot-cpp-build` so future C++ Godot plugins can reuse
+`.deps/build/godot-cpp` so future C++ Godot plugins can reuse
 the same build tree.
 
 Branch `4.5` is mandatory — it must match the engine version pinned in
@@ -531,7 +524,7 @@ cmake -B build-arm64 \
     -DANDROID_PLATFORM=android-29 \
     -DCMAKE_BUILD_TYPE=Release \
     -DGODOT_CPP_DIR=$SCRIPT_DIR/godot-cpp \
-    -DGODOT_CPP_BUILD_DIR=$REPO_ROOT/third_party/godot-cpp-build
+    -DGODOT_CPP_BUILD_DIR=$REPO_ROOT/.deps/build/godot-cpp
 cmake --build build-arm64 -j4
 ```
 

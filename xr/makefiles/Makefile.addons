@@ -6,8 +6,8 @@
 # install, run, logcat, top-level clean) stay in xr/Makefile.
 #
 # Targets exposed here:
-#   sync-submodule        — sync .gitmodules config, then init/update all git submodules
-#   setup-vendors          — godot-xr-tools submodule/symlink + godotopenxrvendors prepare.sh
+#   deps                   — sync pinned third-party repos into ../.deps
+#   setup-vendors          — godot-xr-tools symlink + godotopenxrvendors prepare.sh
 #   prepare-android-libs   — extract Godot's android template AARs from export_templates
 #   build-ahb              — build the AHardwareBuffer GDExtension and install both copies of the .so
 #   build-capture-plugins  — gradle build the Android capture plugins, drop their .aar/.jar into addons/
@@ -55,23 +55,28 @@ AHB_DIR      := native/ahb_decoder
 AHB_SRC      := $(AHB_DIR)/CMakeLists.txt $(AHB_DIR)/build.sh $(shell find $(AHB_DIR)/src -type f 2>/dev/null)
 AHB_ADDON_SO := addons/ahb_decoder/libahb_decoder.so
 AHB_JNI_SO   := android/build/libs/release/arm64-v8a/libahb_decoder.so
-GODOT_CPP_BUILD_DIR := ../third_party/godot-cpp-build
+DEPS_SCRIPT ?= ../scripts/sync_deps.sh
+DEPS_ROOT ?= ../.deps
+DEPS_SRC_DIR := $(abspath $(DEPS_ROOT)/src)
+DEPS_BUILD_DIR := $(abspath $(DEPS_ROOT)/build)
+GODOT_XR_TOOLS_ADDON := $(DEPS_SRC_DIR)/godot-xr-tools/addons/godot-xr-tools
+GODOT_CPP_BUILD_DIR := $(DEPS_BUILD_DIR)/godot-cpp
 
 # ---------------------------------------------------------------------------
 # Phony targets exposed to xr/Makefile
 # ---------------------------------------------------------------------------
 
-.PHONY: sync-submodule setup-vendors prepare-android-libs build-ahb build-capture-plugins prepare-capture-plugins clean-addons
+.PHONY: deps setup-vendors prepare-android-libs build-ahb build-capture-plugins prepare-capture-plugins clean-addons
 
 # ---------------------------------------------------------------------------
 # Third-party vendored addons
 # ---------------------------------------------------------------------------
-# Two third-party addons are pulled from upstream instead of being vendored
-# into this repo:
+# Third-party source checkouts are pulled from upstream into repo-level .deps
+# instead of being vendored or tracked as git submodules:
 #
-#   addons/godot-xr-tools     — git submodule at third_party/..., exposed
-#                               here via a symlink (so Godot sees it under
-#                               res://addons/ without bloating the repo).
+#   addons/godot-xr-tools     — .deps/src/godot-xr-tools, exposed here via
+#                               a symlink so Godot sees it under res://addons/
+#                               without bloating the repo.
 #   addons/godotopenxrvendors — prebuilt binaries fetched by `prepare.sh`
 #                               from a pinned GitHub release of
 #                               GodotVR/godot_openxr_vendors.
@@ -80,36 +85,24 @@ GODOT_CPP_BUILD_DIR := ../third_party/godot-cpp-build
 # either pinned version. Both steps are idempotent (fast no-op when already
 # in sync).
 #
-# To upgrade godot-xr-tools:
-#   cd third_party/godot-xr-tools && git fetch --tags && git checkout <new-tag>
-#   git add third_party/godot-xr-tools && git commit
+# To upgrade godot-xr-tools / godot-cpp / FFmpeg:
+#   edit scripts/sync_deps.sh pins, run `make deps`, then commit the script.
 # To upgrade godotopenxrvendors:
 #   edit UPSTREAM_TAG in addons/godotopenxrvendors/prepare.sh and re-run --force.
-sync-submodule:
-	git -C .. submodule sync --recursive
-	git -C .. submodule update --init --recursive
-	@echo "[sync-submodule] submodules ready"
+deps:
+	$(DEPS_SCRIPT)
 
 setup-vendors:
-	@if [ ! -d ../third_party/godot-xr-tools/addons/godot-xr-tools ]; then \
-		mkdir -p ../third_party; \
-		if git -C .. ls-files --error-unmatch third_party/godot-xr-tools >/dev/null 2>&1; then \
-			git -C .. submodule update --init --recursive third_party/godot-xr-tools; \
-		else \
-			echo "[setup-vendors] cloning godot-xr-tools fallback"; \
-			tmp="../third_party/.godot-xr-tools.$$$$.tmp"; \
-			rm -rf "$$tmp"; \
-			if git clone --depth 1 --filter=blob:none https://github.com/godotvr/godot-xr-tools.git "$$tmp"; then \
-				rm -rf ../third_party/godot-xr-tools; \
-				mv "$$tmp" ../third_party/godot-xr-tools; \
-			else \
-				rm -rf "$$tmp"; \
-				echo "[setup-vendors] godot-xr-tools clone failed" >&2; \
-				exit 1; \
-			fi; \
-		fi; \
+	@if [ ! -d "$(GODOT_XR_TOOLS_ADDON)" ]; then \
+		$(DEPS_SCRIPT) godot-xr-tools; \
 	fi
-	@test -L addons/godot-xr-tools || ln -sfn ../../third_party/godot-xr-tools/addons/godot-xr-tools addons/godot-xr-tools
+	@if [ -L addons/godot-xr-tools ] || [ ! -e addons/godot-xr-tools ]; then \
+		rm -f addons/godot-xr-tools; \
+		ln -s "$(GODOT_XR_TOOLS_ADDON)" addons/godot-xr-tools; \
+	else \
+		echo "[setup-vendors] addons/godot-xr-tools exists and is not a symlink" >&2; \
+		exit 1; \
+	fi
 	@echo "[setup-vendors] godot-xr-tools $$(cat addons/godot-xr-tools/plugin.cfg | awk -F'\"' '/^version/{print $$2}') ready"
 	./addons/godotopenxrvendors/prepare.sh
 

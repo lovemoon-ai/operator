@@ -456,7 +456,7 @@ reassembles into one access unit before handing to the decoder
 
 ## 5. `xr/native/ahb_decoder/` GDExtension
 
-C++17 GDExtension built via CMake against `godot-cpp` (submodule).
+C++17 GDExtension built via CMake against `godot-cpp` from `.deps/src`.
 Produces `libahb_decoder.so` installed into both
 `xr/addons/ahb_decoder/` (for the GDExtension manifest) and
 `xr/android/build/libs/arm64-v8a/` (for `System.loadLibrary`).

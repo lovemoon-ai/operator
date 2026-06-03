@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
-set(FFMPEG_BUILD_DIR "${REPO_ROOT}/third_party/ffmpeg-build" CACHE PATH
+set(FFMPEG_BUILD_DIR "${REPO_ROOT}/.deps/build/ffmpeg" CACHE PATH
     "Shared FFmpeg build root for Android")
 set(FFMPEG_ROOT "${FFMPEG_BUILD_DIR}/${ANDROID_ABI}/install" CACHE PATH
     "Patched FFmpeg install root for Android")

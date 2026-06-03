@@ -24,19 +24,18 @@ if(ANDROID_PLATFORM_LEVEL LESS 29)
 endif()
 
 # --- godot-cpp ----------------------------------------------------
-# The real checkout lives in repo-level third_party/godot-cpp so multiple
+# The real checkout lives in repo-level .deps/src/godot-cpp so multiple
 # native plugins can share it. This plugin consumes it through the
 # CMAKE_CURRENT_SOURCE_DIR/godot-cpp symlink created by build.sh.
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 set(GODOT_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/godot-cpp" CACHE PATH
-    "Path to the godot-cpp source tree, normally the local symlink to third_party/godot-cpp")
-set(GODOT_CPP_BUILD_DIR "${REPO_ROOT}/third_party/godot-cpp-build" CACHE PATH
+    "Path to the godot-cpp source tree, normally the local symlink to .deps/src/godot-cpp")
+set(GODOT_CPP_BUILD_DIR "${REPO_ROOT}/.deps/build/godot-cpp" CACHE PATH
     "Shared CMake build directory for godot-cpp")
 if(NOT EXISTS "${GODOT_CPP_DIR}/SConstruct")
     message(FATAL_ERROR
         "godot-cpp not found at ${GODOT_CPP_DIR}. The library will not build.\n"
-        "Run:  git submodule update --init --depth=1 third_party/godot-cpp\n"
-        "      ln -sfn ../../../third_party/godot-cpp xr/native/ahb_decoder/godot-cpp\n"
+        "Run:  make -C xr deps\n"
     )
 endif()
 add_subdirectory("${GODOT_CPP_DIR}" "${GODOT_CPP_BUILD_DIR}" EXCLUDE_FROM_ALL)

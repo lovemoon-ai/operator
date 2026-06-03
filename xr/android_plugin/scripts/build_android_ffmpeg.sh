@@ -7,10 +7,11 @@ QUEST_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKSPACE_ROOT="$(cd "$QUEST_ROOT/.." && pwd)"
 SPATIALMP4_ROOT="${SPATIALMP4_ROOT:-$WORKSPACE_ROOT/SpatialMP4}"
 FFMPEG_VERSION="${FFMPEG_VERSION:-8.1.1}"
-DEFAULT_FFMPEG_TAG="$(git -C "$WORKSPACE_ROOT" config --file .gitmodules --get submodule.third_party/ffmpeg.tag 2>/dev/null || true)"
-FFMPEG_TAG="${FFMPEG_TAG:-${DEFAULT_FFMPEG_TAG:-n${FFMPEG_VERSION}}}"
-FFMPEG_SOURCE="${FFMPEG_SOURCE:-$WORKSPACE_ROOT/third_party/ffmpeg}"
-FFMPEG_BUILD_DIR="${FFMPEG_BUILD_DIR:-$WORKSPACE_ROOT/third_party/ffmpeg-build}"
+DEPS_ROOT="${DEPS_ROOT:-$WORKSPACE_ROOT/.deps}"
+DEFAULT_FFMPEG_SOURCE="$DEPS_ROOT/src/ffmpeg"
+FFMPEG_TAG="${FFMPEG_TAG:-n${FFMPEG_VERSION}}"
+FFMPEG_SOURCE="${FFMPEG_SOURCE:-$DEFAULT_FFMPEG_SOURCE}"
+FFMPEG_BUILD_DIR="${FFMPEG_BUILD_DIR:-$DEPS_ROOT/build/ffmpeg}"
 ANDROID_ABI="${ANDROID_ABI:-arm64-v8a}"
 ANDROID_API="${ANDROID_API:-29}"
 NDK_ROOT="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -73,24 +74,9 @@ is_ffmpeg_source_repo() {
 }
 
 ensure_ffmpeg_source() {
-    mkdir -p "$WORKSPACE_ROOT/third_party"
-
     if ! is_ffmpeg_source_repo; then
-        if git -C "$WORKSPACE_ROOT" ls-files --error-unmatch third_party/ffmpeg >/dev/null 2>&1; then
-            echo "FFmpeg submodule not initialised; running 'git submodule update --init'..." >&2
-            git -C "$WORKSPACE_ROOT" submodule update --init --depth=1 third_party/ffmpeg
-        else
-            echo "FFmpeg submodule not tracked; cloning $FFMPEG_TAG fallback..." >&2
-            tmp="$WORKSPACE_ROOT/third_party/ffmpeg.$$.tmp"
-            rm -rf "$tmp"
-            if git clone --depth 1 --branch "$FFMPEG_TAG" https://github.com/FFmpeg/FFmpeg.git "$tmp"; then
-                rm -rf "$FFMPEG_SOURCE"
-                mv "$tmp" "$FFMPEG_SOURCE"
-            else
-                rm -rf "$tmp"
-                echo "ERROR: FFmpeg clone failed" >&2
-                exit 1
-            fi
+        if [ "$FFMPEG_SOURCE" = "$DEFAULT_FFMPEG_SOURCE" ] && [ -x "$WORKSPACE_ROOT/scripts/sync_deps.sh" ]; then
+            "$WORKSPACE_ROOT/scripts/sync_deps.sh" ffmpeg
         fi
     fi
 

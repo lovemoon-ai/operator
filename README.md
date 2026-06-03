@@ -4,15 +4,15 @@
 从 clone 到跑通端到端测试：
 
 ```bash
-# 1. 拉取代码与子模块
+# 1. 拉取代码并同步本地第三方依赖
 git clone https://github.com/lovemoon-ai/operator
-git submodule update --init --recursive
+cd operator/xr && make deps
 
 # 2. 安装测试依赖（macOS 示例）
 brew install ffmpeg mediamtx android-platform-tools
 
 # 3. 构建 Robot 侧（Rust）
-cd robot && cargo build --release -p xr-bridge
+cd ../robot && cargo build --release -p xr-bridge
 
 # 4. 构建并安装 XR APK 到 Quest（首次需要）
 cd ../xr && make build && make install

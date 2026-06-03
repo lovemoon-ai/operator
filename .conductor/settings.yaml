@@ -1,7 +1,6 @@
 worktree:
   sync_branch: false
   symlink:
-    - third_party/ffmpeg-build
-    - third_party/godot-cpp-build
+    - .deps
 
 icon: ../xr/icon.png

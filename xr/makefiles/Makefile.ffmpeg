@@ -1,7 +1,7 @@
 # Cross-compiled FFmpeg for spatialmp4_muxer (Android arm64-v8a).
 #
 # Included from xr/Makefile (via Makefile.addons). The actual heavy lifting
-# — prepare submodule worktree, patch, configure, make — lives in
+# — prepare source worktree, patch, configure, make — lives in
 #   android_plugin/scripts/build_android_ffmpeg.sh
 # which is shared between Makefile-driven and ad-hoc invocations. This file
 # layers idempotency, sibling-repo auto-discovery, and clean wiring on top.
@@ -13,10 +13,10 @@
 #
 # Variables (override on the make command line or in the environment):
 #   FFMPEG_VERSION   default 8.1.1     — git tag = n${FFMPEG_VERSION}
-#   FFMPEG_TAG       default from ../.gitmodules submodule.third_party/ffmpeg.tag
-#   FFMPEG_SOURCE    default ../third_party/ffmpeg
-#                    Submodule checkout used as the clean source tree.
-#   FFMPEG_BUILD_DIR default ../third_party/ffmpeg-build
+#   FFMPEG_TAG       default n${FFMPEG_VERSION}
+#   FFMPEG_SOURCE    default ../.deps/src/ffmpeg
+#                    Pinned source checkout used as the clean source tree.
+#   FFMPEG_BUILD_DIR default ../.deps/build/ffmpeg
 #                    Per-ABI worktree, configure output, and install root.
 #   ANDROID_ABI      default arm64-v8a — only arm64-v8a is wired today
 #   ANDROID_API      default 29
@@ -27,9 +27,9 @@
 #                    NDK location; one of them must be set.
 
 FFMPEG_VERSION ?= 8.1.1
-FFMPEG_TAG     ?= $(shell git config --file ../.gitmodules --get submodule.third_party/ffmpeg.tag 2>/dev/null || echo n$(FFMPEG_VERSION))
-FFMPEG_SOURCE  ?= $(abspath ../third_party/ffmpeg)
-FFMPEG_BUILD_DIR ?= $(abspath ../third_party/ffmpeg-build)
+FFMPEG_TAG     ?= n$(FFMPEG_VERSION)
+FFMPEG_SOURCE  ?= $(abspath ../.deps/src/ffmpeg)
+FFMPEG_BUILD_DIR ?= $(abspath ../.deps/build/ffmpeg)
 ANDROID_ABI    ?= arm64-v8a
 ANDROID_API    ?= 29
 
@@ -39,7 +39,6 @@ ANDROID_API    ?= 29
 FFMPEG_INSTALL := $(FFMPEG_BUILD_DIR)/$(ANDROID_ABI)/install
 FFMPEG_LIB     := $(FFMPEG_INSTALL)/lib/libavformat.a
 FFMPEG_WORKTREE := $(FFMPEG_BUILD_DIR)/$(ANDROID_ABI)/src
-FFMPEG_LEGACY_INSTALL := android_plugin/spatialmp4_muxer/src/main/cpp/third_party/ffmpeg
 
 # Build script (single source of truth for the configure flags + toolchain
 # setup). Make stays out of its way and just decides when to invoke it.
@@ -100,15 +99,14 @@ $(FFMPEG_LIB): $(FFMPEG_BUILD_SCRIPT) \
 	@test -f "$@" || { echo "[ffmpeg] build script finished but $@ is missing" >&2; exit 1; }
 
 # Hose both the install tree and the script's per-ABI worktree/build dir.
-# The real FFmpeg source stays pinned under third_party/ffmpeg; all generated
-# source worktrees, objects, and installed archives live in third_party/ffmpeg-build.
+# The real FFmpeg source stays pinned under .deps/src/ffmpeg; all generated
+# source worktrees, objects, and installed archives live in .deps/build/ffmpeg.
 clean-ffmpeg:
 	@if git -C "$(FFMPEG_SOURCE)" rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
 		git -C "$(FFMPEG_SOURCE)" worktree remove -f "$(FFMPEG_WORKTREE)" >/dev/null 2>&1 || true; \
 		git -C "$(FFMPEG_SOURCE)" worktree prune >/dev/null 2>&1 || true; \
 	fi
 	rm -rf $(FFMPEG_BUILD_DIR)/$(ANDROID_ABI) \
-	       $(FFMPEG_LEGACY_INSTALL) \
 	       android_plugin/scripts/build_ffmpeg_android
 
 ffmpeg-info:

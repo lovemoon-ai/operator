@@ -26,6 +26,8 @@ TCP+UDP protocol on a shared Layer-2 subnet:
 Other top-level dirs:
 
 - **`claw/`** — Project's own design-doc system.
+- **`.deps/`** — Local hidden dependency checkouts/build output created by
+  `make -C xr deps`; ignored by git and not a submodule.
 - **`tools/mac_mock_streamer.py`** — Pure-Python reference
   implementation of the wire protocol. Useful when debugging XR-side
   behaviour without bringing up the Rust agent.
@@ -84,7 +86,7 @@ auto-extracts the AAR from `~/Library/Application Support/Godot/...`
 or `~/.local/share/godot/...`.
 
 ```bash
-make sync-submodule     # sync .gitmodules, then init/update all git submodules
+make deps               # sync pinned third-party repos into ../.deps
 make build              # build-quest — produces build/quest/XRoboToolkit.apk
 make build-pico         # build/pico/XRoboToolkit.apk
 make build-glassxr      # build/glassxr/XRoboToolkit.apk
@@ -104,8 +106,7 @@ The AHB GDExtension (`xr/native/ahb_decoder/`) is a separate build:
 
 ```bash
 # First time only:
-make -C xr sync-submodule
-ln -sfn ../../../third_party/godot-cpp xr/native/ahb_decoder/godot-cpp
+make -C xr deps
 
 xr/native/ahb_decoder/build.sh          # Release
 xr/native/ahb_decoder/build.sh Debug    # symbol-level debugging

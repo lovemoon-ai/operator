@@ -18,7 +18,7 @@ plugins {
 }
 
 val repoRoot = rootProject.projectDir.parentFile.parentFile
-val ffmpegBuildDir = repoRoot.resolve("third_party/ffmpeg-build")
+val ffmpegBuildDir = repoRoot.resolve(".deps/build/ffmpeg")
 val ffmpegRoot = ffmpegBuildDir.resolve("arm64-v8a/install")
 
 android {
