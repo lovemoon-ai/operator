@@ -637,6 +637,9 @@ func _on_settings_requested() -> void:
 		return
 	_release_ui_pointer()
 	record_control.hide_control()
+	var mode := str(capture_options.get("interaction_mode", "controllers"))
+	if settings_panel != null and settings_panel.has_method("set_feedback_input_mode"):
+		settings_panel.set_feedback_input_mode(mode, right_pointer if mode == "controllers" else null)
 	settings_panel.open()
 
 

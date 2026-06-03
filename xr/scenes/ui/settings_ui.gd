@@ -34,6 +34,7 @@ const DEFAULT_SHOW_ON_LAUNCH: bool = false
 const EXIT_HOLD_SECONDS := 2.0
 
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
+const ICON_PATH := "res://assets/icons/%s.svg"
 
 # --- Palette --------------------------------------------------------
 const COL_PANEL_BG := Color(0.055, 0.067, 0.08, 0.96)
@@ -74,11 +75,14 @@ var _status_label: Label
 var _exit_indicator: HoldIndicator
 var _exit_holding := false
 var _exit_hold_seconds := 0.0
+var _icon_cache: Dictionary = {}
 
 ## name -> { ip, pose_port, video_port, device_type, device_name }
 var _discovered: Dictionary = {}
 ## Currently hover-highlighted slot.
 var _highlighted_slot: PanelContainer
+var _feedback_input_mode := "controllers"
+var _feedback_controller: XRController3D
 
 
 func _ready() -> void:
@@ -98,6 +102,11 @@ func _process(delta: float) -> void:
 		return
 	_cancel_exit_hold()
 	exit_requested.emit()
+
+
+func set_feedback_input_mode(mode: String, controller: XRController3D = null) -> void:
+	_feedback_input_mode = mode
+	_feedback_controller = controller
 
 
 # --- UI construction ----------------------------------------------------------
@@ -138,8 +147,7 @@ func _build_ui() -> void:
 	_discovery_option = OptionButton.new()
 	_discovery_option.custom_minimum_size.y = 55
 	_discovery_option.add_theme_font_size_override("font_size", 23)
-	_discovery_option.add_item(tr(MANUAL_LABEL_KEY))
-	_discovery_option.set_item_metadata(0, "")
+	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 	_discovery_option.item_selected.connect(_on_discovery_selected)
 	_add_interactive(content, _discovery_option)
 
@@ -164,8 +172,7 @@ func _build_ui() -> void:
 	_type_option.custom_minimum_size.y = 55
 	_type_option.add_theme_font_size_override("font_size", 23)
 	for t in ROBOT_TYPES:
-		_type_option.add_item(_robot_type_display(t))
-		_type_option.set_item_metadata(_type_option.item_count - 1, t)
+		_add_option_item(_type_option, _robot_type_display(t), t, _icon_name_for_robot_type(t))
 	_add_interactive(content, _type_option)
 
 	# --- Video + options toggles ---
@@ -201,6 +208,7 @@ func _build_ui() -> void:
 
 	var ok_button := Button.new()
 	ok_button.text = tr("UI_OK")
+	_apply_button_icon(ok_button, "check")
 	ok_button.custom_minimum_size.y = 68
 	ok_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	ok_button.add_theme_font_size_override("font_size", 28)
@@ -209,6 +217,7 @@ func _build_ui() -> void:
 
 	var exit_button := Button.new()
 	exit_button.text = tr("UI_EXIT")
+	_apply_button_icon(exit_button, "power")
 	exit_button.custom_minimum_size.y = 68
 	exit_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	exit_button.add_theme_font_size_override("font_size", 28)
@@ -237,12 +246,19 @@ func _add_interactive(parent: Container, control: Control) -> PanelContainer:
 	slot.add_theme_stylebox_override("panel", _interactive_style(false))
 	control.mouse_entered.connect(_on_interactive_mouse_entered.bind(slot))
 	control.mouse_exited.connect(_on_interactive_mouse_exited.bind(slot))
+	if control is CheckButton:
+		(control as CheckButton).toggled.connect(func(enabled: bool) -> void:
+			_play_ui_sound("toggle_on" if enabled else "toggle_off")
+		)
+	elif control is Button:
+		(control as Button).pressed.connect(func() -> void: _play_ui_sound("click"))
 	slot.add_child(control)
 	parent.add_child(slot)
 	return slot
 
 
 func _on_interactive_mouse_entered(slot: PanelContainer) -> void:
+	_play_ui_sound("hover", -5.0)
 	_set_highlighted_slot(slot)
 
 
@@ -320,8 +336,7 @@ func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> vo
 	var previously_selected_name := _selected_robot_name()
 
 	_discovery_option.clear()
-	_discovery_option.add_item(tr(MANUAL_LABEL_KEY))
-	_discovery_option.set_item_metadata(0, "")
+	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 
 	var names: Array = _discovered.keys()
 	names.sort()
@@ -330,10 +345,12 @@ func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> vo
 		var rname: String = names[i]
 		var info: Dictionary = _discovered[rname]
 		var disp := _format_robot_label(rname, info)
-		# OptionButton.add_item() returns void in Godot 4; query the index after.
-		_discovery_option.add_item(disp)
-		var idx: int = _discovery_option.item_count - 1
-		_discovery_option.set_item_metadata(idx, rname)
+		var idx := _add_option_item(
+			_discovery_option,
+			disp,
+			rname,
+			_icon_name_for_robot_type(String(info.get("device_type", "")))
+		)
 		if rname == previously_selected_name:
 			idx_to_select = idx
 		elif idx_to_select == 0 and prefer_ip != "" and String(info.get("ip", "")) == prefer_ip:
@@ -408,10 +425,12 @@ func _apply_mode_lock() -> void:
 
 func _on_ok_pressed() -> void:
 	_cancel_exit_hold()
+	_play_ui_sound("confirm")
 	var ip := _ip_input.text.strip_edges()
 	var port := _port_input.text.strip_edges().to_int()
 	if ip.is_empty():
 		_set_status(tr("UI_IP_REQUIRED"))
+		_play_ui_sound("error")
 		return
 	if port <= 0 or port > 65535:
 		port = DEFAULT_PORT
@@ -430,6 +449,7 @@ func _on_ok_pressed() -> void:
 
 func _on_exit_button_down() -> void:
 	_cancel_exit_hold()
+	_play_ui_sound("exit_charging", -4.0)
 	_exit_holding = true
 
 
@@ -467,6 +487,77 @@ func _robot_type_display(robot_type: String) -> String:
 			return tr("UI_DEVICE_TYPE_RC_CAR")
 		_:
 			return robot_type
+
+
+func _icon_name_for_robot_type(robot_type: String) -> String:
+	match robot_type:
+		"robot_arm":
+			return "robot-arm"
+		"rc_car":
+			return "car"
+		_:
+			return "signal"
+
+
+func _add_option_item(option: OptionButton, label: String, metadata: Variant, icon_name: String) -> int:
+	option.add_item(label)
+	var idx := option.item_count - 1
+	option.set_item_metadata(idx, metadata)
+	var icon := _load_icon(icon_name)
+	if icon != null:
+		option.set_item_icon(idx, icon)
+	return idx
+
+
+func _apply_button_icon(button: Button, icon_name: String) -> void:
+	button.icon = _load_icon(icon_name)
+	button.expand_icon = true
+	button.icon_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.add_theme_constant_override("icon_max_width", 30)
+
+
+func _load_icon(icon_name: String) -> Texture2D:
+	if _icon_cache.has(icon_name):
+		return _icon_cache[icon_name]
+	var texture: Texture2D = null
+	var path := ICON_PATH % icon_name
+	if FileAccess.file_exists(path):
+		var svg := FileAccess.get_file_as_string(path)
+		var image := Image.new()
+		if image.load_svg_from_string(svg, 1.0) == OK:
+			texture = ImageTexture.create_from_image(image)
+	_icon_cache[icon_name] = texture
+	return texture
+
+
+func _get_ui_sound_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("UISoundBus")
+
+
+func _get_haptics_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("Haptics")
+
+
+func _play_ui_sound(action: String, volume_db: float = 0.0) -> void:
+	if _feedback_input_mode == "hands":
+		var sound_bus := _get_ui_sound_bus()
+		if sound_bus != null and sound_bus.has_method("play"):
+			sound_bus.call("play", action, volume_db)
+	elif _feedback_input_mode == "controllers":
+		var haptics := _get_haptics_bus()
+		var use_haptics := _feedback_controller != null
+		if haptics != null and haptics.has_method("should_use_controller_feedback"):
+			use_haptics = bool(haptics.call("should_use_controller_feedback", _feedback_controller))
+		if use_haptics and haptics != null and haptics.has_method("fire_ui_event"):
+			haptics.call("fire_ui_event", action, _feedback_controller)
+		else:
+			var sound_bus := _get_ui_sound_bus()
+			if sound_bus != null and sound_bus.has_method("play"):
+				sound_bus.call("play", action, volume_db)
 
 
 static func load_settings() -> Dictionary:

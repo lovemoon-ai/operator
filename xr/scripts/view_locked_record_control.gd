@@ -56,6 +56,8 @@ var _hold_seconds := 0.0
 var _suppress_primary_pressed := false
 var _pointer_position := NO_POINTER
 var _pointer_pressed := false
+var _feedback_input_mode := "controllers"
+var _feedback_controller: XRController3D
 
 func _init() -> void:
 	quad_size = Vector2(0.18, 0.238)
@@ -74,6 +76,7 @@ func _process(delta: float) -> void:
 		return
 	var completed_action := _hold_action
 	_cancel_hold()
+	_play_feedback("confirm")
 	match completed_action:
 		"start":
 			_suppress_primary_pressed = true
@@ -136,6 +139,12 @@ func set_pointer_pressed(pressed: bool) -> void:
 	event.position = _pointer_position
 	event.global_position = _pointer_position
 	_viewport.push_input(event)
+
+
+func set_feedback_input_mode(mode: String, controller: XRController3D = null) -> void:
+	_feedback_input_mode = mode
+	_feedback_controller = controller
+
 
 func clear_pointer() -> void:
 	if _pointer_pressed:
@@ -214,6 +223,7 @@ func _make_circle_button(slot: Control, diameter: float, text: String, font_size
 	button.add_theme_stylebox_override("hover", _circle_style(diameter, Color(0.08, 0.11, 0.12, 0.64)))
 	button.add_theme_stylebox_override("pressed", _circle_style(diameter, Color(0.10, 0.14, 0.15, 0.78)))
 	button.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	button.mouse_entered.connect(func() -> void: _play_feedback("hover", -5.0))
 	slot.add_child(button)
 	return button
 
@@ -269,6 +279,7 @@ func _on_primary_button_down() -> void:
 		_suppress_primary_pressed = false
 	var action := "stop" if _recording else "start"
 	if _requires_hold(action):
+		_play_feedback("exit_charging", -4.0)
 		_begin_hold(action)
 
 func _on_primary_button_up() -> void:
@@ -284,10 +295,12 @@ func _on_primary_pressed() -> void:
 		_suppress_primary_pressed = false
 		return
 	if not _recording and not _requires_hold("start"):
+		_play_feedback("click")
 		emit_signal("start_requested")
 
 func _on_settings_button_down() -> void:
 	if not _recording and _requires_hold("settings"):
+		_play_feedback("exit_charging", -4.0)
 		_begin_hold("settings")
 
 func _on_settings_button_up() -> void:
@@ -300,4 +313,35 @@ func _on_settings_mouse_exited() -> void:
 
 func _on_settings_pressed() -> void:
 	if not _recording and not _requires_hold("settings"):
+		_play_feedback("click")
 		emit_signal("settings_requested")
+
+
+func _play_feedback(action: String, volume_db: float = 0.0) -> void:
+	if _feedback_input_mode == "hands":
+		var sound_bus := _get_ui_sound_bus()
+		if sound_bus != null and sound_bus.has_method("play"):
+			sound_bus.call("play", action, volume_db)
+	elif _feedback_input_mode == "controllers":
+		var haptics := _get_haptics_bus()
+		var use_haptics := _feedback_controller != null
+		if haptics != null and haptics.has_method("should_use_controller_feedback"):
+			use_haptics = bool(haptics.call("should_use_controller_feedback", _feedback_controller))
+		if use_haptics and haptics != null and haptics.has_method("fire_ui_event"):
+			haptics.call("fire_ui_event", action, _feedback_controller)
+		else:
+			var sound_bus := _get_ui_sound_bus()
+			if sound_bus != null and sound_bus.has_method("play"):
+				sound_bus.call("play", action, volume_db)
+
+
+func _get_ui_sound_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("UISoundBus")
+
+
+func _get_haptics_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("Haptics")

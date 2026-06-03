@@ -54,7 +54,7 @@ func _report_enable_transition(cmd: Dictionary) -> void:
 		return
 	_has_last_enable_state = true
 	_last_enable_state = enabled
-	print("[CommandSender] enable=%s (right grip deadman)" % str(enabled))
+	print("[CommandSender] enable=%s (teleop deadman)" % str(enabled))
 
 
 func _report_active_command_summary(cmd: Dictionary) -> void:

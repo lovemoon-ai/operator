@@ -354,6 +354,8 @@ func _show_settings_panel() -> void:
 		_settings_ui.set_discovering(false)
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
+	if _settings_panel and _settings_panel.has_method("set_feedback_input_mode"):
+		_settings_panel.set_feedback_input_mode("controllers", _right_controller)
 	if _settings_panel and _settings_panel.has_method("open"):
 		_settings_panel.open()
 	else:

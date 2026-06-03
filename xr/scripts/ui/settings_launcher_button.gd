@@ -33,6 +33,7 @@ func _build_button(viewport: SubViewport) -> void:
 	_button.add_theme_stylebox_override("hover", _button_style(Color(0.075, 0.088, 0.10, 0.92)))
 	_button.add_theme_stylebox_override("pressed", _button_style(Color(0.095, 0.112, 0.13, 0.98)))
 	_button.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	_button.mouse_entered.connect(func() -> void: _play_feedback("hover", -5.0, self))
 	_button.pressed.connect(_on_pressed)
 	root.add_child(_button)
 
@@ -47,4 +48,5 @@ func _button_style(bg_color: Color) -> StyleBoxFlat:
 
 
 func _on_pressed() -> void:
+	_play_feedback("click", 0.0, self)
 	pressed.emit()

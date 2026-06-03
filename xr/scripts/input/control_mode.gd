@@ -29,8 +29,6 @@ func configure(descriptor: Dictionary) -> void:
 
 func collect_command(tracking: TrackingProvider) -> Dictionary:
 	var cmd = {"axes": {}, "buttons": {}, "poses": {}, "timestamp_ns": Time.get_ticks_usec() * 1000}
-	var enable_sampled := false
-	var enable_pressed := false
 	for mapping in _mappings:
 		var source: String = mapping["source"]
 		var target: String = mapping["target"]
@@ -38,15 +36,17 @@ func collect_command(tracking: TrackingProvider) -> Dictionary:
 		var invert: bool = mapping.get("invert", false)
 		var offset: float = mapping.get("offset", 0.0)
 
-		if target == "enable":
-			if not enable_sampled:
-				enable_pressed = _read_enable_pressed(tracking)
-				enable_sampled = true
-			cmd["buttons"][target] = bool(cmd["buttons"].get(target, false)) or enable_pressed
-			continue
-
 		var value = _read_vr_source(source, tracking)
 		if value == null:
+			continue
+
+		if target == "enable":
+			var enable_pressed := _source_value_to_button(value, scale, invert, offset)
+			if enable_pressed:
+				_enable_hold_until_msec = Time.get_ticks_msec() + ENABLE_RELEASE_GRACE_MSEC
+			else:
+				enable_pressed = Time.get_ticks_msec() <= _enable_hold_until_msec
+			cmd["buttons"][target] = bool(cmd["buttons"].get(target, false)) or enable_pressed
 			continue
 
 		if typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
@@ -93,12 +93,23 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 	return null
 
 
-func _read_enable_pressed(tracking: TrackingProvider) -> bool:
-	var now_msec := Time.get_ticks_msec()
-	if _get_grip_value(tracking, 1) >= 0.5:
-		_enable_hold_until_msec = now_msec + ENABLE_RELEASE_GRACE_MSEC
-		return true
-	return now_msec <= _enable_hold_until_msec
+func _source_value_to_button(value: Variant, scale: float, invert: bool, offset: float) -> bool:
+	if typeof(value) == TYPE_BOOL:
+		return bool(value)
+	if typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
+		var numeric_value := float(value)
+		if invert:
+			numeric_value = -numeric_value
+		numeric_value = numeric_value * scale + offset
+		return numeric_value >= 0.5
+	if value is Vector2:
+		var vector_value: Vector2 = value
+		var vector_magnitude := vector_value.length()
+		if invert:
+			vector_magnitude = -vector_magnitude
+		vector_magnitude = vector_magnitude * scale + offset
+		return vector_magnitude >= 0.5
+	return false
 
 
 # Helper methods to safely extract input values

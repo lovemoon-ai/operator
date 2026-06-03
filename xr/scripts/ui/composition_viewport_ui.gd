@@ -10,6 +10,8 @@ var _viewport_size := Vector2i.ZERO
 var _cursor: Panel
 var _pointer_position := NO_POINTER
 var _pointer_pressed := false
+var _feedback_input_mode := "controllers"
+var _feedback_controller: XRController3D
 
 
 func _setup_viewport_layer(
@@ -74,6 +76,11 @@ func set_pointer_pressed(pressed: bool) -> void:
 	_viewport.push_input(event)
 
 
+func set_feedback_input_mode(mode: String, controller: XRController3D = null) -> void:
+	_feedback_input_mode = mode
+	_feedback_controller = controller
+
+
 func clear_pointer() -> void:
 	if _pointer_pressed:
 		set_pointer_pressed(false)
@@ -97,6 +104,36 @@ func get_ray_hit_point(ray_origin: Vector3, ray_direction: Vector3) -> Vector3:
 
 func _on_pointer_cleared() -> void:
 	pass
+
+
+func _play_feedback(action: String, volume_db: float = 0.0, _spatial_node: Node3D = null) -> void:
+	if _feedback_input_mode == "hands":
+		var sound_bus := _get_ui_sound_bus()
+		if sound_bus != null and sound_bus.has_method("play"):
+			sound_bus.call("play", action, volume_db)
+	elif _feedback_input_mode == "controllers":
+		var haptics := _get_haptics_bus()
+		var use_haptics := _feedback_controller != null
+		if haptics != null and haptics.has_method("should_use_controller_feedback"):
+			use_haptics = bool(haptics.call("should_use_controller_feedback", _feedback_controller))
+		if use_haptics and haptics != null and haptics.has_method("fire_ui_event"):
+			haptics.call("fire_ui_event", action, _feedback_controller)
+		else:
+			var sound_bus := _get_ui_sound_bus()
+			if sound_bus != null and sound_bus.has_method("play"):
+				sound_bus.call("play", action, volume_db)
+
+
+func _get_ui_sound_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("UISoundBus")
+
+
+func _get_haptics_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("Haptics")
 
 
 func _build_cursor(cursor_size: float) -> void:

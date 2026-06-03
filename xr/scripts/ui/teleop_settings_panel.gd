@@ -74,8 +74,7 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	_discovery_option = OptionButton.new()
 	_discovery_option.custom_minimum_size.y = 55
 	_discovery_option.add_theme_font_size_override("font_size", 23)
-	_discovery_option.add_item(tr(MANUAL_LABEL_KEY))
-	_discovery_option.set_item_metadata(0, "")
+	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 	_discovery_option.item_selected.connect(_on_discovery_selected)
 	add_interactive(_content, _discovery_option)
 
@@ -99,8 +98,7 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	_type_option.custom_minimum_size.y = 55
 	_type_option.add_theme_font_size_override("font_size", 23)
 	for t in ROBOT_TYPES:
-		_type_option.add_item(_robot_type_display(t))
-		_type_option.set_item_metadata(_type_option.item_count - 1, t)
+		_add_option_item(_type_option, _robot_type_display(t), t, _icon_name_for_robot_type(t))
 	add_interactive(_content, _type_option)
 
 	_video_face_toggle = add_toggle(_content, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
@@ -151,8 +149,7 @@ func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> vo
 	var previously_selected_name := _selected_robot_name()
 
 	_discovery_option.clear()
-	_discovery_option.add_item(tr(MANUAL_LABEL_KEY))
-	_discovery_option.set_item_metadata(0, "")
+	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 
 	var names: Array = _discovered.keys()
 	names.sort()
@@ -161,9 +158,12 @@ func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> vo
 		var rname: String = names[i]
 		var info: Dictionary = _discovered[rname]
 		var disp := _format_robot_label(rname, info)
-		_discovery_option.add_item(disp)
-		var idx: int = _discovery_option.item_count - 1
-		_discovery_option.set_item_metadata(idx, rname)
+		var idx := _add_option_item(
+			_discovery_option,
+			disp,
+			rname,
+			_icon_name_for_robot_type(String(info.get("device_type", "")))
+		)
 		if rname == previously_selected_name:
 			idx_to_select = idx
 		elif idx_to_select == 0 and prefer_ip != "" and String(info.get("ip", "")) == prefer_ip:
@@ -297,6 +297,26 @@ func _robot_type_display(robot_type: String) -> String:
 			return tr("UI_DEVICE_TYPE_RC_CAR")
 		_:
 			return robot_type
+
+
+func _icon_name_for_robot_type(robot_type: String) -> String:
+	match robot_type:
+		"robot_arm":
+			return "robot-arm"
+		"rc_car":
+			return "car"
+		_:
+			return "signal"
+
+
+func _add_option_item(option: OptionButton, label: String, metadata: Variant, icon_name: String) -> int:
+	option.add_item(label)
+	var idx := option.item_count - 1
+	option.set_item_metadata(idx, metadata)
+	var icon := _load_icon(icon_name)
+	if icon != null:
+		option.set_item_icon(idx, icon)
+	return idx
 
 
 static func load_settings() -> Dictionary:
