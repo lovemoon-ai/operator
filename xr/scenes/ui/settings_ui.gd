@@ -16,10 +16,11 @@ extends Control
 ##     IP/Port show the discovered values, read-only.
 ##   - Manual entry: dropdown set to "─ Manual entry ─", IP/Port editable.
 ##   - Confirm → save to user://settings.cfg + emit settings_applied(...)
-##   - Exit requires a short hold, then hides the panel without connecting.
+##   - Exit requires a short hold, then emits exit_requested to quit the app.
 
 signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_on_launch: bool)
 signal close_requested()
+signal exit_requested()
 
 const SETTINGS_PATH := "user://settings.cfg"
 const SECTION := "settings"
@@ -96,7 +97,7 @@ func _process(delta: float) -> void:
 	if _exit_hold_seconds < EXIT_HOLD_SECONDS:
 		return
 	_cancel_exit_hold()
-	close_requested.emit()
+	exit_requested.emit()
 
 
 # --- UI construction ----------------------------------------------------------
