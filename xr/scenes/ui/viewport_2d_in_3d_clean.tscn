@@ -14,7 +14,7 @@ size = Vector3(3, 2, 0.02)
 [node name="Viewport2Din3D" type="Node3D"]
 script = ExtResource("1_viewport")
 alpha_scissor_threshold = 0.25
-unshaded = false
+unshaded = true
 filter = true
 
 [node name="Viewport" type="SubViewport" parent="."]

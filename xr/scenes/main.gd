@@ -4,8 +4,9 @@ extends Node3D
 ## Hello → DeviceDescriptor → DeviceCommand ↔ Telemetry.
 ##
 ## UI model (per issue 004 / settings redesign):
-##  - At launch, world-locked SettingsPanel is visible. User fills IP /
-##    Port / Robot Type / Video window mode, presses OK.
+##  - At launch, world-locked SettingsPanel is visible if discovery needs
+##    manual confirmation. User fills IP / Port / Robot Type / Video window
+##    mode, presses OK.
 ##  - OK → save to user://settings.cfg, hide panel, show face-locked
 ##    floating SettingsButton, kick off TCP connect.
 ##  - The floating button (face-locked, under XRCamera3D) re-opens the
@@ -177,6 +178,8 @@ func _wire_settings_ui() -> void:
 		_settings_ui.settings_applied.connect(_on_settings_applied)
 		if _settings_ui.has_signal("close_requested"):
 			_settings_ui.close_requested.connect(_on_settings_close_requested)
+		if _settings_ui.has_signal("exit_requested"):
+			_settings_ui.exit_requested.connect(_on_settings_exit_requested)
 	else:
 		push_warning("[Operator] SettingsPanel inner UI not ready — falling back to defaults")
 	if _settings_button_ui and _settings_button_ui.has_signal("pressed"):
@@ -240,9 +243,8 @@ func _configure_passthrough() -> void:
 # --- Settings flow ------------------------------------------------------------
 
 ## Called by SettingsUI when the user presses Confirm.
-## Q1 / Q2 answer: A + A — save + auto-connect; robot_type is a hint
-## that the descriptor will override on handshake.
-## show_on_launch is persisted only; we don't act on it during this run.
+## Saves the panel state, hides it, then connects/reconnects with the chosen
+## endpoint. robot_type is a hint that the descriptor will override on handshake.
 func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_on_launch: bool) -> void:
 	print("[Operator] Settings applied: ip=%s port=%d type=%s face_locked=%s show_on_launch=%s" % [
 		ip, port, robot_type, video_face_locked, show_on_launch,
@@ -269,10 +271,28 @@ func _on_settings_button_pressed() -> void:
 	_show_settings_panel()
 
 
-## "Exit" on the panel: just hide it (no connect) and re-show the
-## floating settings button so the user can reopen later.
+## Legacy close signal: hide it and re-show the floating settings button so
+## the user can reopen later.
 func _on_settings_close_requested() -> void:
 	_hide_settings_panel()
+
+
+## Exit on the panel mirrors ego mode: close the running session and quit app.
+func _on_settings_exit_requested() -> void:
+	print("[Operator] Settings exit requested — quitting app")
+	if _command_sender:
+		_command_sender.set_sending(false)
+	if _clock_sync:
+		_clock_sync.stop()
+	if _discovery and _discovery.has_method("stop_scan"):
+		_discovery.stop_scan()
+	if _tcp_handler:
+		_tcp_handler.disconnect_from_robot()
+	if _video_tcp_handler:
+		_video_tcp_handler.disconnect_from_robot()
+	if _video_udp_handler:
+		_video_udp_handler.disconnect_from_robot()
+	get_tree().quit()
 
 
 func _show_settings_panel() -> void:
