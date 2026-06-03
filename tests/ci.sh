@@ -1,3 +1,7 @@
 #!/usr/bin/env sh
 
-./01_rtsp_test.sh --launch-app
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+exec "$SCRIPT_DIR/01_rtsp_test.sh" --launch-app "$@"
