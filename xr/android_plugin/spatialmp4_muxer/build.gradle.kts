@@ -17,6 +17,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val repoRoot = rootProject.projectDir.parentFile.parentFile
+val ffmpegBuildDir = repoRoot.resolve("third_party/ffmpeg-build")
+val ffmpegRoot = ffmpegBuildDir.resolve("arm64-v8a/install")
+
 android {
     namespace = "com.spatialmp4.questcapture.muxer"
     compileSdk = 35
@@ -29,7 +33,11 @@ android {
         }
         externalNativeBuild {
             cmake {
-                arguments += listOf("-DANDROID_STL=c++_shared")
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    "-DFFMPEG_BUILD_DIR=${ffmpegBuildDir.absolutePath}",
+                    "-DFFMPEG_ROOT=${ffmpegRoot.absolutePath}",
+                )
             }
         }
     }
