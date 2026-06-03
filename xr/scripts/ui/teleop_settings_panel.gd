@@ -15,6 +15,40 @@ const DEFAULT_FACE_LOCKED: bool = true
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
 
+class DiscoverySpinner:
+	extends Control
+
+	var active := false
+	var accent_color := Color(1.0, 0.647, 0.169, 0.98)
+	var _angle := 0.0
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		custom_minimum_size = Vector2(26, 26)
+		visible = false
+		set_process(false)
+
+	func set_active(value: bool) -> void:
+		if active == value:
+			return
+		active = value
+		visible = active
+		set_process(active)
+		queue_redraw()
+
+	func _process(delta: float) -> void:
+		_angle = wrapf(_angle + delta * 4.2, 0.0, PI * 2.0)
+		queue_redraw()
+
+	func _draw() -> void:
+		if not active:
+			return
+		var center := size * 0.5
+		var radius := minf(size.x, size.y) * 0.5 - 3.0
+		var base_color := Color(accent_color.r, accent_color.g, accent_color.b, 0.18)
+		draw_arc(center, radius, 0.0, PI * 2.0, 40, base_color, 3.0, true)
+		draw_arc(center, radius, _angle, _angle + PI * 1.45, 28, accent_color, 3.4, true)
+
 var _discovery_option: OptionButton
 var _ip_input: LineEdit
 var _port_input: LineEdit
@@ -22,6 +56,8 @@ var _type_option: OptionButton
 var _video_face_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
 var _status_label: Label
+var _discovery_spinner: DiscoverySpinner
+var _discovery_active := false
 var _discovered: Dictionary = {}
 
 
@@ -70,7 +106,22 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	_video_face_toggle = add_toggle(_content, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
 	_show_on_launch_toggle = add_toggle(_content, tr("UI_SHOW_SETTINGS_ON_LAUNCH"), DEFAULT_SHOW_ON_LAUNCH, 22)
 
-	_status_label = add_status_label(tr("UI_STATUS_PREFIX") % tr("UI_STATUS_EMPTY"))
+	var status_row := HBoxContainer.new()
+	status_row.add_theme_constant_override("separation", 10)
+	status_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_content.add_child(status_row)
+
+	_discovery_spinner = DiscoverySpinner.new()
+	_discovery_spinner.accent_color = COL_ACCENT
+	status_row.add_child(_discovery_spinner)
+
+	_status_label = Label.new()
+	_status_label.text = tr("UI_STATUS_PREFIX") % tr("UI_STATUS_EMPTY")
+	_status_label.add_theme_font_size_override("font_size", 18)
+	_status_label.add_theme_color_override("font_color", COL_STATUS)
+	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	status_row.add_child(_status_label)
 
 
 func _on_confirm_requested() -> void:
@@ -138,6 +189,16 @@ func remove_discovered(robot_name: String) -> void:
 func set_status(text: String) -> void:
 	if _status_label:
 		_status_label.text = tr("UI_STATUS_PREFIX") % text
+	if not _discovery_active and _discovery_spinner:
+		_discovery_spinner.set_active(false)
+
+
+func set_discovering(active: bool, text: String = "") -> void:
+	_discovery_active = active
+	if _discovery_spinner:
+		_discovery_spinner.set_active(active)
+	if not text.is_empty():
+		set_status(text)
 
 
 func _load_from_disk() -> void:
