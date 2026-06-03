@@ -268,10 +268,13 @@ step "2/4  ffmpeg publisher (testsrc2 1280x720@30 $CODEC → $RTSP_URL)"
 # with --codec; the bridge stream-copies whatever it receives.
 if [ "$CODEC" = "hevc" ]; then
     # libx265: re-emit VPS/SPS/PPS at each IDR (repeat-headers) so a headset
-    # joining mid-stream is primed. `-tag:v hvc1` keeps the RTSP/MediaCodec
-    # side on the standard HEVC sample entry.
-    VENC=(-c:v libx265 -preset ultrafast -tune zerolatency
-        -x265-params "keyint=30:min-keyint=30:repeat-headers=1:bframes=0"
+    # joining mid-stream is primed. `veryfast` keeps the stream closer to a
+    # useful HEVC encode than `ultrafast`, while closed GOP / no scene-cut /
+    # no lookahead / single frame-thread keep this a low-latency test instead
+    # of measuring x265 pipeline buffering. `-tag:v hvc1` keeps the
+    # RTSP/MediaCodec side on the standard HEVC sample entry.
+    VENC=(-c:v libx265 -preset veryfast -tune zerolatency
+        -x265-params "keyint=30:min-keyint=30:repeat-headers=1:bframes=0:open-gop=0:scenecut=0:rc-lookahead=0:frame-threads=1"
         -tag:v hvc1)
 else
     VENC=(-c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -bf 0)
