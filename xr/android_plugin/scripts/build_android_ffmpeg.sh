@@ -10,6 +10,7 @@ FFMPEG_VERSION="${FFMPEG_VERSION:-8.1.1}"
 DEFAULT_FFMPEG_TAG="$(git -C "$WORKSPACE_ROOT" config --file .gitmodules --get submodule.third_party/ffmpeg.tag 2>/dev/null || true)"
 FFMPEG_TAG="${FFMPEG_TAG:-${DEFAULT_FFMPEG_TAG:-n${FFMPEG_VERSION}}}"
 FFMPEG_SOURCE="${FFMPEG_SOURCE:-$WORKSPACE_ROOT/third_party/ffmpeg}"
+FFMPEG_BUILD_DIR="${FFMPEG_BUILD_DIR:-$WORKSPACE_ROOT/third_party/ffmpeg-build}"
 ANDROID_ABI="${ANDROID_ABI:-arm64-v8a}"
 ANDROID_API="${ANDROID_API:-29}"
 NDK_ROOT="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -51,9 +52,9 @@ if [ ! -d "$TOOLCHAIN" ]; then
     exit 1
 fi
 
-BUILD_ROOT="$SCRIPT_DIR/build_ffmpeg_android/$ANDROID_ABI"
-SRC_DIR="$BUILD_ROOT/ffmpeg"
-INSTALL_PREFIX="$QUEST_ROOT/android_plugin/spatialmp4_muxer/src/main/cpp/third_party/ffmpeg/$ANDROID_ABI"
+BUILD_ROOT="$FFMPEG_BUILD_DIR/$ANDROID_ABI"
+SRC_DIR="$BUILD_ROOT/src"
+INSTALL_PREFIX="${FFMPEG_INSTALL:-$BUILD_ROOT/install}"
 READ_PATCH="$SPATIALMP4_ROOT/scripts/ffmpeg_8_1_1_read.patch"
 ENC_PATCH="$SPATIALMP4_ROOT/scripts/ffmpeg_8_1_1_enc.patch"
 

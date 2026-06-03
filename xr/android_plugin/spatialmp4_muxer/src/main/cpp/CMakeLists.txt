@@ -6,13 +6,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(FFMPEG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg/${ANDROID_ABI}" CACHE PATH
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
+set(FFMPEG_BUILD_DIR "${REPO_ROOT}/third_party/ffmpeg-build" CACHE PATH
+    "Shared FFmpeg build root for Android")
+set(FFMPEG_ROOT "${FFMPEG_BUILD_DIR}/${ANDROID_ABI}/install" CACHE PATH
     "Patched FFmpeg install root for Android")
 
 if(NOT EXISTS "${FFMPEG_ROOT}/include/libavformat/avformat.h")
     message(FATAL_ERROR
         "Patched FFmpeg for ${ANDROID_ABI} was not found at ${FFMPEG_ROOT}. "
-        "Run android_plugin/scripts/build_android_ffmpeg.sh first.")
+        "Run `make build-ffmpeg` from xr/ or invoke android_plugin/scripts/build_android_ffmpeg.sh first.")
 endif()
 
 function(import_ffmpeg_lib target_name lib_name)

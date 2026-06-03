@@ -76,3 +76,4 @@ settings.local.json
 
 # Shared native dependency build output.
 third_party/godot-cpp-build/
+third_party/ffmpeg-build/
