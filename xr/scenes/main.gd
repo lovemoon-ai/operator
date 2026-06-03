@@ -227,6 +227,7 @@ func _configure_passthrough() -> void:
 	var viewport := get_viewport()
 	if viewport:
 		viewport.transparent_bg = true
+		viewport.physics_object_picking = false
 		var world := viewport.get_world_3d()
 		if world and world.environment:
 			world.environment.background_mode = Environment.BG_CLEAR_COLOR

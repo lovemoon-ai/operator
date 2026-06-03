@@ -109,13 +109,9 @@ const MAX_DRAIN_PER_TICK: int = 32
 
 
 func _ready() -> void:
-	# Disable Nagle's algorithm. Without this small writes (e.g. our
-	# 76-byte timed video header) get coalesced for up to 40 ms before
-	# being sent, which adds 40 ms to the `tx=` latency for every NAL.
-	# Re-applied on each successful connect (see _process_connecting)
-	# because some Godot 4 builds don't honour the flag set before the
-	# socket is actually open.
-	_tcp.set_no_delay(true)
+	# TCP_NODELAY is applied after STATUS_CONNECTED. Calling set_no_delay()
+	# before the socket is open logs an error on Android/Pico builds.
+	pass
 
 
 func _process(delta: float) -> void:
