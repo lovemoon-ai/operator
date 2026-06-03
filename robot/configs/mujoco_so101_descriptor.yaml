@@ -1,0 +1,65 @@
+device:
+  type: "robot_arm"
+  name: "MuJoCo SO-101 Arm"
+  icon: "robot_arm"
+  model_url: ""
+
+control_schema:
+  axes:
+    - name: "gripper"
+      display: "Gripper"
+      range: [0.0, 1.0]
+      default: 1.0
+      dead_zone: 0.02
+  buttons:
+    - name: "enable"
+      display: "Enable"
+      toggle: false
+      confirm: false
+  poses:
+    - name: "end_effector"
+      display: "End Effector Target"
+      dof: 6
+      frame: "right_hand"
+
+input_mapping:
+  - source: "right_controller_pose"
+    target: "end_effector"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "absolute"
+  - source: "right_trigger"
+    target: "gripper"
+    scale: 1.0
+    invert: true
+    offset: 1.0
+    mode: "absolute"
+  - source: "right_grip"
+    target: "enable"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "momentary"
+
+telemetry_schema:
+  values:
+    - name: "joint_angles"
+      display: "Joint Angles"
+      unit: "deg"
+      type: "array"
+      length: 6
+    - name: "num_joints"
+      display: "Number of Joints"
+      type: "int"
+    - name: "connected"
+      display: "Connected"
+      type: "bool"
+
+video_feeds: []
+
+safety:
+  disconnect_action: "stop"
+  command_timeout_ms: 500
+  limits:
+    gripper: [0.0, 1.0]

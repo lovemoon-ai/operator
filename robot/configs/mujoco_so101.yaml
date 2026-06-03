@@ -28,10 +28,10 @@ adapter:
   # Factory dispatch: "mujoco_so101" routes to RobotArmDevice + MujocoSo101Driver.
   device_type: "mujoco_so101"
 
-  # No descriptor_file: the built-in arm descriptor
-  # (RobotArmDevice::default_descriptor) is used — 6 joints, gripper axis on
-  # right_trigger, end_effector pose on right_hand. Set descriptor_file to a YAML
-  # path to override.
+  # Descriptor declares the XR input mapping: right_controller_pose drives the
+  # end_effector pose, right_trigger drives gripper closure (released = open),
+  # and right_grip is the momentary teleop enable/deadman.
+  descriptor_file: "configs/mujoco_so101_descriptor.yaml"
 
   arm:
     # Routes to MujocoSo101Driver instead of a serial bus.
@@ -49,11 +49,11 @@ adapter:
     # adapter's CWD; the recommended CWD is `robot/`. Switch to absolute paths
     # if you launch from elsewhere.
     mujoco:
-      python: "../examples/mujuco-arm-so101/.venv/bin/python"
+      python: "../examples/mujuco-arm-so101/.venv/bin/mjpython" # mac required
       script: "../examples/mujuco-arm-so101/sim_so101.py"
       # mj_step calls per outbound ctrl write. Driver clamps to [1, 50].
       steps_per_write: 3
-      extra_args: []
+      extra_args: ["--viewer"]
 
     # Joint limits in degrees, applied positionally per joint. ~5° inside the
     # MuJoCo actuator ranges in examples/mujuco-arm-so101/assets/so101/so101.xml.
@@ -70,10 +70,22 @@ adapter:
 
     pose_mapping:
       mode: "direct"
-      scale: 1.0
+      # Direct mapping is intentionally conservative for live teleop:
+      # 0.1 m controller motion -> 15 deg joint delta.
+      scale: 0.5
       mirror: true
 
     # Sim bridge round-trip is dominated by Python I/O. 60 ms gives comfortable
     # headroom over the default 20 ms during the spawn → ready → first-step
     # warm-up window.
     driver_write_timeout_ms: 60
+
+bridge:
+  name: "mujoco-so101"
+  pose_port: 63901
+  video_port: 12345
+  discovery_port: 63900
+  pose_udp_port: 63902
+  telemetry_port: 63903
+  discovery_unicast_targets:
+    - 10.79.156.210

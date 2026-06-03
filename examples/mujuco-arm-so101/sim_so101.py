@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
 import sys
 import time
 from pathlib import Path
@@ -188,6 +189,7 @@ def run_smoketest() -> None:
 
 ARM_ACTUATORS = ["shoulder_pan", "shoulder_lift", "elbow_flex",
                  "wrist_flex", "wrist_roll", "gripper"]
+VIEWER_IDLE_SYNC_PERIOD_S = 1.0 / 30.0
 
 
 def _emit(obj: dict) -> None:
@@ -239,6 +241,23 @@ def run_bridge(viewer_enabled: bool = False) -> None:
                 )
                 viewer_handle = None
 
+    def maybe_sync_viewer() -> None:
+        """Push the latest mjData snapshot to the viewer if it's alive.
+
+        Quietly drops if the user has closed the window mid-session so the JSON
+        protocol can keep running headless."""
+        nonlocal viewer_handle
+        if viewer_handle is None:
+            return
+        try:
+            if viewer_handle.is_running():
+                viewer_handle.sync()
+            else:
+                viewer_handle = None
+        except Exception as e:
+            print(f"bridge: viewer sync failed ({e}); detaching", file=sys.stderr)
+            viewer_handle = None
+
     # Resolve actuator + joint indices once.
     act_ids = []
     qadr = []
@@ -261,6 +280,9 @@ def run_bridge(viewer_enabled: bool = False) -> None:
     for k, a in enumerate(act_ids):
         data.ctrl[a] = float(data.qpos[qadr[k]])
 
+    mujoco.mj_forward(model, data)
+    maybe_sync_viewer()
+
     _emit({
         "event": "ready",
         "nq": int(model.nq),
@@ -281,25 +303,21 @@ def run_bridge(viewer_enabled: bool = False) -> None:
             "ts_ns": time.time_ns(),
         }
 
-    def maybe_sync_viewer() -> None:
-        """Push the latest mjData snapshot to the viewer if it's alive.
-
-        Quietly drops if the user has closed the window mid-session — we
-        don't want to crash the bridge over a closed GUI."""
-        nonlocal viewer_handle
-        if viewer_handle is None:
-            return
-        try:
-            if viewer_handle.is_running():
-                viewer_handle.sync()
-            else:
-                viewer_handle = None
-        except Exception as e:
-            print(f"bridge: viewer sync failed ({e}); detaching", file=sys.stderr)
-            viewer_handle = None
-
     try:
-        for raw in sys.stdin:
+        while True:
+            if viewer_handle is None:
+                raw = sys.stdin.readline()
+            else:
+                readable, _, _ = select.select(
+                    [sys.stdin], [], [], VIEWER_IDLE_SYNC_PERIOD_S
+                )
+                if not readable:
+                    maybe_sync_viewer()
+                    continue
+                raw = sys.stdin.readline()
+
+            if raw == "":
+                break
             raw = raw.strip()
             if not raw:
                 continue
@@ -316,6 +334,7 @@ def run_bridge(viewer_enabled: bool = False) -> None:
                     mujoco.mj_resetData(model, data)
                 for k, a in enumerate(act_ids):
                     data.ctrl[a] = float(data.qpos[qadr[k]])
+                mujoco.mj_forward(model, data)
                 maybe_sync_viewer()
                 _emit(snapshot())
                 continue

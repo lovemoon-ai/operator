@@ -8,9 +8,10 @@
 //!   → MuJoCo bridge subprocess (python sim_so101.py bridge)
 //!   → telemetry frame → bridge watch channel.
 //!
-//! The test seeds the PoseMapper reference with a first pose, then sends poses
-//! with a position offset that produce a non-trivial joint delta, and asserts
-//! the reported `joint_angles` telemetry CHANGES (the sim actually moved).
+//! The test holds the teleop `enable` deadman, seeds the PoseMapper reference
+//! with a first pose, then sends poses with a position offset that produce a
+//! non-trivial joint delta, and asserts the reported `joint_angles` telemetry
+//! CHANGES (the sim actually moved).
 //!
 //! Requires the MuJoCo venv (created by `examples/mujuco-arm-so101 make env`).
 //! If the python binary is missing, the test skips (prints + returns) rather
@@ -94,6 +95,7 @@ const IDENTITY_QUAT: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
 
 fn pose_cmd(position: [f64; 3]) -> DeviceCommand {
     let mut cmd = DeviceCommand::default();
+    cmd.buttons.insert("enable".to_string(), true);
     cmd.poses.insert(
         "end_effector".to_string(),
         Pose6D {
@@ -134,8 +136,8 @@ async fn mujoco_round_trip_moves_joints() {
     let arm = arm_config(python.to_str().unwrap(), script.to_str().unwrap());
 
     // Build the real arm device on absolute paths and serve it on loopback.
-    let device =
-        RobotArmDevice::new(RobotArmDevice::default_descriptor(), &arm).expect("build RobotArmDevice");
+    let device = RobotArmDevice::new(RobotArmDevice::default_descriptor(), &arm)
+        .expect("build RobotArmDevice");
 
     let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
         .await
@@ -167,7 +169,10 @@ async fn mujoco_round_trip_moves_joints() {
             .expect("first joint_angles telemetry (sim ready)");
 
         // Frame 1: seed the PoseMapper reference at the origin.
-        client.send_command(&pose_cmd([0.0, 0.0, 0.0])).await.expect("seed pose");
+        client
+            .send_command(&pose_cmd([0.0, 0.0, 0.0]))
+            .await
+            .expect("seed pose");
 
         // Frames 2..N: move the controller +x / +y / +z by a big delta. With
         // deg_per_meter = 300, a 0.1 m offset is ~30° on the base joint — well

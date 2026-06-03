@@ -63,7 +63,10 @@ fn encode_framed<T: Serialize>(item: &T, dst: &mut BytesMut) -> Result<(), std::
     if json.len() > MAX_FRAME_LEN {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("frame length {} exceeds maximum {MAX_FRAME_LEN}", json.len()),
+            format!(
+                "frame length {} exceeds maximum {MAX_FRAME_LEN}",
+                json.len()
+            ),
         ));
     }
     dst.reserve(4 + json.len());
@@ -76,9 +79,7 @@ fn encode_framed<T: Serialize>(item: &T, dst: &mut BytesMut) -> Result<(), std::
 ///
 /// Returns `Ok(None)` when the buffer does not yet hold a full frame (partial
 /// reads), and only consumes bytes when a complete frame is decoded.
-fn decode_framed<T: DeserializeOwned>(
-    src: &mut BytesMut,
-) -> Result<Option<T>, std::io::Error> {
+fn decode_framed<T: DeserializeOwned>(src: &mut BytesMut) -> Result<Option<T>, std::io::Error> {
     // Need the 4-byte length prefix first.
     if src.len() < 4 {
         return Ok(None);

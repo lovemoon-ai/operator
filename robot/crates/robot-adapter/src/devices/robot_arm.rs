@@ -15,15 +15,21 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use teleop_protocol::{
-    AxisDef, ControlSchema, DeviceCommand, DeviceDescriptor, DeviceInfo, DeviceTelemetry, Pose6D,
-    PoseDef, TelemetrySchema, TelemetryValue, TelemetryValueDef,
+    AxisDef, ButtonDef, ControlSchema, DeviceCommand, DeviceDescriptor, DeviceInfo,
+    DeviceTelemetry, InputMapping, PoseDef, TelemetrySchema, TelemetryValue, TelemetryValueDef,
 };
 
 use crate::config::ArmConfig;
 use crate::control::drivers::{self, ArmDriver};
 use crate::control::pose_mapping::PoseMapper;
 use crate::control::safety::{Safety, SafetyResult};
+use crate::control::teleop::{
+    command_enable, TeleopPoseController, TeleopPoseResult, ENABLE_BUTTON, END_EFFECTOR_POSE,
+};
 use crate::device::Device;
+
+const GRIPPER_AXIS: &str = "gripper";
+const GRIPPER_COMMAND_EPSILON: f64 = 0.01;
 
 /// A robotic arm device backed by an [`ArmDriver`] (this phase: the MuJoCo
 /// SO-101 simulator).
@@ -33,14 +39,17 @@ pub struct RobotArmDevice {
     driver: Arc<Mutex<Box<dyn ArmDriver>>>,
     safety: Mutex<Safety>,
     mapper: Mutex<PoseMapper>,
+    teleop: TeleopPoseController,
     connected: std::sync::atomic::AtomicBool,
     last_angles: Mutex<Vec<f64>>,
     num_joints: usize,
-    /// One-shot flag: cleared on connect, set after the first valid
-    /// `end_effector` pose calibrates the `PoseMapper` reference. Without this,
-    /// `PoseMapper::map_direct` collapses `reference = current` and the position
-    /// deltas are always zero — effectively disabling the first three joints.
-    reference_set: std::sync::atomic::AtomicBool,
+    /// Number of joints controlled by the controller pose. SO-101 reserves the
+    /// final actuator for the gripper axis, so pose maps only the arm joints.
+    pose_joint_count: usize,
+    gripper_joint_index: Option<usize>,
+    gripper_joint_limits: Option<[f64; 2]>,
+    gripper_default: Option<f64>,
+    last_gripper: Option<f64>,
     /// Maximum time a single driver write is allowed to block.
     driver_write_timeout: std::time::Duration,
     /// Counter of frames that exceeded `driver_write_timeout`.
@@ -52,18 +61,28 @@ impl RobotArmDevice {
     pub fn new(descriptor: DeviceDescriptor, arm_config: &ArmConfig) -> Result<Self> {
         let driver = drivers::create_driver(&arm_config.driver, arm_config.mujoco.as_ref())?;
         let safety = Safety::from_config(&arm_config.safety);
-        let mapper = PoseMapper::new(&arm_config.pose_mapping, arm_config.servo_ids.len());
         let num_joints = arm_config.servo_ids.len();
+        let gripper_joint_index = gripper_joint_index_for(&descriptor, num_joints);
+        let pose_joint_count = pose_joint_count_for(&descriptor, num_joints);
+        let gripper_joint_limits = gripper_joint_index
+            .and_then(|idx| arm_config.safety.joint_limits_deg.get(idx).copied());
+        let gripper_default = gripper_axis_default_for(&descriptor);
+        let mapper = PoseMapper::new(&arm_config.pose_mapping, pose_joint_count);
 
         Ok(Self {
             descriptor,
             driver: Arc::new(Mutex::new(driver)),
             safety: Mutex::new(safety),
             mapper: Mutex::new(mapper),
+            teleop: TeleopPoseController::new(),
             connected: std::sync::atomic::AtomicBool::new(false),
             last_angles: Mutex::new(vec![0.0; num_joints]),
             num_joints,
-            reference_set: std::sync::atomic::AtomicBool::new(false),
+            pose_joint_count,
+            gripper_joint_index,
+            gripper_joint_limits,
+            gripper_default,
+            last_gripper: None,
             driver_write_timeout: std::time::Duration::from_millis(
                 arm_config.driver_write_timeout_ms,
             ),
@@ -71,9 +90,10 @@ impl RobotArmDevice {
         })
     }
 
-    /// The built-in 6-DOF SO-101 arm descriptor: one `gripper` axis (0..1), one
-    /// `end_effector` pose (frame `right_hand`), and `joint_angles` /
-    /// `num_joints` / `connected` telemetry. Matches `config/device_robot_arm.yaml`.
+    /// The built-in 6-DOF SO-101 arm descriptor: one robot `gripper` axis
+    /// (0..1), one teleop `enable` deadman, one `end_effector` pose (frame
+    /// `right_hand`), and `joint_angles` / `num_joints` / `connected`
+    /// telemetry. Matches `config/device_robot_arm.yaml`.
     pub fn default_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {
             device: DeviceInfo {
@@ -87,18 +107,49 @@ impl RobotArmDevice {
                     name: "gripper".to_string(),
                     display: "Gripper".to_string(),
                     range: (0.0, 1.0),
-                    default: 0.0,
+                    default: 1.0,
                     dead_zone: 0.02,
                 }],
-                buttons: Vec::new(),
+                buttons: vec![ButtonDef {
+                    name: ENABLE_BUTTON.to_string(),
+                    display: "Enable".to_string(),
+                    toggle: false,
+                    group: None,
+                    confirm: false,
+                }],
                 poses: vec![PoseDef {
-                    name: "end_effector".to_string(),
+                    name: END_EFFECTOR_POSE.to_string(),
                     display: "End Effector Target".to_string(),
                     dof: 6,
                     frame: "right_hand".to_string(),
                 }],
             },
-            input_mapping: Vec::new(),
+            input_mapping: vec![
+                InputMapping {
+                    source: "right_controller_pose".to_string(),
+                    target: END_EFFECTOR_POSE.to_string(),
+                    scale: 1.0,
+                    invert: false,
+                    offset: 0.0,
+                    mode: "absolute".to_string(),
+                },
+                InputMapping {
+                    source: "right_trigger".to_string(),
+                    target: "gripper".to_string(),
+                    scale: 1.0,
+                    invert: true,
+                    offset: 1.0,
+                    mode: "absolute".to_string(),
+                },
+                InputMapping {
+                    source: "right_grip".to_string(),
+                    target: ENABLE_BUTTON.to_string(),
+                    scale: 1.0,
+                    invert: false,
+                    offset: 0.0,
+                    mode: "momentary".to_string(),
+                },
+            ],
             telemetry_schema: TelemetrySchema {
                 values: vec![
                     TelemetryValueDef {
@@ -157,6 +208,89 @@ impl RobotArmDevice {
             }
         }
     }
+
+    async fn maybe_set_gripper(&mut self, value: Option<f64>) -> Result<()> {
+        let Some(value) = value else {
+            return Ok(());
+        };
+        let value = value.clamp(0.0, 1.0);
+        if self.last_gripper.is_none()
+            && self
+                .gripper_default
+                .map(|default| (default - value).abs() < GRIPPER_COMMAND_EPSILON)
+                .unwrap_or(false)
+        {
+            self.last_gripper = Some(value);
+            tracing::debug!(
+                "RobotArmDevice: seeded gripper default {:.2} without driver write",
+                value
+            );
+            return Ok(());
+        }
+        if self
+            .last_gripper
+            .map(|last| (last - value).abs() < GRIPPER_COMMAND_EPSILON)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        self.last_gripper = Some(value);
+        tracing::info!("RobotArmDevice: gripper command {:.2}", value);
+
+        if let Some(angle) = self.gripper_axis_to_joint_degrees(value) {
+            if let Some(index) = self.gripper_joint_index {
+                let mut last_angles = self.last_angles.lock().await;
+                last_angles.resize(self.num_joints, 0.0);
+                if let Some(slot) = last_angles.get_mut(index) {
+                    *slot = angle;
+                }
+            }
+        }
+
+        let driver = self.driver.clone();
+        self.with_write_timeout("set_gripper", move || async move {
+            driver.lock().await.set_gripper(value as f32).await
+        })
+        .await
+    }
+
+    fn gripper_axis_to_joint_degrees(&self, value: f64) -> Option<f64> {
+        let [lo, hi] = self.gripper_joint_limits?;
+        Some(lo + value.clamp(0.0, 1.0) * (hi - lo))
+    }
+}
+
+fn has_gripper_axis(descriptor: &DeviceDescriptor) -> bool {
+    descriptor
+        .control_schema
+        .axes
+        .iter()
+        .any(|axis| axis.name == GRIPPER_AXIS)
+}
+
+fn gripper_axis_default_for(descriptor: &DeviceDescriptor) -> Option<f64> {
+    descriptor
+        .control_schema
+        .axes
+        .iter()
+        .find(|axis| axis.name == GRIPPER_AXIS)
+        .map(|axis| axis.default)
+}
+
+fn gripper_joint_index_for(descriptor: &DeviceDescriptor, num_joints: usize) -> Option<usize> {
+    if has_gripper_axis(descriptor) && num_joints > 0 {
+        Some(num_joints - 1)
+    } else {
+        None
+    }
+}
+
+fn pose_joint_count_for(descriptor: &DeviceDescriptor, num_joints: usize) -> usize {
+    if gripper_joint_index_for(descriptor, num_joints).is_some() {
+        num_joints - 1
+    } else {
+        num_joints
+    }
 }
 
 #[async_trait]
@@ -166,15 +300,24 @@ impl Device for RobotArmDevice {
     }
 
     async fn connect(&mut self) -> Result<()> {
-        self.driver.lock().await.enable_torque().await?;
+        let initial_angles = {
+            let mut driver = self.driver.lock().await;
+            driver.enable_torque().await?;
+            driver.last_joint_angles()
+        };
+        if let Some(joints) = initial_angles {
+            let mut last_angles = self.last_angles.lock().await;
+            *last_angles = joints.angles;
+            last_angles.resize(self.num_joints, 0.0);
+        }
         self.connected
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        // Force a re-calibration on the next valid pose. Handles first connect
-        // and reconnect-after-disconnect: the operator's hand is almost
-        // certainly not where it was when the previous session ended.
-        self.reference_set
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        tracing::info!("RobotArmDevice connected (awaiting first pose for calibration)");
+        {
+            let mut mapper = self.mapper.lock().await;
+            self.teleop.reset(&mut mapper);
+        }
+        self.last_gripper = None;
+        tracing::info!("RobotArmDevice connected (awaiting teleop enable)");
         Ok(())
     }
 
@@ -182,36 +325,32 @@ impl Device for RobotArmDevice {
         self.driver.lock().await.emergency_stop().await?;
         self.connected
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut mapper = self.mapper.lock().await;
+            self.teleop.reset(&mut mapper);
+        }
+        self.last_gripper = None;
         tracing::info!("RobotArmDevice disconnected");
         Ok(())
     }
 
     async fn send_command(&mut self, cmd: &DeviceCommand) -> Result<()> {
         // Extract end-effector pose and gripper value from the generic command.
-        let gripper = cmd.axes.get("gripper").copied().unwrap_or(0.0);
+        let gripper = cmd.axes.get(GRIPPER_AXIS).copied();
 
-        if let Some(pose) = cmd.poses.get("end_effector") {
-            let pose: &Pose6D = pose;
-
-            // First valid pose after (re)connect: capture it as the calibration
-            // reference. Without this, `PoseMapper::map_direct` computes
-            // `current - current = 0` for every frame and the
-            // base/shoulder/elbow joints never move. compare_exchange makes the
-            // calibration race-free across concurrent dispatches.
-            if self
-                .reference_set
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                self.mapper.lock().await.set_reference(pose);
-            }
-
-            let joints = self.mapper.lock().await.map(pose);
+        if cmd.poses.contains_key(END_EFFECTOR_POSE) {
+            let current_joint_target = self.last_angles.lock().await.clone();
+            let joints = {
+                let mut mapper = self.mapper.lock().await;
+                match self
+                    .teleop
+                    .map_command(cmd, &mut mapper, &current_joint_target)
+                {
+                    TeleopPoseResult::Active(joints) => joints,
+                    TeleopPoseResult::Disabled => return Ok(()),
+                    TeleopPoseResult::WaitingForPose => return Ok(()),
+                }
+            };
 
             let safety_result = self.safety.lock().await.validate(&joints);
             let (validated, was_clamped) = match safety_result {
@@ -230,20 +369,29 @@ impl Device for RobotArmDevice {
             // out and silently hold, in which case the headset still wants to
             // see the latest commanded angle in telemetry.
             let _ = was_clamped; // currently informational only
-            *self.last_angles.lock().await = validated.angles.clone();
+            {
+                let mut last_angles = self.last_angles.lock().await;
+                last_angles.resize(self.num_joints, 0.0);
+                for (index, angle) in validated
+                    .angles
+                    .iter()
+                    .copied()
+                    .take(self.pose_joint_count)
+                    .enumerate()
+                {
+                    last_angles[index] = angle;
+                }
+            }
             let driver = self.driver.clone();
+            let validated_for_driver = validated;
             self.with_write_timeout("set_joints", move || async move {
-                driver.lock().await.set_joints(&validated).await
+                driver.lock().await.set_joints(&validated_for_driver).await
             })
             .await?;
-        } else {
-            // No pose — maybe just a gripper command.
-            let driver = self.driver.clone();
-            let gripper_f = gripper as f32;
-            self.with_write_timeout("set_gripper", move || async move {
-                driver.lock().await.set_gripper(gripper_f).await
-            })
-            .await?;
+            self.maybe_set_gripper(gripper).await?;
+        } else if command_enable(cmd) {
+            // No pose — maybe just a gripper command, still gated by enable.
+            self.maybe_set_gripper(gripper).await?;
         }
 
         Ok(())
@@ -273,6 +421,11 @@ impl Device for RobotArmDevice {
         tracing::error!("RobotArmDevice: EMERGENCY STOP");
         self.driver.lock().await.emergency_stop().await?;
         self.safety.lock().await.reset();
+        {
+            let mut mapper = self.mapper.lock().await;
+            self.teleop.reset(&mut mapper);
+        }
+        self.last_gripper = None;
         Ok(())
     }
 
@@ -295,6 +448,20 @@ mod tests {
         assert_eq!(d.control_schema.axes.len(), 1);
         assert_eq!(d.control_schema.axes[0].name, "gripper");
         assert_eq!(d.control_schema.axes[0].range, (0.0, 1.0));
+        assert_eq!(d.control_schema.axes[0].default, 1.0);
+        assert_eq!(d.control_schema.buttons.len(), 1);
+        assert_eq!(d.control_schema.buttons[0].name, "enable");
+        assert!(d
+            .input_mapping
+            .iter()
+            .any(|m| m.source == "right_grip" && m.target == "enable"));
+        let trigger = d
+            .input_mapping
+            .iter()
+            .find(|m| m.source == "right_trigger" && m.target == "gripper")
+            .expect("right trigger gripper mapping");
+        assert!(trigger.invert);
+        assert_eq!(trigger.offset, 1.0);
         // Telemetry advertises joint_angles (array), num_joints, connected.
         let names: Vec<&str> = d
             .telemetry_schema
@@ -305,5 +472,13 @@ mod tests {
         assert!(names.contains(&"joint_angles"));
         assert!(names.contains(&"num_joints"));
         assert!(names.contains(&"connected"));
+    }
+
+    #[test]
+    fn default_descriptor_reserves_last_joint_for_gripper() {
+        let d = RobotArmDevice::default_descriptor();
+        assert_eq!(gripper_joint_index_for(&d, 6), Some(5));
+        assert_eq!(pose_joint_count_for(&d, 6), 5);
+        assert_eq!(gripper_axis_default_for(&d), Some(1.0));
     }
 }

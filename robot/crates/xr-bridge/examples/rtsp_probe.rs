@@ -40,8 +40,9 @@ struct FeedStats {
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("xr_bridge=warn,rtsp_probe=info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("xr_bridge=warn,rtsp_probe=info")
+            }),
         )
         .init();
 
@@ -110,8 +111,12 @@ async fn main() {
                                 // SPS: profile_idc/level_idc sit right after the
                                 // 4-byte start code + 1-byte NAL header.
                                 if nal.len() >= 8 {
-                                    stats_c.sps_profile_idc.store(nal[5] as u64, Ordering::Relaxed);
-                                    stats_c.sps_level_idc.store(nal[7] as u64, Ordering::Relaxed);
+                                    stats_c
+                                        .sps_profile_idc
+                                        .store(nal[5] as u64, Ordering::Relaxed);
+                                    stats_c
+                                        .sps_level_idc
+                                        .store(nal[7] as u64, Ordering::Relaxed);
                                 }
                             }
                             _ => {}
@@ -164,6 +169,9 @@ async fn main() {
             mb = bytes as f64 / 1e6,
         );
     }
-    println!("---- aggregate egress: {agg_mbps:.2} Mb/s across {} feed(s) ----", stats_all.len());
+    println!(
+        "---- aggregate egress: {agg_mbps:.2} Mb/s across {} feed(s) ----",
+        stats_all.len()
+    );
     println!("captured streams in {out_dir}/<name>.h264 — decode with: ffmpeg -v error -i <file> -f null -");
 }

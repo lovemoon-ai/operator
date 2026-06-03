@@ -79,7 +79,9 @@ impl DummyHandle {
     /// Last observed `"gripper"` axis value, if any command ever carried one.
     pub fn last_gripper(&self) -> Option<f64> {
         if self.inner.has_gripper.load(Ordering::SeqCst) {
-            Some(f64::from_bits(self.inner.last_gripper_bits.load(Ordering::SeqCst)))
+            Some(f64::from_bits(
+                self.inner.last_gripper_bits.load(Ordering::SeqCst),
+            ))
         } else {
             None
         }
@@ -160,7 +162,8 @@ impl Device for DummyDevice {
         let s = &self.handle.inner;
         s.command_count.fetch_add(1, Ordering::SeqCst);
         s.last_axes.store(cmd.axes.len() as u64, Ordering::SeqCst);
-        s.last_buttons.store(cmd.buttons.len() as u64, Ordering::SeqCst);
+        s.last_buttons
+            .store(cmd.buttons.len() as u64, Ordering::SeqCst);
         s.last_poses.store(cmd.poses.len() as u64, Ordering::SeqCst);
         if let Some(g) = cmd.axes.get("gripper") {
             s.last_gripper_bits.store(g.to_bits(), Ordering::SeqCst);
@@ -287,7 +290,9 @@ mod tests {
     #[tokio::test]
     async fn no_gripper_axis_is_none() {
         let (mut dev, handle) = DummyDevice::with_handle(DummyDevice::default_descriptor());
-        dev.send_command(&cmd_with_axes(&[("throttle", 0.1)])).await.unwrap();
+        dev.send_command(&cmd_with_axes(&[("throttle", 0.1)]))
+            .await
+            .unwrap();
         assert_eq!(handle.last_gripper(), None);
     }
 }

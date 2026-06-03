@@ -56,6 +56,7 @@ use crate::control::JointAngles;
 
 /// SO-101 has 5 arm joints + 1 gripper.
 pub const NUM_ACTUATORS: usize = 6;
+const NUM_ARM_JOINTS: usize = NUM_ACTUATORS - 1;
 
 /// Gripper actuator range in radians, from `assets/so101/so101.xml`
 /// (`+` = open).
@@ -248,7 +249,10 @@ impl MujocoSo101Driver {
         for _ in 0..8 {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                anyhow::bail!("MuJoCo bridge did not become ready within {:?}", READY_TIMEOUT);
+                anyhow::bail!(
+                    "MuJoCo bridge did not become ready within {:?}",
+                    READY_TIMEOUT
+                );
             }
             let resp = self.read_line(remaining).await?;
             if resp.event.as_deref() == Some("ready") {
@@ -306,19 +310,25 @@ impl ArmDriver for MujocoSo101Driver {
         if !self.ready {
             anyhow::bail!("MujocoSo101Driver::set_joints before enable_torque");
         }
-        if joints.angles.len() != NUM_ACTUATORS {
+        if joints.angles.len() != NUM_ARM_JOINTS {
             tracing::debug!(
-                "MujocoSo101Driver: got {} angles, expected {NUM_ACTUATORS}; \
-                 leaving extras at last_ctrl",
+                "MujocoSo101Driver: got {} joint angles, expected {NUM_ARM_JOINTS}; \
+                 writing arm joints only and holding gripper",
                 joints.angles.len()
             );
         }
-        let n = joints.angles.len().min(NUM_ACTUATORS);
+        let n = joints.angles.len().min(NUM_ARM_JOINTS);
         // Degrees → radians at the driver boundary. The rest of the pipeline is
-        // degrees by convention (PoseMapper, Safety).
+        // degrees by convention (PoseMapper, Safety). The gripper actuator is
+        // intentionally excluded here so pose/wrist commands can never move the
+        // jaw; it is controlled only by set_gripper().
         for i in 0..n {
             self.last_ctrl[i] = joints.angles[i].to_radians();
         }
+        tracing::trace!(
+            "MujocoSo101Driver: set_joints wrote {n} arm joints, held gripper_ctrl={:.3}",
+            self.last_ctrl[NUM_ACTUATORS - 1]
+        );
         self.step().await
     }
 
@@ -328,6 +338,12 @@ impl ArmDriver for MujocoSo101Driver {
         }
         self.last_ctrl[NUM_ACTUATORS - 1] = Self::gripper_value_to_rad(value);
         self.step().await
+    }
+
+    fn last_joint_angles(&self) -> Option<JointAngles> {
+        Some(JointAngles {
+            angles: self.last_q_rad.iter().map(|rad| rad.to_degrees()).collect(),
+        })
     }
 
     async fn emergency_stop(&mut self) -> Result<()> {
@@ -457,10 +473,7 @@ mod tests {
         // Direct deserialization works; the `error` field gets populated.
         let raw = r#"{"error":"ctrl must be list of 6 floats"}"#;
         let resp: BridgeResponse = serde_json::from_str(raw).unwrap();
-        assert_eq!(
-            resp.error.as_deref(),
-            Some("ctrl must be list of 6 floats")
-        );
+        assert_eq!(resp.error.as_deref(), Some("ctrl must be list of 6 floats"));
     }
 
     #[test]

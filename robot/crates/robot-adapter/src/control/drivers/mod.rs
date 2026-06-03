@@ -25,6 +25,11 @@ pub trait ArmDriver: Send {
     /// Set the gripper opening (0.0 = closed, 1.0 = open).
     async fn set_gripper(&mut self, value: f32) -> Result<()>;
 
+    /// Latest known joint angles in degrees, if the backend can report them.
+    fn last_joint_angles(&self) -> Option<JointAngles> {
+        None
+    }
+
     /// Emergency stop: immediately disable all servo torque / freeze motion.
     async fn emergency_stop(&mut self) -> Result<()>;
 

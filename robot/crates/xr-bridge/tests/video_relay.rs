@@ -14,9 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_util::codec::Framed;
 
-use xr_bridge::protocol::{
-    TimedVideoFrame, TimedVideoFrameCodec, VIDEO_PIPELINE_MODE_FFMPEG,
-};
+use xr_bridge::protocol::{TimedVideoFrame, TimedVideoFrameCodec, VIDEO_PIPELINE_MODE_FFMPEG};
 use xr_bridge::video::fanout::serve_video_clients_on;
 use xr_bridge::video::nal::ParamSetCache;
 
@@ -147,7 +145,10 @@ async fn relay_roundtrips_a_large_idr_byte_for_byte() {
 
     // SPS, PPS, then the big IDR.
     let frames = recv_n(client, 3).await;
-    assert_eq!(frames[2].nal, big, "large IDR must survive the relay verbatim");
+    assert_eq!(
+        frames[2].nal, big,
+        "large IDR must survive the relay verbatim"
+    );
 }
 
 #[tokio::test]

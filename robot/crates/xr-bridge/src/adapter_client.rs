@@ -173,9 +173,9 @@ impl AdapterClient {
     fn sink_mut(&mut self) -> Result<&mut Sink> {
         match &mut self.state {
             ConnState::Connected(sink) => Ok(sink),
-            ConnState::PreHandshake(_) => {
-                Err(anyhow!("send attempted before handshake; call handshake() first"))
-            }
+            ConnState::PreHandshake(_) => Err(anyhow!(
+                "send attempted before handshake; call handshake() first"
+            )),
             ConnState::Empty => Err(anyhow!("client in invalid state")),
         }
     }

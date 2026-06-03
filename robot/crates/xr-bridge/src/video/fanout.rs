@@ -497,7 +497,11 @@ mod tests {
         cache.observe(&h_pps());
 
         let mut delivered: Vec<Vec<u8>> = JoinPrimer::priming_nals(&cache);
-        assert_eq!(delivered, vec![h_vps(), h_sps(), h_pps()], "VPS,SPS,PPS order");
+        assert_eq!(
+            delivered,
+            vec![h_vps(), h_sps(), h_pps()],
+            "VPS,SPS,PPS order"
+        );
 
         // Live HEVC stream: trail, trail, IDR, trail — skip the leading inter
         // frames, start on the IDR, then forward everything.

@@ -212,7 +212,11 @@ pub fn nal_type_of(nal: &[u8], codec: Codec) -> Option<u8> {
     let sc = start_code_len(nal);
     // With a start code the header byte follows it; without one (a raw NAL) the
     // first byte is the header.
-    let header = if sc == 0 { *nal.first()? } else { *nal.get(sc)? };
+    let header = if sc == 0 {
+        *nal.first()?
+    } else {
+        *nal.get(sc)?
+    };
     Some(match codec {
         Codec::H264 => header & 0x1F,
         Codec::Hevc => (header >> 1) & 0x3F,
@@ -479,9 +483,7 @@ mod tests {
         let p3 = vec![0x00, 0x00, 0x00, 0x01, 0x41, 0x03];
 
         // Sequence: [7,8,5,1,1,7,8,5,1].
-        let stream = [
-            &sps_a, &pps_a, &idr, &p1, &p2, &sps_b, &pps_b, &idr2, &p3,
-        ];
+        let stream = [&sps_a, &pps_a, &idr, &p1, &p2, &sps_b, &pps_b, &idr2, &p3];
         for nal in stream {
             cache.observe(nal);
         }
@@ -515,7 +517,10 @@ mod tests {
         let sps = vec![0x00, 0x00, 0x00, 0x01, 0x67, 0xAA];
         let pps = vec![0x00, 0x00, 0x00, 0x01, 0x68, 0xBB];
         cache.observe(&sps);
-        assert!(cache.ordered_param_nals().is_empty(), "SPS only is not enough");
+        assert!(
+            cache.ordered_param_nals().is_empty(),
+            "SPS only is not enough"
+        );
         cache.observe(&pps);
         assert_eq!(cache.ordered_param_nals(), vec![sps, pps]);
     }
@@ -530,7 +535,11 @@ mod tests {
         assert_eq!(Codec::parse(" HEVC "), Codec::Hevc);
         assert_eq!(Codec::parse("h264"), Codec::H264);
         assert_eq!(Codec::parse(""), Codec::H264);
-        assert_eq!(Codec::parse("nonsense"), Codec::H264, "typo falls back to H.264");
+        assert_eq!(
+            Codec::parse("nonsense"),
+            Codec::H264,
+            "typo falls back to H.264"
+        );
         assert_eq!(Codec::default(), Codec::H264);
         assert_eq!(Codec::H264.as_str(), "h264");
         assert_eq!(Codec::Hevc.as_str(), "hevc");
@@ -591,7 +600,10 @@ mod tests {
         assert!(cache.observe(&pps));
 
         // HEVC priming order is VPS, SPS, PPS.
-        assert_eq!(cache.ordered_param_nals(), vec![vps.clone(), sps.clone(), pps.clone()]);
+        assert_eq!(
+            cache.ordered_param_nals(),
+            vec![vps.clone(), sps.clone(), pps.clone()]
+        );
         assert_eq!(cache.vps(), Some(vps));
         assert_eq!(cache.sps(), Some(sps));
         assert_eq!(cache.pps(), Some(pps));

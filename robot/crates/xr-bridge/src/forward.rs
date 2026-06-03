@@ -149,9 +149,7 @@ mod tests {
 
     /// Spin up a mock adapter on an ephemeral loopback port that replies to
     /// `Hello` with `descriptor` and records commands + stops.
-    async fn spawn_mock_adapter(
-        descriptor: DeviceDescriptor,
-    ) -> (Endpoint, Arc<Mutex<MockState>>) {
+    async fn spawn_mock_adapter(descriptor: DeviceDescriptor) -> (Endpoint, Arc<Mutex<MockState>>) {
         let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
             .await
             .expect("bind mock adapter");

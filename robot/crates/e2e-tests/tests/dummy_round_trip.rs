@@ -161,7 +161,10 @@ async fn stop_triggers_emergency_stop_on_device() {
     client.handshake().await.expect("handshake");
 
     assert_eq!(handle.estop_count(), 0);
-    client.stop("watchdog: headset quiet".to_string()).await.expect("stop");
+    client
+        .stop("watchdog: headset quiet".to_string())
+        .await
+        .expect("stop");
 
     let stopped = wait_until(|| handle.estop_count() >= 1, Duration::from_secs(2)).await;
     assert!(

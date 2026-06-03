@@ -18,10 +18,12 @@ extends Node3D
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
 const SettingsInteractionRouterScript = preload("res://scripts/ui/settings_interaction_router.gd")
+const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
 const OperatorUIPointerVisualScript = preload("res://scripts/xr/operator_ui_pointer_visual.gd")
 
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
+const TELEOP_CONTROLLER_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.078, -0.145))
 
 @onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
 @onready var _origin: XROrigin3D = $XROrigin3D
@@ -54,6 +56,7 @@ var _settings_button: Node3D
 var _settings_ui: Node = null
 var _settings_interaction_router: Node
 var _settings_pointer_visual: Node3D
+var _teleop_controller_panel: Node3D
 
 ## Selected by the user in the Settings UI; used as a hint until the
 ## DeviceDescriptor arrives and overrides it.
@@ -147,6 +150,7 @@ func _process(_delta: float) -> void:
 		_settings_interaction_router.busy = false
 		_settings_interaction_router.set_targets([_settings_panel, _settings_button])
 		_settings_interaction_router.update_pointer()
+	_update_teleop_controller_panel()
 
 
 func _create_v2_nodes() -> void:
@@ -202,11 +206,32 @@ func _create_settings_ui_nodes() -> void:
 	_settings_button.pressed.connect(_on_settings_button_pressed)
 	_origin.add_child(_settings_button)
 
+	_teleop_controller_panel = TeleopControllerPanelScript.new()
+	_teleop_controller_panel.name = "TeleopControllerPanel"
+	_teleop_controller_panel.transform = TELEOP_CONTROLLER_PANEL_OFFSET
+	_right_controller.add_child(_teleop_controller_panel)
+
 	_settings_interaction_router = SettingsInteractionRouterScript.new()
 	_settings_interaction_router.name = "SettingsInteractionRouter"
 	_settings_interaction_router.configure(_origin, _camera, _left_controller, _right_controller, _settings_pointer_visual)
 	_settings_interaction_router.set_targets([_settings_panel, _settings_button])
 	_origin.add_child(_settings_interaction_router)
+
+
+func _update_teleop_controller_panel() -> void:
+	if _teleop_controller_panel == null:
+		return
+	var connected: bool = _tcp_handler != null and _tcp_handler.is_connected_to_robot()
+	var grip_value := 0.0
+	if _tracking_provider and _tracking_provider.has_method("get_controller_input"):
+		var input_any: Variant = _tracking_provider.call("get_controller_input", 1)
+		if input_any is Dictionary:
+			grip_value = maxf(
+				float(input_any.get("grip", 0.0)),
+				maxf(float(input_any.get("grip_click", 0.0)), float(input_any.get("grip_force", 0.0)))
+			)
+	_teleop_controller_panel.call("set_bridge_connected", connected)
+	_teleop_controller_panel.call("set_grip_value", grip_value)
 
 
 # --- XR lifecycle -------------------------------------------------------------
@@ -490,11 +515,15 @@ func _set_status(text: String) -> void:
 
 func _connect_to_robot(ip: String, port: int) -> void:
 	_set_status(tr("UI_CONNECTING_TO") % [ip, port])
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
+		_teleop_controller_panel.call("set_bridge_connected", false)
 	_tcp_handler.connect_to_robot(ip, port)
 
 
 func _on_connected() -> void:
 	_set_status(tr("UI_CONNECTED_HANDSHAKE"))
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
+		_teleop_controller_panel.call("set_bridge_connected", true)
 	_session.on_connected()
 	_connect_video_stream(_tcp_handler.get_host())
 	if _clock_sync:
@@ -504,6 +533,8 @@ func _on_connected() -> void:
 func _on_disconnected() -> void:
 	_set_status(tr("UI_DISCONNECTED"))
 	_command_sender.set_sending(false)
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
+		_teleop_controller_panel.call("set_bridge_connected", false)
 	_video_tcp_handler.disconnect_from_robot()
 	_video_udp_handler.disconnect_from_robot()
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
@@ -515,6 +546,8 @@ func _on_disconnected() -> void:
 
 func _on_connection_failed(reason: String) -> void:
 	_set_status(tr("UI_CONNECTION_FAILED") % reason)
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
+		_teleop_controller_panel.call("set_bridge_connected", false)
 
 
 func _on_command_received(command: String, data: PackedByteArray) -> void:
@@ -562,6 +595,9 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 		])
 	_command_sender.configure_for_device(descriptor)
 	_command_sender.set_sending(true)
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
+		_teleop_controller_panel.call("configure_for_device", descriptor)
+		_update_teleop_controller_panel()
 	_configure_robot_video_stream(descriptor)
 	# [issue 005 / item 1] After the descriptor arrives we now know
 	# whether the robot is offering UDP. Re-call `_connect_video_stream`
@@ -572,6 +608,8 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 
 func _on_device_disconnected() -> void:
 	_command_sender.set_sending(false)
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
+		_teleop_controller_panel.call("set_bridge_connected", false)
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 

@@ -38,7 +38,11 @@ async fn driver_round_trips_against_stub_bridge() {
         return;
     }
     let script = stub_script();
-    assert!(script.exists(), "stub script missing at {}", script.display());
+    assert!(
+        script.exists(),
+        "stub script missing at {}",
+        script.display()
+    );
 
     let mut driver =
         MujocoSo101Driver::new(script.to_str().unwrap(), "python3", 3, &[]).expect("spawn stub");
@@ -71,6 +75,23 @@ async fn driver_round_trips_against_stub_bridge() {
     assert!(
         (q[NUM_ACTUATORS - 1] - GRIPPER_RAD_MAX).abs() < 1e-6,
         "gripper snapshot {} should be GRIPPER_RAD_MAX {}",
+        q[NUM_ACTUATORS - 1],
+        GRIPPER_RAD_MAX
+    );
+
+    // Arm-only joint writes must preserve the gripper actuator. This prevents
+    // controller pose/wrist commands from moving the jaw by positional index.
+    let arm_only = JointAngles {
+        angles: vec![10.0, 20.0, -30.0, 40.0, -50.0],
+    };
+    driver
+        .set_joints(&arm_only)
+        .await
+        .expect("set_joints arm-only");
+    let q = driver.last_q_rad();
+    assert!(
+        (q[NUM_ACTUATORS - 1] - GRIPPER_RAD_MAX).abs() < 1e-6,
+        "arm-only set_joints changed gripper snapshot {} from {}",
         q[NUM_ACTUATORS - 1],
         GRIPPER_RAD_MAX
     );

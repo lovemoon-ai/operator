@@ -7,26 +7,43 @@ extends RefCounted
 var _descriptor: Dictionary = {}
 var _mappings: Array = []
 var _dead_zones: Dictionary = {}  # axis_name -> dead_zone
+var _button_targets: Dictionary = {}  # button_name -> button definition
 var _toggle_states: Dictionary = {}  # button_name -> bool (for toggle buttons)
+var _enable_hold_until_msec: int = 0
+
+const ENABLE_RELEASE_GRACE_MSEC := 100
 
 
 func configure(descriptor: Dictionary) -> void:
 	_descriptor = descriptor
 	_mappings = descriptor.get("input_mapping", [])
+	_dead_zones.clear()
+	_button_targets.clear()
 	# Build dead zone lookup from control_schema.axes
 	var schema = descriptor.get("control_schema", {})
 	for axis_def in schema.get("axes", []):
 		_dead_zones[axis_def["name"]] = axis_def.get("dead_zone", 0.0)
+	for button_def in schema.get("buttons", []):
+		_button_targets[button_def["name"]] = button_def
 
 
 func collect_command(tracking: TrackingProvider) -> Dictionary:
 	var cmd = {"axes": {}, "buttons": {}, "poses": {}, "timestamp_ns": Time.get_ticks_usec() * 1000}
+	var enable_sampled := false
+	var enable_pressed := false
 	for mapping in _mappings:
 		var source: String = mapping["source"]
 		var target: String = mapping["target"]
 		var scale: float = mapping.get("scale", 1.0)
 		var invert: bool = mapping.get("invert", false)
 		var offset: float = mapping.get("offset", 0.0)
+
+		if target == "enable":
+			if not enable_sampled:
+				enable_pressed = _read_enable_pressed(tracking)
+				enable_sampled = true
+			cmd["buttons"][target] = bool(cmd["buttons"].get(target, false)) or enable_pressed
+			continue
 
 		var value = _read_vr_source(source, tracking)
 		if value == null:
@@ -36,10 +53,13 @@ func collect_command(tracking: TrackingProvider) -> Dictionary:
 			var fval: float = float(value)
 			if invert: fval = -fval
 			fval = fval * scale + offset
-			# Apply dead zone
-			var dz = _dead_zones.get(target, 0.0)
-			if absf(fval) < dz: fval = 0.0
-			cmd["axes"][target] = fval
+			if _button_targets.has(target):
+				cmd["buttons"][target] = fval >= 0.5
+			else:
+				# Apply dead zone
+				var dz = _dead_zones.get(target, 0.0)
+				if absf(fval) < dz: fval = 0.0
+				cmd["axes"][target] = fval
 		elif typeof(value) == TYPE_BOOL:
 			cmd["buttons"][target] = value
 		elif value is Dictionary and value.has("position"):
@@ -59,8 +79,8 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"right_joystick_y": return _get_input(tracking, 1, "joystick").y
 		"left_trigger": return _get_input_float(tracking, 0, "trigger")
 		"right_trigger": return _get_input_float(tracking, 1, "trigger")
-		"left_grip": return _get_input_float(tracking, 0, "grip")
-		"right_grip": return _get_input_float(tracking, 1, "grip")
+		"left_grip": return _get_grip_value(tracking, 0)
+		"right_grip": return _get_grip_value(tracking, 1)
 		"button_a": return _get_input_bool(tracking, 1, "ax_button")
 		"button_b": return _get_input_bool(tracking, 1, "by_button")
 		"button_x": return _get_input_bool(tracking, 0, "ax_button")
@@ -71,6 +91,14 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"right_hand_joints": return tracking.get_hand_joints(1)
 		"left_hand_joints": return tracking.get_hand_joints(0)
 	return null
+
+
+func _read_enable_pressed(tracking: TrackingProvider) -> bool:
+	var now_msec := Time.get_ticks_msec()
+	if _get_grip_value(tracking, 1) >= 0.5:
+		_enable_hold_until_msec = now_msec + ENABLE_RELEASE_GRACE_MSEC
+		return true
+	return now_msec <= _enable_hold_until_msec
 
 
 # Helper methods to safely extract input values
@@ -86,6 +114,15 @@ func _get_input_float(tracking: TrackingProvider, hand: int, key: String) -> flo
 	var input = tracking.get_controller_input(hand)
 	if input.is_empty(): return 0.0
 	return float(input.get(key, 0.0))
+
+
+func _get_grip_value(tracking: TrackingProvider, hand: int) -> float:
+	var input = tracking.get_controller_input(hand)
+	if input.is_empty(): return 0.0
+	return maxf(
+		float(input.get("grip", 0.0)),
+		maxf(float(input.get("grip_click", 0.0)), float(input.get("grip_force", 0.0)))
+	)
 
 
 func _get_input_bool(tracking: TrackingProvider, hand: int, key: String) -> bool:

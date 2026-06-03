@@ -196,7 +196,9 @@ async fn events_receiver_sees_full_messages() {
 
     let mut client = AdapterClient::connect(&mock.endpoint).await.unwrap();
     let _ = client.handshake().await.unwrap();
-    let mut events = client.take_events().expect("events receiver available once");
+    let mut events = client
+        .take_events()
+        .expect("events receiver available once");
 
     let mut cmd = DeviceCommand::default();
     cmd.axes.insert("throttle".into(), 0.5);

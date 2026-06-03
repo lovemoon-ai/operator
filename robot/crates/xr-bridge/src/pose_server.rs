@@ -70,9 +70,15 @@ pub async fn run_on(
         latency.new_session();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_connection(socket, addr, descriptor, device_cmd_tx, telemetry_rx, latency)
-                    .await
+            if let Err(e) = handle_connection(
+                socket,
+                addr,
+                descriptor,
+                device_cmd_tx,
+                telemetry_rx,
+                latency,
+            )
+            .await
             {
                 tracing::warn!("Connection error for {addr}: {e}");
             }

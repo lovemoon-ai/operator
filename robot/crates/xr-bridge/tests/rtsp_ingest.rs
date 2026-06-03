@@ -188,9 +188,7 @@ async fn run_feed_and_assert(args: Vec<String>, budget: Duration) {
             assert!(saw_sps, "expected at least one SPS");
             assert!(saw_idr, "expected at least one IDR");
             assert!(total >= 6, "expected several frames, got {total}");
-            eprintln!(
-                "ingest OK: sps={saw_sps} pps={saw_pps} idr={saw_idr} total_frames={total}"
-            );
+            eprintln!("ingest OK: sps={saw_sps} pps={saw_pps} idr={saw_idr} total_frames={total}");
         }
         Err(_) => panic!("timed out waiting for SPS+IDR+frames"),
     }
@@ -382,6 +380,9 @@ async fn rtsp_server_ingest_e2e() {
     fanout_handle.abort();
 
     let (sps, idr, total) = result.expect("timed out pulling from RTSP server");
-    assert!(sps && idr && total >= 6, "rtsp relay: sps={sps} idr={idr} total={total}");
+    assert!(
+        sps && idr && total >= 6,
+        "rtsp relay: sps={sps} idr={idr} total={total}"
+    );
     eprintln!("rtsp_server_ingest_e2e OK against {url}: total={total}");
 }

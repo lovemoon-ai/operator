@@ -77,10 +77,7 @@ async fn command_reflected_in_telemetry() {
     let mut cmd = DeviceCommand::default();
     cmd.axes.insert("throttle".to_string(), 0.5);
     cmd.axes.insert("gripper".to_string(), 0.9);
-    framed
-        .send(BridgeToAdapter::Command(cmd))
-        .await
-        .unwrap();
+    framed.send(BridgeToAdapter::Command(cmd)).await.unwrap();
 
     // Wait for a telemetry frame that reflects the 2-axis command.
     let mut saw = false;
@@ -152,9 +149,9 @@ async fn shutdown_closes_connection() {
     let closed = timeout(T, async {
         loop {
             match framed.next().await {
-                None => break true,                  // EOF
-                Some(Err(_)) => break true,          // reset also fine
-                Some(Ok(_)) => continue,             // ignore stray telemetry
+                None => break true,         // EOF
+                Some(Err(_)) => break true, // reset also fine
+                Some(Ok(_)) => continue,    // ignore stray telemetry
             }
         }
     })

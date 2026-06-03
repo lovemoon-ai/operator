@@ -425,7 +425,7 @@ impl ButtonStateTracker {
 mod tests {
     use super::*;
     use teleop_protocol::{
-        AxisDef, ButtonDef, ControlSchema, DeviceInfo, DeviceSafetyConfig, PoseDef, Pose6D,
+        AxisDef, ButtonDef, ControlSchema, DeviceInfo, DeviceSafetyConfig, Pose6D, PoseDef,
         TelemetrySchema,
     };
 
@@ -761,7 +761,9 @@ mod tests {
 
     fn extract_button(r: &SafetyResult, name: &str) -> bool {
         match r {
-            SafetyResult::Ok(c) | SafetyResult::Clamped(c) => *c.buttons.get(name).unwrap_or(&false),
+            SafetyResult::Ok(c) | SafetyResult::Clamped(c) => {
+                *c.buttons.get(name).unwrap_or(&false)
+            }
             SafetyResult::Rejected(reason) => panic!("unexpected reject: {reason}"),
         }
     }

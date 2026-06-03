@@ -14,6 +14,7 @@
 pub mod drivers;
 pub mod pose_mapping;
 pub mod safety;
+pub mod teleop;
 
 /// Joint angles for the arm, in **degrees** (one per joint).
 ///

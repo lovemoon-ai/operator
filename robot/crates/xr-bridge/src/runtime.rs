@@ -98,7 +98,10 @@ pub async fn spawn_stack(
     let mut tasks = Vec::new();
 
     // Telemetry fan-in: adapter watch -> bridge telemetry watch.
-    tasks.push(tokio::spawn(telemetry_fanin(adapter_telemetry, telemetry_tx)));
+    tasks.push(tokio::spawn(telemetry_fanin(
+        adapter_telemetry,
+        telemetry_tx,
+    )));
 
     // pose_server on the pre-bound listener.
     {

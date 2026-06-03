@@ -155,7 +155,10 @@ mod tests {
 
         // Advancing further without a fresh command: does NOT fire again.
         tokio::time::advance(Duration::from_secs(5)).await;
-        assert!(!wd.tick("idle").await, "should not re-fire while still idle");
+        assert!(
+            !wd.tick("idle").await,
+            "should not re-fire while still idle"
+        );
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
@@ -178,7 +181,10 @@ mod tests {
 
         // Next idle period fires again.
         tokio::time::advance(Duration::from_millis(300)).await;
-        assert!(wd.tick("idle").await, "should fire on the second idle period");
+        assert!(
+            wd.tick("idle").await,
+            "should fire on the second idle period"
+        );
         assert_eq!(fired.load(Ordering::SeqCst), 2);
     }
 

@@ -122,7 +122,9 @@ async fn headset_to_adapter_round_trip() {
     let pose_addr = stack.pose_addr;
 
     // 3. Simulated headset: raw TCP + CommandCodec.
-    let socket = TcpStream::connect(pose_addr).await.expect("connect to pose port");
+    let socket = TcpStream::connect(pose_addr)
+        .await
+        .expect("connect to pose port");
     socket.set_nodelay(true).unwrap();
     let mut framed = Framed::new(socket, CommandCodec);
 

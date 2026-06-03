@@ -78,7 +78,7 @@ upgrade: check-uv
 
 # Run the interactive viewer (default).
 run-sim: env prepare-assets
-	$(UV) run python sim_so101.py viewer
+	$(UV) run mjpython sim_so101.py viewer
 
 smoketest: env prepare-assets
 	$(UV) run python sim_so101.py smoketest

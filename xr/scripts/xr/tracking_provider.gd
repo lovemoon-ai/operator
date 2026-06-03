@@ -6,6 +6,8 @@ extends Node
 
 signal tracking_data_ready(data: Dictionary)
 
+const CONTROLLER_CACHE_TTL_MSEC := 250
+
 ## Reference to XRCamera3D in the scene tree
 var _camera: XRCamera3D
 ## References to controller nodes
@@ -17,6 +19,10 @@ var _xr_interface: XRInterface
 var _platform_name: String = "Unknown"
 ## Whether hand tracking is available
 var _hand_tracking_available: bool = false
+var _last_controller_inputs: Array[Dictionary] = [{}, {}]
+var _last_controller_input_msec: Array[int] = [0, 0]
+var _last_controller_poses: Array[Dictionary] = [{}, {}]
+var _last_controller_pose_msec: Array[int] = [0, 0]
 
 
 func _ready() -> void:
@@ -91,18 +97,21 @@ func get_head_pose() -> Dictionary:
 func get_controller_pose(hand: int) -> Dictionary:
 	var controller: XRController3D = _left_controller if hand == 0 else _right_controller
 	if not controller:
-		return {}
+		return _get_cached_controller_pose(hand)
 
 	var is_active: bool = controller.get_is_active()
 	if not is_active:
-		return {"is_active": false}
+		return _get_cached_controller_pose(hand)
 
 	var t := controller.global_transform
-	return {
+	var pose := {
 		"position": t.origin,
 		"rotation": t.basis.get_rotation_quaternion(),
 		"is_active": true
 	}
+	_last_controller_poses[hand] = pose
+	_last_controller_pose_msec[hand] = Time.get_ticks_msec()
+	return pose
 
 
 ## Get controller input state for given hand (0=left, 1=right).
@@ -110,13 +119,15 @@ func get_controller_pose(hand: int) -> Dictionary:
 func get_controller_input(hand: int) -> Dictionary:
 	var controller: XRController3D = _left_controller if hand == 0 else _right_controller
 	if not controller or not controller.get_is_active():
-		return {}
+		return _get_cached_controller_input(hand)
 
-	return {
+	var input := {
 		"trigger": controller.get_float("trigger"),
 		"trigger_click": controller.get_float("trigger_click"),
 		"grip": controller.get_float("grip"),
 		"grip_click": controller.get_float("grip_click"),
+		"grip_force": controller.get_float("grip_force"),
+		"select_button": controller.get_float("select_button"),
 		"primary_x": controller.get_vector2("primary").x,
 		"primary_y": controller.get_vector2("primary").y,
 		"primary_click": controller.get_float("primary_click"),
@@ -124,6 +135,23 @@ func get_controller_input(hand: int) -> Dictionary:
 		"by_button": controller.get_float("by_button"),
 		"menu_button": controller.get_float("menu_button"),
 	}
+	_last_controller_inputs[hand] = input
+	_last_controller_input_msec[hand] = Time.get_ticks_msec()
+	return input
+
+
+func _get_cached_controller_pose(hand: int) -> Dictionary:
+	var now_msec := Time.get_ticks_msec()
+	if now_msec - int(_last_controller_pose_msec[hand]) <= CONTROLLER_CACHE_TTL_MSEC:
+		return _last_controller_poses[hand]
+	return {"is_active": false}
+
+
+func _get_cached_controller_input(hand: int) -> Dictionary:
+	var now_msec := Time.get_ticks_msec()
+	if now_msec - int(_last_controller_input_msec[hand]) <= CONTROLLER_CACHE_TTL_MSEC:
+		return _last_controller_inputs[hand]
+	return {}
 
 
 ## Get hand joint tracking data for given hand (0=left, 1=right).

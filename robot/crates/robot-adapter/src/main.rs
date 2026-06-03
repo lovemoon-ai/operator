@@ -33,22 +33,25 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let cli = Cli::parse();
 
     // Base config: file if given, else defaults.
     let mut cfg = match &cli.config {
-        Some(path) => AdapterConfig::from_yaml_file(path)
-            .with_context(|| format!("loading config {path}"))?,
+        Some(path) => {
+            AdapterConfig::from_yaml_file(path).with_context(|| format!("loading config {path}"))?
+        }
         None => AdapterConfig::default(),
     };
 
     // CLI overrides.
     if let Some(ep) = &cli.endpoint {
-        cfg.endpoint = Endpoint::from_str(ep)
-            .with_context(|| format!("parsing --endpoint {ep:?}"))?;
+        cfg.endpoint =
+            Endpoint::from_str(ep).with_context(|| format!("parsing --endpoint {ep:?}"))?;
     }
 
     let descriptor = cfg.load_descriptor()?;

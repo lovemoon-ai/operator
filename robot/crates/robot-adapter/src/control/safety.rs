@@ -64,9 +64,7 @@ impl Safety {
         // --- 1. Sanity: NaN/inf are programmer / network errors. Reject. ---
         for (i, angle) in result_angles.iter().enumerate() {
             if !angle.is_finite() {
-                return SafetyResult::Rejected(format!(
-                    "joint {i} angle is not finite ({angle})"
-                ));
+                return SafetyResult::Rejected(format!("joint {i} angle is not finite ({angle})"));
             }
         }
 
@@ -90,9 +88,7 @@ impl Safety {
             let dt = now.duration_since(*prev_t).as_secs_f64();
             if dt > 0.0 && self.max_velocity > 0.0 {
                 let max_step = self.max_velocity * dt;
-                for (i, (curr, prev_val)) in
-                    result_angles.iter_mut().zip(prev.iter()).enumerate()
-                {
+                for (i, (curr, prev_val)) in result_angles.iter_mut().zip(prev.iter()).enumerate() {
                     let delta = *curr - *prev_val;
                     if delta.abs() > max_step {
                         let clamped_delta = max_step.copysign(delta);
@@ -204,7 +200,9 @@ mod tests {
         // huge factor avoids the flakiness a smaller one would have under heavy
         // parallel test load, where dt can round to ~10 ns.
         let mut s = safety(1e18); // effectively unbounded
-        let _ = s.validate(&JointAngles { angles: vec![0.0; 6] });
+        let _ = s.validate(&JointAngles {
+            angles: vec![0.0; 6],
+        });
         let cmd = JointAngles {
             angles: vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         };

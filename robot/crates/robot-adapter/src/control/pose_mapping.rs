@@ -24,10 +24,10 @@ pub struct PoseMapper {
     mirror: bool,
     /// Number of joints on the arm.
     num_joints: usize,
-    /// Reference (calibration) position captured when tracking starts.
-    reference_pose: Option<[f64; 3]>,
-    /// Home joint angles (all zeros for now).
-    home_angles: Vec<f64>,
+    /// Reference pose captured when teleop enable is pressed.
+    reference_pose: Option<Pose6D>,
+    /// Base joint angles captured when teleop enable is pressed.
+    base_angles: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,15 +52,30 @@ impl PoseMapper {
             mirror: config.mirror,
             num_joints,
             reference_pose: None,
-            home_angles: vec![0.0; num_joints],
+            base_angles: vec![0.0; num_joints],
         }
     }
 
     /// Set the calibration reference pose. Called once when tracking starts to
     /// record the controller's "home" position.
     pub fn set_reference(&mut self, pose: &Pose6D) {
-        self.reference_pose = Some(pose.position);
-        tracing::info!("Calibration reference set: {:?}", pose.position);
+        self.reference_pose = Some(pose.clone());
+        tracing::info!(
+            "Calibration reference set: position={:?} rotation={:?}",
+            pose.position,
+            pose.rotation
+        );
+    }
+
+    /// Clear the controller pose reference.
+    pub fn clear_reference(&mut self) {
+        self.reference_pose = None;
+    }
+
+    /// Set the joint-space baseline that relative controller motion adds to.
+    pub fn set_base_angles(&mut self, angles: &[f64]) {
+        self.base_angles = angles.to_vec();
+        self.base_angles.resize(self.num_joints, 0.0);
     }
 
     /// Map an end-effector pose to joint angles.
@@ -79,46 +94,45 @@ impl PoseMapper {
     /// - delta_z -> joint 2 (elbow)
     /// - Controller rotation (roll/pitch/yaw) -> joints 3, 4, 5 (wrist)
     fn map_direct(&self, pose: &Pose6D) -> JointAngles {
-        let mut angles = self.home_angles.clone();
+        let mut angles = self.base_angles.clone();
 
-        let reference = self.reference_pose.unwrap_or(pose.position);
+        let reference = self.reference_pose.as_ref().unwrap_or(pose);
         let current = pose.position;
 
         // Position deltas (meters) -> angle deltas (degrees).
         // Using a simple linear mapping: 0.1m movement = 30 degrees.
         let deg_per_meter = 300.0 * self.scale;
-        let dx = current[0] - reference[0];
-        let dy = current[1] - reference[1];
-        let dz = current[2] - reference[2];
+        let dx = current[0] - reference.position[0];
+        let dy = current[1] - reference.position[1];
+        let dz = current[2] - reference.position[2];
 
         let mirror_sign = if self.mirror { -1.0 } else { 1.0 };
 
         // Map position deltas to base joints.
         if self.num_joints > 0 {
-            angles[0] = dx * deg_per_meter * mirror_sign; // base rotation
+            angles[0] += dx * deg_per_meter * mirror_sign; // base rotation
         }
         if self.num_joints > 1 {
-            angles[1] = dy * deg_per_meter; // shoulder
+            angles[1] += dy * deg_per_meter; // shoulder
         }
         if self.num_joints > 2 {
-            angles[2] = dz * deg_per_meter * mirror_sign; // elbow
+            angles[2] += dz * deg_per_meter * mirror_sign; // elbow
         }
 
         // Map controller rotation to wrist joints.
-        let rot = &pose.rotation;
-        let quat = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
-            rot[3], rot[0], rot[1], rot[2], // nalgebra uses w,x,y,z order
-        ));
-        let euler = quat.euler_angles(); // (roll, pitch, yaw) in radians
+        let reference_quat = quat_from_xyzw(reference.rotation);
+        let current_quat = quat_from_xyzw(pose.rotation);
+        let relative_quat = reference_quat.inverse() * current_quat;
+        let euler = relative_quat.euler_angles(); // (roll, pitch, yaw) in radians
 
         if self.num_joints > 3 {
-            angles[3] = euler.0.to_degrees() * self.scale; // wrist roll
+            angles[3] += euler.0.to_degrees() * self.scale; // wrist roll
         }
         if self.num_joints > 4 {
-            angles[4] = euler.1.to_degrees() * self.scale; // wrist pitch
+            angles[4] += euler.1.to_degrees() * self.scale; // wrist pitch
         }
         if self.num_joints > 5 {
-            angles[5] = euler.2.to_degrees() * self.scale; // wrist yaw
+            angles[5] += euler.2.to_degrees() * self.scale; // wrist yaw
         }
 
         JointAngles { angles }
@@ -128,7 +142,7 @@ impl PoseMapper {
     fn map_ik_stub(&self, _pose: &Pose6D) -> JointAngles {
         tracing::warn!("IK mapping not yet implemented, using home position");
         JointAngles {
-            angles: self.home_angles.clone(),
+            angles: self.base_angles.clone(),
         }
     }
 
@@ -136,9 +150,15 @@ impl PoseMapper {
     fn map_retarget_stub(&self, _pose: &Pose6D) -> JointAngles {
         tracing::warn!("Retarget mapping not yet implemented, using home position");
         JointAngles {
-            angles: self.home_angles.clone(),
+            angles: self.base_angles.clone(),
         }
     }
+}
+
+fn quat_from_xyzw(rot: [f64; 4]) -> UnitQuaternion<f64> {
+    UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+        rot[3], rot[0], rot[1], rot[2], // nalgebra uses w,x,y,z order
+    ))
 }
 
 /// Extract Euler angles from a quaternion (utility for debugging).
@@ -202,7 +222,11 @@ mod tests {
         let out = m.map(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
         // Identity quaternion -> all euler angles zero -> wrist joints zero.
         assert!(out.angles[3].abs() < 1e-9, "wrist roll = {}", out.angles[3]);
-        assert!(out.angles[4].abs() < 1e-9, "wrist pitch = {}", out.angles[4]);
+        assert!(
+            out.angles[4].abs() < 1e-9,
+            "wrist pitch = {}",
+            out.angles[4]
+        );
         assert!(out.angles[5].abs() < 1e-9, "wrist yaw = {}", out.angles[5]);
     }
 
@@ -235,5 +259,34 @@ mod tests {
         assert!(out.angles[0].abs() < 1e-9);
         assert!(out.angles[1].abs() < 1e-9);
         assert!(out.angles[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn base_angles_are_preserved_at_reference_pose() {
+        let mut m = mapper(false, 1.0);
+        m.set_base_angles(&[10.0, 20.0, 30.0, 1.0, 2.0, 3.0]);
+        m.set_reference(&pose([0.1, 0.2, 0.3], IDENTITY_QUAT));
+
+        let out = m.map(&pose([0.1, 0.2, 0.3], IDENTITY_QUAT));
+        assert_eq!(out.angles, vec![10.0, 20.0, 30.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn rotation_is_relative_to_reference_pose() {
+        let mut m = mapper(false, 1.0);
+        let q_ref = UnitQuaternion::from_euler_angles(0.5, 0.0, 0.0);
+        let q_current = UnitQuaternion::from_euler_angles(0.75, 0.0, 0.0);
+        let ref_q = q_ref.quaternion();
+        let current_q = q_current.quaternion();
+
+        m.set_reference(&pose([0.0, 0.0, 0.0], [ref_q.i, ref_q.j, ref_q.k, ref_q.w]));
+        let out = m.map(&pose(
+            [0.0, 0.0, 0.0],
+            [current_q.i, current_q.j, current_q.k, current_q.w],
+        ));
+
+        assert!((out.angles[3] - 0.25_f64.to_degrees()).abs() < 1e-9);
+        assert!(out.angles[4].abs() < 1e-9);
+        assert!(out.angles[5].abs() < 1e-9);
     }
 }

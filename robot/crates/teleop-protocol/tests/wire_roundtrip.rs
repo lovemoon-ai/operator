@@ -56,7 +56,10 @@ fn device_telemetry_json_roundtrip_with_array() {
     values.insert("battery".to_string(), TelemetryValue::Float(0.92));
     values.insert("ticks".to_string(), TelemetryValue::Int(42));
     values.insert("homed".to_string(), TelemetryValue::Bool(true));
-    values.insert("state".to_string(), TelemetryValue::Text("idle".to_string()));
+    values.insert(
+        "state".to_string(),
+        TelemetryValue::Text("idle".to_string()),
+    );
     values.insert(
         "joints".to_string(),
         TelemetryValue::Array(vec![0.1, -0.2, 0.3, 1.5]),
