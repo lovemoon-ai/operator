@@ -1,0 +1,71 @@
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Shader" path="res://scenes/ui/operator_ui_ray.gdshader" id="1_ray"]
+[ext_resource type="Script" path="res://scripts/xr/operator_function_pointer.gd" id="2_pointer"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ray"]
+resource_local_to_scene = true
+shader = ExtResource("1_ray")
+shader_parameter/core_color = Color(0.34, 0.88, 1, 0.48)
+shader_parameter/tip_color = Color(0.78, 0.98, 1, 0.1)
+shader_parameter/laser_length_m = 1.0
+shader_parameter/fade_start = 0.58
+shader_parameter/alpha_multiplier = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_target"]
+resource_local_to_scene = true
+transparency = 1
+shading_mode = 0
+albedo_color = Color(0.54, 0.94, 1, 0.52)
+
+[sub_resource type="BoxMesh" id="BoxMesh_laser"]
+resource_local_to_scene = true
+material = SubResource("ShaderMaterial_ray")
+size = Vector3(0.0012, 0.0012, 10)
+subdivide_depth = 20
+
+[sub_resource type="SphereMesh" id="SphereMesh_target"]
+resource_local_to_scene = true
+material = SubResource("StandardMaterial3D_target")
+radius = 0.018
+height = 0.036
+radial_segments = 12
+rings = 6
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_suppress"]
+radius = 0.08
+
+[node name="FunctionPointer" type="Node3D"]
+script = ExtResource("2_pointer")
+hand_offset_mode = 1
+active_button_action = "__operator_ui_click_bridge__"
+show_laser = 2
+laser_length = 1
+laser_material = SubResource("ShaderMaterial_ray")
+laser_hit_material = SubResource("ShaderMaterial_ray")
+show_target = true
+target_radius = 0.018
+target_material = SubResource("StandardMaterial3D_target")
+suppress_radius = 0.08
+
+[node name="RayCast" type="RayCast3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.013, 0)
+target_position = Vector3(0, 0, -10)
+collision_mask = 5242880
+
+[node name="Laser" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.013, -5)
+cast_shadow = 0
+mesh = SubResource("BoxMesh_laser")
+
+[node name="Target" type="MeshInstance3D" parent="."]
+visible = false
+cast_shadow = 0
+mesh = SubResource("SphereMesh_target")
+
+[node name="SuppressArea" type="Area3D" parent="."]
+collision_layer = 0
+collision_mask = 4194304
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="SuppressArea"]
+shape = SubResource("SphereShape3D_suppress")

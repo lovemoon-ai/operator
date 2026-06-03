@@ -4,7 +4,7 @@
 [ext_resource type="Script" path="res://scenes/mode_select.gd" id="2_mode_select"]
 [ext_resource type="PackedScene" path="res://scenes/ui/viewport_2d_in_3d_clean.tscn" id="4_vp2d3d"]
 [ext_resource type="PackedScene" path="res://scenes/ui/mode_select_ui.tscn" id="5_mode_ui"]
-[ext_resource type="PackedScene" uid="uid://cqhw276realc" path="res://addons/godot-xr-tools/functions/function_pointer.tscn" id="7_fnptr"]
+[ext_resource type="PackedScene" path="res://scenes/ui/operator_function_pointer.tscn" id="7_fnptr"]
 [ext_resource type="Script" path="res://scripts/xr/function_pointer_click_bridge.gd" id="8_pointer_click"]
 
 [node name="ModeSelect" type="Node3D"]
@@ -24,10 +24,6 @@ tracker = &"left_hand"
 tracker = &"right_hand"
 
 [node name="FunctionPointer" parent="XROrigin3D/RightController" instance=ExtResource("7_fnptr")]
-hand_offset_mode = 1
-active_button_action = "__operator_ui_click_bridge__"
-laser_length = 1
-show_target = true
 
 [node name="PointerClickBridge" type="Node" parent="XROrigin3D/RightController"]
 script = ExtResource("8_pointer_click")

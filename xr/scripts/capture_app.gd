@@ -6,6 +6,7 @@ const DepthSamplerScript := preload("res://scripts/depth_sampler.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
+const OperatorUIPointerVisualScript := preload("res://scripts/xr/operator_ui_pointer_visual.gd")
 
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
@@ -41,6 +42,7 @@ var right_pointer: XRController3D
 var settings_panel
 var record_control
 var status_popup
+var ui_pointer_visual
 var writer: Object
 var pose_sampler: Node
 var depth_sampler: Node
@@ -353,6 +355,10 @@ func _setup_xr_scene() -> void:
 	right_pointer.button_released.connect(_on_controller_button_released.bind(right_pointer))
 	origin.add_child(right_pointer)
 
+	ui_pointer_visual = OperatorUIPointerVisualScript.new()
+	ui_pointer_visual.name = "OperatorUIPointerVisual"
+	origin.add_child(ui_pointer_visual)
+
 	settings_panel = ViewLockedCapturePanelScript.new()
 	settings_panel.name = "ViewLockedSettingsPanel"
 	settings_panel.saved.connect(_on_capture_settings_saved)
@@ -639,9 +645,15 @@ func _update_controller_pointer(panel: Object) -> void:
 		elif left_pointer.get_has_tracking_data():
 			pointer = left_pointer
 	if pointer:
-		panel.update_pointer_from_ray(pointer.global_transform.origin, -pointer.global_transform.basis.z)
+		var ray_origin := pointer.global_transform.origin
+		var ray_direction := -pointer.global_transform.basis.z
+		if panel.update_pointer_from_ray(ray_origin, ray_direction):
+			_show_ui_pointer_visual(ray_origin, ray_direction, panel, _controller_pointer_down != null)
+		else:
+			_hide_ui_pointer_visual()
 	else:
 		panel.clear_pointer()
+		_hide_ui_pointer_visual()
 
 
 func _update_hand_pointer(panel: Object) -> void:
@@ -657,6 +669,7 @@ func _update_hand_pointer(panel: Object) -> void:
 			_release_pressed_panel()
 			_hand_pointer_down = false
 		panel.clear_pointer()
+		_hide_ui_pointer_visual()
 		return
 
 	var index_tip: Vector3 = origin.to_global(tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_INDEX_FINGER_TIP).origin)
@@ -666,6 +679,10 @@ func _update_hand_pointer(panel: Object) -> void:
 	if direction.length_squared() > 0.000001:
 		has_intersection = panel.update_pointer_from_ray(hmd_camera.global_position, direction.normalized())
 	var pressed := has_intersection and index_tip.distance_to(thumb_tip) <= HAND_PINCH_DISTANCE_M
+	if has_intersection:
+		_show_ui_pointer_visual(hmd_camera.global_position, direction.normalized(), panel, pressed)
+	else:
+		_hide_ui_pointer_visual()
 	if pressed != _hand_pointer_down:
 		_hand_pointer_down = pressed
 		if pressed:
@@ -690,6 +707,7 @@ func _on_controller_button_pressed(action: String, pointer: XRController3D) -> v
 		return
 	if panel.update_pointer_from_ray(pointer.global_transform.origin, -pointer.global_transform.basis.z):
 		_controller_pointer_down = pointer
+		_show_ui_pointer_visual(pointer.global_transform.origin, -pointer.global_transform.basis.z, panel, true)
 		_press_panel(panel)
 
 
@@ -708,6 +726,7 @@ func _release_ui_pointer() -> void:
 		settings_panel.clear_pointer()
 	if record_control:
 		record_control.clear_pointer()
+	_hide_ui_pointer_visual()
 
 
 func _active_pointer_panel() -> Object:
@@ -727,6 +746,30 @@ func _release_pressed_panel() -> void:
 	if _pressed_panel:
 		_pressed_panel.set_pointer_pressed(false)
 		_pressed_panel = null
+
+
+func _show_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3, panel: Object, pressed: bool) -> void:
+	if ui_pointer_visual == null or not (panel is Node3D):
+		return
+	var hit_point := _panel_hit_point(panel as Node3D, ray_origin, ray_direction)
+	ui_pointer_visual.show_ray(ray_origin, ray_direction, hit_point, pressed)
+
+
+func _hide_ui_pointer_visual() -> void:
+	if ui_pointer_visual:
+		ui_pointer_visual.clear()
+
+
+func _panel_hit_point(panel: Node3D, ray_origin: Vector3, ray_direction: Vector3) -> Vector3:
+	var direction := ray_direction.normalized()
+	if direction.length_squared() < 0.000001:
+		return ray_origin
+	var normal := panel.global_transform.basis.z.normalized()
+	var denominator := normal.dot(direction)
+	if absf(denominator) < 0.0001:
+		return ray_origin + direction * 0.25
+	var distance_m := normal.dot(panel.global_transform.origin - ray_origin) / denominator
+	return ray_origin + direction * maxf(distance_m, 0.001)
 
 
 func _on_settings_requested() -> void:
