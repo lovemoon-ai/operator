@@ -75,7 +75,7 @@ build-install-quest: build-quest install-quest
 
 build-install-pico: build-pico install-pico
 
-ship-pico-fast:
+ship-fast:
 	$(ADB) shell am force-stop $(package)
 	$(ADB) logcat -c
 	$(ADB) shell am start -n $(package)/$(activity) $(mode_extra)
@@ -85,7 +85,9 @@ ship-pico-fast:
 	$(ADB) logcat --pid=$$PID -v brief | \
 		grep -E "godot|Operator|RobotView|TcpHandler|KotlinVideo|AhbVideo|OpenXR"
 
-ship-pico: build-install-pico ship-pico-fast
+ship-pico: build-install-pico ship-fast
+
+ship-quest: build-install-quest ship-fast
 
 # ---------------------------------------------------------------------------
 # Editor / logcat / crash dump
