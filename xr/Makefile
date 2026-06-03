@@ -86,7 +86,10 @@ godot:
 	godot -e .
 
 log:
-	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot"
+
+log2:
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "OpenXR"
 
 crash:
 	$(ADB) logcat -d > crash.log
