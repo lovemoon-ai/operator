@@ -6,7 +6,7 @@
 [ext_resource type="PackedScene" path="res://scenes/ui/viewport_2d_in_3d_clean.tscn" id="4_vp2d3d"]
 [ext_resource type="PackedScene" path="res://scenes/ui/settings_ui.tscn" id="5_settings_ui"]
 [ext_resource type="PackedScene" path="res://scenes/ui/settings_button_ui.tscn" id="6_settings_btn_ui"]
-[ext_resource type="PackedScene" uid="uid://cqhw276realc" path="res://addons/godot-xr-tools/functions/function_pointer.tscn" id="7_fnptr"]
+[ext_resource type="PackedScene" path="res://scenes/ui/operator_function_pointer.tscn" id="7_fnptr"]
 [ext_resource type="Script" path="res://scripts/xr/tracking_provider.gd" id="8_tracking"]
 [ext_resource type="Script" path="res://scripts/network/tcp_handler.gd" id="9_tcp"]
 [ext_resource type="Script" path="res://scripts/network/pose_sender.gd" id="10_pose"]
@@ -30,10 +30,6 @@ tracker = &"left_hand"
 tracker = &"right_hand"
 
 [node name="FunctionPointer" parent="XROrigin3D/RightController" instance=ExtResource("7_fnptr")]
-hand_offset_mode = 1
-active_button_action = "__operator_ui_click_bridge__"
-laser_length = 1
-show_target = true
 
 [node name="PointerClickBridge" type="Node" parent="XROrigin3D/RightController"]
 script = ExtResource("12_pointer_click")
