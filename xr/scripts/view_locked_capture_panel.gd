@@ -7,7 +7,7 @@ signal exit_requested
 const VIEWPORT_SIZE := Vector2i(720, 1000)
 const DEFAULT_SAVE_ROOT := "/sdcard/Movies/SpatialMP4"
 const NO_POINTER := Vector2(-1.0, -1.0)
-const HIGHLIGHT_COLOR := Color(0.20, 0.86, 1.0, 0.98)
+const HIGHLIGHT_COLOR := Color(1.0, 0.647, 0.169, 0.98)
 const EXIT_HOLD_SECONDS := 2.0
 
 class HoldIndicator:
@@ -28,7 +28,7 @@ class HoldIndicator:
 		var inset := 8.0
 		var y := size.y - 5.0
 		var end_x := inset + (size.x - inset * 2.0) * progress
-		draw_line(Vector2(inset, y), Vector2(end_x, y), Color(0.20, 0.86, 1.0, 0.98), 4.0, true)
+		draw_line(Vector2(inset, y), Vector2(end_x, y), Color(1.0, 0.647, 0.169, 0.98), 4.0, true)
 
 const STORAGE_REFRESH_SECONDS := 3.0
 
@@ -272,7 +272,7 @@ func _build_viewport() -> void:
 	_cursor.visible = false
 	_cursor.size = Vector2(18.0, 18.0)
 	var cursor_style := StyleBoxFlat.new()
-	cursor_style.bg_color = Color(0.20, 0.86, 1.0, 0.98)
+	cursor_style.bg_color = HIGHLIGHT_COLOR
 	cursor_style.set_corner_radius_all(9)
 	_cursor.add_theme_stylebox_override("panel", cursor_style)
 	_viewport.add_child(_cursor)

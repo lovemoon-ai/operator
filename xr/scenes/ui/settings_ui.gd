@@ -5,7 +5,7 @@ extends Control
 ##   - dark translucent panel, subtle border, rounded corners
 ##   - muted section labels above full-width controls
 ##   - every interactive control wrapped in a "slot" PanelContainer that
-##     highlights with a cyan border on pointer hover (mouse_entered)
+##     highlights with the operator accent border on pointer hover (mouse_entered)
 ##   - CheckButton (switch) toggles instead of CheckBox
 ##
 ## The whole UI is built in code (not a .tscn layout) so the hover-slot
@@ -15,8 +15,8 @@ extends Control
 ##   - Discovered dropdown (Auto): pick a robot found via UDP broadcast.
 ##     IP/Port show the discovered values, read-only.
 ##   - Manual entry: dropdown set to "─ Manual entry ─", IP/Port editable.
-##   - OK  → save to user://settings.cfg + emit settings_applied(...)
-##   - Close → just hide (emit close_requested), no connect.
+##   - Confirm → save to user://settings.cfg + emit settings_applied(...)
+##   - Exit requires a short hold, then hides the panel without connecting.
 
 signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_on_launch: bool)
 signal close_requested()
@@ -30,16 +30,37 @@ const DEFAULT_PORT: int = 63901
 const DEFAULT_TYPE: String = "robot_arm"
 const DEFAULT_FACE_LOCKED: bool = true
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
+const EXIT_HOLD_SECONDS := 2.0
 
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
 
-# --- Palette (from GodotQuestCapture) ----------------------------------------
+# --- Palette --------------------------------------------------------
 const COL_PANEL_BG := Color(0.055, 0.067, 0.08, 0.96)
 const COL_PANEL_BORDER := Color(0.18, 0.22, 0.26, 1.0)
 const COL_TITLE := Color(0.94, 0.96, 0.98)
 const COL_SECTION := Color(0.65, 0.70, 0.75)
 const COL_STATUS := Color(0.55, 0.80, 0.66)
-const COL_ACCENT := Color(0.20, 0.86, 1.0, 0.98)
+const COL_ACCENT := Color(1.0, 0.647, 0.169, 0.98)
+
+class HoldIndicator:
+	extends Control
+
+	var progress := 0.0
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func set_progress(value: float) -> void:
+		progress = clampf(value, 0.0, 1.0)
+		queue_redraw()
+
+	func _draw() -> void:
+		if progress <= 0.0:
+			return
+		var inset := 8.0
+		var y := size.y - 5.0
+		var end_x := inset + (size.x - inset * 2.0) * progress
+		draw_line(Vector2(inset, y), Vector2(end_x, y), Color(1.0, 0.647, 0.169, 0.98), 4.0, true)
 
 # --- Built controls ----------------------------------------------------------
 var _discovery_option: OptionButton
@@ -49,6 +70,9 @@ var _type_option: OptionButton
 var _video_face_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
 var _status_label: Label
+var _exit_indicator: HoldIndicator
+var _exit_holding := false
+var _exit_hold_seconds := 0.0
 
 ## name -> { ip, pose_port, video_port, device_type, device_name }
 var _discovered: Dictionary = {}
@@ -61,6 +85,18 @@ func _ready() -> void:
 	_load_from_disk()
 	_apply_mode_lock()
 	print("[SettingsUI] ready (manual mode; %d discovered)" % (_discovery_option.item_count - 1))
+
+
+func _process(delta: float) -> void:
+	if not _exit_holding:
+		return
+	_exit_hold_seconds = minf(_exit_hold_seconds + delta, EXIT_HOLD_SECONDS)
+	if _exit_indicator:
+		_exit_indicator.set_progress(_exit_hold_seconds / EXIT_HOLD_SECONDS)
+	if _exit_hold_seconds < EXIT_HOLD_SECONDS:
+		return
+	_cancel_exit_hold()
+	close_requested.emit()
 
 
 # --- UI construction ----------------------------------------------------------
@@ -162,14 +198,6 @@ func _build_ui() -> void:
 	actions.add_theme_constant_override("separation", 14)
 	content.add_child(actions)
 
-	var close_button := Button.new()
-	close_button.text = tr("UI_CLOSE")
-	close_button.custom_minimum_size.y = 68
-	close_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	close_button.add_theme_font_size_override("font_size", 26)
-	close_button.pressed.connect(func(): close_requested.emit())
-	_add_interactive(actions, close_button)
-
 	var ok_button := Button.new()
 	ok_button.text = tr("UI_OK")
 	ok_button.custom_minimum_size.y = 68
@@ -177,6 +205,19 @@ func _build_ui() -> void:
 	ok_button.add_theme_font_size_override("font_size", 28)
 	ok_button.pressed.connect(_on_ok_pressed)
 	_add_interactive(actions, ok_button)
+
+	var exit_button := Button.new()
+	exit_button.text = tr("UI_EXIT")
+	exit_button.custom_minimum_size.y = 68
+	exit_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	exit_button.add_theme_font_size_override("font_size", 28)
+	exit_button.button_down.connect(_on_exit_button_down)
+	exit_button.button_up.connect(_on_exit_button_up)
+	exit_button.mouse_exited.connect(_on_exit_mouse_exited)
+	var exit_slot := _add_interactive(actions, exit_button)
+	_exit_indicator = HoldIndicator.new()
+	_exit_indicator.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	exit_slot.add_child(_exit_indicator)
 
 
 func _section_label(text_key: String) -> Label:
@@ -365,6 +406,7 @@ func _apply_mode_lock() -> void:
 
 
 func _on_ok_pressed() -> void:
+	_cancel_exit_hold()
 	var ip := _ip_input.text.strip_edges()
 	var port := _port_input.text.strip_edges().to_int()
 	if ip.is_empty():
@@ -383,6 +425,26 @@ func _on_ok_pressed() -> void:
 	_save_to_disk(ip, port, rtype, face_locked, show_on_launch)
 	_set_status(tr("UI_APPLYING"))
 	settings_applied.emit(ip, port, rtype, face_locked, show_on_launch)
+
+
+func _on_exit_button_down() -> void:
+	_cancel_exit_hold()
+	_exit_holding = true
+
+
+func _on_exit_button_up() -> void:
+	_cancel_exit_hold()
+
+
+func _on_exit_mouse_exited() -> void:
+	_cancel_exit_hold()
+
+
+func _cancel_exit_hold() -> void:
+	_exit_holding = false
+	_exit_hold_seconds = 0.0
+	if _exit_indicator:
+		_exit_indicator.set_progress(0.0)
 
 
 # --- External hooks ----------------------------------------------------------

@@ -7,7 +7,7 @@ const COL_PANEL_BG := Color(0.055, 0.067, 0.08, 0.96)
 const COL_PANEL_BORDER := Color(0.18, 0.22, 0.26, 1.0)
 const COL_TITLE := Color(0.94, 0.96, 0.98)
 const COL_MUTED := Color(0.65, 0.70, 0.75)
-const COL_ACCENT := Color(0.20, 0.86, 1.0, 0.98)
+const COL_ACCENT := Color(1.0, 0.647, 0.169, 0.98)
 
 var _status_label: Label
 

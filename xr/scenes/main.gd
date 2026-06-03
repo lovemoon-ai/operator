@@ -239,7 +239,7 @@ func _configure_passthrough() -> void:
 
 # --- Settings flow ------------------------------------------------------------
 
-## Called by SettingsUI when the user presses OK.
+## Called by SettingsUI when the user presses Confirm.
 ## Q1 / Q2 answer: A + A — save + auto-connect; robot_type is a hint
 ## that the descriptor will override on handshake.
 ## show_on_launch is persisted only; we don't act on it during this run.
@@ -269,8 +269,8 @@ func _on_settings_button_pressed() -> void:
 	_show_settings_panel()
 
 
-## "Close" button on the panel: just hide it (no connect) and re-show the
-## floating ⚙ button so the user can reopen later.
+## "Exit" on the panel: just hide it (no connect) and re-show the
+## floating settings button so the user can reopen later.
 func _on_settings_close_requested() -> void:
 	_hide_settings_panel()
 

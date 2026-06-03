@@ -11,6 +11,8 @@ const LONG_HOLD_SECONDS := 2.0
 const PRIMARY_DIAMETER := 122.0
 const SETTINGS_DIAMETER := 76.0
 const NO_POINTER := Vector2(-1.0, -1.0)
+const COL_ACCENT := Color(1.0, 0.647, 0.169, 0.98)
+const COL_ACCENT_MUTED := Color(1.0, 0.647, 0.169, 0.78)
 
 class HoldRing:
 	extends Control
@@ -35,7 +37,7 @@ class HoldRing:
 				-PI * 0.5,
 				(-PI * 0.5) + (TAU * progress),
 				72,
-				Color(0.18, 0.88, 1.0, 0.98),
+				Color(1.0, 0.647, 0.169, 0.98),
 				6.0,
 				true
 			)
@@ -162,7 +164,7 @@ func _build_viewport() -> void:
 	_timer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_timer_label.custom_minimum_size = Vector2(VIEWPORT_SIZE.x, 38.0)
 	_timer_label.add_theme_font_size_override("font_size", 32)
-	_timer_label.add_theme_color_override("font_color", Color(0.30, 0.88, 0.64, 0.94))
+	_timer_label.add_theme_color_override("font_color", COL_ACCENT)
 	content.add_child(_timer_label)
 
 	var primary_slot := _make_slot(PRIMARY_DIAMETER)
@@ -188,7 +190,7 @@ func _build_viewport() -> void:
 	_cursor.visible = false
 	_cursor.size = Vector2(10.0, 10.0)
 	var cursor_style := StyleBoxFlat.new()
-	cursor_style.bg_color = Color(0.20, 0.86, 1.0, 0.78)
+	cursor_style.bg_color = COL_ACCENT_MUTED
 	cursor_style.set_corner_radius_all(5)
 	_cursor.add_theme_stylebox_override("panel", cursor_style)
 	_viewport.add_child(_cursor)
