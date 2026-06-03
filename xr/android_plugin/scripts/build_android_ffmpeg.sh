@@ -60,10 +60,22 @@ ENC_PATCH="$SPATIALMP4_ROOT/scripts/ffmpeg_8_1_1_enc.patch"
 
 mkdir -p "$BUILD_ROOT"
 
+is_ffmpeg_source_repo() {
+    local top source_abs top_abs
+
+    [ -d "$FFMPEG_SOURCE" ] || return 1
+    top="$(git -C "$FFMPEG_SOURCE" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "$top" ] || return 1
+
+    source_abs="$(cd "$FFMPEG_SOURCE" && pwd -P)"
+    top_abs="$(cd "$top" && pwd -P)"
+    [ "$top_abs" = "$source_abs" ]
+}
+
 ensure_ffmpeg_source() {
     mkdir -p "$WORKSPACE_ROOT/third_party"
 
-    if ! git -C "$FFMPEG_SOURCE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! is_ffmpeg_source_repo; then
         if git -C "$WORKSPACE_ROOT" ls-files --error-unmatch third_party/ffmpeg >/dev/null 2>&1; then
             echo "FFmpeg submodule not initialised; running 'git submodule update --init'..." >&2
             git -C "$WORKSPACE_ROOT" submodule update --init --depth=1 third_party/ffmpeg
@@ -82,7 +94,7 @@ ensure_ffmpeg_source() {
         fi
     fi
 
-    if ! git -C "$FFMPEG_SOURCE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if ! is_ffmpeg_source_repo; then
         echo "ERROR: FFmpeg source not found at $FFMPEG_SOURCE" >&2
         exit 1
     fi
