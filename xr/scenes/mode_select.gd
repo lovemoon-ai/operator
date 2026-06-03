@@ -2,6 +2,8 @@ extends Node3D
 
 const TELEOP_SCENE := "res://scenes/teleop_main.tscn"
 const EGO_SCENE := "res://scenes/capture_app.tscn"
+const MODE_TELEOP := "teleop"
+const MODE_EGO := "ego"
 
 @onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
 @onready var _mode_panel: Node3D = $XROrigin3D/XRCamera3D/ModePanel
@@ -13,6 +15,12 @@ var _changing_scene := false
 
 func _ready() -> void:
 	if Engine.is_editor_hint():
+		return
+
+	var automation_mode := _get_automation_mode()
+	if not automation_mode.is_empty():
+		print("[Operator] Automation mode selected: %s" % automation_mode)
+		_open_mode(automation_mode)
 		return
 
 	_configure_passthrough()
@@ -67,11 +75,19 @@ func _wire_mode_ui() -> void:
 
 
 func _open_teleop() -> void:
-	_change_scene(TELEOP_SCENE)
+	_open_mode(MODE_TELEOP)
 
 
 func _open_ego() -> void:
-	_change_scene(EGO_SCENE)
+	_open_mode(MODE_EGO)
+
+
+func _open_mode(mode: String) -> void:
+	var path := _scene_for_mode(mode)
+	if path.is_empty():
+		push_warning("[Operator] Ignoring unknown mode: %s" % mode)
+		return
+	_change_scene(path)
 
 
 func _change_scene(path: String) -> void:
@@ -90,6 +106,65 @@ func _change_scene_deferred(path: String) -> void:
 		_changing_scene = false
 		_mode_panel.visible = true
 		push_error("[Operator] Failed to change scene to %s: %s" % [path, err])
+
+
+func _scene_for_mode(mode: String) -> String:
+	match _normalize_mode(mode):
+		MODE_TELEOP:
+			return TELEOP_SCENE
+		MODE_EGO:
+			return EGO_SCENE
+		_:
+			return ""
+
+
+func _get_automation_mode() -> String:
+	var mode := _mode_from_args(OS.get_cmdline_user_args())
+	if mode.is_empty():
+		mode = _mode_from_args(OS.get_cmdline_args())
+	if mode.is_empty():
+		mode = _mode_from_environment()
+	return _normalize_mode(mode)
+
+
+func _mode_from_args(args: PackedStringArray) -> String:
+	for i in range(args.size()):
+		var arg := String(args[i]).strip_edges()
+		if arg == "--operator-mode" or arg == "--mode":
+			if i + 1 < args.size():
+				return String(args[i + 1]).strip_edges()
+			push_warning("[Operator] %s requires a value" % arg)
+			return ""
+		if arg.begins_with("--operator-mode="):
+			return arg.substr("--operator-mode=".length()).strip_edges()
+		if arg.begins_with("--mode="):
+			return arg.substr("--mode=".length()).strip_edges()
+		if arg.begins_with("operator.mode="):
+			return arg.substr("operator.mode=".length()).strip_edges()
+		if arg.begins_with("operator_mode="):
+			return arg.substr("operator_mode=".length()).strip_edges()
+	return ""
+
+
+func _mode_from_environment() -> String:
+	for key in ["OPERATOR_MODE", "XR_OPERATOR_MODE"]:
+		if OS.has_environment(key):
+			return OS.get_environment(key).strip_edges()
+	return ""
+
+
+func _normalize_mode(raw_mode: String) -> String:
+	var mode := raw_mode.strip_edges().to_lower().replace("-", "_")
+	match mode:
+		MODE_TELEOP, "teleoperation", "remote", "remote_control", "driver":
+			return MODE_TELEOP
+		MODE_EGO, "egocentric", "capture", "capture_app":
+			return MODE_EGO
+		"":
+			return ""
+		_:
+			push_warning("[Operator] Unknown automation mode '%s' (expected teleop or ego)" % raw_mode)
+			return ""
 
 
 func _configure_passthrough() -> void:

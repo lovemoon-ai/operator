@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: log build-quest build-pico build-androidxr install-quest install-pico install-androidxr run stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: log build-quest build-pico build-androidxr install-quest install-pico install-androidxr run run-teleop run-ego stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 # ADB=adb -s PB321XKGL4210070B
 ADB=adb
@@ -18,6 +18,7 @@ apk_pico=build/pico/Operator.apk
 apk_androidxr=build/androidxr/Operator.apk
 package=com.lovemoon.operator
 activity=com.godot.game.GodotApp
+mode_extra=$(if $(MODE),--es operator.mode $(MODE),)
 
 # Plugin/library build rules (setup-vendors, prepare-android-libs, build-ahb,
 # build-capture-plugins, prepare-capture-plugins, clean-addons).
@@ -56,7 +57,15 @@ uninstall:
 	$(ADB) uninstall $(package)
 
 run:
-	$(ADB) shell am start -n $(package)/$(activity)
+	$(ADB) shell am start -n $(package)/$(activity) $(mode_extra)
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+
+run-teleop:
+	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode teleop
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+
+run-ego:
+	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode ego
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
 
 stop:
@@ -69,7 +78,7 @@ build-install-pico: build-pico install-pico
 ship-pico-fast:
 	$(ADB) shell am force-stop $(package)
 	$(ADB) logcat -c
-	$(ADB) shell am start -n $(package)/$(activity)
+	$(ADB) shell am start -n $(package)/$(activity) $(mode_extra)
 	@sleep 1
 	@PID=$$($(ADB) shell "pidof $(package)" | tr -d '\r'); \
 	echo "--- tailing logcat for pid $$PID (Ctrl-C to stop) ---"; \

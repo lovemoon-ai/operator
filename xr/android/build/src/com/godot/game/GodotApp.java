@@ -43,7 +43,9 @@ import android.util.Log;
 import androidx.activity.EdgeToEdge;
 import androidx.core.splashscreen.SplashScreen;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -51,6 +53,9 @@ import java.util.Set;
  * Feel free to extend and modify this class for your custom logic.
  */
 public class GodotApp extends GodotActivity {
+	private static final String EXTRA_OPERATOR_MODE = "operator.mode";
+	private static final String EXTRA_OPERATOR_MODE_LEGACY = "operator_mode";
+
 	static {
 		// .NET libraries.
 		if (BuildConfig.FLAVOR.equals("mono")) {
@@ -89,6 +94,28 @@ public class GodotApp extends GodotActivity {
 		plugins.add(new KotlinCameraPlugin(godot));
 		plugins.add(new KotlinVideoDecoderPlugin(godot));
 		return plugins;
+	}
+
+	@Override
+	public List<String> getCommandLine() {
+		ArrayList<String> args = new ArrayList<>(super.getCommandLine());
+		String operatorMode = getIntent().getStringExtra(EXTRA_OPERATOR_MODE);
+		if (operatorMode == null || operatorMode.trim().isEmpty()) {
+			operatorMode = getIntent().getStringExtra(EXTRA_OPERATOR_MODE_LEGACY);
+		}
+		if (operatorMode != null && !operatorMode.trim().isEmpty()) {
+			ensureUserArgsDelimiter(args);
+			args.add("--operator-mode");
+			args.add(operatorMode.trim());
+			Log.i("Operator", "Automation operator mode requested: " + operatorMode.trim());
+		}
+		return args;
+	}
+
+	private static void ensureUserArgsDelimiter(ArrayList<String> args) {
+		if (!args.contains("--")) {
+			args.add("--");
+		}
 	}
 
 	@Override

@@ -57,6 +57,7 @@ SKIP_BUILD=0
 FRAME_WAIT=20
 KEEP=0
 MIN_FRAMES=30
+APP_MODE=teleop
 # Codec under test. h264 (default) publishes libx264 + bridge_video.yaml;
 # hevc publishes libx265 and uses bridge_video_hevc.yaml (feed codec: hevc),
 # exercising the video/hevc MediaCodec path on the headset.
@@ -369,8 +370,8 @@ adb logcat -c >/dev/null
 if [ "$LAUNCH_APP" = "1" ]; then
     adb shell am force-stop "$PKG"
     sleep 0.3
-    adb shell am start -n "$PKG/$ACT" >/dev/null
-    ok "app launched"
+    adb shell am start -n "$PKG/$ACT" --es operator.mode "$APP_MODE" >/dev/null
+    ok "app launched (operator.mode=$APP_MODE)"
     sleep 5
 else
     if adb shell "pidof $PKG" 2>/dev/null | tr -d '\r' | grep -q '[0-9]'; then
