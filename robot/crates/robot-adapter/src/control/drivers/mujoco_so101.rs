@@ -367,6 +367,20 @@ impl MujocoSo101Driver {
         self.apply_snapshot(&resp);
         Ok(())
     }
+
+    async fn reset_bridge_to_home(&mut self) -> Result<()> {
+        let req = BridgeRequest::Reset { reset: true };
+        let mut line = serde_json::to_vec(&req)?;
+        line.push(b'\n');
+        self.stdin.write_all(&line).await?;
+        self.stdin.flush().await?;
+        let resp = self.read_line(RESPONSE_TIMEOUT).await?;
+        self.apply_snapshot(&resp);
+        if resp.ctrl.is_empty() && resp.q.len() == NUM_ACTUATORS {
+            self.last_ctrl = self.last_q_rad;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -438,6 +452,18 @@ impl ArmDriver for MujocoSo101Driver {
         self.last_ee_pose.clone()
     }
 
+    async fn reset_to_initial_pose(&mut self) -> Result<()> {
+        if !self.ready {
+            anyhow::bail!("MujocoSo101Driver::reset_to_initial_pose before enable_torque");
+        }
+        self.reset_bridge_to_home().await?;
+        tracing::info!(
+            "MujocoSo101: reset to home pose q_rad={:?}",
+            self.last_q_rad
+        );
+        Ok(())
+    }
+
     async fn emergency_stop(&mut self) -> Result<()> {
         // The sim has no torque-off concept. Freeze ctrl at the last reported q
         // so the next physics step has zero motion demand. We don't return
@@ -466,16 +492,7 @@ impl ArmDriver for MujocoSo101Driver {
         // to whatever the PoseMapper computes — easily a 90° jump on
         // shoulder_lift, which looks like a violent commanded motion. Reset
         // returns a snapshot we mirror into both `last_q_rad` and `last_ctrl`.
-        let req = BridgeRequest::Reset { reset: true };
-        let mut line = serde_json::to_vec(&req)?;
-        line.push(b'\n');
-        self.stdin.write_all(&line).await?;
-        self.stdin.flush().await?;
-        let resp = self.read_line(RESPONSE_TIMEOUT).await?;
-        self.apply_snapshot(&resp);
-        if resp.ctrl.is_empty() && resp.q.len() == NUM_ACTUATORS {
-            self.last_ctrl = self.last_q_rad;
-        }
+        self.reset_bridge_to_home().await?;
         tracing::info!(
             "MujocoSo101: torque enabled, home pose seeded q_rad={:?}",
             self.last_q_rad

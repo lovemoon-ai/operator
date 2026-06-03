@@ -164,6 +164,11 @@ async fn mujoco_round_trip_moves_joints() {
             .poses
             .iter()
             .any(|pose| pose.name == "operator_frame"));
+        assert!(desc
+            .control_schema
+            .buttons
+            .iter()
+            .any(|button| button.name == "reset"));
 
         let mut telemetry = client.telemetry();
 

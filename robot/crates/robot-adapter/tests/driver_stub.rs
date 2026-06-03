@@ -124,4 +124,22 @@ async fn driver_round_trips_against_stub_bridge() {
         .expect("end-effector pose after command");
     assert_eq!(ee.position, target.position);
     assert_eq!(ee.rotation, target.rotation);
+
+    driver
+        .reset_to_initial_pose()
+        .await
+        .expect("reset_to_initial_pose");
+    let q = driver.last_q_rad();
+    let home = [0.0, -1.57, 1.57, 0.0, 0.0, 0.0];
+    for (index, (actual, expected)) in q.iter().zip(home).enumerate() {
+        assert!(
+            (actual - expected).abs() < 1e-9,
+            "q[{index}] {actual} should return to home {expected}"
+        );
+    }
+    let ee = driver
+        .last_end_effector_pose()
+        .expect("end-effector pose after reset");
+    assert_eq!(ee.position, [0.25, 0.0, 0.2]);
+    assert_eq!(ee.rotation, [0.0, 0.0, 0.0, 1.0]);
 }

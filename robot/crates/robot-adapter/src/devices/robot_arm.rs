@@ -26,8 +26,8 @@ use crate::control::drivers::{self, ArmDriver};
 use crate::control::pose_mapping::PoseMapper;
 use crate::control::safety::{Safety, SafetyResult};
 use crate::control::teleop::{
-    command_enable, TeleopEndEffectorResult, TeleopPoseController, TeleopPoseResult, ENABLE_BUTTON,
-    END_EFFECTOR_POSE, OPERATOR_FRAME_POSE,
+    command_enable, command_reset, TeleopEndEffectorResult, TeleopPoseController, TeleopPoseResult,
+    ENABLE_BUTTON, END_EFFECTOR_POSE, OPERATOR_FRAME_POSE, RESET_BUTTON,
 };
 use crate::device::Device;
 
@@ -58,6 +58,7 @@ pub struct RobotArmDevice {
     gripper_joint_limits: Option<[f64; 2]>,
     gripper_default: Option<f64>,
     last_gripper: Option<f64>,
+    last_reset_button: bool,
     /// Maximum time a single driver write is allowed to block.
     driver_write_timeout: std::time::Duration,
     /// Counter of frames that exceeded `driver_write_timeout`.
@@ -101,6 +102,7 @@ impl RobotArmDevice {
             gripper_joint_limits,
             gripper_default,
             last_gripper: None,
+            last_reset_button: false,
             driver_write_timeout: std::time::Duration::from_millis(
                 arm_config.driver_write_timeout_ms,
             ),
@@ -109,9 +111,9 @@ impl RobotArmDevice {
     }
 
     /// The built-in 6-DOF SO-101 arm descriptor: one robot `gripper` axis
-    /// (0..1), one teleop `enable` deadman, one `end_effector` pose (frame
-    /// `right_hand`), one `operator_frame` pose (frame `head`) used to align
-    /// operator forward to robot +X, and `joint_angles` / `num_joints` /
+    /// (0..1), teleop `enable` and `reset` buttons, one `end_effector` pose
+    /// (frame `right_hand`), one `operator_frame` pose (frame `head`) used to
+    /// align operator forward to robot +X, and `joint_angles` / `num_joints` /
     /// `connected` telemetry. Matches `config/device_robot_arm.yaml`.
     pub fn default_descriptor() -> DeviceDescriptor {
         DeviceDescriptor {
@@ -129,13 +131,22 @@ impl RobotArmDevice {
                     default: 1.0,
                     dead_zone: 0.02,
                 }],
-                buttons: vec![ButtonDef {
-                    name: ENABLE_BUTTON.to_string(),
-                    display: "Enable".to_string(),
-                    toggle: false,
-                    group: None,
-                    confirm: false,
-                }],
+                buttons: vec![
+                    ButtonDef {
+                        name: ENABLE_BUTTON.to_string(),
+                        display: "Enable".to_string(),
+                        toggle: false,
+                        group: None,
+                        confirm: false,
+                    },
+                    ButtonDef {
+                        name: RESET_BUTTON.to_string(),
+                        display: "Reset".to_string(),
+                        toggle: false,
+                        group: None,
+                        confirm: false,
+                    },
+                ],
                 poses: vec![
                     PoseDef {
                         name: END_EFFECTOR_POSE.to_string(),
@@ -179,6 +190,14 @@ impl RobotArmDevice {
                 InputMapping {
                     source: "right_grip".to_string(),
                     target: ENABLE_BUTTON.to_string(),
+                    scale: 1.0,
+                    invert: false,
+                    offset: 0.0,
+                    mode: "momentary".to_string(),
+                },
+                InputMapping {
+                    source: "button_b".to_string(),
+                    target: RESET_BUTTON.to_string(),
                     scale: 1.0,
                     invert: false,
                     offset: 0.0,
@@ -299,6 +318,45 @@ impl RobotArmDevice {
         .await
     }
 
+    async fn handle_reset_button(&mut self, cmd: &DeviceCommand) -> Result<bool> {
+        let pressed = command_reset(cmd);
+        let rising_edge = pressed && !self.last_reset_button;
+        self.last_reset_button = pressed;
+        if !rising_edge {
+            return Ok(false);
+        }
+
+        self.reset_to_initial_pose().await?;
+        Ok(true)
+    }
+
+    async fn reset_to_initial_pose(&mut self) -> Result<()> {
+        tracing::info!("RobotArmDevice: reset requested; returning to initial pose");
+        {
+            let mut mapper = self.mapper.lock().await;
+            self.teleop.reset(&mut mapper);
+        }
+        self.safety.lock().await.reset();
+        self.last_gripper = None;
+
+        let (latest_joints, latest_end_effector_pose) = {
+            let mut driver = self.driver.lock().await;
+            driver.reset_to_initial_pose().await?;
+            (driver.last_joint_angles(), driver.last_end_effector_pose())
+        };
+
+        if let Some(joints) = latest_joints {
+            let mut last_angles = self.last_angles.lock().await;
+            *last_angles = joints.angles;
+            last_angles.resize(self.num_joints, 0.0);
+        }
+        {
+            let mut last_pose = self.last_end_effector_pose.lock().await;
+            *last_pose = latest_end_effector_pose;
+        }
+        Ok(())
+    }
+
     fn gripper_axis_to_joint_degrees(&self, value: f64) -> Option<f64> {
         let [lo, hi] = self.gripper_joint_limits?;
         Some(lo + value.clamp(0.0, 1.0) * (hi - lo))
@@ -373,6 +431,7 @@ impl Device for RobotArmDevice {
             self.teleop.reset(&mut mapper);
         }
         self.last_gripper = None;
+        self.last_reset_button = false;
         tracing::info!("RobotArmDevice connected (awaiting teleop enable)");
         Ok(())
     }
@@ -390,11 +449,16 @@ impl Device for RobotArmDevice {
             let mut last_pose = self.last_end_effector_pose.lock().await;
             *last_pose = None;
         }
+        self.last_reset_button = false;
         tracing::info!("RobotArmDevice disconnected");
         Ok(())
     }
 
     async fn send_command(&mut self, cmd: &DeviceCommand) -> Result<()> {
+        if self.handle_reset_button(cmd).await? {
+            return Ok(());
+        }
+
         // Extract end-effector pose and gripper value from the generic command.
         let gripper = cmd.axes.get(GRIPPER_AXIS).copied();
 
@@ -554,6 +618,7 @@ impl Device for RobotArmDevice {
             self.teleop.reset(&mut mapper);
         }
         self.last_gripper = None;
+        self.last_reset_button = false;
         Ok(())
     }
 
@@ -579,12 +644,17 @@ mod tests {
         assert_eq!(d.control_schema.axes[0].name, "gripper");
         assert_eq!(d.control_schema.axes[0].range, (0.0, 1.0));
         assert_eq!(d.control_schema.axes[0].default, 1.0);
-        assert_eq!(d.control_schema.buttons.len(), 1);
+        assert_eq!(d.control_schema.buttons.len(), 2);
         assert_eq!(d.control_schema.buttons[0].name, "enable");
+        assert_eq!(d.control_schema.buttons[1].name, "reset");
         assert!(d
             .input_mapping
             .iter()
             .any(|m| m.source == "right_grip" && m.target == "enable"));
+        assert!(d
+            .input_mapping
+            .iter()
+            .any(|m| m.source == "button_b" && m.target == RESET_BUTTON));
         assert!(d
             .input_mapping
             .iter()

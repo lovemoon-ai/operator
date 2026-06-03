@@ -31,7 +31,8 @@ adapter:
   # Descriptor declares the XR input mapping: right_controller_pose drives the
   # end_effector pose, head_pose provides the operator alignment frame,
   # right_trigger drives gripper closure (released = open), and right_grip is
-  # the momentary teleop enable/deadman.
+  # the momentary teleop enable/deadman. B resets the arm to the MuJoCo home
+  # pose.
   descriptor_file: "configs/mujoco_so101_descriptor.yaml"
 
   arm:

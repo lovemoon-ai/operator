@@ -55,6 +55,11 @@ pub trait ArmDriver: Send {
         None
     }
 
+    /// Reset the backend to its configured initial/home pose.
+    async fn reset_to_initial_pose(&mut self) -> Result<()> {
+        anyhow::bail!("driver does not support reset_to_initial_pose")
+    }
+
     /// Emergency stop: immediately disable all servo torque / freeze motion.
     async fn emergency_stop(&mut self) -> Result<()>;
 

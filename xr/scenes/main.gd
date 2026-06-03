@@ -223,12 +223,14 @@ func _create_settings_ui_nodes() -> void:
 func _update_teleop_controller_panel() -> void:
 	if _teleop_controller_panel == null:
 		return
-	_update_teleop_controller_panel_transform()
+	var controller_active := _is_right_controller_mode_active()
+	_teleop_controller_panel.call("set_controller_active", controller_active)
+	_update_teleop_controller_panel_transform(controller_active)
 	var connected: bool = _tcp_handler != null and _tcp_handler.is_connected_to_robot()
 	var grip_value := 0.0
 	var trigger_value := 0.0
 	var a_pressed := false
-	if _tracking_provider and _tracking_provider.has_method("get_controller_input"):
+	if controller_active and _tracking_provider and _tracking_provider.has_method("get_controller_input"):
 		var input_any: Variant = _tracking_provider.call("get_controller_input", 1)
 		if input_any is Dictionary:
 			grip_value = maxf(
@@ -243,10 +245,18 @@ func _update_teleop_controller_panel() -> void:
 	_teleop_controller_panel.call("set_a_button_pressed", a_pressed)
 
 
-func _update_teleop_controller_panel_transform() -> void:
+func _update_teleop_controller_panel_transform(controller_active: bool = true) -> void:
 	if _teleop_controller_panel == null or _right_controller == null:
 		return
+	if not controller_active:
+		return
 	_teleop_controller_panel.global_transform = _right_controller.global_transform * TELEOP_CONTROLLER_OVERLAY_OFFSET
+
+
+func _is_right_controller_mode_active() -> bool:
+	if _tracking_provider and _tracking_provider.has_method("is_controller_mode_active"):
+		return bool(_tracking_provider.call("is_controller_mode_active", 1))
+	return _right_controller != null and _right_controller.get_is_active() and _right_controller.get_has_tracking_data()
 
 
 # --- XR lifecycle -------------------------------------------------------------

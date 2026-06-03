@@ -7,15 +7,19 @@ const TRIGGER_ACTIVE_THRESHOLD := 0.08
 const BUTTON_ACTIVE_THRESHOLD := 0.5
 const A_TOGGLE_COOLDOWN_MSEC := 180
 
-const STATUS_LAMP_POS := Vector3(0.030, 0.010, -0.018)
-const STATUS_LABEL_POS := Vector3(0.030, 0.030, -0.018)
-const A_BUTTON_POS := Vector3(0.060, 0.004, -0.032)
-const A_LABEL_POS := Vector3(0.084, 0.035, -0.036)
+# Local positions are relative to the OpenXR right-hand grip pose.
+# +Y is the controller top face, -Z is the trigger/front side.
+const STATUS_LAMP_POS := Vector3(0.018, 0.023, -0.034)
+const STATUS_LABEL_POS := Vector3(0.018, 0.043, -0.034)
+const A_BUTTON_POS := Vector3(0.043, 0.026, -0.050)
+const A_LABEL_POS := Vector3(0.075, 0.050, -0.050)
+const B_BUTTON_POS := Vector3(0.044, 0.026, -0.014)
+const B_LABEL_POS := Vector3(0.076, 0.050, -0.014)
 
-const GRIP_ANCHOR_POS := Vector3(-0.052, -0.055, 0.020)
-const GRIP_TIP_POS := Vector3(-0.155, 0.040, -0.010)
-const TRIGGER_ANCHOR_POS := Vector3(0.000, -0.030, -0.098)
-const TRIGGER_TIP_POS := Vector3(0.025, 0.100, -0.155)
+const GRIP_ANCHOR_POS := Vector3(-0.044, -0.038, 0.000)
+const GRIP_TIP_POS := Vector3(-0.132, 0.025, 0.012)
+const TRIGGER_ANCHOR_POS := Vector3(0.002, -0.016, -0.074)
+const TRIGGER_TIP_POS := Vector3(0.034, 0.066, -0.124)
 
 const COL_ACTIVE := Color(0.14, 0.82, 0.45, 1.0)
 const COL_WAITING := Color(1.0, 0.72, 0.18, 1.0)
@@ -25,9 +29,11 @@ const COL_HELP_LINE := Color(0.72, 0.84, 1.0, 0.92)
 const COL_HELP_KEY := Color(1.0, 0.65, 0.18, 1.0)
 const COL_TRIGGER := Color(0.28, 0.76, 1.0, 1.0)
 const COL_BUTTON_A := Color(0.40, 0.64, 1.0, 1.0)
+const COL_BUTTON_B := Color(1.0, 0.42, 0.30, 1.0)
 const COL_DIM := Color(0.18, 0.20, 0.23, 0.86)
 
 var _enabled_for_device := false
+var _controller_active := false
 var _bridge_connected := false
 var _grip_pressed := false
 var _trigger_pressed := false
@@ -43,6 +49,8 @@ var _grip_marker: MeshInstance3D
 var _trigger_marker: MeshInstance3D
 var _a_marker: MeshInstance3D
 var _a_label: Label3D
+var _b_marker: MeshInstance3D
+var _b_label: Label3D
 
 var _mat_active: StandardMaterial3D
 var _mat_waiting: StandardMaterial3D
@@ -53,6 +61,7 @@ var _mat_help_text_back: StandardMaterial3D
 var _mat_trigger: StandardMaterial3D
 var _mat_trigger_idle: StandardMaterial3D
 var _mat_button_a: StandardMaterial3D
+var _mat_button_b: StandardMaterial3D
 var _mat_dim: StandardMaterial3D
 
 
@@ -63,13 +72,19 @@ func _init() -> void:
 
 func configure_for_device(descriptor: Dictionary) -> void:
 	_enabled_for_device = _has_controller_teleop_mapping(descriptor)
-	visible = _enabled_for_device
 	var schema: Dictionary = descriptor.get("control_schema", {})
-	print("[TeleopControllerPanel] configured enabled=%s buttons=%d mappings=%d" % [
+	print("[ControllerHelpTip] configured enabled=%s buttons=%d mappings=%d" % [
 		str(_enabled_for_device),
 		schema.get("buttons", []).size(),
 		descriptor.get("input_mapping", []).size(),
 	])
+	_refresh()
+
+
+func set_controller_active(active: bool) -> void:
+	if _controller_active == active:
+		return
+	_controller_active = active
 	_refresh()
 
 
@@ -105,7 +120,7 @@ func set_a_button_pressed(pressed: bool) -> void:
 		if now_msec - _last_a_toggle_msec >= A_TOGGLE_COOLDOWN_MSEC:
 			_last_a_toggle_msec = now_msec
 			_help_visible = not _help_visible
-			print("[TeleopControllerPanel] help_visible=%s" % str(_help_visible))
+			print("[ControllerHelpTip] help_visible=%s" % str(_help_visible))
 			_refresh()
 	_last_a_pressed = pressed
 
@@ -120,6 +135,7 @@ func _build_overlay() -> void:
 	_mat_trigger = _emissive_material(COL_TRIGGER, 1.1)
 	_mat_trigger_idle = _material(Color(COL_TRIGGER.r, COL_TRIGGER.g, COL_TRIGGER.b, 0.42), true)
 	_mat_button_a = _emissive_material(COL_BUTTON_A, 0.85)
+	_mat_button_b = _emissive_material(COL_BUTTON_B, 0.85)
 	_mat_dim = _material(COL_DIM, true)
 
 	_status_lamp = _sphere("StatusLamp", STATUS_LAMP_POS, 0.010, _mat_disconnected)
@@ -136,8 +152,15 @@ func _build_overlay() -> void:
 	_a_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	add_child(_a_label)
 
+	_b_marker = _sphere("BResetMarker", B_BUTTON_POS, 0.0075, _mat_button_b)
+	add_child(_b_marker)
+
+	_b_label = _label("BResetLabel", tr("UI_TELEOP_B_RESET"), B_LABEL_POS, 0.0010, 16, COL_HELP_TEXT)
+	_b_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	add_child(_b_label)
+
 	_help_root = Node3D.new()
-	_help_root.name = "HelpTips"
+	_help_root.name = "ControllerHelpTip"
 	add_child(_help_root)
 
 	_add_tip(
@@ -250,7 +273,7 @@ func _label_backplate(node_name: String, position: Vector3, width: float, height
 
 
 func _refresh() -> void:
-	if not _enabled_for_device:
+	if not _enabled_for_device or not _controller_active:
 		visible = false
 		return
 	visible = true
@@ -269,14 +292,22 @@ func _refresh() -> void:
 	if _status_label:
 		_status_label.text = status_text
 		_status_label.modulate = _status_color()
+	var controls_visible := _bridge_connected and _controller_active
 	if _help_root:
-		_help_root.visible = _help_visible
+		_help_root.visible = controls_visible and _help_visible
 	if _grip_marker:
 		_grip_marker.material_override = _mat_active if _grip_pressed else _mat_help_key
 	if _trigger_marker:
 		_trigger_marker.material_override = _mat_trigger if _trigger_pressed else _mat_trigger_idle
+	if _a_marker:
+		_a_marker.visible = controls_visible
 	if _a_label:
+		_a_label.visible = controls_visible
 		_a_label.text = tr("UI_TELEOP_A_HIDE_HELP") if _help_visible else tr("UI_TELEOP_A_SHOW_HELP")
+	if _b_marker:
+		_b_marker.visible = controls_visible
+	if _b_label:
+		_b_label.visible = controls_visible
 
 
 func _status_color() -> Color:

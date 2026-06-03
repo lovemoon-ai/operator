@@ -14,6 +14,7 @@ use crate::control::pose_mapping::PoseMapper;
 use crate::control::JointAngles;
 
 pub const ENABLE_BUTTON: &str = "enable";
+pub const RESET_BUTTON: &str = "reset";
 pub const END_EFFECTOR_POSE: &str = "end_effector";
 pub const OPERATOR_FRAME_POSE: &str = "operator_frame";
 const ENABLE_AXIS_THRESHOLD: f64 = 0.5;
@@ -116,6 +117,10 @@ pub fn command_enable(cmd: &DeviceCommand) -> bool {
         || cmd.axes.get(ENABLE_BUTTON).copied().unwrap_or(0.0) >= ENABLE_AXIS_THRESHOLD
 }
 
+pub fn command_reset(cmd: &DeviceCommand) -> bool {
+    cmd.buttons.get(RESET_BUTTON).copied().unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +220,18 @@ mod tests {
             TeleopPoseResult::Disabled => {}
             other => panic!("expected disabled, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn command_reset_reads_reset_button_only() {
+        let mut cmd = DeviceCommand::default();
+        assert!(!command_reset(&cmd));
+
+        cmd.buttons.insert(ENABLE_BUTTON.to_string(), true);
+        assert!(!command_reset(&cmd));
+
+        cmd.buttons.insert(RESET_BUTTON.to_string(), true);
+        assert!(command_reset(&cmd));
     }
 
     #[test]

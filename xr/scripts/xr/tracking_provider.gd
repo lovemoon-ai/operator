@@ -7,6 +7,8 @@ extends Node
 signal tracking_data_ready(data: Dictionary)
 
 const CONTROLLER_CACHE_TTL_MSEC := 250
+const LEFT_HAND_TRACKER := &"/user/hand_tracker/left"
+const RIGHT_HAND_TRACKER := &"/user/hand_tracker/right"
 
 ## Reference to XRCamera3D in the scene tree
 var _camera: XRCamera3D
@@ -75,8 +77,33 @@ func _find_xr_origin() -> XROrigin3D:
 
 func _check_hand_tracking_support() -> bool:
 	# Check if OpenXR hand tracking extension is available
-	var tracker := XRServer.get_tracker("/user/hand_tracker/left")
+	var tracker := XRServer.get_tracker(LEFT_HAND_TRACKER)
 	return tracker != null
+
+
+func is_hand_tracking_active(hand: int) -> bool:
+	return is_optical_hand_tracking_active(hand)
+
+
+func is_optical_hand_tracking_active(hand: int) -> bool:
+	var tracker = XRServer.get_tracker(_hand_tracker_name(hand))
+	if not (tracker is XRHandTracker):
+		return false
+	var hand_tracker := tracker as XRHandTracker
+	return hand_tracker.has_tracking_data \
+			and hand_tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
+
+
+func is_controller_mode_active(hand: int) -> bool:
+	var controller: XRController3D = _left_controller if hand == 0 else _right_controller
+	if controller == null:
+		return false
+	if not controller.get_is_active() or not controller.get_has_tracking_data():
+		return false
+	var haptics := _get_haptics_bus()
+	if haptics != null and haptics.has_method("should_use_controller_feedback"):
+		return bool(haptics.call("should_use_controller_feedback", controller))
+	return not is_optical_hand_tracking_active(hand)
 
 
 ## Get the head (camera) pose as a Dictionary.
@@ -99,8 +126,12 @@ func get_controller_pose(hand: int) -> Dictionary:
 	if not controller:
 		return _get_cached_controller_pose(hand)
 
-	var is_active: bool = controller.get_is_active()
-	if not is_active:
+	if is_optical_hand_tracking_active(hand):
+		_last_controller_poses[hand] = {}
+		_last_controller_pose_msec[hand] = 0
+		return {"is_active": false}
+
+	if not is_controller_mode_active(hand):
 		return _get_cached_controller_pose(hand)
 
 	var t := controller.global_transform
@@ -118,7 +149,15 @@ func get_controller_pose(hand: int) -> Dictionary:
 ## Returns dictionary of standard OpenXR input bindings.
 func get_controller_input(hand: int) -> Dictionary:
 	var controller: XRController3D = _left_controller if hand == 0 else _right_controller
-	if not controller or not controller.get_is_active():
+	if not controller:
+		return _get_cached_controller_input(hand)
+
+	if is_optical_hand_tracking_active(hand):
+		_last_controller_inputs[hand] = {}
+		_last_controller_input_msec[hand] = 0
+		return {}
+
+	if not is_controller_mode_active(hand):
 		return _get_cached_controller_input(hand)
 
 	var primary := controller.get_vector2("primary")
@@ -200,9 +239,21 @@ func get_capabilities() -> Dictionary:
 	return {
 		"platform": _platform_name,
 		"hand_tracking": _hand_tracking_available,
-		"has_left_controller": _left_controller != null and _left_controller.get_is_active() if _left_controller else false,
-		"has_right_controller": _right_controller != null and _right_controller.get_is_active() if _right_controller else false,
+		"has_left_controller": is_controller_mode_active(0),
+		"has_right_controller": is_controller_mode_active(1),
+		"left_hand_tracking": is_optical_hand_tracking_active(0),
+		"right_hand_tracking": is_optical_hand_tracking_active(1),
 	}
+
+
+func _hand_tracker_name(hand: int) -> StringName:
+	return LEFT_HAND_TRACKER if hand == 0 else RIGHT_HAND_TRACKER
+
+
+func _get_haptics_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("Haptics")
 
 
 ## Collect all tracking data into a single dictionary.
