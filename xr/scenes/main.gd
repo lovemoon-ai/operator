@@ -60,6 +60,8 @@ var _settings_pointer_visual: Node3D
 var _user_robot_type_hint: String = "robot_arm"
 
 var _xr_started: bool = false
+var _launch_window_active: bool = false
+var _launch_window_token: int = 0
 
 
 func _ready() -> void:
@@ -109,16 +111,13 @@ func _ready() -> void:
 	_command_sender.tracking_provider = _tracking_provider
 	_command_sender.tcp_handler = _tcp_handler
 
-	# Start discovery scanning (background — no longer surfaced in the UI,
-	# but kept running so we can react to robot_lost and so future UI
-	# affordances can re-introduce a "pick from discovered" dropdown).
+	# Start discovery scanning in the background; the Settings panel opens
+	# as soon as XR is ready and shows discovery progress while this runs.
 	_discovery.start_scan()
 
-	# Initial UI state: BOTH panel and button hidden. Discovery has 3s to
-	# find a robot; the launch decision in `_finalize_launch` will reveal
-	# either the panel (if the user needs to pick / fill IP) or the
-	# floating button (if we auto-connect successfully). Done after the
-	# composition-layer settings nodes were created above.
+	# Initial UI state: hide both until XR is ready enough to place
+	# composition layers. `_begin_launch_window` opens the panel immediately
+	# instead of waiting for discovery to finish.
 	_settings_panel.visible = false
 	_settings_button.visible = false
 
@@ -134,7 +133,7 @@ func _ready() -> void:
 	if xr_interface and xr_interface.is_initialized():
 		call_deferred("_on_xr_started")
 
-	print("[Operator] Main scene initialized (UI hidden — awaiting discovery)")
+	print("[Operator] Main scene initialized (UI hidden — awaiting XR)")
 
 
 func _process(_delta: float) -> void:
@@ -259,6 +258,7 @@ func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_
 	print("[Operator] Settings applied: ip=%s port=%d type=%s face_locked=%s show_on_launch=%s" % [
 		ip, port, robot_type, video_face_locked, show_on_launch,
 	])
+	_cancel_launch_window()
 	_user_robot_type_hint = robot_type
 
 	# Apply video window mode immediately.
@@ -290,6 +290,7 @@ func _on_settings_close_requested() -> void:
 ## Exit on the panel mirrors ego mode: close the running session and quit app.
 func _on_settings_exit_requested() -> void:
 	print("[Operator] Settings exit requested — quitting app")
+	_cancel_launch_window()
 	if _command_sender:
 		_command_sender.set_sending(false)
 	if _clock_sync:
@@ -309,6 +310,8 @@ func _show_settings_panel() -> void:
 	# Re-push the latest discovery snapshot every time we open the panel —
 	# robots may have appeared / disappeared while it was closed.
 	_push_discovery_to_settings_ui()
+	if _settings_ui and _settings_ui.has_method("set_discovering"):
+		_settings_ui.set_discovering(false)
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
 	if _settings_panel and _settings_panel.has_method("open"):
@@ -328,13 +331,13 @@ func _hide_settings_panel() -> void:
 
 # --- Launch decision (D: hybrid auto-discover) -------------------------------
 #
-# Both the panel and the floating button start hidden. We give discovery a 3s
-# window to find robot(s), then pick one of:
+# The panel opens immediately with a spinner while discovery gets a 3s window
+# to find robot(s), then we pick one of:
 #
 #   show_on_launch == true   → always show panel
 #   0 robots                 → show panel (manual fallback, status hints why)
-#   1 robot == last_used_ip  → silent auto-connect, no panel
-#   1 robot, last_used_ip is loopback default → silent auto-connect
+#   1 robot == last_used_ip  → auto-connect after spinner, close panel
+#   1 robot, last_used_ip is loopback default → auto-connect after spinner
 #   1 robot, different IP    → show panel pre-filled with the new IP
 #   N robots                 → show panel with the dropdown populated
 #
@@ -346,11 +349,24 @@ const _LAUNCH_DISCOVERY_WINDOW_SEC: float = 3.0
 
 
 func _begin_launch_window() -> void:
+	_launch_window_token += 1
+	_launch_window_active = true
 	print("[Operator] Discovery window started (%.1fs)" % _LAUNCH_DISCOVERY_WINDOW_SEC)
-	get_tree().create_timer(_LAUNCH_DISCOVERY_WINDOW_SEC).timeout.connect(_finalize_launch)
+	_show_settings_panel_discovering()
+	get_tree().create_timer(_LAUNCH_DISCOVERY_WINDOW_SEC).timeout.connect(_finalize_launch.bind(_launch_window_token))
 
 
-func _finalize_launch() -> void:
+func _cancel_launch_window() -> void:
+	_launch_window_active = false
+	_launch_window_token += 1
+	if _settings_ui and _settings_ui.has_method("set_discovering"):
+		_settings_ui.set_discovering(false)
+
+
+func _finalize_launch(token: int) -> void:
+	if token != _launch_window_token or not _launch_window_active:
+		return
+	_launch_window_active = false
 	var persisted: Dictionary = SettingsUI.load_settings()
 	var show_on_launch: bool = bool(persisted.get("show_on_launch", false))
 	var last_ip: String = String(persisted.get("ip", ""))
@@ -401,6 +417,8 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	if _robot_view:
 		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
 	_user_robot_type_hint = String(info.get("device_type", persisted.get("robot_type", "robot_arm")))
+	if _settings_ui and _settings_ui.has_method("set_discovering"):
+		_settings_ui.set_discovering(false)
 
 	if _settings_panel and _settings_panel.has_method("close"):
 		_settings_panel.close()
@@ -413,6 +431,8 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 
 func _show_settings_panel_with_status(text: String) -> void:
 	_push_discovery_to_settings_ui()
+	if _settings_ui and _settings_ui.has_method("set_discovering"):
+		_settings_ui.set_discovering(false)
 	if _settings_panel and _settings_panel.has_method("open"):
 		_settings_panel.open()
 	else:
@@ -420,6 +440,19 @@ func _show_settings_panel_with_status(text: String) -> void:
 	_settings_button.visible = false
 	if _settings_ui and _settings_ui.has_method("set_status"):
 		_settings_ui.set_status(text)
+
+
+func _show_settings_panel_discovering() -> void:
+	_push_discovery_to_settings_ui()
+	if _settings_button and _settings_button.has_method("clear_pointer"):
+		_settings_button.clear_pointer()
+	if _settings_panel and _settings_panel.has_method("open"):
+		_settings_panel.open()
+	else:
+		_settings_panel.visible = true
+	_settings_button.visible = false
+	if _settings_ui and _settings_ui.has_method("set_discovering"):
+		_settings_ui.set_discovering(true, tr("UI_DISCOVERING_ROBOTS"))
 
 
 ## Translate main.gd's IP-keyed `_known_robots` into the name-keyed
