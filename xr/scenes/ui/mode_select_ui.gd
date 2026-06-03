@@ -41,7 +41,7 @@ func _build_ui() -> void:
 	margin.add_child(content)
 
 	var title := Label.new()
-	title.text = "选择模式"
+	title.text = tr("UI_MODE_SELECT_TITLE")
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 38)
 	title.add_theme_color_override("font_color", COL_TITLE)
@@ -52,11 +52,11 @@ func _build_ui() -> void:
 	buttons.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	content.add_child(buttons)
 
-	var teleop_button := _mode_button("遥操模式")
+	var teleop_button := _mode_button(tr("UI_TELEOP_MODE"))
 	teleop_button.pressed.connect(func(): teleop_selected.emit())
 	buttons.add_child(teleop_button)
 
-	var ego_button := _mode_button("Ego 模式")
+	var ego_button := _mode_button(tr("UI_EGO_MODE"))
 	ego_button.pressed.connect(func(): ego_selected.emit())
 	buttons.add_child(ego_button)
 

@@ -167,7 +167,7 @@ func _build_viewport() -> void:
 
 	var primary_slot := _make_slot(PRIMARY_DIAMETER)
 	content.add_child(primary_slot)
-	_primary_button = _make_circle_button(primary_slot, PRIMARY_DIAMETER, "START", 20)
+	_primary_button = _make_circle_button(primary_slot, PRIMARY_DIAMETER, tr("UI_START"), 20)
 	_primary_button.button_down.connect(_on_primary_button_down)
 	_primary_button.button_up.connect(_on_primary_button_up)
 	_primary_button.mouse_exited.connect(_on_primary_mouse_exited)
@@ -176,7 +176,7 @@ func _build_viewport() -> void:
 
 	var settings_slot := _make_slot(SETTINGS_DIAMETER)
 	content.add_child(settings_slot)
-	_settings_button = _make_circle_button(settings_slot, SETTINGS_DIAMETER, "SET", 16)
+	_settings_button = _make_circle_button(settings_slot, SETTINGS_DIAMETER, tr("UI_SET"), 16)
 	_settings_button.button_down.connect(_on_settings_button_down)
 	_settings_button.button_up.connect(_on_settings_button_up)
 	_settings_button.mouse_exited.connect(_on_settings_mouse_exited)
@@ -234,7 +234,7 @@ func _update_controls() -> void:
 	_timer_label.visible = _recording
 	_settings_button.get_parent().visible = not _recording
 	_primary_button.get_parent().visible = _mode != "head"
-	_primary_button.text = "STOP" if _recording else "START"
+	_primary_button.text = tr("UI_STOP") if _recording else tr("UI_START")
 
 func _requires_hold(action: String) -> bool:
 	return action == "start" or action == "stop" or (action == "settings" and _mode == "hands")

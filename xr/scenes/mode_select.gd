@@ -48,7 +48,7 @@ func _on_xr_failed() -> void:
 	_mode_panel.visible = true
 	_wire_mode_ui()
 	if _mode_ui and _mode_ui.has_method("set_status"):
-		_mode_ui.set_status("OpenXR failed")
+		_mode_ui.set_status(tr("UI_OPENXR_FAILED"))
 
 
 func _wire_mode_ui() -> void:

@@ -172,13 +172,13 @@ func _build_viewport() -> void:
 	margin.add_child(content)
 
 	var title := Label.new()
-	title.text = "Capture Settings"
+	title.text = tr("UI_CAPTURE_SETTINGS_TITLE")
 	title.add_theme_font_size_override("font_size", 36)
 	title.add_theme_color_override("font_color", Color(0.94, 0.96, 0.98))
 	content.add_child(title)
 
 	var mode_label := Label.new()
-	mode_label.text = "Record control"
+	mode_label.text = tr("UI_RECORD_CONTROL")
 	mode_label.add_theme_font_size_override("font_size", 21)
 	mode_label.add_theme_color_override("font_color", Color(0.65, 0.70, 0.75))
 	content.add_child(mode_label)
@@ -186,28 +186,28 @@ func _build_viewport() -> void:
 	_mode = OptionButton.new()
 	_mode.custom_minimum_size.y = 55
 	_mode.add_theme_font_size_override("font_size", 23)
-	_mode.add_item("Controllers")
+	_mode.add_item(tr("UI_CONTROLLERS"))
 	_mode.set_item_metadata(0, "controllers")
-	_mode.add_item("Hands")
+	_mode.add_item(tr("UI_HANDS"))
 	_mode.set_item_metadata(1, "hands")
-	_mode.add_item("Head buttons")
+	_mode.add_item(tr("UI_HEAD_BUTTONS"))
 	_mode.set_item_metadata(2, "head")
 	_add_interactive(content, _mode)
 
 	var streams_label := Label.new()
-	streams_label.text = "Captured streams"
+	streams_label.text = tr("UI_CAPTURED_STREAMS")
 	streams_label.add_theme_font_size_override("font_size", 21)
 	streams_label.add_theme_color_override("font_color", Color(0.65, 0.70, 0.75))
 	content.add_child(streams_label)
 
-	_add_toggle(content, "stereo_rgb", "Stereo RGB")
-	_add_toggle(content, "record_depth", "Depth")
-	_add_toggle(content, "record_head_pose", "Head pose")
-	_add_toggle(content, "record_controller_pose", "Controller poses")
-	_add_toggle(content, "record_hand_data", "Hand joints")
+	_add_toggle(content, "stereo_rgb", tr("UI_STEREO_RGB"))
+	_add_toggle(content, "record_depth", tr("UI_DEPTH"))
+	_add_toggle(content, "record_head_pose", tr("UI_HEAD_POSE"))
+	_add_toggle(content, "record_controller_pose", tr("UI_CONTROLLER_POSES"))
+	_add_toggle(content, "record_hand_data", tr("UI_HAND_JOINTS"))
 
 	var outputs_label := Label.new()
-	outputs_label.text = "Outputs"
+	outputs_label.text = tr("UI_OUTPUTS")
 	outputs_label.add_theme_font_size_override("font_size", 21)
 	outputs_label.add_theme_color_override("font_color", Color(0.65, 0.70, 0.75))
 	content.add_child(outputs_label)
@@ -215,10 +215,10 @@ func _build_viewport() -> void:
 	# Controller/hand poses always go into the MP4 mett tracks. This toggle only
 	# controls whether they are ALSO written as separate JSONL sidecar files for
 	# debugging. Default off to avoid the extra main-thread JSON cost.
-	_add_toggle(content, "save_controller_hand_sidecar", "Controller/hand sidecar files", false)
+	_add_toggle(content, "save_controller_hand_sidecar", tr("UI_CONTROLLER_HAND_SIDECAR"), false)
 
 	var storage_label := Label.new()
-	storage_label.text = "Save path"
+	storage_label.text = tr("UI_SAVE_PATH")
 	storage_label.add_theme_font_size_override("font_size", 21)
 	storage_label.add_theme_color_override("font_color", Color(0.65, 0.70, 0.75))
 	content.add_child(storage_label)
@@ -232,7 +232,7 @@ func _build_viewport() -> void:
 	_add_interactive(content, _save_root)
 
 	_storage_label = Label.new()
-	_storage_label.text = "Storage: checking…"
+	_storage_label.text = tr("UI_STORAGE_CHECKING")
 	_storage_label.add_theme_font_size_override("font_size", 18)
 	_storage_label.add_theme_color_override("font_color", Color(0.55, 0.80, 0.66))
 	_storage_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -247,7 +247,7 @@ func _build_viewport() -> void:
 	content.add_child(actions)
 
 	var save_button := Button.new()
-	save_button.text = "Save"
+	save_button.text = tr("UI_SAVE")
 	save_button.custom_minimum_size.y = 68
 	save_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	save_button.add_theme_font_size_override("font_size", 28)
@@ -255,7 +255,7 @@ func _build_viewport() -> void:
 	_add_interactive(actions, save_button)
 
 	var exit_button := Button.new()
-	exit_button.text = "Exit"
+	exit_button.text = tr("UI_EXIT")
 	exit_button.custom_minimum_size.y = 68
 	exit_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	exit_button.add_theme_font_size_override("font_size", 28)
@@ -390,22 +390,22 @@ func _resolve_storage_plugin() -> Object:
 func _query_storage_text() -> String:
 	var plugin := _resolve_storage_plugin()
 	if plugin == null:
-		return "Storage: unavailable on this platform"
+		return tr("UI_STORAGE_UNAVAILABLE_PLATFORM")
 	var raw: Variant = plugin.call("getStorageUsageJson", _configured_save_root())
 	if typeof(raw) != TYPE_STRING or String(raw).is_empty():
-		return "Storage: unavailable"
+		return tr("UI_STORAGE_UNAVAILABLE")
 	var parsed: Variant = JSON.parse_string(String(raw))
 	if typeof(parsed) != TYPE_DICTIONARY:
-		return "Storage: unavailable"
+		return tr("UI_STORAGE_UNAVAILABLE")
 	if parsed.has("error"):
-		return "Storage: %s" % str(parsed["error"])
+		return tr("UI_STORAGE_ERROR") % str(parsed["error"])
 	var total_b := float(parsed.get("total_bytes", 0.0))
 	var free_b := float(parsed.get("available_bytes", parsed.get("free_bytes", 0.0)))
 	var capture_b := float(parsed.get("capture_dir_bytes", 0.0))
 	if total_b <= 0.0:
-		return "Storage: unavailable"
+		return tr("UI_STORAGE_UNAVAILABLE")
 	var used_pct := int(round((total_b - free_b) / total_b * 100.0))
-	return "Free %s of %s (%d%% used)  ·  Captures %s" % [
+	return tr("UI_FREE_STORAGE") % [
 		_human_bytes(free_b),
 		_human_bytes(total_b),
 		used_pct,

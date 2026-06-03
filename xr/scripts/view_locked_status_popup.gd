@@ -26,7 +26,7 @@ func _process(delta: float) -> void:
 
 
 func show_saved_path(path: String, duration_seconds: float = 2.0) -> void:
-	_title_label.text = "Recording saved"
+	_title_label.text = tr("UI_RECORDING_SAVED")
 	_path_label.text = path
 	_hide_seconds = duration_seconds
 	visible = true
@@ -64,7 +64,7 @@ func _build_viewport() -> void:
 	margin.add_child(content)
 
 	_title_label = Label.new()
-	_title_label.text = "Recording saved"
+	_title_label.text = tr("UI_RECORDING_SAVED")
 	_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_title_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_title_label.add_theme_font_size_override("font_size", 30)
