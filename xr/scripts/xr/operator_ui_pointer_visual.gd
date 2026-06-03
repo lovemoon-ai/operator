@@ -4,11 +4,19 @@ class_name OperatorUIPointerVisual
 const RayShader := preload("res://scenes/ui/operator_ui_ray.gdshader")
 
 const RAY_THICKNESS_M := 0.0012
+const IDLE_RAY_THICKNESS_M := 0.0009
 const TARGET_RADIUS_M := 0.012
 const TARGET_PRESSED_RADIUS_M := 0.0075
 const PULSE_RADIUS_M := 0.022
 const MIN_LASER_LENGTH_M := 0.001
 const MAX_DISTANCE_M := 4.0
+const IDLE_RAY_LENGTH_M := 3.4
+const HIT_CORE_COLOR := Color(1.0, 0.647, 0.169, 0.46)
+const HIT_TIP_COLOR := Color(0.949, 0.420, 0.114, 0.10)
+const IDLE_CORE_COLOR := Color(0.72, 0.74, 0.76, 0.24)
+const IDLE_TIP_COLOR := Color(0.72, 0.74, 0.76, 0.04)
+const HIT_FADE_START := 0.58
+const IDLE_FADE_START := 0.24
 
 var _laser: MeshInstance3D
 var _target: MeshInstance3D
@@ -48,13 +56,8 @@ func show_ray(ray_origin: Vector3, ray_direction: Vector3, hit_point: Vector3, p
 		return
 
 	var length_m := clampf(ray_origin.distance_to(hit_point), MIN_LASER_LENGTH_M, MAX_DISTANCE_M)
-	global_position = ray_origin
-	look_at(ray_origin + direction, _safe_up(direction))
-
-	_ray_mesh.size = Vector3(RAY_THICKNESS_M, RAY_THICKNESS_M, length_m)
-	_laser.position = Vector3(0.0, 0.0, -length_m * 0.5)
-	_ray_material.set_shader_parameter("laser_length_m", length_m)
-	_ray_material.set_shader_parameter("alpha_multiplier", 1.18 if pressed else 1.0)
+	_place_ray(ray_origin, direction, length_m, RAY_THICKNESS_M)
+	_apply_ray_style(HIT_CORE_COLOR, HIT_TIP_COLOR, HIT_FADE_START, 1.18 if pressed else 1.0)
 
 	_target_mesh.radius = TARGET_PRESSED_RADIUS_M if pressed else TARGET_RADIUS_M
 	_target_mesh.height = _target_mesh.radius * 2.0
@@ -67,6 +70,25 @@ func show_ray(ray_origin: Vector3, ray_direction: Vector3, hit_point: Vector3, p
 	visible = true
 	_laser.visible = true
 	_target.visible = true
+
+
+func show_idle_ray(ray_origin: Vector3, ray_direction: Vector3) -> void:
+	_build_visuals()
+
+	var direction := ray_direction.normalized()
+	if direction.length_squared() < 0.000001:
+		clear()
+		return
+
+	_place_ray(ray_origin, direction, IDLE_RAY_LENGTH_M, IDLE_RAY_THICKNESS_M)
+	_apply_ray_style(IDLE_CORE_COLOR, IDLE_TIP_COLOR, IDLE_FADE_START, 1.0)
+	_pressed = false
+	if _target:
+		_target.visible = false
+	if _pulse:
+		_pulse.visible = false
+	visible = true
+	_laser.visible = true
 
 
 func clear() -> void:
@@ -86,9 +108,7 @@ func _build_visuals() -> void:
 
 	_ray_material = ShaderMaterial.new()
 	_ray_material.shader = RayShader
-	_ray_material.set_shader_parameter("core_color", Color(1.0, 0.647, 0.169, 0.46))
-	_ray_material.set_shader_parameter("tip_color", Color(0.949, 0.420, 0.114, 0.10))
-	_ray_material.set_shader_parameter("fade_start", 0.58)
+	_apply_ray_style(HIT_CORE_COLOR, HIT_TIP_COLOR, HIT_FADE_START, 1.0)
 
 	_ray_mesh = BoxMesh.new()
 	_ray_mesh.size = Vector3(RAY_THICKNESS_M, RAY_THICKNESS_M, 1.0)
@@ -136,6 +156,23 @@ func _build_visuals() -> void:
 	_pulse.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_pulse.mesh = _pulse_mesh
 	add_child(_pulse)
+
+
+func _place_ray(ray_origin: Vector3, direction: Vector3, length_m: float, thickness_m: float) -> void:
+	global_position = ray_origin
+	look_at(ray_origin + direction, _safe_up(direction))
+	_ray_mesh.size = Vector3(thickness_m, thickness_m, maxf(length_m, MIN_LASER_LENGTH_M))
+	_laser.position = Vector3(0.0, 0.0, -_ray_mesh.size.z * 0.5)
+	_ray_material.set_shader_parameter("laser_length_m", _ray_mesh.size.z)
+
+
+func _apply_ray_style(core_color: Color, tip_color: Color, fade_start: float, alpha_multiplier: float) -> void:
+	if _ray_material == null:
+		return
+	_ray_material.set_shader_parameter("core_color", core_color)
+	_ray_material.set_shader_parameter("tip_color", tip_color)
+	_ray_material.set_shader_parameter("fade_start", fade_start)
+	_ray_material.set_shader_parameter("alpha_multiplier", alpha_multiplier)
 
 
 func _safe_up(direction: Vector3) -> Vector3:

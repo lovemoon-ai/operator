@@ -95,6 +95,8 @@ func _active_target() -> Object:
 
 
 func _should_use_controller_pointer(target: Object) -> bool:
+	if interaction_mode == "hands":
+		return false
 	if _targets.size() > 0 and target == _targets[0]:
 		return true
 	return interaction_mode == "controllers" or (interaction_mode == "head" and not busy)
@@ -118,10 +120,13 @@ func _update_controller_pointer(target: Object) -> void:
 
 	var ray_origin := pointer.global_transform.origin
 	var ray_direction := -pointer.global_transform.basis.z
+	var feedback_mode := _feedback_mode_for_pointer(pointer)
+	_set_target_feedback(target, feedback_mode, pointer if feedback_mode == "controllers" else null)
 	if target.update_pointer_from_ray(ray_origin, ray_direction):
 		_show_ui_pointer_visual(ray_origin, ray_direction, target, _controller_pointer_down != null)
 	else:
-		_hide_ui_pointer_visual()
+		target.clear_pointer()
+		_show_idle_ui_pointer_visual(ray_origin, ray_direction)
 
 
 func _update_hand_pointer(target: Object) -> void:
@@ -144,11 +149,17 @@ func _update_hand_pointer(target: Object) -> void:
 	var thumb_tip: Vector3 = origin.to_global(tracker.get_hand_joint_transform(XRHandTracker.HAND_JOINT_THUMB_TIP).origin)
 	var direction := index_tip - hmd_camera.global_position
 	var has_intersection := false
+	var ray_direction := Vector3.ZERO
 	if direction.length_squared() > 0.000001:
-		has_intersection = target.update_pointer_from_ray(hmd_camera.global_position, direction.normalized())
+		ray_direction = direction.normalized()
+		_set_target_feedback(target, "hands")
+		has_intersection = target.update_pointer_from_ray(hmd_camera.global_position, ray_direction)
 	var pressed := has_intersection and index_tip.distance_to(thumb_tip) <= HAND_PINCH_DISTANCE_M
 	if has_intersection:
-		_show_ui_pointer_visual(hmd_camera.global_position, direction.normalized(), target, pressed)
+		_show_ui_pointer_visual(hmd_camera.global_position, ray_direction, target, pressed)
+	elif ray_direction.length_squared() > 0.000001:
+		target.clear_pointer()
+		_show_idle_ui_pointer_visual(hmd_camera.global_position, ray_direction)
 	else:
 		_hide_ui_pointer_visual()
 	if pressed != _hand_pointer_down:
@@ -197,6 +208,8 @@ func _press_from_controller(pointer: XRController3D) -> void:
 	var target := _active_target()
 	if target == null:
 		return
+	var feedback_mode := _feedback_mode_for_pointer(pointer)
+	_set_target_feedback(target, feedback_mode, pointer if feedback_mode == "controllers" else null)
 	if not target.update_pointer_from_ray(pointer.global_transform.origin, -pointer.global_transform.basis.z):
 		return
 	_controller_pointer_down = pointer
@@ -224,6 +237,34 @@ func _show_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3, target
 	if target.has_method("get_ray_hit_point"):
 		hit_point = target.get_ray_hit_point(ray_origin, ray_direction)
 	ui_pointer_visual.show_ray(ray_origin, ray_direction, hit_point, pressed)
+
+
+func _show_idle_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3) -> void:
+	if ui_pointer_visual == null:
+		return
+	if ui_pointer_visual.has_method("show_idle_ray"):
+		ui_pointer_visual.show_idle_ray(ray_origin, ray_direction)
+	elif ui_pointer_visual.has_method("clear"):
+		ui_pointer_visual.clear()
+
+
+func _set_target_feedback(target: Object, mode: String, controller: XRController3D = null) -> void:
+	if target != null and target.has_method("set_feedback_input_mode"):
+		target.set_feedback_input_mode(mode, controller)
+
+
+func _feedback_mode_for_pointer(pointer: XRController3D) -> String:
+	var haptics := _get_haptics_bus()
+	if haptics != null and haptics.has_method("should_use_controller_feedback"):
+		if not bool(haptics.call("should_use_controller_feedback", pointer)):
+			return "hands"
+	return "controllers"
+
+
+func _get_haptics_bus() -> Node:
+	if not is_inside_tree():
+		return null
+	return get_tree().root.get_node_or_null("Haptics")
 
 
 func _hide_ui_pointer_visual() -> void:

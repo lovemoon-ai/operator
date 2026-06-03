@@ -121,6 +121,7 @@ func get_controller_input(hand: int) -> Dictionary:
 	if not controller or not controller.get_is_active():
 		return _get_cached_controller_input(hand)
 
+	var primary := controller.get_vector2("primary")
 	var input := {
 		"trigger": controller.get_float("trigger"),
 		"trigger_click": controller.get_float("trigger_click"),
@@ -128,8 +129,10 @@ func get_controller_input(hand: int) -> Dictionary:
 		"grip_click": controller.get_float("grip_click"),
 		"grip_force": controller.get_float("grip_force"),
 		"select_button": controller.get_float("select_button"),
-		"primary_x": controller.get_vector2("primary").x,
-		"primary_y": controller.get_vector2("primary").y,
+		"primary": primary,
+		"joystick": primary,
+		"primary_x": primary.x,
+		"primary_y": primary.y,
 		"primary_click": controller.get_float("primary_click"),
 		"ax_button": controller.get_float("ax_button"),
 		"by_button": controller.get_float("by_button"),
