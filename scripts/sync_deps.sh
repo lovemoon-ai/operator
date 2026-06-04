@@ -5,10 +5,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEFAULT_DEPS_ROOT="$REPO_ROOT/.deps"
-DEPS_ROOT="${DEPS_ROOT:-$DEFAULT_DEPS_ROOT}"
-DEPS_SRC_DIR="${DEPS_SRC_DIR:-$DEPS_ROOT/src}"
-DEPS_BUILD_DIR="${DEPS_BUILD_DIR:-$DEPS_ROOT/build}"
+DEFAULT_OPERATOR_DEPS_CACHE_ROOT="$REPO_ROOT/.deps"
+OPERATOR_DEPS_CACHE_ROOT="${OPERATOR_DEPS_CACHE_ROOT:-$DEFAULT_OPERATOR_DEPS_CACHE_ROOT}"
+DEPS_SRC_DIR="${DEPS_SRC_DIR:-$OPERATOR_DEPS_CACHE_ROOT/src}"
+DEPS_BUILD_DIR="${DEPS_BUILD_DIR:-$OPERATOR_DEPS_CACHE_ROOT/build}"
 GIT_DEPTH="${GIT_DEPTH:-1}"
 
 GODOT_XR_TOOLS_COMMIT="5570cc7560eece651eb6eeea47311c96535ec712"
@@ -20,8 +20,11 @@ usage() {
 Usage: $0 [all|godot-xr-tools|godot-cpp|ffmpeg]...
 
 Environment:
-  DEPS_ROOT       Dependency root (default: $DEFAULT_DEPS_ROOT)
-  GIT_DEPTH       Fetch depth for pinned refs (default: 1, use 0 for full)
+  OPERATOR_DEPS_CACHE_ROOT  Dependency root (default: $DEFAULT_OPERATOR_DEPS_CACHE_ROOT)
+                            Point at e.g. ~/.cache/operator/deps to share the
+                            godot-cpp / ffmpeg source + build cache across
+                            branches and worktrees.
+  GIT_DEPTH                 Fetch depth for pinned refs (default: 1, use 0 for full)
 EOF
 }
 
@@ -31,11 +34,11 @@ die() {
 }
 
 acquire_lock() {
-    local lock_dir="$DEPS_ROOT/.sync.lock"
+    local lock_dir="$OPERATOR_DEPS_CACHE_ROOT/.sync.lock"
     local lock_pid=""
     local announced=0
 
-    mkdir -p "$DEPS_ROOT"
+    mkdir -p "$OPERATOR_DEPS_CACHE_ROOT"
     while ! mkdir "$lock_dir" 2>/dev/null; do
         if [ -f "$lock_dir/pid" ]; then
             lock_pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
@@ -52,7 +55,7 @@ acquire_lock() {
     done
 
     echo "$$" > "$lock_dir/pid"
-    trap 'rm -rf "$DEPS_ROOT/.sync.lock"' EXIT
+    trap 'rm -rf "$OPERATOR_DEPS_CACHE_ROOT/.sync.lock"' EXIT
 }
 
 is_git_checkout() {
@@ -171,7 +174,7 @@ sync_godot_xr_tools() {
         "$GODOT_XR_TOOLS_COMMIT" \
         "master"
 
-    if [ "$DEPS_ROOT" = "$DEFAULT_DEPS_ROOT" ]; then
+    if [ "$OPERATOR_DEPS_CACHE_ROOT" = "$DEFAULT_OPERATOR_DEPS_CACHE_ROOT" ]; then
         ensure_symlink \
             "$REPO_ROOT/xr/addons/godot-xr-tools" \
             "../../.deps/src/godot-xr-tools/addons/godot-xr-tools"
@@ -191,7 +194,7 @@ sync_godot_cpp() {
         "$GODOT_CPP_COMMIT" \
         "4.5"
 
-    if [ "$DEPS_ROOT" = "$DEFAULT_DEPS_ROOT" ]; then
+    if [ "$OPERATOR_DEPS_CACHE_ROOT" = "$DEFAULT_OPERATOR_DEPS_CACHE_ROOT" ]; then
         ensure_symlink \
             "$REPO_ROOT/xr/native/ahb_decoder/godot-cpp" \
             "../../../.deps/src/godot-cpp"
@@ -246,4 +249,4 @@ for dep in "$@"; do
     esac
 done
 
-echo "[deps] done: ${DEPS_ROOT#$REPO_ROOT/}"
+echo "[deps] done: ${OPERATOR_DEPS_CACHE_ROOT#$REPO_ROOT/}"
