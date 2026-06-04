@@ -7,7 +7,7 @@ extends Node3D
 ##  - At launch, view-locked composition-layer SettingsPanel is visible if
 ##    discovery needs manual confirmation. User fills IP / Port / Robot Type /
 ##    Video window mode, presses OK.
-##  - OK → save to user://settings.cfg, hide panel, show face-locked
+##  - OK → save to user://teleop_settings.cfg, hide panel, show face-locked
 ##    floating SettingsButton, kick off TCP connect.
 ##  - The floating button (face-locked, under XRCamera3D) re-opens the
 ##    panel when pressed.
@@ -393,7 +393,7 @@ func _hide_settings_panel() -> void:
 #   1 robot, different IP    → show panel pre-filled with the new IP
 #   N robots                 → show panel with the dropdown populated
 #
-# `last_used_ip` lives in user://settings.cfg. The robot agent broadcasts on
+# `last_used_ip` lives in user://teleop_settings.cfg. The robot agent broadcasts on
 # 255.255.255.255:63900 every 3s, so a 3s window catches one beacon under
 # normal conditions.
 

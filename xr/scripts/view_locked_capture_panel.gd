@@ -1,11 +1,15 @@
 extends "res://scripts/ui/base_settings_panel.gd"
 class_name ViewLockedCapturePanel
 
+const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
+
 signal saved(options: Dictionary)
 
 const VIEWPORT_SIZE := Vector2i(720, 1000)
 const DEFAULT_SAVE_ROOT := "/sdcard/Movies/SpatialMP4"
 const STORAGE_REFRESH_SECONDS := 3.0
+const SETTINGS_PATH := "user://capture_settings.cfg"
+const SECTION := "capture"
 
 var _mode: OptionButton
 var _save_root: LineEdit
@@ -18,6 +22,7 @@ var _storage_plugin_checked := false
 
 func _init() -> void:
 	_setup_settings_panel(VIEWPORT_SIZE, Vector2(0.54, 0.75), "UI_CAPTURE_SETTINGS_TITLE", "UI_SAVE", 2, true)
+	set_options(load_settings())
 
 
 func _process(delta: float) -> void:
@@ -41,6 +46,19 @@ func get_options() -> Dictionary:
 		"save_controller_hand_sidecar": _toggle_enabled("save_controller_hand_sidecar"),
 		"save_root": _configured_save_root()
 	}
+
+
+func set_options(options: Dictionary) -> void:
+	_select_mode(str(options.get("interaction_mode", "controllers")))
+	for key in _stream_toggles.keys():
+		var toggle := _stream_toggles[key] as CheckButton
+		if toggle != null:
+			toggle.button_pressed = bool(options.get(key, _default_value_for_key(key)))
+	var save_root := str(options.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
+	_save_root.text = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
+	_storage_refresh_accum = STORAGE_REFRESH_SECONDS
+	if is_inside_tree():
+		_refresh_storage_usage()
 
 
 func open() -> void:
@@ -93,6 +111,7 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 
 func _on_confirm_requested() -> void:
 	var options := get_options()
+	_save_to_disk(options)
 	close()
 	saved.emit(options)
 
@@ -110,6 +129,42 @@ func _toggle_enabled(key: String) -> bool:
 func _configured_save_root() -> String:
 	var configured := _save_root.text.strip_edges()
 	return DEFAULT_SAVE_ROOT if configured.is_empty() else configured
+
+
+func _select_mode(mode: String) -> void:
+	for idx in range(_mode.item_count):
+		if String(_mode.get_item_metadata(idx)) == mode:
+			_mode.select(idx)
+			return
+	_mode.select(0)
+
+
+func _default_value_for_key(key: String) -> Variant:
+	return _default_options().get(key)
+
+
+func _save_to_disk(options: Dictionary) -> void:
+	ConfigStore.save(SETTINGS_PATH, SECTION, _default_options(), options, "CaptureSettings")
+
+
+static func load_settings() -> Dictionary:
+	var out := ConfigStore.load(SETTINGS_PATH, SECTION, _default_options())
+	var save_root := str(out.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
+	out["save_root"] = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
+	return out
+
+
+static func _default_options() -> Dictionary:
+	return {
+		"interaction_mode": "controllers",
+		"stereo_rgb": true,
+		"record_depth": true,
+		"record_head_pose": true,
+		"record_controller_pose": true,
+		"record_hand_data": true,
+		"save_controller_hand_sidecar": false,
+		"save_root": DEFAULT_SAVE_ROOT
+	}
 
 
 func _on_save_root_changed(_new_text: String) -> void:

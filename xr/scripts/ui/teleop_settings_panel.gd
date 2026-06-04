@@ -1,10 +1,12 @@
 extends "res://scripts/ui/base_settings_panel.gd"
 class_name TeleopSettingsPanel
 
+const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
+
 signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_on_launch: bool)
 signal close_requested
 
-const SETTINGS_PATH := "user://settings.cfg"
+const SETTINGS_PATH := "user://teleop_settings.cfg"
 const SECTION := "settings"
 
 const ROBOT_TYPES: Array[String] = ["robot_arm", "rc_car"]
@@ -63,7 +65,9 @@ var _discovered: Dictionary = {}
 
 func _init() -> void:
 	_setup_settings_panel(Vector2i(720, 884), Vector2(0.54, 0.663), "UI_SETTINGS_TITLE", "UI_OK", 2, false)
-	_load_from_disk()
+	var settings := load_settings()
+	set_options(settings)
+	set_status(tr("UI_LOADED_SETTINGS" if bool(settings.get("loaded", false)) else "UI_USING_DEFAULTS"))
 	_apply_mode_lock()
 	print("[SettingsUI] ready (manual mode; %d discovered)" % (_discovery_option.item_count - 1))
 
@@ -131,16 +135,18 @@ func _on_confirm_requested() -> void:
 	if port <= 0 or port > 65535:
 		port = DEFAULT_PORT
 		_port_input.text = str(port)
+	_ip_input.text = ip
 
-	var rtype := DEFAULT_TYPE
-	if _type_option.selected >= 0:
-		rtype = String(_type_option.get_item_metadata(_type_option.selected))
-	var face_locked := _video_face_toggle.button_pressed
-	var show_on_launch := _show_on_launch_toggle.button_pressed
-
-	_save_to_disk(ip, port, rtype, face_locked, show_on_launch)
+	var options := get_options()
+	_save_to_disk(options)
 	set_status(tr("UI_APPLYING"))
-	settings_applied.emit(ip, port, rtype, face_locked, show_on_launch)
+	settings_applied.emit(
+			str(options.get("ip", DEFAULT_IP)),
+			int(options.get("port", DEFAULT_PORT)),
+			str(options.get("robot_type", DEFAULT_TYPE)),
+			bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED)),
+			bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
+	)
 
 
 func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> void:
@@ -201,44 +207,33 @@ func set_discovering(active: bool, text: String = "") -> void:
 		set_status(text)
 
 
-func _load_from_disk() -> void:
-	var cfg := ConfigFile.new()
-	var err := cfg.load(SETTINGS_PATH)
-	var ip: String = DEFAULT_IP
-	var port: int = DEFAULT_PORT
-	var rtype: String = DEFAULT_TYPE
-	var face_locked: bool = DEFAULT_FACE_LOCKED
-	var show_on_launch: bool = DEFAULT_SHOW_ON_LAUNCH
-	if err == OK:
-		ip = cfg.get_value(SECTION, "ip", DEFAULT_IP)
-		port = int(cfg.get_value(SECTION, "port", DEFAULT_PORT))
-		rtype = cfg.get_value(SECTION, "robot_type", DEFAULT_TYPE)
-		face_locked = bool(cfg.get_value(SECTION, "video_face_locked", DEFAULT_FACE_LOCKED))
-		show_on_launch = bool(cfg.get_value(SECTION, "show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
+func get_options() -> Dictionary:
+	var rtype := DEFAULT_TYPE
+	if _type_option.selected >= 0:
+		rtype = String(_type_option.get_item_metadata(_type_option.selected))
+	return {
+		"ip": _ip_input.text.strip_edges(),
+		"port": _port_input.text.strip_edges().to_int(),
+		"robot_type": rtype,
+		"video_face_locked": _video_face_toggle.button_pressed,
+		"show_on_launch": _show_on_launch_toggle.button_pressed
+	}
 
-	_ip_input.text = ip
-	_port_input.text = str(port)
+
+func set_options(options: Dictionary) -> void:
+	_ip_input.text = str(options.get("ip", DEFAULT_IP))
+	_port_input.text = str(int(options.get("port", DEFAULT_PORT)))
+	var rtype := str(options.get("robot_type", DEFAULT_TYPE))
 	var type_idx := ROBOT_TYPES.find(rtype)
 	if type_idx < 0:
 		type_idx = 0
 	_type_option.select(type_idx)
-	_video_face_toggle.button_pressed = face_locked
-	_show_on_launch_toggle.button_pressed = show_on_launch
-
-	var status_key := "UI_LOADED_SETTINGS" if err == OK else "UI_USING_DEFAULTS"
-	set_status(tr(status_key))
+	_video_face_toggle.button_pressed = bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED))
+	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
 
 
-func _save_to_disk(ip: String, port: int, rtype: String, face_locked: bool, show_on_launch: bool) -> void:
-	var cfg := ConfigFile.new()
-	cfg.set_value(SECTION, "ip", ip)
-	cfg.set_value(SECTION, "port", port)
-	cfg.set_value(SECTION, "robot_type", rtype)
-	cfg.set_value(SECTION, "video_face_locked", face_locked)
-	cfg.set_value(SECTION, "show_on_launch", show_on_launch)
-	var err := cfg.save(SETTINGS_PATH)
-	if err != OK:
-		push_warning("[Settings] Failed to save %s: error %d" % [SETTINGS_PATH, err])
+func _save_to_disk(options: Dictionary) -> void:
+	ConfigStore.save(SETTINGS_PATH, SECTION, _default_options(), options, "Settings")
 
 
 func _on_discovery_selected(idx: int) -> void:
@@ -320,20 +315,14 @@ func _add_option_item(option: OptionButton, label: String, metadata: Variant, ic
 
 
 static func load_settings() -> Dictionary:
-	var cfg := ConfigFile.new()
-	var out := {
+	return ConfigStore.load(SETTINGS_PATH, SECTION, _default_options(), "loaded")
+
+
+static func _default_options() -> Dictionary:
+	return {
 		"ip": DEFAULT_IP,
 		"port": DEFAULT_PORT,
 		"robot_type": DEFAULT_TYPE,
 		"video_face_locked": DEFAULT_FACE_LOCKED,
-		"show_on_launch": DEFAULT_SHOW_ON_LAUNCH,
-		"loaded": false,
+		"show_on_launch": DEFAULT_SHOW_ON_LAUNCH
 	}
-	if cfg.load(SETTINGS_PATH) == OK:
-		out["ip"] = cfg.get_value(SECTION, "ip", DEFAULT_IP)
-		out["port"] = int(cfg.get_value(SECTION, "port", DEFAULT_PORT))
-		out["robot_type"] = cfg.get_value(SECTION, "robot_type", DEFAULT_TYPE)
-		out["video_face_locked"] = bool(cfg.get_value(SECTION, "video_face_locked", DEFAULT_FACE_LOCKED))
-		out["show_on_launch"] = bool(cfg.get_value(SECTION, "show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
-		out["loaded"] = true
-	return out
