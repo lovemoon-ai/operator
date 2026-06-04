@@ -80,14 +80,17 @@ endif
 
 build-ffmpeg: $(FFMPEG_LIB)
 
-# Sentinel rule. Real prerequisite list is the build script + the two
-# patches — touch any of them and we rebuild. The clone/configure/make
-# inside the script takes several minutes, so we leave it to the script's
-# own incremental-make behaviour rather than tearing down on every Make
-# invocation.
-$(FFMPEG_LIB): $(FFMPEG_BUILD_SCRIPT) \
-               $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch) \
-               $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_enc.patch)
+# Sentinel rule. The build script + patches are required to exist but are
+# order-only prereqs (after `|`) so their mtime does NOT retrigger a rebuild
+# of a present libavformat.a. This matters because `git worktree add` bumps
+# every checked-out file's mtime to wall-clock-now; without the `|`, every
+# new worktree pointing OPERATOR_DEPS_CACHE_ROOT at a shared cache would
+# unnecessarily rerun `make install` (~35s of header copies) even though the
+# .a is already there. Trade-off: editing the build script or patches will
+# NOT auto-rebuild — run `make clean-ffmpeg` then `make build-ffmpeg`.
+$(FFMPEG_LIB): | $(FFMPEG_BUILD_SCRIPT) \
+                 $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch) \
+                 $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_enc.patch)
 	@if [ -z "$(SPATIALMP4_ROOT)" ]; then \
 		echo "[ffmpeg] SpatialMP4 patches not found. Searched:" >&2; \
 		for p in $(SPATIALMP4_CANDIDATES); do echo "  $$p" >&2; done; \
