@@ -12,13 +12,23 @@
 // so its existing `SpatialMp4Native.nativeWriteRgbPacket(...)` call sites
 // resolve to these classes without renaming. Stage 2 replaces those direct
 // calls with the SpatialDataSink contract.
+import java.io.File
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
 }
 
 val repoRoot = rootProject.projectDir.parentFile.parentFile
-val ffmpegBuildDir = repoRoot.resolve(".deps/build/ffmpeg")
+// Mirror the Make/shell layer: OPERATOR_DEPS_CACHE_ROOT (env) > <repoRoot>/.deps.
+// Without this, `make build-ffmpeg` would land libavformat.a in the shared
+// cache but Gradle would still resolve -DFFMPEG_BUILD_DIR against
+// <worktree>/.deps, tripping the EXISTS check in src/main/cpp/CMakeLists.txt.
+val depsCacheRoot: File = System.getenv("OPERATOR_DEPS_CACHE_ROOT")
+    ?.takeIf { it.isNotBlank() }
+    ?.let { File(it) }
+    ?: repoRoot.resolve(".deps")
+val ffmpegBuildDir = depsCacheRoot.resolve("build/ffmpeg")
 val ffmpegRoot = ffmpegBuildDir.resolve("arm64-v8a/install")
 
 android {

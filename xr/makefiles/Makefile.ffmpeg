@@ -12,19 +12,25 @@
 #   ffmpeg-info    — print where ffmpeg would be built and its current status
 #
 # Variables (override on the make command line or in the environment):
-#   FFMPEG_VERSION   default 8.1.1     — git tag = n${FFMPEG_VERSION}
-#   FFMPEG_TAG       default n${FFMPEG_VERSION}
-#   FFMPEG_SOURCE    default ../.deps/src/ffmpeg
-#                    Pinned source checkout used as the clean source tree.
-#   FFMPEG_BUILD_DIR default ../.deps/build/ffmpeg
-#                    Per-ABI worktree, configure output, and install root.
-#   ANDROID_ABI      default arm64-v8a — only arm64-v8a is wired today
-#   ANDROID_API      default 29
-#   SPATIALMP4_ROOT  default = first match below
-#                    Used as the source of the two patches
-#                    scripts/ffmpeg_8_1_1_{read,enc}.patch.
+#   FFMPEG_VERSION            default 8.1.1     — git tag = n${FFMPEG_VERSION}
+#   FFMPEG_TAG                default n${FFMPEG_VERSION}
+#   OPERATOR_DEPS_CACHE_ROOT  default ../.deps  — shared dep cache root, see
+#                             Makefile.addons. Point at e.g.
+#                             ~/.cache/operator/deps to share the ffmpeg
+#                             source + build cache across branches/worktrees.
+#                             FFMPEG_SOURCE and FFMPEG_BUILD_DIR derive from
+#                             this unless overridden directly.
+#   FFMPEG_SOURCE             default $(OPERATOR_DEPS_CACHE_ROOT)/src/ffmpeg
+#                             Pinned source checkout used as the clean source tree.
+#   FFMPEG_BUILD_DIR          default $(OPERATOR_DEPS_CACHE_ROOT)/build/ffmpeg
+#                             Per-ABI worktree, configure output, and install root.
+#   ANDROID_ABI               default arm64-v8a — only arm64-v8a is wired today
+#   ANDROID_API               default 29
+#   SPATIALMP4_ROOT           default = first match below
+#                             Used as the source of the two patches
+#                             scripts/ffmpeg_8_1_1_{read,enc}.patch.
 #   ANDROID_NDK_HOME / ANDROID_NDK_ROOT
-#                    NDK location; one of them must be set.
+#                             NDK location; one of them must be set.
 
 FFMPEG_VERSION ?= 8.1.1
 FFMPEG_TAG     ?= n$(FFMPEG_VERSION)
