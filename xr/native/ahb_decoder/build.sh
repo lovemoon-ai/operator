@@ -5,7 +5,10 @@
 #
 # Requirements:
 #   - $ANDROID_NDK pointing at an NDK r25+ install
-#   - godot-cpp synced by scripts/sync_deps.sh into .deps/src/godot-cpp
+#   - godot-cpp synced by scripts/sync_deps.sh into
+#     $OPERATOR_DEPS_CACHE_ROOT/src/godot-cpp (defaults to .deps/src/godot-cpp;
+#     set OPERATOR_DEPS_CACHE_ROOT=~/.cache/operator/deps to share the source
+#     and build artifacts across branches/worktrees).
 #
 # Usage:
 #   xr/native/ahb_decoder/build.sh [Debug|Release]   # default Release
