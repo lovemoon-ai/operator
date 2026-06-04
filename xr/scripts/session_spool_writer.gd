@@ -79,7 +79,8 @@ func start_session(options: Dictionary = {}) -> bool:
 		"media_pts_clock": "clock_monotonic_ns",
 		"depth_timestamp_source_priority": ["openxr_runtime_display_time", "godot_async_callback_ticks"],
 		"capture_options": capture_options,
-		"sources": sources
+		"sources": sources,
+		"device": _resolve_device_identity()
 	})
 
 	# Every pose stream (head, controllers, hands) flows into the MP4's `mett`
@@ -383,3 +384,42 @@ func _make_dir(path: String) -> Error:
 
 func _capture_enabled(option: String) -> bool:
 	return bool(capture_options.get(option, true))
+
+
+# Mirror of the headset identity that the muxer writes into the mp4 moov/udta
+# metadata, so the session manifest.json sidecar carries the same device_type
+# (pico4_ultra / quest3 / quest3s / ...) without having to demux the mp4.
+#
+# When the Android plugin isn't wired up (desktop editor / unit tests / old
+# plugin AAR without `getDeviceIdentityJson`), we leave the device fields
+# blank and record the runtime OS name in a separate `runtime_os` slot. We
+# explicitly do NOT shove `OS.get_name()` into `device_manufacturer` -- doing
+# so would produce semantically wrong manifests like
+# `{device_manufacturer: "Linux"}` that look plausible to downstream tooling.
+func _resolve_device_identity() -> Dictionary:
+	var identity := {
+		"device_type": "",
+		"device_model": "",
+		"device_manufacturer": "",
+		"device_build_device": "",
+		"runtime_os": OS.get_name()
+	}
+	if android_plugin == null:
+		push_warning("session_spool_writer: android_plugin not bound; manifest device fields will be blank")
+		return identity
+	# Skip has_method() guard: Godot 4's Android plugin reflection doesn't
+	# consistently report @UsedByGodot methods through has_method(), and the
+	# rest of this file already trusts plain .call() on android_plugin /
+	# muxer_plugin. An old plugin AAR returns "" here, which we handle below.
+	var raw: String = str(android_plugin.call("getDeviceIdentityJson"))
+	if raw.is_empty():
+		push_warning("session_spool_writer: getDeviceIdentityJson returned empty; old plugin AAR?")
+		return identity
+	var parsed: Variant = JSON.parse_string(raw)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		push_warning("session_spool_writer: getDeviceIdentityJson did not return a JSON object: %s" % raw)
+		return identity
+	for key in ["device_type", "device_model", "device_manufacturer", "device_build_device"]:
+		if parsed.has(key):
+			identity[key] = str(parsed[key])
+	return identity

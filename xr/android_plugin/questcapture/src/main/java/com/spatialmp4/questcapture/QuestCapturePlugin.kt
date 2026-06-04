@@ -523,6 +523,23 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     @UsedByGodot
     fun getRightCameraMetadataJson(): String = rightMetadata
 
+    /**
+     * GDScript-facing accessor for the headset identity captured from
+     * android.os.Build. Mirrors what is written into the mp4 moov metadata, so
+     * the session manifest.json sidecar can carry the same device_type /
+     * device_model / device_manufacturer values without re-deriving them.
+     */
+    @UsedByGodot
+    fun getDeviceIdentityJson(): String {
+        val identity = DeviceIdentity.detect()
+        return JSONObject()
+            .put("device_type", identity.type)
+            .put("device_model", identity.model)
+            .put("device_manufacturer", identity.manufacturer)
+            .put("device_build_device", identity.device)
+            .toString()
+    }
+
     @UsedByGodot
     fun convertOpenxrDepthRhToU16Mm(
         raw: ByteArray,
@@ -675,6 +692,11 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         val rgbSideData = SpatialMp4SideDataPacker.packRgb(leftConfig.metadata, rightConfig?.metadata)
         val rgbWidth = leftConfig.size.width + (rightConfig?.size?.width ?: 0)
         val rgbCameraCount = if (rightConfig == null) 1 else 2
+        val deviceIdentity = DeviceIdentity.detect()
+        Log.i(
+            TAG,
+            "device identity: type=${deviceIdentity.type} model=${deviceIdentity.model} manufacturer=${deviceIdentity.manufacturer}"
+        )
         val sessionConfig = com.spatialmp4.contract.SessionConfig(
             partialPath = partialPath.absolutePath,
             finalPath = finalPath.absolutePath,
@@ -691,7 +713,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             controllerInputExpected = recordControllerInput,
             rgbIcam = rgbSideData.icam,
             rgbEcam = rgbSideData.ecam,
-            rgbDstr = rgbSideData.dstr
+            rgbDstr = rgbSideData.dstr,
+            deviceType = deviceIdentity.type,
+            deviceModel = deviceIdentity.model,
+            deviceManufacturer = deviceIdentity.manufacturer
         )
         if (!sink.startSession(sessionConfig)) {
             // sink already logged + emitted; nothing more to do.

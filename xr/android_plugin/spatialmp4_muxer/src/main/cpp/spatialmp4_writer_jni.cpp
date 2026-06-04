@@ -136,7 +136,10 @@ class LiveSpatialMp4Writer {
                        bool controller_pose_expected,
                        bool hand_joints_expected,
                        bool controller_input_expected,
-                       SideDataBundle rgb_side_data)
+                       SideDataBundle rgb_side_data,
+                       std::string device_type,
+                       std::string device_model,
+                       std::string device_manufacturer)
       : partial_path_(std::move(partial_path)),
         final_path_(std::move(final_path)),
         session_start_unix_us_(session_start_unix_us),
@@ -151,6 +154,9 @@ class LiveSpatialMp4Writer {
         hand_joints_expected_(hand_joints_expected),
         controller_input_expected_(controller_input_expected),
         rgb_side_data_(std::move(rgb_side_data)),
+        device_type_(std::move(device_type)),
+        device_model_(std::move(device_model)),
+        device_manufacturer_(std::move(device_manufacturer)),
         timed_streams_(kTimedTrackCount, nullptr) {
     // Spawn the dedicated I/O thread. All FFmpeg writes happen here so the
     // Godot main thread and the camera HandlerThread never block on
@@ -586,6 +592,28 @@ class LiveSpatialMp4Writer {
       throw std::runtime_error("failed to allocate MP4 context: " + AvError(ret));
     }
     format_context_ = context;
+
+    // Device identity → mp4 moov/udta metadata. The mov muxer maps these
+    // ffmpeg-key strings into the standard udta atoms (e.g. `com.android.model`
+    // is preserved verbatim, `make` becomes ©mak, `model` becomes ©mod), so a
+    // plain `ffprobe -show_format` on the produced file reveals the headset
+    // model. We also keep our own `device_type` slug so downstream readers
+    // (SpatialMP4 tooling) can branch on a stable short id without parsing the
+    // free-form Build.MODEL string.
+    if (!device_type_.empty()) {
+      av_dict_set(&format_context_->metadata, "device_type", device_type_.c_str(), 0);
+      av_dict_set(&format_context_->metadata, "com.spatialmp4.device_type", device_type_.c_str(), 0);
+    }
+    if (!device_model_.empty()) {
+      av_dict_set(&format_context_->metadata, "model", device_model_.c_str(), 0);
+      av_dict_set(&format_context_->metadata, "device_model", device_model_.c_str(), 0);
+      av_dict_set(&format_context_->metadata, "com.android.model", device_model_.c_str(), 0);
+    }
+    if (!device_manufacturer_.empty()) {
+      av_dict_set(&format_context_->metadata, "make", device_manufacturer_.c_str(), 0);
+      av_dict_set(&format_context_->metadata, "device_manufacturer", device_manufacturer_.c_str(), 0);
+      av_dict_set(&format_context_->metadata, "com.android.manufacturer", device_manufacturer_.c_str(), 0);
+    }
     if (controller_pose_expected_) {
       AddTimedMetadataStream(kTrackLeftControllerPose, "left_controller", "rigid_pose",
                              "spatialmp4.rigid_pose.v1", "application/x-spatialmp4-rigid-pose", "lctr");
@@ -889,6 +917,9 @@ class LiveSpatialMp4Writer {
   bool header_written_ = false;
   bool finished_ = false;
   SideDataBundle rgb_side_data_;
+  std::string device_type_;
+  std::string device_model_;
+  std::string device_manufacturer_;
   AVFormatContext* format_context_ = nullptr;
   AVStream* rgb_stream_ = nullptr;
   AVStream* depth_stream_ = nullptr;
@@ -944,7 +975,10 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeStart(
     jboolean controller_input_expected,
     jbyteArray rgb_icam,
     jbyteArray rgb_ecam,
-    jbyteArray rgb_dstr) {
+    jbyteArray rgb_dstr,
+    jstring device_type,
+    jstring device_model,
+    jstring device_manufacturer) {
   SideDataBundle side_data{
       JByteArrayToVector(env, rgb_icam),
       JByteArrayToVector(env, rgb_ecam),
@@ -964,7 +998,10 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeStart(
       controller_pose_expected == JNI_TRUE,
       hand_joints_expected == JNI_TRUE,
       controller_input_expected == JNI_TRUE,
-      std::move(side_data));
+      std::move(side_data),
+      JStringToString(env, device_type),
+      JStringToString(env, device_model),
+      JStringToString(env, device_manufacturer));
   return reinterpret_cast<jlong>(writer);
 }
 

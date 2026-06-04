@@ -99,7 +99,10 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             config.controllerInputExpected,
             config.rgbIcam,
             config.rgbEcam,
-            config.rgbDstr
+            config.rgbDstr,
+            config.deviceType,
+            config.deviceModel,
+            config.deviceManufacturer
         )
         if (handle == 0L) {
             emitError("Failed to start native SpatialMP4 writer")

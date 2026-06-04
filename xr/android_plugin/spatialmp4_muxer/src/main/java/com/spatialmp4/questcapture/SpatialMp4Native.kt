@@ -29,7 +29,10 @@ object SpatialMp4Native {
         controllerInputExpected: Boolean,
         rgbIcam: ByteArray,
         rgbEcam: ByteArray,
-        rgbDstr: ByteArray
+        rgbDstr: ByteArray,
+        deviceType: String,
+        deviceModel: String,
+        deviceManufacturer: String
     ): Long
 
     external fun nativeConfigureHevc(handle: Long, csd: ByteArray): Boolean
