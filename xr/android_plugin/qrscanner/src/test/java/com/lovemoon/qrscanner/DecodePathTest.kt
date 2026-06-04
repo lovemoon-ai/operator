@@ -6,6 +6,7 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.MultiFormatWriter
 import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.ResultPoint
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.multi.qrcode.QRCodeMultiReader
@@ -122,5 +123,25 @@ class DecodePathTest {
         val payloads = results.map { it.text }.toSet()
         assertTrue(payloads.contains(left))
         assertTrue(payloads.contains(right))
+    }
+
+    @Test
+    fun mirroredBoundsMapBackToOriginalFrame() {
+        val points = arrayOf(
+            ResultPoint(100f, 50f),
+            ResultPoint(220f, 60f),
+            ResultPoint(210f, 190f),
+            ResultPoint(95f, 180f),
+        )
+
+        val normal = computeQrBounds(points, width = 320, height = 240)
+        assertEquals(0.4921875, normal.cx, 0.0001)
+        assertEquals(0.5, normal.cy, 0.0001)
+        assertEquals(0.390625, normal.w, 0.0001)
+
+        val mirrored = computeQrBounds(points, width = 320, height = 240, mirroredHorizontally = true)
+        assertEquals(1.0 - normal.cx, mirrored.cx, 0.0001)
+        assertEquals(normal.cy, mirrored.cy, 0.0001)
+        assertEquals(normal.w, mirrored.w, 0.0001)
     }
 }

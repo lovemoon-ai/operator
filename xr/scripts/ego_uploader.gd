@@ -149,6 +149,27 @@ func pending_jobs() -> Array:
 	return snapshot
 
 
+## Move a queued job to the front so a freshly-finalized recording uploads
+## before stale retry jobs recovered from a previous app run.
+func prioritize(session_id: String) -> bool:
+	var found := false
+	_mutex.lock()
+	for i in range(_queue.size()):
+		if str(_queue[i].get("session_id", "")) != session_id:
+			continue
+		found = true
+		if i > 0:
+			var job: Dictionary = _queue[i]
+			_queue.remove_at(i)
+			_queue.push_front(job)
+			_save_queue_locked()
+		break
+	_mutex.unlock()
+	if found:
+		_wake.post()
+	return found
+
+
 ## Drop a job by session_id. Returns true if a job was removed.
 func cancel(session_id: String) -> bool:
 	var removed := false
@@ -326,7 +347,7 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 			file.close()
 			return false
 
-		var new_offset := _tus_patch(http, tus_location, offset, chunk, job)
+		var new_offset := _tus_patch(http, tus_location, offset, chunk, job, kind)
 		if new_offset < 0:
 			file.close()
 			return false
@@ -382,7 +403,7 @@ func _tus_head(http: HTTPClient, tus_location: String, job: Dictionary) -> int:
 	return -1
 
 
-func _tus_patch(http: HTTPClient, tus_location: String, offset: int, chunk: PackedByteArray, job: Dictionary) -> int:
+func _tus_patch(http: HTTPClient, tus_location: String, offset: int, chunk: PackedByteArray, job: Dictionary, kind: String) -> int:
 	var headers := _common_headers(job)
 	headers.append("Content-Type: application/offset+octet-stream")
 	headers.append("Upload-Offset: %d" % offset)
@@ -390,14 +411,14 @@ func _tus_patch(http: HTTPClient, tus_location: String, offset: int, chunk: Pack
 	var path := _path_of_url(tus_location)
 	var err := http.request_raw(HTTPClient.METHOD_PATCH, path, headers, chunk)
 	if err != OK:
-		_fail(job, "patch", "PATCH request_raw failed: %d" % err)
+		_fail(job, kind, "PATCH request_raw failed: %d" % err)
 		return -1
 	var status := _drive_http(http)
 	if status < 0:
-		_fail(job, "patch", "PATCH drive_http error")
+		_fail(job, kind, "PATCH drive_http error")
 		return -1
 	if status != 204 and status != 200:
-		_fail(job, "patch", "PATCH expected 204, got %d (%s)" % [status, _body_text(http)])
+		_fail(job, kind, "PATCH expected 204, got %d (%s)" % [status, _body_text(http)])
 		return -1
 	var new_off := _response_header(http, "upload-offset")
 	_drain_body(http)

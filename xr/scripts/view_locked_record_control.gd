@@ -47,7 +47,6 @@ var _primary_button: Button
 var _settings_button: Button
 var _timer_label: Label
 var _upload_status_label: Label
-var _upload_progress_bar: ProgressBar
 var _primary_ring: HoldRing
 var _settings_ring: HoldRing
 var _cursor: Panel
@@ -119,21 +118,15 @@ func update_elapsed_seconds(seconds: float) -> void:
 # Show an upload progress / status message under the timer. Pass an
 # empty string (or call clear_upload_status) to hide it. Color hints:
 #   normal = blue, warning = amber, success = green, error = red.
-func set_upload_status(text: String, level: String = "normal", progress: float = -1.0) -> void:
+func set_upload_status(text: String, level: String = "normal", _progress: float = -1.0) -> void:
 	if _upload_status_label == null:
 		return
 	if text.is_empty():
 		_upload_status_label.visible = false
 		_upload_status_label.text = ""
-		if _upload_progress_bar:
-			_upload_progress_bar.visible = false
-			_upload_progress_bar.value = 0.0
 		return
 	_upload_status_label.text = text
 	_upload_status_label.visible = true
-	if _upload_progress_bar:
-		_upload_progress_bar.visible = progress >= 0.0
-		_upload_progress_bar.value = clampf(progress, 0.0, 1.0) * 100.0
 	# Force visible even when not recording so the operator can watch
 	# uploads drain after the recording stopped.
 	visible = true
@@ -227,14 +220,6 @@ func _build_viewport() -> void:
 	_upload_status_label.add_theme_color_override("font_color", Color(0.55, 0.80, 0.98, 0.92))
 	_upload_status_label.autowrap_mode = TextServer.AUTOWRAP_OFF
 	content.add_child(_upload_status_label)
-
-	_upload_progress_bar = ProgressBar.new()
-	_upload_progress_bar.visible = false
-	_upload_progress_bar.show_percentage = false
-	_upload_progress_bar.custom_minimum_size = Vector2(VIEWPORT_SIZE.x - 42.0, 14.0)
-	_upload_progress_bar.min_value = 0.0
-	_upload_progress_bar.max_value = 100.0
-	content.add_child(_upload_progress_bar)
 
 	var primary_slot := _make_slot(PRIMARY_DIAMETER)
 	content.add_child(primary_slot)

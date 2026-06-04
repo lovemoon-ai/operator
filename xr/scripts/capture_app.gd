@@ -55,6 +55,7 @@ var ego_uploader: Node
 var qr_scanner: Object
 var upload_ack_request: HTTPRequest
 var _pending_upload_ack_payload := ""
+var _active_upload_session_id := ""
 var _upload_popup_hold_until_msec := 0
 var _pending_upload_popup_update: Dictionary = {}
 var _upload_popup_timer_armed := false
@@ -392,10 +393,15 @@ func stop_capture() -> void:
 		# to that dir). Both are stable once writer.close() has returned.
 		var session_dir_for_upload: String = writer.get_session_dir_absolute() if writer.has_method("get_session_dir_absolute") else writer.get_session_dir()
 		var mp4_for_upload: String = writer.get_output_mp4_path_absolute() if writer.has_method("get_output_mp4_path_absolute") else (saved_session_dir if saved_session_dir.ends_with(".mp4") else "")
+		var session_id_for_upload := mp4_for_upload.get_file().get_basename()
 		var queued := bool(ego_uploader.enqueue(session_dir_for_upload, mp4_for_upload, capture_options))
 		if queued:
+			_active_upload_session_id = session_id_for_upload
+			if ego_uploader.has_method("prioritize"):
+				ego_uploader.prioritize(session_id_for_upload)
 			ego_uploader.resume()
 		elif upload_expected:
+			_active_upload_session_id = ""
 			_queue_upload_ui(tr("UI_UPLOAD_NOT_QUEUED"), "", -1.0, "warning", 3.0)
 
 
@@ -956,31 +962,28 @@ func _start_upload_ack(payload: String) -> void:
 	var trimmed := payload.strip_edges()
 	if trimmed.is_empty():
 		return
+	if not _is_signed_ack_payload(trimmed):
+		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_INVALID_QR"))
+		return
 	_pending_upload_ack_payload = trimmed
-	var ack_url := _ack_url_for_payload(trimmed)
 	if settings_panel and settings_panel.has_method("set_upload_connectivity_status"):
 		settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_CHECKING"), "normal")
-	print("[UploadAck] checking %s" % ack_url)
+	print("[UploadAck] checking ack %s" % trimmed)
 	if upload_ack_request == null:
 		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_UNAVAILABLE"))
 		return
 	if upload_ack_request.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
 		upload_ack_request.cancel_request()
-	var headers := PackedStringArray(["User-Agent: ego-uploader/1.0 (godot)"])
-	var err := upload_ack_request.request(ack_url, headers, HTTPClient.METHOD_GET)
+	var headers := PackedStringArray([
+		"User-Agent: ego-uploader/1.0 (godot)",
+	])
+	var err := upload_ack_request.request(trimmed, headers, HTTPClient.METHOD_GET)
 	if err != OK:
 		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_REQUEST_FAILED") % err)
 
 
-func _ack_url_for_payload(payload: String) -> String:
-	if payload.find("/ack") >= 0:
-		return payload
-	var query_start := payload.find("?")
-	var base := payload if query_start < 0 else payload.substr(0, query_start)
-	var query := "" if query_start < 0 else payload.substr(query_start)
-	while base.ends_with("/"):
-		base = base.substr(0, base.length() - 1)
-	return base + "/ack" + query
+func _is_signed_ack_payload(payload: String) -> bool:
+	return payload.find("/ack") >= 0 and payload.find("exp=") >= 0 and payload.find("sig=") >= 0
 
 
 func _on_upload_ack_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -1003,11 +1006,15 @@ func _on_upload_ack_completed(result: int, response_code: int, _headers: PackedS
 		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_BAD_RESPONSE"))
 		return
 	var upload_token := str(parsed.get("uploadToken", parsed.get("upload_token", "")))
+	_apply_scanned_upload_endpoint(upload_url, upload_token)
+	print("[UploadAck] ready upload_url=%s auth=%s" % [upload_url, "yes" if not upload_token.is_empty() else "no"])
+
+
+func _apply_scanned_upload_endpoint(upload_url: String, upload_token: String) -> void:
 	if settings_panel and settings_panel.has_method("set_upload_url_from_scan"):
 		settings_panel.set_upload_url_from_scan(upload_url, upload_token, true)
 	if settings_panel and settings_panel.has_method("set_upload_connectivity_status"):
 		settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_READY"), "success")
-	print("[UploadAck] ready upload_url=%s auth=%s" % [upload_url, "yes" if not upload_token.is_empty() else "no"])
 
 
 func _on_upload_ack_failed(message: String) -> void:
@@ -1017,16 +1024,19 @@ func _on_upload_ack_failed(message: String) -> void:
 
 
 # --- EgoUploader signal handlers ---------------------------------------------
-# All four route to the record_control's upload status line so the operator
-# sees what is happening without having to leave headset. Color hints map to
-# the level argument of ViewLockedRecordControl.set_upload_status.
+# Upload attempts are retried in the background, so the visible UI follows only
+# the just-finalized session and uses a single popup progress surface.
 
 func _on_upload_started(_session_id: String, kind: String) -> void:
+	if not _is_visible_upload_session(_session_id):
+		return
 	_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), 0.0, "normal")
 	print("[Upload] %s/%s started" % [_session_id, kind])
 
 
 func _on_upload_progress(_session_id: String, kind: String, sent_bytes: int, total_bytes: int) -> void:
+	if not _is_visible_upload_session(_session_id):
+		return
 	if total_bytes <= 0:
 		_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), -1.0, "normal")
 		return
@@ -1036,26 +1046,36 @@ func _on_upload_progress(_session_id: String, kind: String, sent_bytes: int, tot
 
 
 func _on_upload_finished(session_id: String, kind: String, _response: Dictionary) -> void:
+	if not _is_visible_upload_session(session_id):
+		return
 	_queue_upload_ui(tr("UI_UPLOAD_FINISHED_TITLE") % _upload_kind_label(kind), "", 1.0, "success", 1.2)
 	print("[Upload] %s/%s finished" % [session_id, kind])
 
 
 func _on_upload_failed(session_id: String, kind: String, error: String) -> void:
-	_queue_upload_ui(tr("UI_UPLOAD_FAILED_TITLE"), _upload_kind_label(kind), -1.0, "error", 4.0)
 	push_warning("[Upload] %s/%s failed: %s" % [session_id, kind, error])
 
 
 func _on_session_uploaded(session_id: String) -> void:
+	if not _is_visible_upload_session(session_id):
+		return
 	_queue_upload_ui(tr("UI_UPLOAD_SESSION_COMPLETE"), "", 1.0, "success", 2.5)
+	_active_upload_session_id = ""
 	print("[Upload] session %s fully uploaded" % session_id)
 
 
 func _on_upload_queue_changed(pending_count: int) -> void:
+	if _active_upload_session_id.is_empty():
+		return
 	if pending_count == 0:
 		# Let the success/failure line linger; the next start_capture or
 		# settings open will redraw the control anyway.
 		return
 	_queue_upload_ui(tr("UI_UPLOAD_QUEUE_PENDING") % pending_count, "", -1.0, "normal")
+
+
+func _is_visible_upload_session(session_id: String) -> bool:
+	return not _active_upload_session_id.is_empty() and session_id == _active_upload_session_id
 
 
 func _queue_upload_ui(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0) -> void:
@@ -1092,13 +1112,13 @@ func _apply_upload_ui(update: Dictionary) -> void:
 	var progress := float(update.get("progress", -1.0))
 	var level := str(update.get("level", "normal"))
 	var duration_seconds := float(update.get("duration_seconds", 0.0))
-	var compact := title
-	if not detail.is_empty():
-		compact += " " + detail
-	if record_control:
-		record_control.set_upload_status(compact, level, progress)
+	var used_popup := false
 	if status_popup and status_popup.has_method("show_upload_progress"):
 		status_popup.show_upload_progress(title, detail, progress, level, duration_seconds)
+		used_popup = true
+	if record_control:
+		if used_popup and record_control.has_method("clear_upload_status"):
+			record_control.clear_upload_status()
 
 
 func _upload_kind_label(kind: String) -> String:

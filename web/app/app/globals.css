@@ -140,3 +140,55 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
 .empty-state { padding: 48px 16px; text-align: center; color: var(--muted); }
 .empty-state code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 .button-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.qr-refresh-wrap {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  margin: 0 auto;
+}
+.qr-refresh-button {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  background: #fff;
+  border: 2px solid transparent;
+  border-radius: 8px;
+}
+.qr-refresh-wrap[data-expired="true"] .qr-refresh-button span {
+  filter: grayscale(1);
+  opacity: 0.42;
+}
+.qr-refresh-button:hover:not(:disabled),
+.qr-refresh-button:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+.qr-refresh-button[data-refreshing="true"] {
+  opacity: 0.72;
+}
+.qr-refresh-button > span,
+.qr-refresh-button svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.qr-reset-overlay {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  min-width: 118px;
+  min-height: 44px;
+  border-color: rgba(63,185,80,0.92);
+  background: rgba(13,16,20,0.92);
+  color: var(--good);
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.34);
+}
+.qr-reset-overlay:hover:not(:disabled),
+.qr-reset-overlay:focus-visible {
+  border-color: var(--good);
+  outline: none;
+}

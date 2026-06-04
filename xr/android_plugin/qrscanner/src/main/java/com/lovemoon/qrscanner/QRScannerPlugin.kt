@@ -25,6 +25,7 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.Result
+import com.google.zxing.ResultPoint
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.multi.qrcode.QRCodeMultiReader
 import org.godotengine.godot.Godot
@@ -35,6 +36,74 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+
+internal data class QrBounds(
+    val cx: Double,
+    val cy: Double,
+    val w: Double,
+    val h: Double,
+)
+
+internal fun computeQrBoundsObject(
+    result: Result,
+    width: Int,
+    height: Int,
+    mirroredHorizontally: Boolean = false,
+): JSONObject = computeQrBoundsObject(result.resultPoints, width, height, mirroredHorizontally)
+
+internal fun computeQrBoundsObject(
+    points: Array<out ResultPoint?>?,
+    width: Int,
+    height: Int,
+    mirroredHorizontally: Boolean = false,
+): JSONObject {
+    val bounds = computeQrBounds(points, width, height, mirroredHorizontally)
+    return JSONObject().apply {
+        put("cx", bounds.cx)
+        put("cy", bounds.cy)
+        put("w", bounds.w)
+        put("h", bounds.h)
+    }
+}
+
+internal fun computeQrBounds(
+    points: Array<out ResultPoint?>?,
+    width: Int,
+    height: Int,
+    mirroredHorizontally: Boolean = false,
+): QrBounds {
+    if (width <= 0 || height <= 0) {
+        return QrBounds(cx = 0.5, cy = 0.5, w = 0.0, h = 0.0)
+    }
+    if (points == null || points.isEmpty()) {
+        return QrBounds(cx = 0.5, cy = 0.5, w = 0.0, h = 0.0)
+    }
+    var minX = Float.POSITIVE_INFINITY
+    var maxX = Float.NEGATIVE_INFINITY
+    var minY = Float.POSITIVE_INFINITY
+    var maxY = Float.NEGATIVE_INFINITY
+    for (p in points) {
+        if (p == null) continue
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+        if (p.y < minY) minY = p.y
+        if (p.y > maxY) maxY = p.y
+    }
+    if (!minX.isFinite() || !maxX.isFinite() || !minY.isFinite() || !maxY.isFinite()) {
+        return QrBounds(cx = 0.5, cy = 0.5, w = 0.0, h = 0.0)
+    }
+    val sourceMinX = minX
+    val sourceMaxX = maxX
+    if (mirroredHorizontally) {
+        minX = width.toFloat() - sourceMaxX
+        maxX = width.toFloat() - sourceMinX
+    }
+    val cx = ((minX + maxX) * 0.5f) / width
+    val cy = ((minY + maxY) * 0.5f) / height
+    val w = (maxX - minX) / width
+    val h = (maxY - minY) / height
+    return QrBounds(cx = cx.toDouble(), cy = cy.toDouble(), w = w.toDouble(), h = h.toDouble())
+}
 
 /**
  * GodotPlugin singleton: `QRScannerPlugin`.
@@ -83,10 +152,16 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         // skip frames that arrive within this window of the last decode.
         // 15 fps target ⇒ 66 ms.
         private const val DECODE_INTERVAL_MS = 60L
+        private const val PREVIEW_INTERVAL_MS = 250L
         private const val META_CAMERA_SOURCE_PASSTHROUGH = 0
         private const val META_CAMERA_POSITION_LEFT = 0
         private const val META_CAMERA_POSITION_RIGHT = 1
     }
+
+    private data class DecodedQr(
+        val result: Result,
+        val mirroredHorizontally: Boolean,
+    )
 
     override fun getPluginName(): String = "QRScannerPlugin"
 
@@ -100,6 +175,10 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
             // results_json: JSON array of { payload: String, bounds: Object }.
             // Prefer this signal; one camera frame can contain multiple QR codes.
             SignalInfo("qr_detections", String::class.java),
+            // frame_path: cache file containing the current luma frame that was
+            // sent into ZXing. Emitted at low rate so the GDScript panel can
+            // show a live preview of what the scanner actually sees.
+            SignalInfo("qr_preview_frame", String::class.java),
             // message: short opaque tag. Known values:
             //   "permission_denied"  user has not granted CAMERA
             //   "no_camera"          no usable camera on this device
@@ -130,6 +209,7 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
     }
     private val multiReader = QRCodeMultiReader()
     private var lastDecodeAtMs = 0L
+    private var lastPreviewAtMs = 0L
     private var frameCount = 0L
     @Volatile
     private var lastDetectedFramePath = ""
@@ -158,6 +238,7 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
             try {
                 Log.i(TAG, "startScan: opening camera")
                 lastDetectedFramePath = ""
+                lastPreviewAtMs = 0L
                 // openCameraBlocking returns false (and has already
                 // emitted a specific qr_error tag) on its own
                 // recoverable error paths — no_camera, permission lost
@@ -425,6 +506,13 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         val height = image.height
         val out = copyLumaPlane(image)
 
+        val previewPath = maybeWritePreviewFrame(out, width, height)
+        if (previewPath.isNotEmpty()) {
+            emitOnGodotThread {
+                emitSignal("qr_preview_frame", previewPath)
+            }
+        }
+
         val decoded = decodeAllSources(out, width, height)
         if (decoded.isEmpty()) return
         Log.i(TAG, "qr detected count=${decoded.size}")
@@ -434,7 +522,10 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
             batch.put(
                 JSONObject().apply {
                     put("payload", text)
-                    put("bounds", computeBoundsObject(result, width, height))
+                    put(
+                        "bounds",
+                        computeQrBoundsObject(result.result, width, height, result.mirroredHorizontally),
+                    )
                 },
             )
         }
@@ -442,34 +533,42 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
             emitSignal("qr_detections", batch.toString())
             // Backwards compatibility for older overlays.
             for ((text, result) in decoded) {
-                emitSignal("qr_detected", text, computeBoundsObject(result, width, height).toString())
+                emitSignal(
+                    "qr_detected",
+                    text,
+                    computeQrBoundsObject(result.result, width, height, result.mirroredHorizontally).toString(),
+                )
             }
         }
     }
 
-    private fun decodeAllSources(luma: ByteArray, width: Int, height: Int): LinkedHashMap<String, Result> {
-        val out = LinkedHashMap<String, Result>()
+    private fun decodeAllSources(luma: ByteArray, width: Int, height: Int): LinkedHashMap<String, DecodedQr> {
+        val out = LinkedHashMap<String, DecodedQr>()
         val source = PlanarYUVLuminanceSource(luma, width, height, 0, 0, width, height, false)
-        addDecodedResults(out, decodeSourceMultiple(source))
-        addDecodedResults(out, decodeSourceMultiple(source.invert()))
+        addDecodedResults(out, decodeSourceMultiple(source), false)
+        addDecodedResults(out, decodeSourceMultiple(source.invert()), false)
         val mirrored = PlanarYUVLuminanceSource(luma.copyOf(), width, height, 0, 0, width, height, true)
-        addDecodedResults(out, decodeSourceMultiple(mirrored))
-        addDecodedResults(out, decodeSourceMultiple(mirrored.invert()))
+        addDecodedResults(out, decodeSourceMultiple(mirrored), true)
+        addDecodedResults(out, decodeSourceMultiple(mirrored.invert()), true)
         if (out.isEmpty()) {
             val single = decodeSource(source) ?: decodeSource(source.invert())
             if (single != null) {
                 val text = single.text
-                if (!text.isNullOrBlank()) out[text] = single
+                if (!text.isNullOrBlank()) out[text] = DecodedQr(single, false)
             }
         }
         return out
     }
 
-    private fun addDecodedResults(out: LinkedHashMap<String, Result>, results: List<Result>) {
+    private fun addDecodedResults(
+        out: LinkedHashMap<String, DecodedQr>,
+        results: List<Result>,
+        mirroredHorizontally: Boolean,
+    ) {
         for (result in results) {
             val text = result.text
             if (text.isNullOrBlank()) continue
-            if (!out.containsKey(text)) out[text] = result
+            if (!out.containsKey(text)) out[text] = DecodedQr(result, mirroredHorizontally)
         }
     }
 
@@ -518,7 +617,18 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         return out
     }
 
+    private fun maybeWritePreviewFrame(luma: ByteArray, width: Int, height: Int): String {
+        val now = System.currentTimeMillis()
+        if (now - lastPreviewAtMs < PREVIEW_INTERVAL_MS) return ""
+        lastPreviewAtMs = now
+        return writeLumaFrame(luma, width, height, "qr_preview_frame.jpg", 72, "preview QR frame")
+    }
+
     private fun writeFrozenFrame(luma: ByteArray, width: Int, height: Int): String {
+        return writeLumaFrame(luma, width, height, "qr_detected_frame.jpg", 88, "frozen QR frame")
+    }
+
+    private fun writeLumaFrame(luma: ByteArray, width: Int, height: Int, fileName: String, quality: Int, label: String): String {
         val ctx = activityRef ?: return ""
         return try {
             val pixels = IntArray(width * height)
@@ -528,48 +638,15 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
             }
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-            val file = File(ctx.cacheDir, "qr_detected_frame.jpg")
+            val file = File(ctx.cacheDir, fileName)
             file.outputStream().use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
             }
             bitmap.recycle()
             file.absolutePath
         } catch (t: Throwable) {
-            Log.w(TAG, "failed to write frozen QR frame", t)
+            Log.w(TAG, "failed to write $label", t)
             ""
-        }
-    }
-
-    private fun computeBoundsObject(result: Result, width: Int, height: Int): JSONObject {
-        val points = result.resultPoints ?: emptyArray()
-        if (points.isEmpty()) {
-            return JSONObject().apply {
-                put("cx", 0.5)
-                put("cy", 0.5)
-                put("w", 0.0)
-                put("h", 0.0)
-            }
-        }
-        var minX = Float.POSITIVE_INFINITY
-        var maxX = Float.NEGATIVE_INFINITY
-        var minY = Float.POSITIVE_INFINITY
-        var maxY = Float.NEGATIVE_INFINITY
-        for (p in points) {
-            if (p == null) continue
-            if (p.x < minX) minX = p.x
-            if (p.x > maxX) maxX = p.x
-            if (p.y < minY) minY = p.y
-            if (p.y > maxY) maxY = p.y
-        }
-        val cx = ((minX + maxX) * 0.5f) / width
-        val cy = ((minY + maxY) * 0.5f) / height
-        val w = (maxX - minX) / width
-        val h = (maxY - minY) / height
-        return JSONObject().apply {
-            put("cx", cx.toDouble())
-            put("cy", cy.toDouble())
-            put("w", w.toDouble())
-            put("h", h.toDouble())
         }
     }
 
@@ -606,6 +683,7 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         // Reset the throttle so the first frame of the next scan isn't
         // skipped against a stale timestamp.
         lastDecodeAtMs = 0L
+        lastPreviewAtMs = 0L
         frameCount = 0L
         Log.i(TAG, "scanner stopped")
     }

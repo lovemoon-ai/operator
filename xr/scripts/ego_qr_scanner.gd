@@ -257,6 +257,12 @@ func _on_qr_error(message: String) -> void:
 	_set_status("Scanner error: " + message)
 
 
+func _on_qr_preview_frame(frame_path: String) -> void:
+	if _locked_detection:
+		return
+	_show_frame_path(frame_path, false)
+
+
 func _lock_detected_entries(entries: Array) -> void:
 	if _locked_detection:
 		return
@@ -383,6 +389,9 @@ func _connect_plugin_signals(plugin: Object) -> void:
 	# Prefer the batch signal. It preserves the fact that one frozen camera
 	# frame can contain multiple QR codes. Keep the single-result signal as
 	# a fallback for older APKs.
+	if plugin.has_signal("qr_preview_frame"):
+		if not plugin.is_connected("qr_preview_frame", Callable(self, "_on_qr_preview_frame")):
+			plugin.connect("qr_preview_frame", Callable(self, "_on_qr_preview_frame"))
 	if plugin.has_signal("qr_detections"):
 		if not plugin.is_connected("qr_detections", Callable(self, "_on_qr_detections")):
 			plugin.connect("qr_detections", Callable(self, "_on_qr_detections"))
@@ -535,12 +544,17 @@ func _show_frozen_frame_from_plugin() -> void:
 	if _plugin == null or not _plugin.has_method("getLastDetectedFramePath"):
 		return
 	var path := str(_plugin.call("getLastDetectedFramePath"))
+	_show_frame_path(path, true)
+
+
+func _show_frame_path(path: String, warn_on_error: bool = true) -> void:
 	if path.strip_edges().is_empty():
 		return
 	var image := Image.new()
 	var err := image.load(path)
 	if err != OK:
-		push_warning("[QR] failed to load frozen frame %s err=%d" % [path, err])
+		if warn_on_error:
+			push_warning("[QR] failed to load QR frame %s err=%d" % [path, err])
 		return
 	if _frozen_frame:
 		_frozen_frame.texture = ImageTexture.create_from_image(image)

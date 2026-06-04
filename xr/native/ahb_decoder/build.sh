@@ -13,6 +13,7 @@
 set -euo pipefail
 
 BUILD_TYPE="${1:-Release}"
+BUILD_JOBS="${AHB_BUILD_JOBS:-4}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 DEPS_ROOT="${DEPS_ROOT:-$REPO_ROOT/.deps}"
@@ -76,7 +77,7 @@ cmake -B "$BUILD_DIR" \
     -DGODOT_CPP_DIR="$GODOT_CPP_LINK" \
     -DGODOT_CPP_BUILD_DIR="$GODOT_CPP_BUILD"
 
-cmake --build "$BUILD_DIR" -j4
+cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
 
 SO="$BUILD_DIR/libahb_decoder.so"
 if [[ ! -s "$SO" ]]; then

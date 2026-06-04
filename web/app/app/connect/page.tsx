@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 import QRCode from "qrcode";
 
 import { buildConnectTicket } from "../../lib/connect-ticket";
+import { RefreshableQr } from "./RefreshableQr";
 
 // "Connect" tab. Shows one QR code per LAN-reachable IPv4 address
 // pointing at /api/ingest, so the operator can scan from the headset
@@ -76,18 +77,7 @@ export default async function ConnectPage() {
           {endpoints.map((ep) => (
             <section className="panel" key={`${ep.iface}-${ep.host}`}>
               <h2>{ep.iface}</h2>
-              <div
-                style={{
-                  background: "white",
-                  borderRadius: 8,
-                  padding: 12,
-                  width: "100%",
-                  maxWidth: 260,
-                  margin: "0 auto",
-                }}
-                // QR is server-rendered SVG markup; safe to inline.
-                dangerouslySetInnerHTML={{ __html: ep.qrSvg }}
-              />
+              <RefreshableQr label={`Refresh QR for ${ep.host}`} qrSvg={ep.qrSvg} expiresAt={ep.expiresAt} />
               <div
                 style={{
                   marginTop: 12,
@@ -104,7 +94,7 @@ export default async function ConnectPage() {
                 host {ep.host} · QR expires {new Date(ep.expiresAt).toLocaleTimeString()}
               </div>
               <div style={{ marginTop: 4, fontSize: 11, color: "var(--muted)", textAlign: "center" }}>
-                Refresh this page to issue a new 5-minute QR.
+                Click the QR to issue a new 5-minute QR.
               </div>
             </section>
           ))}
