@@ -1,0 +1,56 @@
+diff --git a/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp b/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
+index 5676b4b..23e803f 100644
+--- a/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
++++ b/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
+@@ -189,10 +189,20 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_bind_methods() {
+ 
+ 	ClassDB::bind_method(D_METHOD("get_environment_depth_map_async", "callback"), &OpenXRMetaEnvironmentDepthExtensionWrapper::get_environment_depth_map_async);
+ 
++	ClassDB::bind_method(D_METHOD("get_predicted_display_time_ns"), &OpenXRMetaEnvironmentDepthExtensionWrapper::get_predicted_display_time_ns);
++
+ 	ADD_SIGNAL(MethodInfo("openxr_meta_environment_depth_started"));
+ 	ADD_SIGNAL(MethodInfo("openxr_meta_environment_depth_stopped"));
+ }
+ 
++int64_t OpenXRMetaEnvironmentDepthExtensionWrapper::get_predicted_display_time_ns() {
++	Ref<OpenXRAPIExtension> openxr_api = get_openxr_api();
++	if (openxr_api.is_null()) {
++		return 0;
++	}
++	return (int64_t)openxr_api->get_predicted_display_time();
++}
++
+ Dictionary OpenXRMetaEnvironmentDepthExtensionWrapper::_get_requested_extensions() {
+ 	Dictionary result;
+ 	for (auto ext : request_extensions) {
+@@ -336,6 +346,17 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_on_pre_render() {
+ 			Dictionary data;
+ 			data["depth_projection_view"] = depth_proj_view;
+ 			data["depth_inverse_projection_view"] = depth_inv_proj_view;
++			data["near_z"] = depth_image.nearZ;
++			data["far_z"] = depth_image.farZ;
++			data["runtime_display_time_ns"] = (int64_t)acquire_info.displayTime;
++			data["fov_angle_left"] = depth_image.views[i].fov.angleLeft;
++			data["fov_angle_right"] = depth_image.views[i].fov.angleRight;
++			data["fov_angle_up"] = depth_image.views[i].fov.angleUp;
++			data["fov_angle_down"] = depth_image.views[i].fov.angleDown;
++			data["local_from_depth_eye"] = Transform3D(
++					Basis(Quaternion(local_from_depth_eye.orientation.x, local_from_depth_eye.orientation.y,
++							local_from_depth_eye.orientation.z, local_from_depth_eye.orientation.w)),
++					Vector3(local_from_depth_eye.position.x, local_from_depth_eye.position.y, local_from_depth_eye.position.z));
+ 
+ 			Ref<Image> image = rs->texture_2d_layer_get(render_state.depth_swapchain_textures[depth_image.swapchainIndex], i);
+ 			data["image"] = image;
+diff --git a/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h b/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
+index b88deef..58de824 100644
+--- a/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
++++ b/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
+@@ -88,6 +88,8 @@ public:
+ 
+ 	void get_environment_depth_map_async(const Callable &p_callback);
+ 
++	int64_t get_predicted_display_time_ns();
++
+ 	void setup_global_uniforms();
+ 
+ 	static OpenXRMetaEnvironmentDepthExtensionWrapper *get_singleton();

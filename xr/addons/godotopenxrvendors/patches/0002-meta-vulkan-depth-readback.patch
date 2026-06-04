@@ -1,0 +1,124 @@
+diff --git a/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp b/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
+index 23e803f..4f91508 100644
+--- a/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
++++ b/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
+@@ -46,6 +46,7 @@
+ #include <godot_cpp/classes/camera3d.hpp>
++#include <godot_cpp/classes/class_db_singleton.hpp>
+ #include <godot_cpp/classes/engine.hpp>
+ #include <godot_cpp/classes/open_xrapi_extension.hpp>
+ #include <godot_cpp/classes/project_settings.hpp>
+ #include <godot_cpp/classes/rendering_device.hpp>
+ #include <godot_cpp/classes/rendering_server.hpp>
+@@ -343,6 +345,29 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_on_pre_render() {
+ 		rs->global_shader_parameter_set(i == 0 ? META_ENVIRONMENT_DEPTH_TO_CAMERA_PROJECTION_LEFT_NAME : META_ENVIRONMENT_DEPTH_TO_CAMERA_PROJECTION_RIGHT_NAME, camera_proj_view * depth_inv_proj_view);
+ 
+ 		if (render_state.depth_map_callbacks.size() > 0) {
++			RID read_texture = render_state.depth_swapchain_textures[depth_image.swapchainIndex];
++			RID readback_texture = render_state.depth_readback_textures[depth_image.swapchainIndex];
++			if (render_state.graphics_api == GRAPHICS_API_VULKAN && readback_texture.is_valid()) {
++				RenderingDevice *rendering_device = RenderingServer::get_singleton()->get_rendering_device();
++				RID src_texture = rs->texture_get_rd_texture(read_texture);
++				RID dst_texture = rs->texture_get_rd_texture(readback_texture);
++				Error err = rendering_device->texture_copy(
++						src_texture,
++						dst_texture,
++						Vector3(),
++						Vector3(),
++						Vector3(1.0 / render_state.depth_swapchain_texel_size.x, 1.0 / render_state.depth_swapchain_texel_size.y, 1.0),
++						0,
++						0,
++						i,
++						i);
++				if (err == OK) {
++					read_texture = readback_texture;
++				} else {
++					UtilityFunctions::printerr("Failed to copy environment depth image for CPU readback: ", err);
++				}
++			}
++
+ 			Dictionary data;
+ 			data["depth_projection_view"] = depth_proj_view;
+ 			data["depth_inverse_projection_view"] = depth_inv_proj_view;
+@@ -358,7 +382,7 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_on_pre_render() {
+ 							local_from_depth_eye.orientation.z, local_from_depth_eye.orientation.w)),
+ 					Vector3(local_from_depth_eye.position.x, local_from_depth_eye.position.y, local_from_depth_eye.position.z));
+ 
+-			Ref<Image> image = rs->texture_2d_layer_get(render_state.depth_swapchain_textures[depth_image.swapchainIndex], i);
++			Ref<Image> image = rs->texture_2d_layer_get(read_texture, i);
+ 			data["image"] = image;
+ 
+ 			callback_data.push_back(data);
+@@ -768,6 +792,7 @@ bool OpenXRMetaEnvironmentDepthExtensionWrapper::_create_depth_provider_rt() {
+ 		}
+ 
+ 		render_state.depth_swapchain_textures.reserve(swapchain_length);
++		render_state.depth_readback_textures.reserve(swapchain_length);
+ 
+ 		RenderingDevice *rendering_device = RenderingServer::get_singleton()->get_rendering_device();
+ 
+@@ -776,7 +801,7 @@ bool OpenXRMetaEnvironmentDepthExtensionWrapper::_create_depth_provider_rt() {
+ 					RenderingDevice::TEXTURE_TYPE_2D_ARRAY,
+ 					RenderingDevice::DATA_FORMAT_D16_UNORM,
+ 					RenderingDevice::TEXTURE_SAMPLES_1,
+-					RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
++					RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT,
+ 					reinterpret_cast<uint64_t>(image.image),
+ 					swapchain_state.width,
+ 					swapchain_state.height,
+@@ -786,6 +811,35 @@ bool OpenXRMetaEnvironmentDepthExtensionWrapper::_create_depth_provider_rt() {
+ 			RID texture = rs->texture_rd_create(rd_texture, RenderingServer::TextureLayeredType::TEXTURE_LAYERED_2D_ARRAY);
+ 
+ 			render_state.depth_swapchain_textures.push_back(texture);
++
++			RID readback_texture;
++			Variant readback_format = ClassDB::instantiate("RDTextureFormat");
++			Variant readback_view = ClassDB::instantiate("RDTextureView");
++			Object *readback_format_obj = readback_format;
++			Object *readback_view_obj = readback_view;
++			if (readback_format_obj != nullptr && readback_view_obj != nullptr) {
++				readback_format_obj->call("set_texture_type", RenderingDevice::TEXTURE_TYPE_2D_ARRAY);
++				readback_format_obj->call("set_format", RenderingDevice::DATA_FORMAT_D16_UNORM);
++				readback_format_obj->call("set_width", swapchain_state.width);
++				readback_format_obj->call("set_height", swapchain_state.height);
++				readback_format_obj->call("set_depth", 1);
++				readback_format_obj->call("set_array_layers", 2);
++				readback_format_obj->call("set_mipmaps", 1);
++				readback_format_obj->call("set_samples", RenderingDevice::TEXTURE_SAMPLES_1);
++				readback_format_obj->call("set_usage_bits",
++						RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT |
++								RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT |
++								RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT |
++								RenderingDevice::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
++				RID rd_readback_texture = rendering_device->call("texture_create", readback_format, readback_view);
++				if (rd_readback_texture.is_valid()) {
++					readback_texture = rs->texture_rd_create(rd_readback_texture, RenderingServer::TextureLayeredType::TEXTURE_LAYERED_2D_ARRAY);
++				}
++			}
++			if (!readback_texture.is_valid()) {
++				UtilityFunctions::printerr("Failed to create environment depth CPU readback texture");
++			}
++			render_state.depth_readback_textures.push_back(readback_texture);
+ 		}
+ 	}
+ 
+@@ -878,6 +923,7 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_destroy_depth_provider_rt() {
+ 	}
+ 
+ 	render_state.depth_swapchain_textures.clear();
++	render_state.depth_readback_textures.clear();
+ 
+ 	if (render_state.depth_provider != XR_NULL_HANDLE) {
+ 		XrResult result = xrDestroyEnvironmentDepthProviderMETA(render_state.depth_provider);
+diff --git a/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h b/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
+index 58de824..bd00553 100644
+--- a/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
++++ b/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
+@@ -172,6 +172,7 @@ private:
+ 		GraphicsAPI graphics_api = GRAPHICS_API_UNKNOWN;
+ 		Vector2 depth_swapchain_texel_size;
+ 		LocalVector<RID> depth_swapchain_textures;
++		LocalVector<RID> depth_readback_textures;
+ 		LocalVector<Callable> depth_map_callbacks;
+ 	} render_state;
+ 

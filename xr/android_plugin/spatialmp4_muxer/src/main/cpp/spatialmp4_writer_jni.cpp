@@ -342,9 +342,20 @@ class LiveSpatialMp4Writer {
     // exclusively on the io thread, so no FFmpeg state is touched
     // concurrently from two threads.
     {
+      std::lock_guard<std::mutex> lock(format_mutex_);
+      if (depth_expected_ && !depth_configured_) {
+        __android_log_print(ANDROID_LOG_WARN, kTag, "finishing without depth stream; no depth frames arrived");
+        depth_expected_ = false;
+      }
+    }
+    {
       std::lock_guard<std::mutex> qlock(queue_mutex_);
       finish_requested_ = true;
-      drained_ = io_queue_.empty();
+      // The I/O thread may already have moved packets out of io_queue_ into
+      // its local deferred buffer while waiting for optional streams such as
+      // depth. Always let the thread run one final pass before declaring the
+      // writer drained.
+      drained_ = false;
     }
     queue_cv_.notify_all();
     {
@@ -366,10 +377,6 @@ class LiveSpatialMp4Writer {
       }
       if (!hevc_configured_) {
         return Fail("HEVC stream was never configured");
-      }
-      if (depth_expected_ && !depth_configured_) {
-        __android_log_print(ANDROID_LOG_WARN, kTag, "finishing without depth stream; no depth frames arrived");
-        depth_expected_ = false;
       }
       if (!header_written_) {
         // Header was never written (no packets arrived). Bail with a clear

@@ -16,6 +16,14 @@ var _callback_us := 0
 var _convert_us := 0
 var _native_convert_plugin: Object
 var _native_convert_checked := false
+var _extension_name := ""
+var _drop_count := 0
+var _last_drop_reason := ""
+var _empty_callback_count := 0
+var _non_dictionary_count := 0
+var _missing_image_count := 0
+var _null_image_count := 0
+var _empty_conversion_count := 0
 
 
 func pop_metrics() -> Dictionary:
@@ -23,12 +31,16 @@ func pop_metrics() -> Dictionary:
 		"callbacks": _callback_count,
 		"frames": _frame_count,
 		"callback_ms": _callback_us / 1000.0,
-		"convert_ms": _convert_us / 1000.0
+		"convert_ms": _convert_us / 1000.0,
+		"drops": _drop_count,
+		"last_drop": _last_drop_reason
 	}
 	_callback_count = 0
 	_frame_count = 0
 	_callback_us = 0
 	_convert_us = 0
+	_drop_count = 0
+	_last_drop_reason = ""
 	return metrics
 
 
@@ -36,10 +48,14 @@ func configure(p_writer: Object) -> void:
 	writer = p_writer
 	for singleton_name in [
 		"OpenXRMetaEnvironmentDepthExtensionWrapper",
-		"OpenXRMetaEnvironmentDepthExtension"
+		"OpenXRMetaEnvironmentDepthExtension",
+		"OpenXRAndroidEnvironmentDepthExtensionWrapper",
+		"OpenXRAndroidEnvironmentDepthExtension"
 	]:
 		if Engine.has_singleton(singleton_name):
 			_extension = Engine.get_singleton(singleton_name)
+			_extension_name = singleton_name
+			print("DepthSampler bound %s" % singleton_name)
 			break
 
 
@@ -73,10 +89,14 @@ func start() -> void:
 	if _extension == null or _started:
 		return
 
-	if _extension.call("is_environment_depth_supported"):
+	var supported := bool(_extension.call("is_environment_depth_supported"))
+	if supported:
 		_timer = 0.0
 		_extension.call("start_environment_depth")
 		_started = true
+		print("DepthSampler started %s" % _extension_name)
+	else:
+		_mark_drop("unsupported", {"extension": _extension_name})
 
 
 func stop() -> void:
@@ -90,6 +110,10 @@ func stop() -> void:
 
 func pump(delta: float) -> void:
 	if writer == null or _extension == null or not _started or _request_pending:
+		return
+
+	if not _extension.has_method("get_environment_depth_map_async"):
+		_mark_drop("missing_async_api", {"extension": _extension_name})
 		return
 
 	_timer += delta
@@ -109,13 +133,27 @@ func _on_depth_map(data: Array) -> void:
 	var cb_start := Time.get_ticks_usec()
 	_callback_count += 1
 	var callback_ticks_ns := cb_start * 1000
+	if data.is_empty():
+		_empty_callback_count += 1
+		_mark_drop("empty_callback", {"count": _empty_callback_count})
+		_callback_us += Time.get_ticks_usec() - cb_start
+		return
+
 	for i in range(data.size()):
+		if not (data[i] is Dictionary):
+			_non_dictionary_count += 1
+			_mark_drop("non_dictionary_item", {"index": i, "count": _non_dictionary_count})
+			continue
 		var item: Dictionary = data[i]
 		if not item.has("image"):
+			_missing_image_count += 1
+			_mark_drop("missing_image", {"index": i, "keys": item.keys(), "count": _missing_image_count})
 			continue
 
 		var image := item["image"] as Image
 		if image == null:
+			_null_image_count += 1
+			_mark_drop("null_image", {"index": i, "keys": item.keys(), "count": _null_image_count})
 			continue
 
 		var eye := "left" if i == 0 else "right"
@@ -158,10 +196,24 @@ func _on_depth_map(data: Array) -> void:
 		var depth_u16_mm: PackedByteArray = _convert_with_native_or_fallback(image, metadata)
 		_convert_us += Time.get_ticks_usec() - convert_start
 		if depth_u16_mm.is_empty():
+			_empty_conversion_count += 1
+			_mark_drop("empty_conversion", {
+				"format": image.get_format(),
+				"width": image.get_width(),
+				"height": image.get_height(),
+				"count": _empty_conversion_count
+			})
 			continue
 		writer.write_depth_frame(timestamp_ns, eye, "", image.get_width(), image.get_height(), metadata, depth_u16_mm)
 		_frame_count += 1
 	_callback_us += Time.get_ticks_usec() - cb_start
+
+
+func _mark_drop(reason: String, details: Dictionary = {}) -> void:
+	_drop_count += 1
+	_last_drop_reason = reason
+	if _drop_count <= 3 or _drop_count % 30 == 0:
+		print("DepthSampler drop: %s %s" % [reason, JSON.stringify(details)])
 
 
 func _store_image_bytes(path: String, image: Image) -> void:

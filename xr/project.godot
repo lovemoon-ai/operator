@@ -87,6 +87,34 @@ META_ENVIRONMENT_DEPTH_TO_CAMERA_PROJECTION_RIGHT={
 "type": "mat4",
 "value": Projection(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
 }
+ANDROID_ENVIRONMENT_DEPTH_AVAILABLE={
+"type": "bool",
+"value": false
+}
+ANDROID_ENVIRONMENT_DEPTH_TEXTURE={
+"type": "sampler2DArray",
+"value": ""
+}
+ANDROID_ENVIRONMENT_DEPTH_RESOLUTION={
+"type": "int",
+"value": 0
+}
+ANDROID_ENVIRONMENT_DEPTH_TANFOV_LEFT={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+ANDROID_ENVIRONMENT_DEPTH_TANFOV_RIGHT={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+ANDROID_ENVIRONMENT_DEPTH_CAMERA_TO_WORLD_LEFT={
+"type": "mat4",
+"value": Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+}
+ANDROID_ENVIRONMENT_DEPTH_CAMERA_TO_WORLD_RIGHT={
+"type": "mat4",
+"value": Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+}
 
 [xr]
 
@@ -101,5 +129,6 @@ openxr/extensions/vendor_performance_metrics=true
 openxr/extensions/meta/render_model=true
 openxr/extensions/meta/passthrough=true
 openxr/extensions/meta/environment_depth=true
+openxr/extensions/androidxr/environment_depth=true
 openxr/extensions/meta/boundary_visibility=true
 openxr/extensions/meta/color_space/starting_color_space=3

@@ -69,6 +69,7 @@ var _camera_configured := false
 var _camera_start_attempted := false
 var _camera_bind_warned := false
 var _camera_permission_wait_logged := false
+var _last_capture_error := ""
 var _passthrough_active := false
 var _previous_transparent_bg := false
 var _previous_environment_blend_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
@@ -277,6 +278,7 @@ func start_capture() -> void:
 	_camera_configured = false
 	_camera_start_attempted = false
 	_camera_permission_wait_logged = false
+	_last_capture_error = ""
 	if record_control:
 		record_control.set_recording(true)
 	if _xr_session_begun and _stream_enabled("record_depth"):
@@ -301,8 +303,12 @@ func stop_capture() -> void:
 	if record_control:
 		record_control.set_recording(false)
 	_play_cue(_stop_cue)
-	if status_popup and not saved_session_dir.is_empty():
-		status_popup.show_saved_path(saved_session_dir)
+	if status_popup:
+		if saved_session_dir.is_empty():
+			var detail := _last_capture_error if not _last_capture_error.is_empty() else tr("UI_RECORDING_SAVE_FAILED_DETAIL")
+			status_popup.show_error(detail)
+		else:
+			status_popup.show_saved_path(saved_session_dir)
 	print("Capture session stopped: %s" % saved_session_dir)
 
 
@@ -561,6 +567,7 @@ func _on_camera_frame_saved(eye: String, _path: String, timestamp_ns: int) -> vo
 
 
 func _on_camera_error(message: String) -> void:
+	_last_capture_error = message
 	push_error("QuestCapturePlugin: %s" % message)
 
 

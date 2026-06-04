@@ -6,6 +6,7 @@ const VIEWPORT_SIZE := Vector2i(720, 220)
 var _viewport: SubViewport
 var _title_label: Label
 var _path_label: Label
+var _panel_style: StyleBoxFlat
 var _hide_seconds := 0.0
 
 
@@ -26,8 +27,19 @@ func _process(delta: float) -> void:
 
 
 func show_saved_path(path: String, duration_seconds: float = 2.0) -> void:
+	_panel_style.bg_color = Color(0.055, 0.067, 0.08, 0.96)
+	_panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
 	_title_label.text = tr("UI_RECORDING_SAVED")
 	_path_label.text = path
+	_hide_seconds = duration_seconds
+	visible = true
+
+
+func show_error(message: String, duration_seconds: float = 4.0) -> void:
+	_panel_style.bg_color = Color(0.15, 0.045, 0.04, 0.96)
+	_panel_style.border_color = Color(0.72, 0.16, 0.12, 0.92)
+	_title_label.text = tr("UI_RECORDING_SAVE_FAILED")
+	_path_label.text = message
 	_hide_seconds = duration_seconds
 	visible = true
 
@@ -43,12 +55,12 @@ func _build_viewport() -> void:
 
 	var panel := PanelContainer.new()
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	var panel_style := StyleBoxFlat.new()
-	panel_style.bg_color = Color(0.055, 0.067, 0.08, 0.96)
-	panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
-	panel_style.set_border_width_all(2)
-	panel_style.set_corner_radius_all(18)
-	panel.add_theme_stylebox_override("panel", panel_style)
+	_panel_style = StyleBoxFlat.new()
+	_panel_style.bg_color = Color(0.055, 0.067, 0.08, 0.96)
+	_panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
+	_panel_style.set_border_width_all(2)
+	_panel_style.set_corner_radius_all(18)
+	panel.add_theme_stylebox_override("panel", _panel_style)
 	_viewport.add_child(panel)
 
 	var margin := MarginContainer.new()
