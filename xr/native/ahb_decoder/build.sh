@@ -71,13 +71,21 @@ fi
 
 ensure_godot_cpp_link
 
+# Pass the symlink's real path (not the per-worktree symlink itself) to cmake
+# so CMakeFiles/.../depend.make + .o object recipes inside the SHARED
+# godot-cpp build dir record a stable source path. Without this, every new
+# worktree gives cmake a different GODOT_CPP_DIR string (its own symlink
+# location), and cmake regenerates the entire godot-cpp build (~2.5 min)
+# even though the .a files in the cache are perfectly reusable.
+GODOT_CPP_DIR_REAL="$(cd "$GODOT_CPP_LINK" && pwd -P)"
+
 BUILD_DIR="build-arm64"
 cmake -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM=android-29 \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DGODOT_CPP_DIR="$GODOT_CPP_LINK" \
+    -DGODOT_CPP_DIR="$GODOT_CPP_DIR_REAL" \
     -DGODOT_CPP_BUILD_DIR="$GODOT_CPP_BUILD"
 
 cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
