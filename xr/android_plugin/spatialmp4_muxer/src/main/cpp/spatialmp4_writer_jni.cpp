@@ -574,7 +574,17 @@ class LiveSpatialMp4Writer {
     if (open_ret < 0) {
       return Fail("failed to open output mp4: " + AvError(open_ret));
     }
-    const int header_ret = avformat_write_header(format_context_, nullptr);
+    // movflags=use_metadata_tags makes the mov muxer write every key in
+    // format_context_->metadata into the moov/udta/meta/keys+ilst (mdta)
+    // structure with the raw key string preserved. Without this, the mov
+    // muxer only honours its tiny iTunes-recognised whitelist (©nam, ©ART,
+    // ...) and silently drops our `device_type` / `com.android.model` /
+    // even `make` and `model` for the isom brand. ffprobe surfaces the
+    // mdta keys/values via -show_entries format_tags.
+    AVDictionary* mux_opts = nullptr;
+    av_dict_set(&mux_opts, "movflags", "+use_metadata_tags", 0);
+    const int header_ret = avformat_write_header(format_context_, &mux_opts);
+    av_dict_free(&mux_opts);
     if (header_ret < 0) {
       return Fail("failed to write mp4 header: " + AvError(header_ret));
     }

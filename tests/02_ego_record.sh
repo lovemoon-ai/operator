@@ -8,15 +8,22 @@
 #
 # Usage:
 #   bash tests/02_ego_record.sh
+#   bash tests/02_ego_record.sh --device pico
 #   bash tests/02_ego_record.sh --skip-build --skip-install
 #   bash tests/02_ego_record.sh --capture-seconds 15 --serial <adb-serial>
 #   bash tests/02_ego_record.sh --skip-device --output-dir tests/logs/ego-record-...
 #
+# Flags:
+#   --device quest|pico   target headset family; selects `make build-<kind>`,
+#                         the matching APK output path, and the expected
+#                         device_type prefix in manifest.json (default quest).
+#
 # Environment overrides:
+#   DEVICE_KIND         same as --device; quest or pico (default quest).
 #   QUEST_SERIAL        adb serial to use; defaults to the first attached device.
 #   CAPTURE_SECONDS     recording duration baked into the CI APK (default 12).
 #   OUTPUT_DIR          artifact directory (default tests/logs/ego-record-<stamp>).
-#   SKIP_BUILD=1        use the existing xr/build/quest/Operator.apk.
+#   SKIP_BUILD=1        use the existing xr/build/<kind>/Operator.apk.
 #   SKIP_INSTALL=1      assume the correct APK is already installed.
 #   SKIP_DEVICE=1       validate existing OUTPUT_DIR/session/SpatialMP4 only.
 #   KEEP_CI_APK=1       do not reinstall the clean APK after the run.
@@ -44,6 +51,7 @@ SKIP_INSTALL="${SKIP_INSTALL:-0}"
 SKIP_DEVICE="${SKIP_DEVICE:-0}"
 KEEP_CI_APK="${KEEP_CI_APK:-0}"
 CLEAR_APP_DATA="${CLEAR_APP_DATA:-1}"
+DEVICE_KIND="${DEVICE_KIND:-quest}"
 
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-60}"
 STOP_BUFFER_SECONDS="${STOP_BUFFER_SECONDS:-120}"
@@ -57,10 +65,31 @@ REMOTE_CAPTURE_ROOT="${DEVICE_ROOT:-/sdcard/Movies/SpatialMP4}"
 REMOTE_SESSION_DIR=""
 REMOTE_FINAL_MP4=""
 
-APK_PATH="$XR_DIR/build/quest/Operator.apk"
+APK_PATH=""           # filled in by configure_device_kind
+MAKE_TARGET=""        # build-quest / build-pico
+EXPECTED_DEVICE_PREFIX=""  # quest / pico — used by validator
 CLEAN_APK_PATH="$OUTPUT_DIR/Operator-clean.apk"
 CAPTURE_APP_GD="$XR_DIR/scripts/capture_app.gd"
 CAPTURE_APP_GD_BAK=""
+
+configure_device_kind() {
+  case "$DEVICE_KIND" in
+    quest)
+      APK_PATH="$XR_DIR/build/quest/Operator.apk"
+      MAKE_TARGET="build-quest"
+      EXPECTED_DEVICE_PREFIX="quest"
+      ;;
+    pico)
+      APK_PATH="$XR_DIR/build/pico/Operator.apk"
+      MAKE_TARGET="build-pico"
+      EXPECTED_DEVICE_PREFIX="pico"
+      ;;
+    *)
+      err "unsupported --device value: $DEVICE_KIND (expected quest or pico)"
+      exit 1
+      ;;
+  esac
+}
 
 SERIAL=""
 CLEAN_APK_READY=0
@@ -95,6 +124,7 @@ while (("$#")); do
     --output-dir) OUTPUT_DIR="$2"; CLEAN_APK_PATH="$OUTPUT_DIR/Operator-clean.apk"; shift 2 ;;
     --serial) QUEST_SERIAL="$2"; shift 2 ;;
     --ffprobe) FFPROBE="$2"; shift 2 ;;
+    --device) DEVICE_KIND="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-install) SKIP_INSTALL=1; shift ;;
     --skip-device) SKIP_DEVICE=1; shift ;;
@@ -105,6 +135,8 @@ while (("$#")); do
     *) err "unknown arg: $1"; usage 1 ;;
   esac
 done
+
+configure_device_kind
 
 cleanup() {
   local rc=$?
@@ -202,8 +234,8 @@ flip_auto_start_on() {
 }
 
 build_clean_apk() {
-  step "Build clean Quest APK"
-  (cd "$XR_DIR" && "$MAKE" build-quest 2>&1 | tee "$OUTPUT_DIR/build-clean.log")
+  step "Build clean ${DEVICE_KIND} APK ($MAKE_TARGET)"
+  (cd "$XR_DIR" && "$MAKE" "$MAKE_TARGET" 2>&1 | tee "$OUTPUT_DIR/build-clean.log")
   if [ ! -f "$APK_PATH" ]; then
     err "APK export did not produce $APK_PATH"
     exit 2
@@ -214,9 +246,9 @@ build_clean_apk() {
 }
 
 build_ci_apk() {
-  step "Build CI auto-record Quest APK"
+  step "Build CI auto-record ${DEVICE_KIND} APK ($MAKE_TARGET)"
   flip_auto_start_on
-  (cd "$XR_DIR" && "$MAKE" build-quest 2>&1 | tee "$OUTPUT_DIR/build-ci.log")
+  (cd "$XR_DIR" && "$MAKE" "$MAKE_TARGET" 2>&1 | tee "$OUTPUT_DIR/build-ci.log")
   restore_auto_start
   if [ ! -f "$APK_PATH" ]; then
     err "APK export did not produce $APK_PATH"
@@ -449,7 +481,7 @@ validate_capture() {
   if [ "$SKIP_DEVICE" = "1" ]; then
     local_root="$OUTPUT_DIR/session/SpatialMP4"
   fi
-  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" <<'PY'
+  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" "$EXPECTED_DEVICE_PREFIX" <<'PY'
 from __future__ import annotations
 
 import json
@@ -464,6 +496,7 @@ capture_seconds = float(sys.argv[3])
 min_mp4_bytes = int(sys.argv[4])
 min_rgb_frames = int(sys.argv[5]) or max(20, int(capture_seconds * 15))
 min_rgb_fps = float(sys.argv[6])
+expected_device_prefix = sys.argv[7] if len(sys.argv) > 7 else ""
 
 checks: list[tuple[str, str, str]] = []
 
@@ -693,6 +726,136 @@ def check_depth(session_dir: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def check_device_block(manifest: dict[str, Any]) -> dict[str, Any]:
+    # Manifest-side device identity introduced by the spatialmp4 device-type
+    # work (DeviceIdentity.detect -> getDeviceIdentityJson -> manifest.json).
+    # We assert the block is present, has every expected key with a non-empty
+    # string value, and that device_type matches the family of the headset we
+    # were asked to target (--device quest|pico). The raw Build.* strings
+    # (model / manufacturer / build_device) are sanity-checked for the same
+    # family so a Pico classified as quest3 (or vice-versa) fails loudly.
+    device = manifest.get("device")
+    if not isinstance(device, dict):
+        failed("manifest has device block", repr(device))
+        return {}
+    passed("manifest has device block")
+
+    required_keys = (
+        "device_type",
+        "device_model",
+        "device_manufacturer",
+        "device_build_device",
+        "runtime_os",
+    )
+    for key in required_keys:
+        value = device.get(key)
+        if isinstance(value, str) and value.strip():
+            passed(f"device.{key} non-empty", value)
+        else:
+            failed(f"device.{key} non-empty", repr(value))
+
+    if expected_device_prefix:
+        # Quest family: classifier returns quest3 / quest3s / questpro / quest2.
+        # Pico family: pico4_ultra / pico4_pro / pico4_enterprise / pico4 / ...
+        device_type = str(device.get("device_type", "")).lower()
+        if device_type.startswith(expected_device_prefix):
+            passed(
+                f"device_type matches --device {expected_device_prefix}",
+                device_type,
+            )
+        else:
+            failed(
+                f"device_type matches --device {expected_device_prefix}",
+                f"got {device_type!r}",
+            )
+
+        manufacturer = str(device.get("device_manufacturer", "")).lower()
+        if expected_device_prefix == "quest":
+            mfg_ok = "oculus" in manufacturer or "meta" in manufacturer
+        elif expected_device_prefix == "pico":
+            mfg_ok = "pico" in manufacturer
+        else:
+            mfg_ok = True
+        if mfg_ok:
+            passed(
+                f"device_manufacturer matches --device {expected_device_prefix}",
+                manufacturer,
+            )
+        else:
+            failed(
+                f"device_manufacturer matches --device {expected_device_prefix}",
+                manufacturer,
+            )
+    return device
+
+
+def check_mp4_device_tags(mp4: Path, device: dict[str, Any]) -> None:
+    # MP4 moov/udta side: the muxer's EnsureContext() writes the same device
+    # strings via av_dict_set into format-level metadata. We re-query with
+    # ffprobe -show_entries format_tags and confirm device_type / model / make
+    # round-tripped. Skipped silently when ffprobe is unavailable so the test
+    # still passes on hosts without a working ffprobe.
+    if not ffprobe or not device:
+        return
+    try:
+        out = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format_tags",
+                "-of",
+                "json",
+                str(mp4),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        format_tags = (json.loads(out.stdout).get("format") or {}).get("tags") or {}
+    except Exception as exc:
+        failed("ffprobe reads MP4 format tags", str(exc))
+        return
+
+    # Tag keys are case-insensitive in mov; ffprobe usually returns lowercase
+    # for the standard atoms (model, make) and the literal key for the custom
+    # ones (device_type, com.android.model, ...). Normalise on read.
+    norm = {k.lower(): v for k, v in format_tags.items()}
+
+    expected = {
+        "device_type": device.get("device_type"),
+        "device_model": device.get("device_model"),
+        "device_manufacturer": device.get("device_manufacturer"),
+    }
+    # Standard mov atoms: model -> ©mod, make -> ©mak. ffprobe surfaces them
+    # as 'model' / 'make' in format_tags.
+    standard_alias = {
+        "device_model": "model",
+        "device_manufacturer": "make",
+    }
+
+    for our_key, want in expected.items():
+        if not want:
+            continue
+        candidates = [our_key, standard_alias.get(our_key, "")]
+        candidates = [c for c in candidates if c]
+        got = next((norm[c] for c in candidates if c in norm), None)
+        if got == want:
+            passed(f"MP4 udta {our_key} matches manifest", got)
+        elif got is None:
+            failed(
+                f"MP4 udta {our_key} present",
+                f"want {want!r}, none of {candidates} found in {list(norm)}",
+            )
+        else:
+            failed(
+                f"MP4 udta {our_key} matches manifest",
+                f"want {want!r}, got {got!r}",
+            )
+
+
 def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
     data = run_ffprobe(mp4)
     if data is None:
@@ -794,6 +957,7 @@ if not manifest_path.exists() or not timebase_path.exists():
 manifest = safe_json(manifest_path)
 timebase = safe_json(timebase_path)
 options = check_manifest(manifest)
+device = check_device_block(manifest)
 check_timebase(timebase)
 check_required_files(session_dir, mp4, options)
 check_rgb_index(session_dir, "left", timebase)
@@ -802,6 +966,7 @@ if options.get("stereo_rgb", True):
 if options.get("record_depth", True):
     check_depth(session_dir)
 check_mp4(mp4, options)
+check_mp4_device_tags(mp4, device)
 
 sys.exit(print_summary())
 PY
