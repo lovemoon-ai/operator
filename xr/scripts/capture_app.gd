@@ -8,6 +8,10 @@ const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
 const OperatorUIPointerVisualScript := preload("res://scripts/xr/operator_ui_pointer_visual.gd")
 const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_interaction_router.gd")
+const EgoSettingsStoreScript := preload("res://scripts/ego_settings_store.gd")
+const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
+const EgoQRScannerScript := preload("res://scripts/ego_qr_scanner.gd")
+const QR_SCANNER_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
@@ -16,6 +20,7 @@ const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -
 const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -0.86))
 const STATUS_POPUP_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.92))
 const CUE_SAMPLE_RATE := 32000
+const UPLOAD_ACK_TIMEOUT_SECONDS := 8.0
 
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
@@ -45,6 +50,13 @@ var settings_interaction_router
 var writer: Object
 var pose_sampler: Node
 var depth_sampler: Node
+var ego_uploader: Node
+var qr_scanner: Object
+var upload_ack_request: HTTPRequest
+var _pending_upload_ack_payload := ""
+var _upload_popup_hold_until_msec := 0
+var _pending_upload_popup_update: Dictionary = {}
+var _upload_popup_timer_armed := false
 var cue_player: AudioStreamPlayer
 var _start_cue: AudioStreamWAV
 var _stop_cue: AudioStreamWAV
@@ -119,6 +131,27 @@ func _ready() -> void:
 	add_child(depth_sampler)
 	pose_sampler.configure(writer, hmd_camera, left_controller, right_controller)
 	depth_sampler.configure(writer)
+
+	# EgoUploader runs a background worker thread that drains the
+	# user://ego_upload_queue.json over TUS 1.0.0. We instantiate it
+	# unconditionally so any jobs left over from the previous launch
+	# resume even if the user hasn't opened the settings panel yet;
+	# enqueue() is a no-op when upload_url is unset.
+	ego_uploader = EgoUploaderScript.new()
+	ego_uploader.name = "EgoUploader"
+	add_child(ego_uploader)
+	ego_uploader.upload_started.connect(_on_upload_started)
+	ego_uploader.upload_progress.connect(_on_upload_progress)
+	ego_uploader.upload_finished.connect(_on_upload_finished)
+	ego_uploader.upload_failed.connect(_on_upload_failed)
+	ego_uploader.session_uploaded.connect(_on_session_uploaded)
+	ego_uploader.queue_changed.connect(_on_upload_queue_changed)
+
+	upload_ack_request = HTTPRequest.new()
+	upload_ack_request.name = "UploadAckRequest"
+	upload_ack_request.timeout = UPLOAD_ACK_TIMEOUT_SECONDS
+	upload_ack_request.request_completed.connect(_on_upload_ack_completed)
+	add_child(upload_ack_request)
 
 	if AUTO_START_FOR_DEVICE_TEST:
 		capture_options["interaction_mode"] = "head"
@@ -281,6 +314,10 @@ func start_capture() -> void:
 	_last_capture_error = ""
 	if record_control:
 		record_control.set_recording(true)
+	# Park any in-flight upload while we record — see
+	# claw/issues/010-ego-data-upload.md "Trip-wires".
+	if ego_uploader:
+		ego_uploader.pause()
 	if _xr_session_begun and _stream_enabled("record_depth"):
 		depth_sampler.start()
 	_start_camera_plugin()
@@ -303,13 +340,35 @@ func stop_capture() -> void:
 	if record_control:
 		record_control.set_recording(false)
 	_play_cue(_stop_cue)
+	var upload_expected := _upload_config_available()
 	if status_popup:
 		if saved_session_dir.is_empty():
 			var detail := _last_capture_error if not _last_capture_error.is_empty() else tr("UI_RECORDING_SAVE_FAILED_DETAIL")
 			status_popup.show_error(detail)
+			_upload_popup_hold_until_msec = 0
 		else:
-			status_popup.show_saved_path(saved_session_dir)
+			var saved_popup_seconds := 1.35 if upload_expected else 2.0
+			status_popup.show_saved_path(saved_session_dir, saved_popup_seconds)
+			_upload_popup_hold_until_msec = Time.get_ticks_msec() + int(saved_popup_seconds * 1000.0) if upload_expected else 0
 	print("Capture session stopped: %s" % saved_session_dir)
+
+	# Hand the freshly-finalized session to the uploader. enqueue() is a
+	# no-op when upload_url is empty or upload_on_finalize is off, so we
+	# can always call it. Then resume the worker we paused at
+	# start_capture so the new job (and anything queued from a prior
+	# session) starts draining.
+	if ego_uploader and writer:
+		# session_spool_writer.gd exposes get_session_dir_absolute() (an
+		# OS-absolute path on Android, e.g. /sdcard/DCIM/SpatialMP4/<id>/)
+		# and get_output_mp4_path_absolute() (the finalized mp4 sibling
+		# to that dir). Both are stable once writer.close() has returned.
+		var session_dir_for_upload: String = writer.get_session_dir_absolute() if writer.has_method("get_session_dir_absolute") else writer.get_session_dir()
+		var mp4_for_upload: String = writer.get_output_mp4_path_absolute() if writer.has_method("get_output_mp4_path_absolute") else (saved_session_dir if saved_session_dir.ends_with(".mp4") else "")
+		var queued := bool(ego_uploader.enqueue(session_dir_for_upload, mp4_for_upload, capture_options))
+		if queued:
+			ego_uploader.resume()
+		elif upload_expected:
+			_queue_upload_ui(tr("UI_UPLOAD_NOT_QUEUED"), "", -1.0, "warning", 3.0)
 
 
 func _setup_xr_scene() -> void:
@@ -366,7 +425,27 @@ func _setup_xr_scene() -> void:
 	settings_panel.name = "ViewLockedSettingsPanel"
 	settings_panel.saved.connect(_on_capture_settings_saved)
 	settings_panel.exit_requested.connect(_on_exit_requested)
+	# Camera button on the Upload URL row → open the QR scanner overlay.
+	if settings_panel.has_signal("scan_upload_url_requested"):
+		settings_panel.scan_upload_url_requested.connect(_on_scan_upload_url_requested)
 	origin.add_child(settings_panel)
+
+	# QR scanner overlay (Camera2 + ZXing). Sits in the same scene tree as
+	# the settings panel so its OpenXR composition layer renders alongside
+	# the others. Hidden by default; we open it on demand and close on
+	# accept / cancel.
+	qr_scanner = EgoQRScannerScript.new()
+	qr_scanner.name = "EgoQRScanner"
+	qr_scanner.payload_accepted.connect(_on_qr_payload_accepted)
+	qr_scanner.cancelled.connect(_on_qr_cancelled)
+	origin.add_child(qr_scanner)
+	# Hydrate the panel from the persisted ego settings so the user's last
+	# choices (interaction mode, stream toggles, save_root, upload URL,
+	# upload toggles) survive an app restart. See EgoSettingsStore +
+	# claw/issues/010-ego-data-upload.md PR-1.
+	var persisted := EgoSettingsStoreScript.load_options()
+	if settings_panel.has_method("set_options"):
+		settings_panel.set_options(persisted)
 	capture_options = settings_panel.get_options()
 
 	record_control = ViewLockedRecordControlScript.new()
@@ -375,7 +454,7 @@ func _setup_xr_scene() -> void:
 	record_control.stop_requested.connect(stop_capture)
 	record_control.settings_requested.connect(_on_settings_requested)
 	origin.add_child(record_control)
-	settings_interaction_router.set_targets([settings_panel, record_control])
+	settings_interaction_router.set_targets([qr_scanner, settings_panel, record_control])
 
 	status_popup = ViewLockedStatusPopupScript.new()
 	status_popup.name = "ViewLockedStatusPopup"
@@ -603,7 +682,15 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 	_release_ui_pointer()
 	record_control.show_for_mode(str(capture_options.get("interaction_mode", "controllers")))
 	_prepare_output_storage()
-	print("Capture options updated: %s" % JSON.stringify(capture_options))
+	# Persist for next launch. Token is base64-obfuscated, not encrypted —
+	# see EgoSettingsStore header for the security trip-wire.
+	EgoSettingsStoreScript.save_options(capture_options)
+	# Redact the token in the log so it does not land in adb logcat /
+	# crash.log uploads.
+	var log_view := capture_options.duplicate(true)
+	if str(log_view.get("upload_token", "")) != "":
+		log_view["upload_token"] = "<redacted>"
+	print("Capture options updated: %s" % JSON.stringify(log_view))
 
 
 func _on_exit_requested() -> void:
@@ -623,6 +710,8 @@ func _update_view_locked_panel() -> void:
 		record_control.transform = hmd_camera.transform * RECORD_CONTROL_OFFSET
 	if status_popup:
 		status_popup.transform = hmd_camera.transform * STATUS_POPUP_OFFSET
+	if qr_scanner and qr_scanner.visible:
+		qr_scanner.transform = hmd_camera.transform * QR_SCANNER_OFFSET
 
 
 func _update_ui_pointer() -> void:
@@ -630,7 +719,12 @@ func _update_ui_pointer() -> void:
 		return
 	settings_interaction_router.interaction_mode = str(capture_options.get("interaction_mode", "controllers"))
 	settings_interaction_router.busy = _recording
-	settings_interaction_router.set_targets([settings_panel, record_control])
+	# Scanner is intentionally target[0] so SettingsInteractionRouter's
+	# `_should_use_controller_pointer` returns true for it regardless of
+	# interaction_mode — picking a small floating arrow with a hand pinch
+	# is too fiddly. When the scanner isn't visible the router's
+	# `_active_target()` skips past it to the settings/record panel.
+	settings_interaction_router.set_targets([qr_scanner, settings_panel, record_control])
 	settings_interaction_router.update_pointer()
 
 
@@ -652,6 +746,10 @@ func _on_settings_requested() -> void:
 
 func _stream_enabled(option: String) -> bool:
 	return bool(capture_options.get(option, true))
+
+
+func _upload_config_available() -> bool:
+	return bool(capture_options.get("upload_on_finalize", false)) and not str(capture_options.get("upload_url", "")).strip_edges().is_empty()
 
 
 func _configured_save_root() -> String:
@@ -734,6 +832,198 @@ func _make_beep_stream(frequency_hz: float, duration_seconds: float) -> AudioStr
 	stream.stereo = false
 	stream.data = data
 	return stream
+
+
+# --- QR scanner overlay handlers --------------------------------------------
+# The scanner sits in front of the user; while it's open we hide the capture
+# panel and the record control so the user has a clean field of view through
+# passthrough. The Kotlin plugin drives detections via signals on its own.
+
+func _on_scan_upload_url_requested() -> void:
+	print("[QR] scan_upload_url_requested received")
+	if qr_scanner == null:
+		push_warning("[QR] scan requested but EgoQRScanner is null")
+		return
+	# Park the capture panel so the user's view isn't double-occluded with
+	# two world-locked quads. Saved state is preserved.
+	if settings_panel and settings_panel.visible:
+		settings_panel.close()
+	if record_control:
+		record_control.hide_control()
+	_release_ui_pointer()
+	qr_scanner.open()
+	print("[QR] EgoQRScanner.open() called")
+
+
+func _on_qr_payload_accepted(payload: String) -> void:
+	# Re-open the settings panel so the user can review + Save.
+	if settings_panel:
+		settings_panel.open()
+	_start_upload_ack(payload)
+
+
+func _on_qr_cancelled() -> void:
+	# Restore the settings panel without touching the upload URL.
+	if settings_panel:
+		settings_panel.open()
+
+
+func _start_upload_ack(payload: String) -> void:
+	var trimmed := payload.strip_edges()
+	if trimmed.is_empty():
+		return
+	_pending_upload_ack_payload = trimmed
+	var ack_url := _ack_url_for_payload(trimmed)
+	if settings_panel and settings_panel.has_method("set_upload_connectivity_status"):
+		settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_CHECKING"), "normal")
+	print("[UploadAck] checking %s" % ack_url)
+	if upload_ack_request == null:
+		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_UNAVAILABLE"))
+		return
+	if upload_ack_request.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		upload_ack_request.cancel_request()
+	var headers := PackedStringArray(["User-Agent: ego-uploader/1.0 (godot)"])
+	var err := upload_ack_request.request(ack_url, headers, HTTPClient.METHOD_GET)
+	if err != OK:
+		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_REQUEST_FAILED") % err)
+
+
+func _ack_url_for_payload(payload: String) -> String:
+	if payload.find("/ack") >= 0:
+		return payload
+	var query_start := payload.find("?")
+	var base := payload if query_start < 0 else payload.substr(0, query_start)
+	var query := "" if query_start < 0 else payload.substr(query_start)
+	while base.ends_with("/"):
+		base = base.substr(0, base.length() - 1)
+	return base + "/ack" + query
+
+
+func _on_upload_ack_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS:
+		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_NETWORK_FAILED") % result)
+		return
+	var text := body.get_string_from_utf8()
+	if response_code < 200 or response_code >= 300:
+		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_HTTP_FAILED") % [response_code, text.substr(0, 80)])
+		return
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_BAD_RESPONSE"))
+		return
+	if not bool(parsed.get("ok", false)):
+		_on_upload_ack_failed(str(parsed.get("error", tr("UI_UPLOAD_ACK_BAD_RESPONSE"))))
+		return
+	var upload_url := str(parsed.get("uploadUrl", parsed.get("upload_url", ""))).strip_edges()
+	if upload_url.is_empty():
+		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_BAD_RESPONSE"))
+		return
+	var upload_token := str(parsed.get("uploadToken", parsed.get("upload_token", "")))
+	if settings_panel and settings_panel.has_method("set_upload_url_from_scan"):
+		settings_panel.set_upload_url_from_scan(upload_url, upload_token, true)
+	if settings_panel and settings_panel.has_method("set_upload_connectivity_status"):
+		settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_READY"), "success")
+	print("[UploadAck] ready upload_url=%s auth=%s" % [upload_url, "yes" if not upload_token.is_empty() else "no"])
+
+
+func _on_upload_ack_failed(message: String) -> void:
+	if settings_panel and settings_panel.has_method("set_upload_connectivity_status"):
+		settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_FAILED") % message, "error")
+	push_warning("[UploadAck] failed: %s" % message)
+
+
+# --- EgoUploader signal handlers ---------------------------------------------
+# All four route to the record_control's upload status line so the operator
+# sees what is happening without having to leave headset. Color hints map to
+# the level argument of ViewLockedRecordControl.set_upload_status.
+
+func _on_upload_started(_session_id: String, kind: String) -> void:
+	_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), 0.0, "normal")
+	print("[Upload] %s/%s started" % [_session_id, kind])
+
+
+func _on_upload_progress(_session_id: String, kind: String, sent_bytes: int, total_bytes: int) -> void:
+	if total_bytes <= 0:
+		_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), -1.0, "normal")
+		return
+	var pct: int = int(round((float(sent_bytes) / float(total_bytes)) * 100.0))
+	var progress := clampf(float(sent_bytes) / float(total_bytes), 0.0, 1.0)
+	_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_PROGRESS_DETAIL") % pct, progress, "normal")
+
+
+func _on_upload_finished(session_id: String, kind: String, _response: Dictionary) -> void:
+	_queue_upload_ui(tr("UI_UPLOAD_FINISHED_TITLE") % _upload_kind_label(kind), "", 1.0, "success", 1.2)
+	print("[Upload] %s/%s finished" % [session_id, kind])
+
+
+func _on_upload_failed(session_id: String, kind: String, error: String) -> void:
+	_queue_upload_ui(tr("UI_UPLOAD_FAILED_TITLE"), _upload_kind_label(kind), -1.0, "error", 4.0)
+	push_warning("[Upload] %s/%s failed: %s" % [session_id, kind, error])
+
+
+func _on_session_uploaded(session_id: String) -> void:
+	_queue_upload_ui(tr("UI_UPLOAD_SESSION_COMPLETE"), "", 1.0, "success", 2.5)
+	print("[Upload] session %s fully uploaded" % session_id)
+
+
+func _on_upload_queue_changed(pending_count: int) -> void:
+	if pending_count == 0:
+		# Let the success/failure line linger; the next start_capture or
+		# settings open will redraw the control anyway.
+		return
+	_queue_upload_ui(tr("UI_UPLOAD_QUEUE_PENDING") % pending_count, "", -1.0, "normal")
+
+
+func _queue_upload_ui(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0) -> void:
+	var update := {
+		"title": title,
+		"detail": detail,
+		"progress": progress,
+		"level": level,
+		"duration_seconds": duration_seconds,
+	}
+	var now := Time.get_ticks_msec()
+	if now < _upload_popup_hold_until_msec:
+		_pending_upload_popup_update = update
+		if not _upload_popup_timer_armed:
+			_upload_popup_timer_armed = true
+			var delay := maxf(float(_upload_popup_hold_until_msec - now) / 1000.0, 0.05)
+			get_tree().create_timer(delay).timeout.connect(_flush_pending_upload_ui)
+		return
+	_apply_upload_ui(update)
+
+
+func _flush_pending_upload_ui() -> void:
+	_upload_popup_timer_armed = false
+	if _pending_upload_popup_update.is_empty():
+		return
+	var update := _pending_upload_popup_update.duplicate(true)
+	_pending_upload_popup_update.clear()
+	_apply_upload_ui(update)
+
+
+func _apply_upload_ui(update: Dictionary) -> void:
+	var title := str(update.get("title", ""))
+	var detail := str(update.get("detail", ""))
+	var progress := float(update.get("progress", -1.0))
+	var level := str(update.get("level", "normal"))
+	var duration_seconds := float(update.get("duration_seconds", 0.0))
+	var compact := title
+	if not detail.is_empty():
+		compact += " " + detail
+	if record_control:
+		record_control.set_upload_status(compact, level, progress)
+	if status_popup and status_popup.has_method("show_upload_progress"):
+		status_popup.show_upload_progress(title, detail, progress, level, duration_seconds)
+
+
+func _upload_kind_label(kind: String) -> String:
+	match kind:
+		"manifest":
+			return tr("UI_UPLOAD_KIND_MANIFEST")
+		"media":
+			return tr("UI_UPLOAD_KIND_MEDIA")
+	return kind
 
 
 func _suppress_boundary_visibility() -> void:

@@ -1,0 +1,61 @@
+{
+  "name": "@love-moon/ego-ingest",
+  "version": "0.1.0",
+  "description": "Receive, store, and visualize ego-mode XR recordings uploaded over TUS 1.0.0. Pairs with the Teleoperate-Anything XR client.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/ui/react/index.d.ts",
+      "default": "./dist/ui/react/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "dev": "tsc -p . --watch"
+  },
+  "peerDependencies": {
+    "express": "^4.17.0 || ^5.0.0",
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "express": { "optional": false },
+    "react": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "express": "^4.19.2",
+    "react": "^18.3.1",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "keywords": [
+    "tus",
+    "xr",
+    "vr",
+    "ego",
+    "teleop",
+    "ingest",
+    "dataset",
+    "upload"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/operator",
+    "directory": "web/modules/ego-ingest"
+  }
+}

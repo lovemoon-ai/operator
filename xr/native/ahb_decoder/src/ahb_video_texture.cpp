@@ -482,8 +482,10 @@ bool AhbVideoTexture::_ensure_destination_image(int32_t width, int32_t height) {
 	info.samples = VK_SAMPLE_COUNT_1_BIT;
 	info.tiling = VK_IMAGE_TILING_OPTIMAL;
 	// STORAGE for our compute write, SAMPLED for Godot's fragment read.
+	// TRANSFER_SRC is required when Godot reads the Texture2DRD back, e.g.
+	// for compositor screenshots while capture is stopping.
 	info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-			VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+			VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -549,6 +551,10 @@ bool AhbVideoTexture::_ensure_destination_image(int32_t width, int32_t height) {
 }
 
 void AhbVideoTexture::_release_destination_image() {
+	if (_current_rd_rid != RID()) {
+		set_texture_rd_rid(RID());
+		_current_rd_rid = RID();
+	}
 	if (_dst_image_view != VK_NULL_HANDLE) {
 		vkDestroyImageView(_vk_device, _dst_image_view, nullptr);
 		_dst_image_view = VK_NULL_HANDLE;
@@ -567,7 +573,6 @@ void AhbVideoTexture::_release_destination_image() {
 	_descriptor_set_initialized = false;
 	// The RID wraps _dst_image; when we destroy the image we must let
 	// Godot rebind on the next dispatch.
-	_current_rd_rid = RID();
 }
 
 uint32_t AhbVideoTexture::_find_device_local_memory_type(uint32_t memory_type_bits) const {
@@ -1021,14 +1026,15 @@ void AhbVideoTexture::_render_thread_tick() {
 		RenderingServer *rs = RenderingServer::get_singleton();
 		RenderingDevice *rd = rs ? rs->get_rendering_device() : nullptr;
 		if (rd) {
-			RID rd_rid = rd->texture_create_from_extension(
-					RenderingDevice::TEXTURE_TYPE_2D,
-					RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
-					RenderingDevice::TEXTURE_SAMPLES_1,
-					RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT,
-					(uint64_t)_dst_image,
-					_dst_width,
-					_dst_height,
+				RID rd_rid = rd->texture_create_from_extension(
+						RenderingDevice::TEXTURE_TYPE_2D,
+						RenderingDevice::DATA_FORMAT_R8G8B8A8_UNORM,
+						RenderingDevice::TEXTURE_SAMPLES_1,
+						RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT |
+								RenderingDevice::TEXTURE_USAGE_CAN_COPY_FROM_BIT,
+						(uint64_t)_dst_image,
+						_dst_width,
+						_dst_height,
 					1,
 					1);
 			// Texture2DRD::set_texture_rd_rid() expects a RenderingDevice

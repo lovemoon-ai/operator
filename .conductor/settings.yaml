@@ -3,5 +3,7 @@ worktree:
   symlink:
     - .deps/src
     - xr/addons/godotopenxrvendors/.bin
+    - xr/android/build/local.properties
+    - xr/android/build/.gradle
 
 icon: ../xr/icon.png

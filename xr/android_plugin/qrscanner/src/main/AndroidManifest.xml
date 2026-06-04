@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!--
+        Pico-OS and Meta Horizon OS both gate access to the passthrough /
+        headset cameras behind vendor-specific permissions in addition to
+        android.permission.CAMERA. Declare both; the runtime grants whichever
+        applies on the actual device.
+    -->
+    <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
+    <uses-permission android:name="com.picovr.permission.CAMERA" />
+
+    <application>
+        <meta-data
+            android:name="org.godotengine.plugin.v2.QRScannerPlugin"
+            android:value="com.lovemoon.qrscanner.QRScannerPlugin" />
+    </application>
+</manifest>

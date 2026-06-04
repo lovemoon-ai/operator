@@ -18,4 +18,5 @@ rootProject.name = "QuestCaptureAndroidPlugin"
 include(":contract")
 include(":spatialmp4_muxer")
 include(":questcapture")
+include(":qrscanner")
 

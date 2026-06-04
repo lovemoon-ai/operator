@@ -5,7 +5,7 @@ signal start_requested
 signal stop_requested
 signal settings_requested
 
-const VIEWPORT_SIZE := Vector2i(250, 330)
+const VIEWPORT_SIZE := Vector2i(250, 370)
 const START_HOLD_SECONDS := 1.0
 const LONG_HOLD_SECONDS := 2.0
 const PRIMARY_DIAMETER := 122.0
@@ -46,6 +46,8 @@ var _viewport: SubViewport
 var _primary_button: Button
 var _settings_button: Button
 var _timer_label: Label
+var _upload_status_label: Label
+var _upload_progress_bar: ProgressBar
 var _primary_ring: HoldRing
 var _settings_ring: HoldRing
 var _cursor: Panel
@@ -60,7 +62,9 @@ var _feedback_input_mode := "controllers"
 var _feedback_controller: XRController3D
 
 func _init() -> void:
-	quad_size = Vector2(0.18, 0.238)
+	# Aspect kept ~ viewport ratio (370/250 ≈ 1.48). Bumped from
+	# 0.238 → 0.266 to make room for the upload status row.
+	quad_size = Vector2(0.18, 0.266)
 	alpha_blend = true
 	sort_order = 3
 	visible = false
@@ -110,6 +114,42 @@ func update_elapsed_seconds(seconds: float) -> void:
 		return
 	var total_seconds := int(seconds)
 	_timer_label.text = "%02d:%02d" % [total_seconds / 60, total_seconds % 60]
+
+
+# Show an upload progress / status message under the timer. Pass an
+# empty string (or call clear_upload_status) to hide it. Color hints:
+#   normal = blue, warning = amber, success = green, error = red.
+func set_upload_status(text: String, level: String = "normal", progress: float = -1.0) -> void:
+	if _upload_status_label == null:
+		return
+	if text.is_empty():
+		_upload_status_label.visible = false
+		_upload_status_label.text = ""
+		if _upload_progress_bar:
+			_upload_progress_bar.visible = false
+			_upload_progress_bar.value = 0.0
+		return
+	_upload_status_label.text = text
+	_upload_status_label.visible = true
+	if _upload_progress_bar:
+		_upload_progress_bar.visible = progress >= 0.0
+		_upload_progress_bar.value = clampf(progress, 0.0, 1.0) * 100.0
+	# Force visible even when not recording so the operator can watch
+	# uploads drain after the recording stopped.
+	visible = true
+	var color := Color(0.55, 0.80, 0.98, 0.94)   # normal: cyan-blue
+	match level:
+		"success":
+			color = Color(0.30, 0.88, 0.64, 0.96)
+		"warning":
+			color = Color(1.00, 0.78, 0.36, 0.96)
+		"error":
+			color = Color(1.00, 0.46, 0.42, 0.98)
+	_upload_status_label.add_theme_color_override("font_color", color)
+
+
+func clear_upload_status() -> void:
+	set_upload_status("", "normal")
 
 func update_pointer_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> bool:
 	var uv: Vector2 = intersects_ray(ray_origin, ray_direction)
@@ -175,6 +215,26 @@ func _build_viewport() -> void:
 	_timer_label.add_theme_font_size_override("font_size", 32)
 	_timer_label.add_theme_color_override("font_color", COL_ACCENT)
 	content.add_child(_timer_label)
+
+	# Upload status line — hidden until EgoUploader emits its first signal.
+	# Driven from capture_app.gd via set_upload_status() / clear_upload_status().
+	_upload_status_label = Label.new()
+	_upload_status_label.text = ""
+	_upload_status_label.visible = false
+	_upload_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_upload_status_label.custom_minimum_size = Vector2(VIEWPORT_SIZE.x, 22.0)
+	_upload_status_label.add_theme_font_size_override("font_size", 16)
+	_upload_status_label.add_theme_color_override("font_color", Color(0.55, 0.80, 0.98, 0.92))
+	_upload_status_label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	content.add_child(_upload_status_label)
+
+	_upload_progress_bar = ProgressBar.new()
+	_upload_progress_bar.visible = false
+	_upload_progress_bar.show_percentage = false
+	_upload_progress_bar.custom_minimum_size = Vector2(VIEWPORT_SIZE.x - 42.0, 14.0)
+	_upload_progress_bar.min_value = 0.0
+	_upload_progress_bar.max_value = 100.0
+	content.add_child(_upload_progress_bar)
 
 	var primary_slot := _make_slot(PRIMARY_DIAMETER)
 	content.add_child(primary_slot)

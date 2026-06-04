@@ -24,7 +24,15 @@ xr/native/ahb_decoder/build-*/
 crash.log
 
 # Local hidden dependency checkouts and native build output.
+.deps
 .deps/
+
+# Web workspace dependency/build output.
+web/node_modules/
+web/.next/
+web/modules/*/dist/
+web/data/
+*.tsbuildinfo
 
 # OS
 .DS_Store
@@ -67,6 +75,8 @@ xr/android_plugin/scripts/build_ffmpeg_android/
 xr/addons/quest_capture_android/bin/*.aar
 xr/addons/spatial_capture_contract/bin/*.jar
 xr/addons/spatialmp4_muxer/bin/*.aar
+xr/addons/qr_scanner/bin/*.aar
+xr/addons/qr_scanner/bin/*.jar
 
 # claude
 *.lock

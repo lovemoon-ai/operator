@@ -71,6 +71,7 @@ class HoldIndicator:
 			draw_circle(center, radius * 0.55, Color(1.0, 1.0, 1.0, 0.85))
 
 var _content: VBoxContainer
+var _scroll_container: ScrollContainer
 var _highlighted_slot: PanelContainer
 var _exit_indicator: HoldIndicator
 var _exit_holding := false
@@ -245,27 +246,37 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String)
 	margin.add_theme_constant_override("margin_bottom", 30)
 	panel.add_child(margin)
 
-	_content = VBoxContainer.new()
-	_content.add_theme_constant_override("separation", 14)
-	margin.add_child(_content)
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 14)
+	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	margin.add_child(root)
 
 	var title := Label.new()
 	title.text = tr(title_key)
 	title.add_theme_font_size_override("font_size", 36)
 	title.add_theme_color_override("font_color", COL_TITLE)
-	_content.add_child(title)
+	root.add_child(title)
+
+	_scroll_container = ScrollContainer.new()
+	_scroll_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_scroll_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_scroll_container.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_scroll_container.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	root.add_child(_scroll_container)
+
+	_content = VBoxContainer.new()
+	_content.add_theme_constant_override("separation", 14)
+	_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_scroll_container.add_child(_content)
 
 	_build_settings_content(_content)
-
-	var spacer := Control.new()
-	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_content.add_child(spacer)
 
 	var actions := HBoxContainer.new()
 	actions.add_theme_constant_override("separation", 14)
 	actions.custom_minimum_size.y = ACTION_BUTTON_HEIGHT
 	actions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_content.add_child(actions)
+	root.add_child(actions)
 
 	var confirm_button := Button.new()
 	confirm_button.text = tr(confirm_key)

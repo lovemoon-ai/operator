@@ -1,0 +1,21 @@
+{
+  "name": "@love-moon/web-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Web tier for the Teleoperate-Anything project: the Next.js data-management app (web/app) plus shared modules (web/modules/*).",
+  "workspaces": [
+    "app",
+    "modules/*"
+  ],
+  "scripts": {
+    "build:ingest": "npm --workspace @love-moon/ego-ingest run build",
+    "predev": "npm run build:ingest",
+    "dev": "npm --workspace ego-app run dev",
+    "prebuild": "npm run build:ingest",
+    "build": "npm --workspace ego-app run build",
+    "start": "npm --workspace ego-app run start"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

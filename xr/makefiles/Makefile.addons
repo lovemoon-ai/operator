@@ -40,7 +40,10 @@ CAPTURE_PLUGIN_ARTIFACTS := \
 	addons/quest_capture_android/bin/questcapture-debug.aar \
 	addons/quest_capture_android/bin/questcapture-release.aar \
 	addons/spatialmp4_muxer/bin/spatialmp4_muxer-debug.aar \
-	addons/spatialmp4_muxer/bin/spatialmp4_muxer-release.aar
+	addons/spatialmp4_muxer/bin/spatialmp4_muxer-release.aar \
+	addons/qr_scanner/bin/qrscanner-debug.aar \
+	addons/qr_scanner/bin/qrscanner-release.aar \
+	addons/qr_scanner/bin/zxing-core-3.5.3.jar
 
 # Where Godot stores its installed export templates. We look in both the macOS
 # and Linux locations; first hit wins.
@@ -167,11 +170,14 @@ build-capture-plugins: $(FFMPEG_LIB)
 	@mkdir -p $(GRADLE_USER_HOME) \
 		addons/spatial_capture_contract/bin \
 		addons/quest_capture_android/bin \
-		addons/spatialmp4_muxer/bin
+		addons/spatialmp4_muxer/bin \
+		addons/qr_scanner/bin
 	cd android_plugin && GRADLE_USER_HOME=$(GRADLE_USER_HOME) $(CAPTURE_GRADLE) \
 		:contract:jar \
 		:questcapture:assembleDebug :questcapture:assembleRelease \
-		:spatialmp4_muxer:assembleDebug :spatialmp4_muxer:assembleRelease
+		:spatialmp4_muxer:assembleDebug :spatialmp4_muxer:assembleRelease \
+		:qrscanner:assembleDebug :qrscanner:assembleRelease \
+		:qrscanner:copyRuntimeDependencies
 	cp -f android_plugin/contract/build/libs/contract.jar \
 		addons/spatial_capture_contract/bin/contract.jar
 	cp -f android_plugin/questcapture/build/outputs/aar/questcapture-debug.aar \
@@ -182,6 +188,12 @@ build-capture-plugins: $(FFMPEG_LIB)
 		addons/spatialmp4_muxer/bin/spatialmp4_muxer-debug.aar
 	cp -f android_plugin/spatialmp4_muxer/build/outputs/aar/spatialmp4_muxer-release.aar \
 		addons/spatialmp4_muxer/bin/spatialmp4_muxer-release.aar
+	cp -f android_plugin/qrscanner/build/outputs/aar/qrscanner-debug.aar \
+		addons/qr_scanner/bin/qrscanner-debug.aar
+	cp -f android_plugin/qrscanner/build/outputs/aar/qrscanner-release.aar \
+		addons/qr_scanner/bin/qrscanner-release.aar
+	cp -f android_plugin/qrscanner/build/outputs/runtime-libs/core-3.5.3.jar \
+		addons/qr_scanner/bin/zxing-core-3.5.3.jar
 
 # Skip the Gradle build when every artifact is present and newer than the
 # Gradle source tree. Anything else triggers a rebuild.
@@ -237,10 +249,13 @@ clean-addons:
 		android_plugin/questcapture/build \
 		android_plugin/spatialmp4_muxer/.cxx \
 		android_plugin/spatialmp4_muxer/build \
+		android_plugin/qrscanner/build \
 		native/ahb_decoder/build-*
 		# $(GODOT_CPP_BUILD_DIR)
 	rm -f \
 		addons/ahb_decoder/*.so \
 		addons/quest_capture_android/bin/*.aar \
 		addons/spatial_capture_contract/bin/*.jar \
-		addons/spatialmp4_muxer/bin/*.aar
+		addons/spatialmp4_muxer/bin/*.aar \
+		addons/qr_scanner/bin/*.aar \
+		addons/qr_scanner/bin/*.jar

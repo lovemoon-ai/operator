@@ -7,6 +7,7 @@ var _viewport: SubViewport
 var _title_label: Label
 var _path_label: Label
 var _panel_style: StyleBoxFlat
+var _progress_bar: ProgressBar
 var _hide_seconds := 0.0
 
 
@@ -21,6 +22,8 @@ func _init() -> void:
 func _process(delta: float) -> void:
 	if not visible:
 		return
+	if _hide_seconds < 0.0:
+		return
 	_hide_seconds -= delta
 	if _hide_seconds <= 0.0:
 		visible = false
@@ -31,6 +34,10 @@ func show_saved_path(path: String, duration_seconds: float = 2.0) -> void:
 	_panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
 	_title_label.text = tr("UI_RECORDING_SAVED")
 	_path_label.text = path
+	_path_label.add_theme_color_override("font_color", Color(0.90, 0.93, 0.94))
+	if _progress_bar:
+		_progress_bar.visible = false
+		_progress_bar.value = 0.0
 	_hide_seconds = duration_seconds
 	visible = true
 
@@ -40,7 +47,32 @@ func show_error(message: String, duration_seconds: float = 4.0) -> void:
 	_panel_style.border_color = Color(0.72, 0.16, 0.12, 0.92)
 	_title_label.text = tr("UI_RECORDING_SAVE_FAILED")
 	_path_label.text = message
+	_path_label.add_theme_color_override("font_color", Color(1.00, 0.46, 0.42, 0.98))
+	if _progress_bar:
+		_progress_bar.visible = false
+		_progress_bar.value = 0.0
 	_hide_seconds = duration_seconds
+	visible = true
+
+
+func show_upload_progress(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0) -> void:
+	_panel_style.bg_color = Color(0.055, 0.067, 0.08, 0.96)
+	_panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
+	_title_label.text = title
+	_path_label.text = detail
+	var color := Color(0.55, 0.80, 0.98, 0.94)
+	match level:
+		"success":
+			color = Color(0.30, 0.88, 0.64, 0.96)
+		"warning":
+			color = Color(1.00, 0.78, 0.36, 0.96)
+		"error":
+			color = Color(1.00, 0.46, 0.42, 0.98)
+	_path_label.add_theme_color_override("font_color", color)
+	if _progress_bar:
+		_progress_bar.visible = progress >= 0.0
+		_progress_bar.value = clampf(progress, 0.0, 1.0) * 100.0
+	_hide_seconds = duration_seconds if duration_seconds > 0.0 else -1.0
 	visible = true
 
 
@@ -90,3 +122,11 @@ func _build_viewport() -> void:
 	_path_label.add_theme_font_size_override("font_size", 22)
 	_path_label.add_theme_color_override("font_color", Color(0.90, 0.93, 0.94))
 	content.add_child(_path_label)
+
+	_progress_bar = ProgressBar.new()
+	_progress_bar.visible = false
+	_progress_bar.show_percentage = true
+	_progress_bar.custom_minimum_size = Vector2(VIEWPORT_SIZE.x - 80.0, 24.0)
+	_progress_bar.min_value = 0.0
+	_progress_bar.max_value = 100.0
+	content.add_child(_progress_bar)
