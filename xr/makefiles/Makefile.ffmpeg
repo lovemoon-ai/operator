@@ -87,7 +87,11 @@ build-ffmpeg: $(FFMPEG_LIB)
 # new worktree pointing OPERATOR_DEPS_CACHE_ROOT at a shared cache would
 # unnecessarily rerun `make install` (~35s of header copies) even though the
 # .a is already there. Trade-off: editing the build script or patches will
-# NOT auto-rebuild — run `make clean-ffmpeg` then `make build-ffmpeg`.
+# NOT auto-rebuild. To pick up such an edit you have to bypass the sentinel:
+#   - shared cache:  make clean-ffmpeg FORCE=1 && make build-ffmpeg
+#                    (warning: nukes the cache for EVERY worktree using it)
+#   - private cache: unset OPERATOR_DEPS_CACHE_ROOT first, or point it at a
+#                    throwaway dir, to keep the shared cache intact.
 $(FFMPEG_LIB): | $(FFMPEG_BUILD_SCRIPT) \
                  $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch) \
                  $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_enc.patch)
@@ -116,9 +120,24 @@ $(FFMPEG_LIB): | $(FFMPEG_BUILD_SCRIPT) \
 	@test -f "$@" || { echo "[ffmpeg] build script finished but $@ is missing" >&2; exit 1; }
 
 # Hose both the install tree and the script's per-ABI worktree/build dir.
-# The real FFmpeg source stays pinned under .deps/src/ffmpeg; all generated
-# source worktrees, objects, and installed archives live in .deps/build/ffmpeg.
+# The real FFmpeg source stays pinned under $(OPERATOR_DEPS_CACHE_ROOT)/src/ffmpeg;
+# all generated source worktrees, objects, and installed archives live in
+# $(OPERATOR_DEPS_CACHE_ROOT)/build/ffmpeg.
+#
+# DESTRUCTIVE WHEN CACHE IS SHARED. If OPERATOR_DEPS_CACHE_ROOT is set away
+# from its per-worktree default (../.deps), this target wipes a directory
+# that every other worktree using the same cache also depends on. Require an
+# explicit FORCE=1 in that mode so it's a deliberate act, not a hand slip.
 clean-ffmpeg:
+	@if [ "$(OPERATOR_DEPS_CACHE_ROOT)" != "../.deps" ] && [ "$(FORCE)" != "1" ]; then \
+		echo "[ffmpeg] REFUSING to clean a shared cache." >&2; \
+		echo "[ffmpeg]   OPERATOR_DEPS_CACHE_ROOT = $(OPERATOR_DEPS_CACHE_ROOT)" >&2; \
+		echo "[ffmpeg]   would rm -rf            $(FFMPEG_BUILD_DIR)/$(ANDROID_ABI)" >&2; \
+		echo "[ffmpeg] Every worktree pointing OPERATOR_DEPS_CACHE_ROOT at this path" >&2; \
+		echo "[ffmpeg] would then have to pay the full 5-15 min rebuild." >&2; \
+		echo "[ffmpeg] If that's what you want:  make clean-ffmpeg FORCE=1" >&2; \
+		exit 1; \
+	fi
 	@if git -C "$(FFMPEG_SOURCE)" rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
 		git -C "$(FFMPEG_SOURCE)" worktree remove -f "$(FFMPEG_WORKTREE)" >/dev/null 2>&1 || true; \
 		git -C "$(FFMPEG_SOURCE)" worktree prune >/dev/null 2>&1 || true; \

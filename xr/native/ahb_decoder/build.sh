@@ -77,7 +77,16 @@ ensure_godot_cpp_link
 # worktree gives cmake a different GODOT_CPP_DIR string (its own symlink
 # location), and cmake regenerates the entire godot-cpp build (~2.5 min)
 # even though the .a files in the cache are perfectly reusable.
+#
+# `set -e` does NOT trigger when a command substitution in an assignment
+# fails, so we check the result explicitly — a broken symlink here would
+# otherwise surface as a confusing "godot-cpp not found" from cmake.
 GODOT_CPP_DIR_REAL="$(cd "$GODOT_CPP_LINK" && pwd -P)"
+if [[ -z "$GODOT_CPP_DIR_REAL" ]]; then
+    echo "ERROR: failed to resolve $GODOT_CPP_LINK to a real path" >&2
+    echo "       (is the godot-cpp symlink broken? try: make -C xr deps)" >&2
+    exit 1
+fi
 
 BUILD_DIR="build-arm64"
 cmake -B "$BUILD_DIR" \
