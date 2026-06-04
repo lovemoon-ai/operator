@@ -3,9 +3,9 @@ robot/target/
 
 # Godot
 xr/.godot/
-xr/.gradle/
+xr/.gradle
 xr/android/build/build/
-xr/android/build/.gradle/
+xr/android/build/.gradle
 xr/android/build/.kotlin/
 xr/android/build/.cxx/
 xr/android/build/.externalNativeBuild/
