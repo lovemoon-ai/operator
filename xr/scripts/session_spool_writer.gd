@@ -66,9 +66,31 @@ func start_session(options: Dictionary = {}) -> bool:
 		sources["depth"] = "OpenXRMetaEnvironmentDepthExtension converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		sources["pose"] = "Godot OpenXR nodes and XRHandTracker; PTS from OpenXRMetaEnvironmentDepthExtensionWrapper.get_predicted_display_time_ns() when available, else Time.get_ticks_usec()"
+	# v3 spatial audio. The audio path is provider-driven (AudioRecord ->
+	# MediaCodec AAC-LC -> SpatialDataSink), so GDScript never sees a frame;
+	# we just record the configured shape in the manifest. The same fields
+	# get echoed into the mp4 audio track's stream metadata (`spatial_format`,
+	# `channel_count`, `sample_rate_hz`) so an offline reader can correlate.
+	if bool(capture_options.get("record_audio", false)):
+		var requested_audio_layout := str(capture_options.get("audio_channel_layout", "stereo"))
+		var audio_layout := _effective_audio_layout_for_request(requested_audio_layout)
+		var audio_sample_rate := int(capture_options.get("audio_sample_rate_hz", 48000))
+		var audio_bitrate := int(capture_options.get("audio_bitrate_bps", 128000))
+		sources["audio"] = {
+			"codec": "aac_lc",
+			"channel_layout": audio_layout,
+			"requested_channel_layout": requested_audio_layout,
+			"layout_fallback": requested_audio_layout != audio_layout,
+			"channel_count": _audio_channel_count_for_layout(audio_layout),
+			"sample_rate_hz": audio_sample_rate,
+			"bitrate_bps": audio_bitrate,
+			"pipeline": "Android MediaRecorder.AudioSource.MIC -> AudioRecord -> MediaCodec AAC-LC -> SpatialDataSink",
+			"pts_domain": "godot_ticks_ns",
+			"pts_anchor": "first_successful_microphone_read_godot_ticks_us + n * (1024 * 1_000_000 / sample_rate_hz)"
+		}
 
 	_write_json("%s/manifest.json" % session_dir, {
-		"schema": "spatialmp4.quest_capture.spool.v2",
+		"schema": "spatialmp4.quest_capture.spool.v3",
 		"session_id": session_id,
 		"output_mp4_path": output_mp4_path,
 		"partial_mp4_path": partial_mp4_path,
@@ -383,6 +405,11 @@ func _make_dir(path: String) -> Error:
 
 
 func _capture_enabled(option: String) -> bool:
+	# record_audio is privacy-sensitive (it opens the microphone) so the
+	# default is OFF when the host did not explicitly request it. Every other
+	# stream defaults ON for backward-compat with existing capture flows.
+	if option == "record_audio":
+		return bool(capture_options.get(option, false))
 	return bool(capture_options.get(option, true))
 
 
@@ -423,3 +450,30 @@ func _resolve_device_identity() -> Dictionary:
 		if parsed.has(key):
 			identity[key] = str(parsed[key])
 	return identity
+
+
+# Maps the manifest-visible channel-layout label to its channel count. Mirrors
+# com.spatialmp4.contract.AudioChannelLayout.channelCount on the JVM side.
+func _audio_channel_count_for_layout(layout: String) -> int:
+	match layout:
+		"mono":
+			return 1
+		"stereo":
+			return 2
+		"foa_acn_sn3d", "raw_4ch":
+			return 4
+		_:
+			return 2
+
+
+func _effective_audio_layout_for_request(layout: String) -> String:
+	match layout:
+		"mono", "stereo":
+			return layout
+		"foa_acn_sn3d", "raw_4ch":
+			# Current Android path uses AudioRecord MIC, which exposes mono/stereo
+			# channel masks here. Keep the manifest aligned with the actual AAC
+			# track metadata until a FOA/4-channel provider is wired up.
+			return "stereo"
+		_:
+			return "stereo"

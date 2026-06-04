@@ -23,11 +23,13 @@ extern "C" {
 #include <libavcodec/codec_id.h>
 #include <libavcodec/packet.h>
 #include <libavformat/avformat.h>
+#include <libavutil/channel_layout.h>
 #include <libavutil/dict.h>
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/mem.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/samplefmt.h>
 }
 
 namespace {
@@ -37,6 +39,17 @@ constexpr AVRational kUsTimeBase{1, 1000000};
 constexpr int64_t kDefaultRgbDurationUs = 33333;
 constexpr int64_t kDefaultDepthDurationUs = 200000;
 constexpr int64_t kDefaultPoseDurationUs = 11111;
+// AAC-LC at 48 kHz packs 1024 samples per frame = ~21.3 ms; default keeps
+// the audio packets in steady-state if the provider forgets to set duration.
+constexpr int64_t kDefaultAudioDurationUs = 21333;
+
+// Mirrors com.spatialmp4.contract.AudioChannelLayout.code on the JVM side.
+// Kept as plain ints because JNI marshals primitives much cheaper than
+// strings, and the writer only needs the layout to tag stream metadata.
+constexpr int kAudioLayoutMono = 0;
+constexpr int kAudioLayoutStereo = 1;
+constexpr int kAudioLayoutFoaAcnSn3d = 2;
+constexpr int kAudioLayoutRaw4ch = 3;
 
 constexpr int kTrackHeadPose = 0;
 constexpr int kTrackLeftControllerPose = 1;
@@ -110,6 +123,7 @@ enum class PacketKind {
   kRgb,
   kDepth,
   kTimedMetadata,
+  kAudio,
 };
 
 struct PendingPacket {
@@ -139,7 +153,9 @@ class LiveSpatialMp4Writer {
                        SideDataBundle rgb_side_data,
                        std::string device_type,
                        std::string device_model,
-                       std::string device_manufacturer)
+                       std::string device_manufacturer,
+                       bool audio_expected,
+                       int audio_channel_layout_code_hint)
       : partial_path_(std::move(partial_path)),
         final_path_(std::move(final_path)),
         session_start_unix_us_(session_start_unix_us),
@@ -153,11 +169,36 @@ class LiveSpatialMp4Writer {
         controller_pose_expected_(controller_pose_expected),
         hand_joints_expected_(hand_joints_expected),
         controller_input_expected_(controller_input_expected),
+        audio_expected_(audio_expected),
+        // The hint is what the host believed the layout would be at session
+        // start; the actual layout is whatever ConfigureAudio receives once
+        // the encoder negotiates a format. Keeping the hint avoids losing
+        // diagnostic intent for cases where ConfigureAudio is never called.
+        audio_channel_layout_code_hint_(audio_channel_layout_code_hint),
         rgb_side_data_(std::move(rgb_side_data)),
         device_type_(std::move(device_type)),
         device_model_(std::move(device_model)),
         device_manufacturer_(std::move(device_manufacturer)),
         timed_streams_(kTimedTrackCount, nullptr) {
+    // Document the configured session in logcat so a crash report or an
+    // unexpected mp4 layout can be triaged from the launch banner alone.
+    // Touching audio_channel_layout_code_hint_ here also keeps the field
+    // alive against -Wunused-private-field on stricter compiler configs.
+    __android_log_print(
+        ANDROID_LOG_INFO,
+        kTag,
+        "writer start: rgb=%dx%d@%d cams=%d depth=%d head=%d ctrl=%d hand=%d "
+        "input=%d audio=%d audio_layout_hint=%d -> %s",
+        rgb_width_, rgb_height_, rgb_fps_, rgb_camera_count_,
+        static_cast<int>(depth_expected_),
+        static_cast<int>(head_pose_expected_),
+        static_cast<int>(controller_pose_expected_),
+        static_cast<int>(hand_joints_expected_),
+        static_cast<int>(controller_input_expected_),
+        static_cast<int>(audio_expected_),
+        audio_channel_layout_code_hint_,
+        partial_path_.c_str());
+
     // Spawn the dedicated I/O thread. All FFmpeg writes happen here so the
     // Godot main thread and the camera HandlerThread never block on
     // av_interleaved_write_frame / file I/O when they enqueue packets.
@@ -328,6 +369,123 @@ class LiveSpatialMp4Writer {
                    duration_us > 0 ? duration_us : kDefaultRgbDurationUs, flags);
   }
 
+  // v3: configure the AAC audio stream once, when the MediaCodec encoder
+  // emits its first codec-config blob. Mirrors ConfigureHevc shape -- creates
+  // the AVStream, copies CSD into extradata, tags the channel layout in
+  // stream metadata so a downstream reader can disambiguate FOA vs stereo,
+  // and wakes the io thread so the deferred header write can proceed.
+  bool ConfigureAudio(int sample_rate_hz,
+                      int channel_count,
+                      int channel_layout_code,
+                      const std::vector<uint8_t>& csd) {
+    std::lock_guard<std::mutex> lock(format_mutex_);
+    try {
+      if (!audio_expected_) {
+        // The host configured the session without audio; ignore late CSDs
+        // rather than allocating a phantom track.
+        return true;
+      }
+      if (header_written_) {
+        return true;
+      }
+      EnsureContext();
+      if (audio_stream_) {
+        return true;
+      }
+      if (sample_rate_hz <= 0 || channel_count <= 0) {
+        return Fail("invalid audio stream parameters");
+      }
+      if (csd.empty()) {
+        // AAC needs AudioSpecificConfig as extradata to decode. Refuse rather
+        // than silently producing an undecodable track.
+        return Fail("AAC codec config is empty");
+      }
+
+      audio_stream_ = avformat_new_stream(format_context_, nullptr);
+      if (!audio_stream_) {
+        return Fail("failed to create audio stream");
+      }
+      audio_stream_->time_base = kUsTimeBase;
+
+      AVCodecParameters* codecpar = audio_stream_->codecpar;
+      codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
+      codecpar->codec_id = AV_CODEC_ID_AAC;
+      // codec_tag = 0 lets the mov muxer assign the standard 'mp4a' fourcc.
+      codecpar->codec_tag = 0;
+      codecpar->sample_rate = sample_rate_hz;
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 24, 100)
+      // The new ch_layout API replaces the deprecated `channels` field; the
+      // patched FFmpeg build is recent enough that it is the preferred path.
+      av_channel_layout_uninit(&codecpar->ch_layout);
+      av_channel_layout_default(&codecpar->ch_layout, channel_count);
+#else
+      codecpar->channels = channel_count;
+      codecpar->channel_layout = av_get_default_channel_layout(channel_count);
+#endif
+      codecpar->format = AV_SAMPLE_FMT_FLTP;  // AAC encoder internal format
+      codecpar->frame_size = 1024;  // AAC-LC
+
+      codecpar->extradata = static_cast<uint8_t*>(
+          av_mallocz(csd.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+      if (!codecpar->extradata) {
+        return Fail("failed to allocate audio extradata");
+      }
+      std::memcpy(codecpar->extradata, csd.data(), csd.size());
+      codecpar->extradata_size = static_cast<int>(csd.size());
+
+      // Stream metadata: spatial_format is the contract between the writer
+      // and any reader that wants to render head-rotated ambisonic playback.
+      // For non-ambisonic layouts the same key documents "do NOT rotate" so
+      // an FOA-aware player does not corrupt a stereo capture.
+      const char* layout_tag = AudioLayoutTag(channel_layout_code);
+      av_dict_set(&audio_stream_->metadata, "spatial_format", layout_tag, 0);
+      av_dict_set_int(&audio_stream_->metadata, "channel_count", channel_count, 0);
+      av_dict_set_int(&audio_stream_->metadata, "sample_rate_hz", sample_rate_hz, 0);
+      if (channel_layout_code == kAudioLayoutFoaAcnSn3d) {
+        // SA3D/SAND box equivalents, encoded as plain metadata until a future
+        // FFmpeg patch can write the actual ISO BMFF boxes. Reader tools
+        // already read these keys via the mov demuxer's stream metadata path.
+        av_dict_set_int(&audio_stream_->metadata, "ambisonic_order", 1, 0);
+        av_dict_set(&audio_stream_->metadata, "ambisonic_channel_ordering", "ACN", 0);
+        av_dict_set(&audio_stream_->metadata, "ambisonic_normalization", "SN3D", 0);
+        av_dict_set_int(&audio_stream_->metadata, "non_diegetic", 0, 0);
+      }
+      // handler_name survives the mov mux/demux roundtrip and is the
+      // sentinel readers use to identify the audio stream's role (mirroring
+      // the timed-metadata tracks).
+      const std::string handler_name = std::string("spatialmp4:audio:") + layout_tag;
+      av_dict_set(&audio_stream_->metadata, "handler_name", handler_name.c_str(), 0);
+      av_dict_set_int(&audio_stream_->metadata, "track_base_time", 0, 0);
+
+      audio_configured_ = true;
+      WakeIoThread();
+      return true;
+    } catch (const std::exception& error) {
+      return Fail(error.what());
+    }
+  }
+
+  bool WriteAudio(const std::vector<uint8_t>& data, int64_t pts_us, int64_t duration_us, int flags) {
+    {
+      std::lock_guard<std::mutex> lock(format_mutex_);
+      if (!audio_configured_ || !audio_stream_) {
+        return Fail("audio stream is not configured");
+      }
+    }
+    return Enqueue(PacketKind::kAudio, data, pts_us,
+                   duration_us > 0 ? duration_us : kDefaultAudioDurationUs, flags);
+  }
+
+  bool DisableAudio() {
+    std::lock_guard<std::mutex> lock(format_mutex_);
+    if (audio_configured_) {
+      return true;
+    }
+    audio_expected_ = false;
+    WakeIoThread();
+    return true;
+  }
+
   bool WriteDepth(const std::vector<uint8_t>& data, int64_t pts_us, int64_t duration_us) {
     return Enqueue(PacketKind::kDepth, data, pts_us,
                    duration_us > 0 ? duration_us : kDefaultDepthDurationUs, AV_PKT_FLAG_KEY);
@@ -349,10 +507,7 @@ class LiveSpatialMp4Writer {
     // concurrently from two threads.
     {
       std::lock_guard<std::mutex> lock(format_mutex_);
-      if (depth_expected_ && !depth_configured_) {
-        __android_log_print(ANDROID_LOG_WARN, kTag, "finishing without depth stream; no depth frames arrived");
-        depth_expected_ = false;
-      }
+      DropUnconfiguredOptionalStreamsForFinish_Locked();
     }
     {
       std::lock_guard<std::mutex> qlock(queue_mutex_);
@@ -510,6 +665,9 @@ class LiveSpatialMp4Writer {
       {
         std::lock_guard<std::mutex> flock(format_mutex_);
         first_pts_us_writer_ = first_pts_snapshot;
+        if (finish_now && !header_written_) {
+          DropUnconfiguredOptionalStreamsForFinish_Locked();
+        }
         if (!header_written_) {
           if (CanWriteHeader_Locked(first_pts_snapshot)) {
             WriteHeader_Locked();
@@ -562,10 +720,28 @@ class LiveSpatialMp4Writer {
     if (depth_expected_ && !depth_configured_) {
       return false;
     }
+    if (audio_expected_ && !audio_configured_) {
+      // The AAC encoder needs its first input frame before CSD is available;
+      // hold the header until we have it so the audio stream lands in the
+      // moov box. The io thread parks the queued packets in `deferred` and
+      // replays them once configuration completes.
+      return false;
+    }
     if (first_pts_snapshot == INT64_MIN) {
       return false;
     }
     return true;
+  }
+
+  void DropUnconfiguredOptionalStreamsForFinish_Locked() {
+    if (depth_expected_ && !depth_configured_) {
+      __android_log_print(ANDROID_LOG_WARN, kTag, "finishing without depth stream; no depth frames arrived");
+      depth_expected_ = false;
+    }
+    if (audio_expected_ && !audio_configured_) {
+      __android_log_print(ANDROID_LOG_WARN, kTag, "finishing without audio stream; no AAC packets arrived");
+      audio_expected_ = false;
+    }
   }
 
   bool WriteHeader_Locked() {
@@ -710,7 +886,7 @@ class LiveSpatialMp4Writer {
       track_base_unix_us = session_start_unix_us_ + (first_pts_us_writer_ - session_start_godot_ticks_us_);
     }
     const int64_t track_base_godot_ticks_us = first_pts_us_writer_;
-    for (AVStream* stream : {rgb_stream_, depth_stream_}) {
+    for (AVStream* stream : {rgb_stream_, depth_stream_, audio_stream_}) {
       if (!stream) {
         continue;
       }
@@ -759,6 +935,9 @@ class LiveSpatialMp4Writer {
     packet->pts = adjusted_pts_us;
     packet->dts = adjusted_pts_us;
     packet->duration = pending.duration_us;
+    // The muxer may rewrite stream->time_base at header time (AAC commonly
+    // becomes 1/sample_rate), while queued packets are stored in microseconds.
+    av_packet_rescale_ts(packet, kUsTimeBase, stream->time_base);
     packet->flags = pending.flags;
 
     ret = av_interleaved_write_frame(format_context_, packet);
@@ -868,8 +1047,28 @@ class LiveSpatialMp4Writer {
           return nullptr;
         }
         return timed_streams_[pending.timed_track_id];
+      case PacketKind::kAudio:
+        return audio_stream_;
     }
     return nullptr;
+  }
+
+  // Translate the JVM-side AudioChannelLayout.code into the stream-metadata
+  // tag string the muxer writes into `spatial_format`. Kept as a member so
+  // any future layout addition only touches one switch in the codebase.
+  static const char* AudioLayoutTag(int code) {
+    switch (code) {
+      case kAudioLayoutMono:
+        return "mono";
+      case kAudioLayoutStereo:
+        return "stereo";
+      case kAudioLayoutFoaAcnSn3d:
+        return "foa_acn_sn3d";
+      case kAudioLayoutRaw4ch:
+        return "raw_4ch";
+      default:
+        return "stereo";
+    }
   }
 
   bool Fail(const std::string& message) {
@@ -900,6 +1099,7 @@ class LiveSpatialMp4Writer {
     // freed memory.
     rgb_stream_ = nullptr;
     depth_stream_ = nullptr;
+    audio_stream_ = nullptr;
     std::fill(timed_streams_.begin(), timed_streams_.end(), nullptr);
   }
 
@@ -924,6 +1124,9 @@ class LiveSpatialMp4Writer {
   bool controller_input_expected_ = false;
   bool hevc_configured_ = false;
   bool depth_configured_ = false;
+  bool audio_expected_ = false;
+  bool audio_configured_ = false;
+  int audio_channel_layout_code_hint_ = kAudioLayoutStereo;
   bool header_written_ = false;
   bool finished_ = false;
   SideDataBundle rgb_side_data_;
@@ -933,6 +1136,7 @@ class LiveSpatialMp4Writer {
   AVFormatContext* format_context_ = nullptr;
   AVStream* rgb_stream_ = nullptr;
   AVStream* depth_stream_ = nullptr;
+  AVStream* audio_stream_ = nullptr;
   // FFV1 depth encoder state (guarded by format_mutex_, used only on io thread).
   AVCodecContext* depth_enc_ctx_ = nullptr;
   AVFrame* depth_frame_ = nullptr;
@@ -988,7 +1192,9 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeStart(
     jbyteArray rgb_dstr,
     jstring device_type,
     jstring device_model,
-    jstring device_manufacturer) {
+    jstring device_manufacturer,
+    jboolean audio_expected,
+    jint audio_channel_layout_code) {
   SideDataBundle side_data{
       JByteArrayToVector(env, rgb_icam),
       JByteArrayToVector(env, rgb_ecam),
@@ -1011,7 +1217,9 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeStart(
       std::move(side_data),
       JStringToString(env, device_type),
       JStringToString(env, device_model),
-      JStringToString(env, device_manufacturer));
+      JStringToString(env, device_manufacturer),
+      audio_expected == JNI_TRUE,
+      static_cast<int>(audio_channel_layout_code));
   return reinterpret_cast<jlong>(writer);
 }
 
@@ -1048,6 +1256,58 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureDepth(
       JByteArrayToVector(env, depth_dstr),
   };
   return writer->ConfigureDepth(width, height, std::move(side_data)) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureAudio(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jint sample_rate_hz,
+    jint channel_count,
+    jint channel_layout_code,
+    jbyteArray csd) {
+  auto* writer = FromHandle(handle);
+  if (!writer) {
+    return JNI_FALSE;
+  }
+  return writer->ConfigureAudio(
+             static_cast<int>(sample_rate_hz),
+             static_cast<int>(channel_count),
+             static_cast<int>(channel_layout_code),
+             JByteArrayToVector(env, csd))
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeDisableAudio(
+    JNIEnv*,
+    jclass,
+    jlong handle) {
+  auto* writer = FromHandle(handle);
+  if (!writer) {
+    return JNI_FALSE;
+  }
+  return writer->DisableAudio() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteAudioPacket(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jbyteArray data,
+    jlong pts_us,
+    jlong duration_us,
+    jint flags) {
+  auto* writer = FromHandle(handle);
+  if (!writer) {
+    return JNI_FALSE;
+  }
+  return writer->WriteAudio(JByteArrayToVector(env, data), pts_us, duration_us, flags)
+             ? JNI_TRUE
+             : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

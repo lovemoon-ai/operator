@@ -28,6 +28,11 @@
 #   SKIP_DEVICE=1       validate existing OUTPUT_DIR/session/SpatialMP4 only.
 #   KEEP_CI_APK=1       do not reinstall the clean APK after the run.
 #   CLEAR_APP_DATA=0    preserve app settings before launch (default clears).
+#   EXPECT_AUDIO=0      disable the audio-specific CI toggle/checks
+#                       (default 1: record and require AAC audio in MP4).
+#   AUDIO_CHANNEL_LAYOUT, AUDIO_SAMPLE_RATE_HZ, AUDIO_BITRATE_BPS
+#                       audio settings baked into the CI APK when EXPECT_AUDIO=1
+#                       (defaults stereo, 48000, 128000).
 #   ADB, PYTHON, FFPROBE, MAKE
 #                       binary overrides.
 
@@ -52,6 +57,10 @@ SKIP_DEVICE="${SKIP_DEVICE:-0}"
 KEEP_CI_APK="${KEEP_CI_APK:-0}"
 CLEAR_APP_DATA="${CLEAR_APP_DATA:-1}"
 DEVICE_KIND="${DEVICE_KIND:-quest}"
+EXPECT_AUDIO="${EXPECT_AUDIO:-1}"
+AUDIO_CHANNEL_LAYOUT="${AUDIO_CHANNEL_LAYOUT:-stereo}"
+AUDIO_SAMPLE_RATE_HZ="${AUDIO_SAMPLE_RATE_HZ:-48000}"
+AUDIO_BITRATE_BPS="${AUDIO_BITRATE_BPS:-128000}"
 
 START_TIMEOUT_SECONDS="${START_TIMEOUT_SECONDS:-60}"
 STOP_BUFFER_SECONDS="${STOP_BUFFER_SECONDS:-120}"
@@ -135,6 +144,12 @@ while (("$#")); do
     *) err "unknown arg: $1"; usage 1 ;;
   esac
 done
+
+case "$OUTPUT_DIR" in
+  /*) ;;
+  *) OUTPUT_DIR="$ROOT/$OUTPUT_DIR" ;;
+esac
+CLEAN_APK_PATH="$OUTPUT_DIR/Operator-clean.apk"
 
 configure_device_kind
 
@@ -223,14 +238,54 @@ flip_auto_start_on() {
     *.*) ;;
     *) stop_value="${stop_value}.0" ;;
   esac
+  local record_audio_value="false"
+  if [ "$EXPECT_AUDIO" = "1" ]; then
+    record_audio_value="true"
+  fi
   CAPTURE_APP_GD_BAK="$(mktemp -t operator_capture_app_gd.XXXXXX)"
   cp "$CAPTURE_APP_GD" "$CAPTURE_APP_GD_BAK"
-  sed -i.tmp -E \
-    -e "s|^const AUTO_START_FOR_DEVICE_TEST := .*|const AUTO_START_FOR_DEVICE_TEST := true|" \
-    -e "s|^const AUTO_STOP_AFTER_SECONDS := .*|const AUTO_STOP_AFTER_SECONDS := ${stop_value}|" \
-    "$CAPTURE_APP_GD"
-  rm -f "$CAPTURE_APP_GD.tmp"
-  ok "enabled AUTO_START_FOR_DEVICE_TEST for ${CAPTURE_SECONDS}s"
+  "$PYTHON" - "$CAPTURE_APP_GD" "$stop_value" "$record_audio_value" "$AUDIO_CHANNEL_LAYOUT" "$AUDIO_SAMPLE_RATE_HZ" "$AUDIO_BITRATE_BPS" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+stop_value = sys.argv[2]
+record_audio = sys.argv[3]
+layout = sys.argv[4]
+sample_rate = sys.argv[5]
+bitrate = sys.argv[6]
+
+text = path.read_text()
+text = text.replace(
+    "const AUTO_START_FOR_DEVICE_TEST := false",
+    "const AUTO_START_FOR_DEVICE_TEST := true",
+    1,
+)
+text = text.replace(
+    "const AUTO_STOP_AFTER_SECONDS := 12.0",
+    f"const AUTO_STOP_AFTER_SECONDS := {stop_value}",
+    1,
+)
+needle = '\t\tcapture_options["interaction_mode"] = "head"\n'
+injected = (
+    needle
+    + f'\t\tcapture_options["record_audio"] = {record_audio}\n'
+    + f'\t\tcapture_options["audio_channel_layout"] = "{layout}"\n'
+    + f'\t\tcapture_options["audio_sample_rate_hz"] = {sample_rate}\n'
+    + f'\t\tcapture_options["audio_bitrate_bps"] = {bitrate}\n'
+)
+if needle not in text:
+    raise SystemExit("AUTO_START_FOR_DEVICE_TEST capture_options hook not found")
+text = text.replace(needle, injected, 1)
+path.write_text(text)
+PY
+  if [ "$EXPECT_AUDIO" = "1" ]; then
+    ok "enabled AUTO_START_FOR_DEVICE_TEST for ${CAPTURE_SECONDS}s with audio ${AUDIO_CHANNEL_LAYOUT}/${AUDIO_SAMPLE_RATE_HZ}Hz"
+  else
+    ok "enabled AUTO_START_FOR_DEVICE_TEST for ${CAPTURE_SECONDS}s"
+  fi
 }
 
 build_clean_apk() {
@@ -295,6 +350,7 @@ grant_permissions() {
   local perm
   for perm in \
     android.permission.CAMERA \
+    android.permission.RECORD_AUDIO \
     horizonos.permission.HEADSET_CAMERA \
     horizonos.permission.AVATAR_CAMERA \
     com.oculus.permission.USE_SCENE \
@@ -307,6 +363,8 @@ grant_permissions() {
   run_adb shell appops set "$PKG" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
   run_adb shell cmd appops set "$PKG" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
   run_adb shell appops set "$PKG" LEGACY_STORAGE allow >/dev/null 2>&1 || true
+  run_adb shell appops set "$PKG" RECORD_AUDIO allow >/dev/null 2>&1 || true
+  run_adb shell cmd appops set "$PKG" RECORD_AUDIO allow >/dev/null 2>&1 || true
   run_adb shell appops set "$PKG" USE_SCENE allow >/dev/null 2>&1 || true
   run_adb shell appops set "$PKG" HEADSET_CAMERA allow >/dev/null 2>&1 || true
   run_adb shell appops set "$PKG" AVATAR_CAMERA allow >/dev/null 2>&1 || true
@@ -481,7 +539,7 @@ validate_capture() {
   if [ "$SKIP_DEVICE" = "1" ]; then
     local_root="$OUTPUT_DIR/session/SpatialMP4"
   fi
-  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" "$EXPECTED_DEVICE_PREFIX" <<'PY'
+  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" "$EXPECTED_DEVICE_PREFIX" "$EXPECT_AUDIO" <<'PY'
 from __future__ import annotations
 
 import json
@@ -497,6 +555,7 @@ min_mp4_bytes = int(sys.argv[4])
 min_rgb_frames = int(sys.argv[5]) or max(20, int(capture_seconds * 15))
 min_rgb_fps = float(sys.argv[6])
 expected_device_prefix = sys.argv[7] if len(sys.argv) > 7 else ""
+expect_audio = (sys.argv[8] if len(sys.argv) > 8 else "0") == "1"
 
 checks: list[tuple[str, str, str]] = []
 
@@ -604,6 +663,24 @@ def packet_count(stream: dict[str, Any]) -> int:
     return 0
 
 
+def audio_channel_count_for_layout(layout: str) -> int:
+    if layout == "mono":
+        return 1
+    if layout in ("foa_acn_sn3d", "raw_4ch"):
+        return 4
+    return 2
+
+
+def effective_audio_layout_for_request(layout: str) -> str:
+    if layout in ("mono", "stereo"):
+        return layout
+    if layout in ("foa_acn_sn3d", "raw_4ch"):
+        # Mirrors SessionSpoolWriter: the current Android AudioRecord path
+        # falls back to stereo until a true 4-channel/FOA provider is wired.
+        return "stereo"
+    return "stereo"
+
+
 def check_required_files(session_dir: Path, mp4: Path, options: dict[str, Any]) -> None:
     required = [
         "manifest.json",
@@ -630,10 +707,10 @@ def check_required_files(session_dir: Path, mp4: Path, options: dict[str, Any]) 
 
 
 def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
-    if manifest.get("schema") == "spatialmp4.quest_capture.spool.v2":
-        passed("manifest schema is spool.v2")
+    if manifest.get("schema") == "spatialmp4.quest_capture.spool.v3":
+        passed("manifest schema is spool.v3")
     else:
-        failed("manifest schema is spool.v2", repr(manifest.get("schema")))
+        failed("manifest schema is spool.v3", repr(manifest.get("schema")))
     if manifest.get("media_pts_domain") == "godot_ticks_ns":
         passed("manifest media_pts_domain is godot_ticks_ns")
     else:
@@ -648,6 +725,45 @@ def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             passed(f"capture option {key}=true")
         else:
             failed(f"capture option {key}=true", repr(options.get(key)))
+    if expect_audio:
+        if options.get("record_audio") is True:
+            passed("capture option record_audio=true")
+        else:
+            failed("capture option record_audio=true", repr(options.get("record_audio")))
+        requested_layout = str(options.get("audio_channel_layout", ""))
+        if requested_layout:
+            passed("capture option audio_channel_layout set", requested_layout)
+        else:
+            failed("capture option audio_channel_layout set", repr(requested_layout))
+        if int(options.get("audio_sample_rate_hz") or 0) > 0:
+            passed("capture option audio_sample_rate_hz set", str(options.get("audio_sample_rate_hz")))
+        else:
+            failed("capture option audio_sample_rate_hz set", repr(options.get("audio_sample_rate_hz")))
+        if int(options.get("audio_bitrate_bps") or 0) > 0:
+            passed("capture option audio_bitrate_bps set", str(options.get("audio_bitrate_bps")))
+        else:
+            failed("capture option audio_bitrate_bps set", repr(options.get("audio_bitrate_bps")))
+
+        sources = manifest.get("sources") or {}
+        audio_source = sources.get("audio")
+        if isinstance(audio_source, dict):
+            passed("manifest sources.audio present")
+            expected_layout = effective_audio_layout_for_request(requested_layout)
+            expected_channels = audio_channel_count_for_layout(expected_layout)
+            if audio_source.get("codec") == "aac_lc":
+                passed("manifest audio codec is aac_lc")
+            else:
+                failed("manifest audio codec is aac_lc", repr(audio_source.get("codec")))
+            if audio_source.get("channel_layout") == expected_layout:
+                passed("manifest audio channel_layout", expected_layout)
+            else:
+                failed("manifest audio channel_layout", repr(audio_source.get("channel_layout")))
+            if int(audio_source.get("channel_count") or 0) == expected_channels:
+                passed("manifest audio channel_count", str(expected_channels))
+            else:
+                failed("manifest audio channel_count", repr(audio_source.get("channel_count")))
+        else:
+            failed("manifest sources.audio present", repr(audio_source))
     return options
 
 
@@ -859,13 +975,17 @@ def check_mp4_device_tags(mp4: Path, device: dict[str, Any]) -> None:
 def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
     data = run_ffprobe(mp4)
     if data is None:
-        warned("MP4 stream inspection skipped", "ffprobe unavailable or failed")
+        if options.get("record_audio") is True:
+            failed("MP4 audio stream inspection requires ffprobe", "record_audio=true")
+        else:
+            warned("MP4 stream inspection skipped", "ffprobe unavailable or failed")
         return
     if not any(status == "FAIL" and name == "ffprobe parses MP4" for status, name, _ in checks):
         passed("ffprobe parses MP4")
     streams = data.get("streams", [])
     rgb = next((s for s in streams if s.get("codec_name") == "hevc" or s.get("codec_tag_string") in ("hev1", "hvc1")), None)
     depth = next((s for s in streams if s.get("codec_name") in ("ffv1", "rawvideo") or s.get("codec_tag_string") == "raw1"), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio" or s.get("codec_name") == "aac"), None)
     mett = [s for s in streams if s.get("codec_tag_string") == "mett"]
     if rgb:
         passed("MP4 contains HEVC RGB stream", f"{rgb.get('width')}x{rgb.get('height')}")
@@ -908,17 +1028,63 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
             passed("MP4 contains timed metadata stream", f"{len(mett)} mett stream(s)")
         else:
             failed("MP4 contains timed metadata stream")
+    if options.get("record_audio") is True:
+        requested_layout = str(options.get("audio_channel_layout", "stereo"))
+        expected_layout = effective_audio_layout_for_request(requested_layout)
+        expected_channels = audio_channel_count_for_layout(expected_layout)
+        expected_sample_rate = int(options.get("audio_sample_rate_hz") or 48000)
+        min_audio_packets = max(10, int(capture_seconds * 8))
+        if audio:
+            passed("MP4 contains AAC audio stream", f"{audio.get('codec_name')}/{audio.get('codec_tag_string')}")
+            if audio.get("codec_name") == "aac":
+                passed("MP4 audio codec is AAC")
+            else:
+                failed("MP4 audio codec is AAC", repr(audio.get("codec_name")))
+            try:
+                sample_rate = int(audio.get("sample_rate") or 0)
+            except ValueError:
+                sample_rate = 0
+            if sample_rate == expected_sample_rate:
+                passed("MP4 audio sample_rate", str(sample_rate))
+            else:
+                failed("MP4 audio sample_rate", f"{sample_rate} != {expected_sample_rate}")
+            try:
+                channels = int(audio.get("channels") or 0)
+            except ValueError:
+                channels = 0
+            if channels == expected_channels:
+                passed("MP4 audio channel count", str(channels))
+            else:
+                failed("MP4 audio channel count", f"{channels} != {expected_channels}")
+            packets = packet_count(audio)
+            if packets >= min_audio_packets:
+                passed("MP4 audio packet count", f"{packets} >= {min_audio_packets}")
+            else:
+                failed("MP4 audio packet count", f"{packets} < {min_audio_packets}")
+
+            tags = {str(k).lower(): str(v) for k, v in (audio.get("tags") or {}).items()}
+            spatial_format = tags.get("spatial_format")
+            if spatial_format is None:
+                warned("MP4 audio spatial_format tag visible", "ffprobe did not expose stream tag")
+            elif spatial_format == expected_layout:
+                passed("MP4 audio spatial_format tag", spatial_format)
+            else:
+                failed("MP4 audio spatial_format tag", f"{spatial_format} != {expected_layout}")
+        else:
+            failed("MP4 contains AAC audio stream")
     starts = {str(s.get("index")): stream_start_us(s) for s in streams}
     if starts:
         if any(abs(v) <= 1000 for v in starts.values()):
             passed("at least one MP4 stream starts at PTS zero", str(starts))
         else:
             failed("at least one MP4 stream starts at PTS zero", str(starts))
-        worst = max(starts.values())
+        dense_streams = [s for s in (rgb, depth if options.get("record_depth", True) else None, audio if options.get("record_audio") is True else None) if s]
+        dense_starts = {str(s.get("index")): stream_start_us(s) for s in dense_streams}
+        worst = max(dense_starts.values()) if dense_starts else 0
         if worst <= 500_000:
-            passed("MP4 streams start within 500 ms", f"worst={worst} us")
+            passed("MP4 dense media streams start within 500 ms", f"worst={worst} us")
         else:
-            failed("MP4 streams start within 500 ms", f"worst={worst} us")
+            failed("MP4 dense media streams start within 500 ms", f"starts={dense_starts} worst={worst} us")
 
 
 def print_summary() -> int:
@@ -978,6 +1144,10 @@ main() {
   step "Pre-flight"
   require_tool "$PYTHON"
   resolve_ffprobe
+  if [ "$EXPECT_AUDIO" = "1" ] && [ -z "${FFPROBE:-}" ]; then
+    err "ffprobe is required when EXPECT_AUDIO=1 so the MP4 audio track can be validated"
+    exit 1
+  fi
   if [ "$SKIP_DEVICE" = "1" ]; then
     ok "SKIP_DEVICE=1; validate only"
     validate_capture

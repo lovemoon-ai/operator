@@ -21,6 +21,7 @@ const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -
 const STATUS_POPUP_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.92))
 const CUE_SAMPLE_RATE := 32000
 const UPLOAD_ACK_TIMEOUT_SECONDS := 8.0
+const AUDIO_PERMISSION_GRACE_US := 3000000
 
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
@@ -69,6 +70,16 @@ var capture_options := {
 	"record_head_pose": true,
 	"record_controller_pose": true,
 	"record_hand_data": true,
+	# v3 spatial audio: off by default; flipped on by the capture settings
+	# panel ("Spatial audio (mic)" toggle). The pipeline additionally gates
+	# on the Android RECORD_AUDIO runtime permission.
+	"record_audio": false,
+	# Encoder shape. Mirrors AudioCapture.DEFAULT_* on the Kotlin side; the
+	# host can override either here in code or via capture_options at runtime
+	# (e.g. for an FOA-capable build that swaps "stereo" -> "foa_acn_sn3d").
+	"audio_channel_layout": "stereo",
+	"audio_sample_rate_hz": 48000,
+	"audio_bitrate_bps": 128000,
 	"save_controller_hand_sidecar": false,
 	"save_root": DEFAULT_SAVE_ROOT
 }
@@ -82,6 +93,9 @@ var _camera_start_attempted := false
 var _camera_bind_warned := false
 var _camera_permission_wait_logged := false
 var _last_capture_error := ""
+var _audio_permission_wait_logged := false
+var _audio_permission_degraded_logged := false
+var _audio_permission_wait_started_ticks_us := 0
 var _passthrough_active := false
 var _previous_transparent_bg := false
 var _previous_environment_blend_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
@@ -239,10 +253,17 @@ func _emit_metrics(window_s: float) -> void:
 			var parsed: Variant = JSON.parse_string(String(raw))
 			if typeof(parsed) == TYPE_DICTIONARY:
 				plugin_metrics = parsed
+	var muxer_metrics: Dictionary = {}
+	if muxer_plugin != null:
+		var raw_muxer: Variant = muxer_plugin.call("popMuxerMetricsJson")
+		if typeof(raw_muxer) == TYPE_STRING and not String(raw_muxer).is_empty():
+			var parsed_muxer: Variant = JSON.parse_string(String(raw_muxer))
+			if typeof(parsed_muxer) == TYPE_DICTIONARY:
+				muxer_metrics = parsed_muxer
 	# Compact one-liner so it doesn't drown the rest of logcat. Tagged
 	# "QcMetrics" so adb logcat -s godot:V | grep QcMetrics gives a clean
 	# table.
-	print("QcMetrics %.1fs recording=%s engine_fps=%d process_fps=%.1f pose_loop_iters=%d stages_ms={panel=%.1f,pointer=%.1f,record=%.1f,pose=%.1f,depth=%.1f,metrics=%.1f} pose=%s depth=%s plugin=%s" % [
+	print("QcMetrics %.1fs recording=%s engine_fps=%d process_fps=%.1f pose_loop_iters=%d stages_ms={panel=%.1f,pointer=%.1f,record=%.1f,pose=%.1f,depth=%.1f,metrics=%.1f} pose=%s depth=%s plugin=%s muxer=%s" % [
 		window_s,
 		str(_recording),
 		engine_fps,
@@ -256,7 +277,8 @@ func _emit_metrics(window_s: float) -> void:
 		_stage_us_emit_metrics / 1000.0,
 		_compact_dict(pose_metrics),
 		_compact_dict(depth_metrics),
-		_compact_dict(plugin_metrics)
+		_compact_dict(plugin_metrics),
+		_compact_dict(muxer_metrics)
 	])
 	_metrics_process_ticks = 0
 	_metrics_pose_loop_iters = 0
@@ -312,6 +334,9 @@ func start_capture() -> void:
 	_camera_start_attempted = false
 	_camera_permission_wait_logged = false
 	_last_capture_error = ""
+	_audio_permission_wait_logged = false
+	_audio_permission_degraded_logged = false
+	_audio_permission_wait_started_ticks_us = 0
 	if record_control:
 		record_control.set_recording(true)
 	# Park any in-flight upload while we record — see
@@ -337,6 +362,9 @@ func stop_capture() -> void:
 	_camera_configured = false
 	_camera_start_attempted = false
 	_camera_permission_wait_logged = false
+	_audio_permission_wait_logged = false
+	_audio_permission_degraded_logged = false
+	_audio_permission_wait_started_ticks_us = 0
 	if record_control:
 		record_control.set_recording(false)
 	_play_cue(_stop_cue)
@@ -446,7 +474,7 @@ func _setup_xr_scene() -> void:
 	var persisted := EgoSettingsStoreScript.load_options()
 	if settings_panel.has_method("set_options"):
 		settings_panel.set_options(persisted)
-	capture_options = settings_panel.get_options()
+	_merge_capture_options(settings_panel.get_options())
 
 	record_control = ViewLockedRecordControlScript.new()
 	record_control.name = "ViewLockedRecordControl"
@@ -569,32 +597,68 @@ func _start_camera_plugin() -> void:
 	var output_mp4_absolute: String = writer.get_output_mp4_path_absolute()
 	var partial_mp4_absolute: String = writer.get_partial_mp4_path_absolute()
 	print("QuestCapturePlugin configure begin: %s" % output_mp4_absolute)
+	# Android Godot plugin singletons do not reliably report @UsedByGodot
+	# methods through has_method(), so call the compact JSON RPC directly.
+	# The QuestCapturePlugin AAR is bundled into this same APK.
+	var want_audio: bool = bool(capture_options.get("record_audio", false))
+	var layout_code: int = _audio_layout_code_for_label(
+		str(capture_options.get("audio_channel_layout", "stereo"))
+	)
+	var session_config := {
+		"final_path": output_mp4_absolute,
+		"partial_path": partial_mp4_absolute,
+		"sidecar_path": session_dir_absolute,
+		"session_start_unix_us": writer.get_session_start_unix_us(),
+		"session_start_godot_ticks_us": writer.get_session_start_ticks_us(),
+		"configure_godot_ticks_us": Time.get_ticks_usec(),
+		"record_depth": _stream_enabled("record_depth"),
+		"record_head_pose": _stream_enabled("record_head_pose"),
+		"record_controller_pose": _stream_enabled("record_controller_pose"),
+		"record_hand_data": _stream_enabled("record_hand_data"),
+		"record_controller_input": _stream_enabled("record_controller_pose"),
+		"stereo_rgb": bool(capture_options.get("stereo_rgb", true)),
+		"rgb_bitrate": int(capture_options.get("rgb_bitrate", DEFAULT_RGB_BITRATE)),
+		"rgb_fps": int(capture_options.get("rgb_fps", DEFAULT_RGB_FPS)),
+		"record_audio": want_audio,
+		"audio_channel_layout_code": layout_code,
+		"audio_sample_rate_hz": int(capture_options.get("audio_sample_rate_hz", 48000)),
+		"audio_bitrate_bps": int(capture_options.get("audio_bitrate_bps", 128000))
+	}
 	var configured_result: Variant = camera_plugin.call(
-		"configureSpatialMp4SessionWithTime",
-		output_mp4_absolute,
-		partial_mp4_absolute,
-		session_dir_absolute,
-		writer.get_session_start_unix_us(),
-		writer.get_session_start_ticks_us(),
-		Time.get_ticks_usec(),
-		_stream_enabled("record_depth"),
-		_stream_enabled("record_head_pose"),
-		_stream_enabled("record_controller_pose"),
-		_stream_enabled("record_hand_data"),
-		_stream_enabled("record_controller_pose"),
-		bool(capture_options.get("stereo_rgb", true)),
-		int(capture_options.get("rgb_bitrate", DEFAULT_RGB_BITRATE)),
-		int(capture_options.get("rgb_fps", DEFAULT_RGB_FPS))
+		"configureSpatialMp4SessionFromJson",
+		JSON.stringify(session_config)
 	)
 	_camera_configured = bool(configured_result)
-	print("QuestCapturePlugin configureSessionWithTime returned: %s" % configured_result)
+	print("QuestCapturePlugin configureSession returned: %s (audio=%s)" % [configured_result, want_audio])
 	if not _camera_configured:
 		print("QuestCapturePlugin configure failed; RGB capture will retry")
 		return
 
 	camera_plugin.call("requestCameraPermission")
+	# RECORD_AUDIO is a runtime permission too. Request it up front; if the
+	# user denies or ignores it, _try_start_camera_plugin degrades to a
+	# video-only capture instead of blocking the whole session.
+	if want_audio:
+		camera_plugin.call("requestAudioPermission")
 	print("QuestCapturePlugin requested camera permissions")
 	_try_start_camera_plugin()
+
+
+# Mirrors com.spatialmp4.contract.AudioChannelLayout.code on the Kotlin side.
+# Centralised here so the capture panel / settings UI can swap "stereo" for
+# "foa_acn_sn3d" without re-deriving the enum mapping in three places.
+func _audio_layout_code_for_label(label: String) -> int:
+	match label:
+		"mono":
+			return 0
+		"stereo":
+			return 1
+		"foa_acn_sn3d":
+			return 2
+		"raw_4ch":
+			return 3
+		_:
+			return 1
 
 
 func _try_start_camera_plugin() -> void:
@@ -607,6 +671,21 @@ func _try_start_camera_plugin() -> void:
 			print("QuestCapturePlugin waiting for camera permission")
 		camera_plugin.call("requestCameraPermission")
 		return
+	var wants_audio: bool = bool(capture_options.get("record_audio", false))
+	if wants_audio:
+		var has_audio_permission: bool = bool(camera_plugin.call("hasAudioPermission"))
+		if not has_audio_permission:
+			var now_us := Time.get_ticks_usec()
+			if not _audio_permission_wait_logged:
+				_audio_permission_wait_logged = true
+				_audio_permission_wait_started_ticks_us = now_us
+				print("QuestCapturePlugin waiting for audio permission")
+			camera_plugin.call("requestAudioPermission")
+			if now_us - _audio_permission_wait_started_ticks_us < AUDIO_PERMISSION_GRACE_US:
+				return
+			if not _audio_permission_degraded_logged:
+				_audio_permission_degraded_logged = true
+				print("QuestCapturePlugin audio permission missing; starting without audio")
 	_camera_start_attempted = true
 	print("QuestCapturePlugin invoking startCameras")
 	var started: bool = bool(camera_plugin.call("startCameras"))
@@ -677,7 +756,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 func _on_capture_settings_saved(options: Dictionary) -> void:
 	if _recording:
 		return
-	capture_options = options.duplicate(true)
+	_merge_capture_options(options)
 	capture_options["save_root"] = _configured_save_root()
 	_release_ui_pointer()
 	record_control.show_for_mode(str(capture_options.get("interaction_mode", "controllers")))
@@ -750,6 +829,11 @@ func _stream_enabled(option: String) -> bool:
 
 func _upload_config_available() -> bool:
 	return bool(capture_options.get("upload_on_finalize", false)) and not str(capture_options.get("upload_url", "")).strip_edges().is_empty()
+
+
+func _merge_capture_options(options: Dictionary) -> void:
+	for key in options.keys():
+		capture_options[key] = options[key]
 
 
 func _configured_save_root() -> String:

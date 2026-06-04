@@ -57,6 +57,10 @@ func get_options() -> Dictionary:
 		"record_head_pose": _toggle_enabled("record_head_pose"),
 		"record_controller_pose": _toggle_enabled("record_controller_pose"),
 		"record_hand_data": _toggle_enabled("record_hand_data"),
+		# v3 spatial audio: opt-in for privacy. The toggle defaults off below
+		# (default_on=false in _add_stream_toggle) so a recording never opens
+		# the mic without the operator explicitly enabling it.
+		"record_audio": _toggle_enabled("record_audio"),
 		"save_controller_hand_sidecar": _toggle_enabled("save_controller_hand_sidecar"),
 		"save_root": _configured_save_root(),
 		"upload_url": _upload_url.text.strip_edges() if _upload_url else "",
@@ -109,6 +113,10 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	_add_stream_toggle("record_head_pose", tr("UI_HEAD_POSE"))
 	_add_stream_toggle("record_controller_pose", tr("UI_CONTROLLER_POSES"))
 	_add_stream_toggle("record_hand_data", tr("UI_HAND_JOINTS"))
+	# Audio is privacy-sensitive (opens the microphone), so the toggle starts
+	# OFF -- the operator has to flip it explicitly. The capture pipeline
+	# additionally gates on RECORD_AUDIO runtime permission downstream.
+	_add_stream_toggle("record_audio", tr("UI_RECORD_AUDIO"), false)
 
 	add_section_label("UI_OUTPUTS")
 
@@ -228,6 +236,10 @@ static func _default_options() -> Dictionary:
 		"record_head_pose": true,
 		"record_controller_pose": true,
 		"record_hand_data": true,
+		"record_audio": false,
+		"audio_channel_layout": "stereo",
+		"audio_sample_rate_hz": 48000,
+		"audio_bitrate_bps": 128000,
 		"save_controller_hand_sidecar": false,
 		"save_root": DEFAULT_SAVE_ROOT,
 		"upload_url": "",

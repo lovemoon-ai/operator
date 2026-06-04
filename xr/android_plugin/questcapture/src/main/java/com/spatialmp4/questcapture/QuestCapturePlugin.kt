@@ -61,6 +61,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     // nativeWriterHandle migrated to SpatialMp4MuxerPlugin in Stage 2b. The
     // provider now hands the muxer a SessionConfig and lets it own the handle.
     private var hevcEncoder: StereoHevcEncoder? = null
+    // v3 spatial audio capture: nullable so a session that disabled audio
+    // (recordAudio=false) keeps the camera path zero-cost.
+    private var audioCapture: AudioCapture? = null
     private var leftMetadata = "{}"
     private var rightMetadata = "{}"
     private var sessionStartUnixUs = 0L
@@ -74,6 +77,11 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var recordControllerPose = true
     private var recordHandData = true
     private var recordControllerInput = true
+    private var recordAudio = false
+    private var audioChannelLayout: com.spatialmp4.contract.AudioChannelLayout =
+        com.spatialmp4.contract.AudioChannelLayout.STEREO
+    private var audioSampleRateHz = AudioCapture.DEFAULT_SAMPLE_RATE_HZ
+    private var audioBitrateBps = AudioCapture.DEFAULT_AAC_BITRATE_BPS
     private var stereoRgb = true
     private var rgbBitrate = DEFAULT_RGB_BITRATE
     private var rgbFps = DEFAULT_RGB_FPS
@@ -89,6 +97,11 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private val metricEncoderPairsOffered = AtomicLong(0L)
     private val metricEncoderMonoOffered = AtomicLong(0L)
     private val metricEncoderPacketsOut = AtomicLong(0L)
+    // v3: AAC packets emitted into the sink. Useful for diagnosing
+    // "muxer says native_audio_writes=0" — if this counter ticks but the
+    // muxer's does not, the regression is on the contract boundary, not in
+    // the capture pipeline.
+    private val metricAudioPacketsOut = AtomicLong(0L)
     // metricNativeWrite* counters migrated to SpatialMp4MuxerPlugin in Stage
     // 2b; GDScript hosts that want them call muxer.popMuxerMetricsJson().
 
@@ -151,6 +164,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         rgbBitrate: Int,
         rgbFps: Int
     ): Boolean {
+        // Legacy entry point: audio defaults to off so an old GDScript host
+        // that has not been updated to the v3 RPC keeps recording exactly
+        // what it did before.
         return configureSessionInternal(
             sidecarPath,
             sessionStartUnixUs,
@@ -165,7 +181,114 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             recordControllerInput,
             stereoRgb,
             rgbBitrate,
-            rgbFps
+            rgbFps,
+            recordAudio = false,
+            audioChannelLayoutCode = com.spatialmp4.contract.AudioChannelLayout.STEREO.code,
+            audioSampleRateHz = AudioCapture.DEFAULT_SAMPLE_RATE_HZ,
+            audioBitrateBps = AudioCapture.DEFAULT_AAC_BITRATE_BPS
+        )
+    }
+
+    /**
+     * v3 capture session config RPC: superset of
+     * [configureSpatialMp4SessionWithTime] that adds the audio gate. GDScript
+     * hosts that want spatial audio call this; everyone else can keep using
+     * the legacy entry point.
+     */
+    @UsedByGodot
+    fun configureSpatialMp4SessionWithAudio(
+        finalPath: String,
+        partialPath: String,
+        sidecarPath: String,
+        sessionStartUnixUs: Long,
+        sessionStartGodotTicksUs: Long,
+        configureGodotTicksUs: Long,
+        recordDepth: Boolean,
+        recordHeadPose: Boolean,
+        recordControllerPose: Boolean,
+        recordHandData: Boolean,
+        recordControllerInput: Boolean,
+        stereoRgb: Boolean,
+        rgbBitrate: Int,
+        rgbFps: Int,
+        recordAudio: Boolean,
+        audioChannelLayoutCode: Int,
+        audioSampleRateHz: Int,
+        audioBitrateBps: Int
+    ): Boolean {
+        return configureSessionInternal(
+            sidecarPath,
+            sessionStartUnixUs,
+            sessionStartGodotTicksUs,
+            configureGodotTicksUs,
+            finalPath,
+            partialPath,
+            recordDepth,
+            recordHeadPose,
+            recordControllerPose,
+            recordHandData,
+            recordControllerInput,
+            stereoRgb,
+            rgbBitrate,
+            rgbFps,
+            recordAudio,
+            audioChannelLayoutCode,
+            audioSampleRateHz,
+            audioBitrateBps
+        )
+    }
+
+    /**
+     * Compact v3 session-config RPC. Prefer this from GDScript so boolean
+     * gates added after the legacy 14-argument method are not exposed to
+     * Android plugin bridge argument-count quirks.
+     */
+    @UsedByGodot
+    fun configureSpatialMp4SessionFromJson(configJson: String): Boolean {
+        val config = try {
+            JSONObject(configJson)
+        } catch (error: Exception) {
+            emitSignal("camera_error", "Invalid SpatialMP4 session config JSON: ${error.message}")
+            return false
+        }
+
+        val finalPath = config.optString("final_path", "")
+        val partialPath = config.optString("partial_path", "")
+        val sidecarPath = config.optString("sidecar_path", "")
+        if (finalPath.isBlank() || partialPath.isBlank() || sidecarPath.isBlank()) {
+            emitSignal("camera_error", "SpatialMP4 session config requires final_path, partial_path, and sidecar_path")
+            return false
+        }
+
+        val recordAudio = config.optBoolean("record_audio", false)
+        val layoutCode = config.optInt(
+            "audio_channel_layout_code",
+            com.spatialmp4.contract.AudioChannelLayout.STEREO.code
+        )
+        Log.i(
+            TAG,
+            "configureSpatialMp4SessionFromJson audio=$recordAudio layout=$layoutCode sampleRate=${config.optInt("audio_sample_rate_hz", AudioCapture.DEFAULT_SAMPLE_RATE_HZ)}"
+        )
+
+        return configureSessionInternal(
+            sidecarPath,
+            config.optLong("session_start_unix_us", 0L),
+            config.optLong("session_start_godot_ticks_us", 0L),
+            config.optLong("configure_godot_ticks_us", 0L),
+            finalPath,
+            partialPath,
+            config.optBoolean("record_depth", true),
+            config.optBoolean("record_head_pose", true),
+            config.optBoolean("record_controller_pose", true),
+            config.optBoolean("record_hand_data", true),
+            config.optBoolean("record_controller_input", true),
+            config.optBoolean("stereo_rgb", true),
+            config.optInt("rgb_bitrate", DEFAULT_RGB_BITRATE),
+            config.optInt("rgb_fps", DEFAULT_RGB_FPS),
+            recordAudio,
+            layoutCode,
+            config.optInt("audio_sample_rate_hz", AudioCapture.DEFAULT_SAMPLE_RATE_HZ),
+            config.optInt("audio_bitrate_bps", AudioCapture.DEFAULT_AAC_BITRATE_BPS)
         )
     }
 
@@ -183,7 +306,11 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         recordControllerInput: Boolean = true,
         stereoRgb: Boolean = true,
         rgbBitrate: Int = DEFAULT_RGB_BITRATE,
-        rgbFps: Int = DEFAULT_RGB_FPS
+        rgbFps: Int = DEFAULT_RGB_FPS,
+        recordAudio: Boolean = false,
+        audioChannelLayoutCode: Int = com.spatialmp4.contract.AudioChannelLayout.STEREO.code,
+        audioSampleRateHz: Int = AudioCapture.DEFAULT_SAMPLE_RATE_HZ,
+        audioBitrateBps: Int = AudioCapture.DEFAULT_AAC_BITRATE_BPS
     ): Boolean {
         val dir = File(path)
         try {
@@ -217,6 +344,11 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         this.stereoRgb = stereoRgb
         this.rgbBitrate = if (rgbBitrate > 0) rgbBitrate else DEFAULT_RGB_BITRATE
         this.rgbFps = if (rgbFps > 0) rgbFps else DEFAULT_RGB_FPS
+        this.recordAudio = recordAudio
+        this.audioChannelLayout =
+            com.spatialmp4.contract.AudioChannelLayout.fromCode(audioChannelLayoutCode)
+        this.audioSampleRateHz = if (audioSampleRateHz > 0) audioSampleRateHz else AudioCapture.DEFAULT_SAMPLE_RATE_HZ
+        this.audioBitrateBps = if (audioBitrateBps > 0) audioBitrateBps else AudioCapture.DEFAULT_AAC_BITRATE_BPS
         // Capture all clock anchors back-to-back so the deltas between them stay
         // sub-microsecond. CLOCK_MONOTONIC is the same clock Godot's
         // Time.get_ticks_usec() uses on Android, and is also what Camera2 reports
@@ -373,6 +505,26 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     }
 
     @UsedByGodot
+    fun hasAudioPermission(): Boolean {
+        val activity = mainActivity ?: return false
+        return ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    @UsedByGodot
+    fun requestAudioPermission() {
+        val activity = mainActivity ?: return
+        if (hasAudioPermission()) {
+            return
+        }
+        ActivityCompat.requestPermissions(
+            activity,
+            arrayOf(Manifest.permission.RECORD_AUDIO),
+            REQUEST_AUDIO_PERMISSIONS
+        )
+    }
+
+    @UsedByGodot
     fun startCameras(): Boolean {
         val activity = mainActivity ?: return false
         val root = sessionDir ?: run {
@@ -468,6 +620,12 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         sessions.clear()
         hevcEncoder?.stopAndDrain()
         hevcEncoder = null
+        // Drain audio AFTER the video encoder so the muxer's drained_ signal
+        // does not fire while AAC packets are still in flight. AudioCapture
+        // joins its own threads, so this returns once the last packet has
+        // either landed at the sink or been dropped.
+        audioCapture?.stopAndDrain()
+        audioCapture = null
         closeFrameIndexWriters()
     }
 
@@ -613,6 +771,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("enc_pairs_in", metricEncoderPairsOffered.getAndSet(0L))
             .put("enc_mono_in", metricEncoderMonoOffered.getAndSet(0L))
             .put("enc_packets_out", metricEncoderPacketsOut.getAndSet(0L))
+            .put("audio_packets_out", metricAudioPacketsOut.getAndSet(0L))
         return payload.toString()
     }
 
@@ -697,6 +856,22 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             TAG,
             "device identity: type=${deviceIdentity.type} model=${deviceIdentity.model} manufacturer=${deviceIdentity.manufacturer}"
         )
+        // Honour the audio gate: if the host disabled audio for this session
+        // or the runtime permission was denied, fall back to audioExpected=false
+        // so the muxer never allocates an audio track. This is what keeps a
+        // capture without RECORD_AUDIO permission from producing a half-built
+        // mp4 that no player will read.
+        val audioGate = recordAudio && hasAudioPermission()
+        Log.i(
+            TAG,
+            "SpatialMP4 audio gate recordAudio=$recordAudio permission=${hasAudioPermission()} enabled=$audioGate layout=${audioChannelLayout.tag}"
+        )
+        if (recordAudio && !audioGate) {
+            emitSignal(
+                "camera_error",
+                "RECORD_AUDIO permission missing; audio track disabled for this session"
+            )
+        }
         val sessionConfig = com.spatialmp4.contract.SessionConfig(
             partialPath = partialPath.absolutePath,
             finalPath = finalPath.absolutePath,
@@ -716,7 +891,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             rgbDstr = rgbSideData.dstr,
             deviceType = deviceIdentity.type,
             deviceModel = deviceIdentity.model,
-            deviceManufacturer = deviceIdentity.manufacturer
+            deviceManufacturer = deviceIdentity.manufacturer,
+            audioExpected = audioGate,
+            audioChannelLayoutCode = audioChannelLayout.code
         )
         if (!sink.startSession(sessionConfig)) {
             // sink already logged + emitted; nothing more to do.
@@ -754,7 +931,33 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             return false
         }
         hevcEncoder = encoder
-        Log.i(TAG, "SpatialMP4 live writer started stereo=${rightConfig != null} partial=${partialPath.absolutePath} final=${finalPath.absolutePath}")
+
+        // v3: stand up the audio path only if the session truly enabled it.
+        // If audio cannot deliver AAC CSD, tell the muxer to clear its pending
+        // audio gate so the rest of the streams do not wait on a missing track.
+        if (audioGate) {
+            val audio = AudioCapture(
+                dataSink = sink,
+                sampleRateHz = audioSampleRateHz,
+                channelLayout = audioChannelLayout,
+                clockMonotonicToGodotTicksOffsetNs = getXrTimeToGodotTicksOffsetNs(),
+                fallbackSessionStartGodotTicksUs = sessionStartGodotTicksUs,
+                bitrateBps = audioBitrateBps,
+                onError = { message -> emitSignal("camera_error", message) },
+                onPacketEmitted = { metricAudioPacketsOut.incrementAndGet() }
+            )
+            if (!audio.start()) {
+                Log.w(TAG, "AudioCapture failed to start; disabling audio track for this session")
+                sink.onAudioUnavailable("AudioCapture failed to start")
+                audioCapture = null
+            } else {
+                audioCapture = audio
+            }
+        } else {
+            audioCapture = null
+        }
+
+        Log.i(TAG, "SpatialMP4 live writer started stereo=${rightConfig != null} audio=${audioCapture != null} partial=${partialPath.absolutePath} final=${finalPath.absolutePath}")
         return true
     }
 
@@ -1156,6 +1359,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     companion object {
         private const val REQUEST_CAMERA_PERMISSIONS = 4001
         private const val REQUEST_STORAGE_PERMISSION = 4002
+        private const val REQUEST_AUDIO_PERMISSIONS = 4003
         private const val IMAGE_READER_MAX_IMAGES = 3
         private const val TAG = "QuestCapturePlugin"
         private const val DEFAULT_RGB_BITRATE = 24_000_000
@@ -1164,7 +1368,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         private const val DEFAULT_POSE_DURATION_US = 11_111L
         private const val DEFAULT_HAND_DURATION_US = 33_333L
         private const val DEFAULT_INPUT_DURATION_US = 1_000L
-        private const val STOP_TIMEOUT_SECONDS = 5L
+        private const val STOP_TIMEOUT_SECONDS = 8L
         private const val META_CAMERA_SOURCE_PASSTHROUGH = 0
         private const val META_CAMERA_POSITION_LEFT = 0
         private const val META_CAMERA_POSITION_RIGHT = 1

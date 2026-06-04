@@ -21,7 +21,13 @@ extends RefCounted
 
 signal error(message: String)
 
-const EXPECTED_CONTRACT_VERSION := 2
+# Bumped in lock-step with com.spatialmp4.contract.CONTRACT_VERSION. v3 adds
+# the spatial audio hot-path: providers may emit AAC packets through
+# SpatialDataSink.onAudioPacket and the muxer writes them into the mp4's
+# audio track. GDScript hosts do NOT push audio frames themselves -- this
+# facade exists for parity with the rest of the surface; the actual audio
+# pipeline runs entirely Kotlin-side inside QuestCapturePlugin -> AudioCapture.
+const EXPECTED_CONTRACT_VERSION := 3
 
 var _plugin: Object
 

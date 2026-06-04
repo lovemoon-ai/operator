@@ -11,7 +11,7 @@
 
 # ADB=adb -s PB321XKGL4210070B
 ADB=adb
-GRADLE_USER_HOME?=$(CURDIR)/.gradle
+GRADLE_USER_HOME?=$(HOME)/.gradle
 
 apk_quest=build/quest/Operator.apk
 apk_pico=build/pico/Operator.apk

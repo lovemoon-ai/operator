@@ -3,6 +3,12 @@
     <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <!-- v3 spatial audio capture: AudioCapture opens a MediaRecorder.AudioSource.MIC
+         stream when the host session enables record_audio. The Godot export
+         preset also flips permissions/record_audio=true so the merged
+         manifest carries this through to the final APK. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <application>
         <meta-data

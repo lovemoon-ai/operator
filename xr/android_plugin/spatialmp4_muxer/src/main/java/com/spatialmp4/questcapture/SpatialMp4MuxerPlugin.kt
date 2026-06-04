@@ -20,6 +20,7 @@
 package com.spatialmp4.questcapture
 
 import android.util.Log
+import com.spatialmp4.contract.AudioStreamConfig
 import com.spatialmp4.contract.CONTRACT_VERSION
 import com.spatialmp4.contract.Intrinsics
 import com.spatialmp4.contract.RgbStreamConfig
@@ -62,6 +63,11 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
     @Volatile private var recordControllerPose: Boolean = true
     @Volatile private var recordHandData: Boolean = true
     @Volatile private var recordControllerInput: Boolean = true
+    // v3: audio gating mirrors the depth/pose flags. recordAudio is the
+    // host's "is the audio sink expected to run at all" bit; audioConfigured
+    // flips after the muxer accepts the first AAC CSD from the provider.
+    @Volatile private var recordAudio: Boolean = false
+    @Volatile private var audioConfigured: Boolean = false
 
     // ---- write counters (atomic getAndSet -> popMuxerMetricsJson) ---------
     private val metricNativeWriteRgb = AtomicLong(0L)
@@ -69,6 +75,10 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
     private val metricNativeWritePose = AtomicLong(0L)
     private val metricNativeWriteHand = AtomicLong(0L)
     private val metricNativeWriteControllerInput = AtomicLong(0L)
+    // v3: audio writes. Non-zero when an enabled session is actually feeding
+    // the encoder; zero proves the audio gate (recordAudio + audioConfigured)
+    // is suppressing writes when expected.
+    private val metricNativeWriteAudio = AtomicLong(0L)
 
     // =======================================================================
     // SpatialDataSink (contract)
@@ -102,7 +112,9 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             config.rgbDstr,
             config.deviceType,
             config.deviceModel,
-            config.deviceManufacturer
+            config.deviceManufacturer,
+            config.audioExpected,
+            config.audioChannelLayoutCode
         )
         if (handle == 0L) {
             emitError("Failed to start native SpatialMP4 writer")
@@ -112,13 +124,15 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         finalMp4Path = config.finalPath
         depthStreamConfigured = false
         rgbConfigured = false
+        audioConfigured = false
         lastDepthPtsUs = 0L
         recordDepth = config.depthExpected
         recordHeadPose = config.headPoseExpected
         recordControllerPose = config.controllerPoseExpected
         recordHandData = config.handJointsExpected
         recordControllerInput = config.controllerInputExpected
-        Log.i(TAG, "SpatialMP4 writer started -> ${config.finalPath}")
+        recordAudio = config.audioExpected
+        Log.i(TAG, "SpatialMP4 writer started -> ${config.finalPath} (audio=${config.audioExpected})")
         return true
     }
 
@@ -135,6 +149,8 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         nativeWriterHandle = 0L
         depthStreamConfigured = false
         rgbConfigured = false
+        audioConfigured = false
+        recordAudio = false
         val resolved = finalMp4Path
         finalMp4Path = ""
         return if (ok) resolved else ""
@@ -219,6 +235,80 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             return
         }
         metricNativeWriteDepth.incrementAndGet()
+    }
+
+    // ---- v3 audio hot path -------------------------------------------------
+
+    override fun onAudioCsd(config: AudioStreamConfig) {
+        val handle = nativeWriterHandle
+        if (handle == 0L) {
+            Log.w(TAG, "onAudioCsd called before startSession; ignoring")
+            return
+        }
+        if (!recordAudio) {
+            // Session config did not request audio; a stray CSD arrived
+            // anyway (e.g. provider misconfiguration). Drop silently rather
+            // than allocate a phantom track in the mp4.
+            return
+        }
+        if (audioConfigured) return
+        if (!SpatialMp4Native.nativeConfigureAudio(
+                handle,
+                config.sampleRateHz,
+                config.channelCount,
+                config.channelLayout.code,
+                config.csd
+            )
+        ) {
+            emitError("nativeConfigureAudio failed: ${SpatialMp4Native.nativeGetLastError(handle)}")
+            onAudioUnavailable("native audio configuration failed")
+            return
+        }
+        audioConfigured = true
+        Log.i(
+            TAG,
+            "audio stream configured: ${config.sampleRateHz} Hz, " +
+                "${config.channelCount} ch, layout=${config.channelLayout.tag}"
+        )
+    }
+
+    override fun onAudioPacket(
+        data: ByteBuffer,
+        ptsNs: Long,
+        durationNs: Long,
+        isKeyframe: Boolean
+    ) {
+        val handle = nativeWriterHandle
+        if (handle == 0L || !recordAudio) return
+        if (!audioConfigured) return
+        // The contract documents `data` as potentially a direct MediaCodec
+        // ByteBuffer whose backing memory dies after this method returns;
+        // copy through a ByteArray for the JNI hand-off. The encoder's
+        // output buffer is small (≤ a few KB per AAC frame) so the copy
+        // cost is negligible vs the HEVC packet path.
+        val bytes = ByteArray(data.remaining())
+        data.get(bytes)
+        val flags = if (isKeyframe) AV_PKT_FLAG_KEY else 0
+        val ok = SpatialMp4Native.nativeWriteAudioPacket(
+            handle, bytes, ptsNs / 1000L, durationNs / 1000L, flags
+        )
+        if (!ok) {
+            emitError("nativeWriteAudioPacket failed: ${SpatialMp4Native.nativeGetLastError(handle)}")
+            return
+        }
+        metricNativeWriteAudio.incrementAndGet()
+    }
+
+    override fun onAudioUnavailable(reason: String) {
+        val handle = nativeWriterHandle
+        if (handle == 0L) return
+        recordAudio = false
+        audioConfigured = false
+        if (!SpatialMp4Native.nativeDisableAudio(handle)) {
+            emitError("nativeDisableAudio failed: ${SpatialMp4Native.nativeGetLastError(handle)}")
+            return
+        }
+        Log.w(TAG, "audio disabled for active session: $reason")
     }
 
     override fun onError(message: String) {
@@ -391,6 +481,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             .put("native_pose_writes", metricNativeWritePose.getAndSet(0L))
             .put("native_hand_writes", metricNativeWriteHand.getAndSet(0L))
             .put("native_input_writes", metricNativeWriteControllerInput.getAndSet(0L))
+            .put("native_audio_writes", metricNativeWriteAudio.getAndSet(0L))
         return payload.toString()
     }
 

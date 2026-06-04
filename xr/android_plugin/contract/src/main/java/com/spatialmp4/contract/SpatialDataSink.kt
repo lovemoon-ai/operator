@@ -11,10 +11,11 @@
 //   * Configuration calls (onRgbCsd, onDepthMetadata) happen once per session
 //     on the provider's setup thread. Implementations must be re-entrant w.r.t.
 //     a single thread but need not be thread-safe across configure calls.
-//   * onRgbPacket / onDepthFrame are called on the producer's encoder thread
-//     (MediaCodec output thread or the OpenXR depth callback's deferred queue).
-//     Implementations should enqueue and return quickly (the current muxer's
-//     IO thread already does exactly this).
+//   * onRgbPacket / onDepthFrame / onAudioPacket are called on the producer's
+//     encoder or capture thread (MediaCodec output thread, AudioCapture drain
+//     thread, or the OpenXR depth callback's deferred queue). Implementations
+//     should enqueue and return quickly (the current muxer's IO thread already
+//     does exactly this).
 //   * ByteBuffers passed to onRgbPacket are typically direct MediaCodec output
 //     buffers whose backing memory is valid only until the call returns; the
 //     sink MUST copy out before suspending.
@@ -34,16 +35,20 @@ package com.spatialmp4.contract
 
 import java.nio.ByteBuffer
 
-// Bumped to 2 alongside Stage 2b: startSession / finishSession added so the
-// muxer owns the native writer handle outright. Older sinks (v1) lack those
-// hooks and silently no-op; binding still succeeds with a logged warning.
+// Bumped to 3 alongside spatial audio recording: the contract gains an audio
+// hot-path (onAudioCsd / onAudioPacket) plus matching SessionConfig flags so
+// the provider can hand a MediaCodec-encoded AAC stream to the muxer without
+// going through GDScript. The same SessionConfig also carries device identity
+// fields added in Stage 2 metadata work.
 //
-// Note: the device-identity fields on SessionConfig (deviceType / deviceModel
-// / deviceManufacturer) are additive with default empty-string values, so
-// they don't require a contract bump -- a provider built against an older
-// SessionConfig still type-checks against this version, and an older muxer
-// reading a newer SessionConfig just sees empty strings it skips writing.
-const val CONTRACT_VERSION: Int = 2
+// Compatibility matrix:
+//   * v2 provider <-> v2 muxer: audio absent on both sides, unchanged.
+//   * v3 provider <-> v3 muxer: audio packets flow over onAudioCsd /
+//     onAudioPacket when SessionConfig.audioExpected is true.
+//   * Mixed AARs with different embedded contract.jar revisions are unsupported;
+//     rebuild the plugins together instead of relying on Kotlin data-class
+//     constructor compatibility.
+const val CONTRACT_VERSION: Int = 3
 
 /**
  * Per-camera intrinsics + extrinsics + lens distortion, used both for RGB
@@ -117,7 +122,16 @@ data class SessionConfig(
     // simply skips writing the corresponding metadata key.
     val deviceType: String = "",
     val deviceModel: String = "",
-    val deviceManufacturer: String = ""
+    val deviceManufacturer: String = "",
+    // ---- v3 spatial audio fields (see CONTRACT_VERSION above) -----------
+    // audioExpected gates the muxer audio track: when false the writer
+    // never allocates an AAC stream and any stray onAudioPacket is dropped.
+    // audioChannelLayoutCode encodes the channel layout that the *encoder*
+    // produces (see AudioChannelLayout for the enum/int mapping). The muxer
+    // uses it to tag the audio track's stream metadata so a downstream
+    // player can distinguish e.g. true FOA from generic 4-channel PCM.
+    val audioExpected: Boolean = false,
+    val audioChannelLayoutCode: Int = AudioChannelLayout.STEREO.code
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -140,7 +154,9 @@ data class SessionConfig(
             rgbDstr.contentEquals(other.rgbDstr) &&
             deviceType == other.deviceType &&
             deviceModel == other.deviceModel &&
-            deviceManufacturer == other.deviceManufacturer
+            deviceManufacturer == other.deviceManufacturer &&
+            audioExpected == other.audioExpected &&
+            audioChannelLayoutCode == other.audioChannelLayoutCode
     }
 
     override fun hashCode(): Int {
@@ -163,6 +179,71 @@ data class SessionConfig(
         result = 31 * result + deviceType.hashCode()
         result = 31 * result + deviceModel.hashCode()
         result = 31 * result + deviceManufacturer.hashCode()
+        result = 31 * result + audioExpected.hashCode()
+        result = 31 * result + audioChannelLayoutCode
+        return result
+    }
+}
+
+/**
+ * Channel layout the audio encoder hands to the muxer. We carry it as an int
+ * code on the wire (data classes with enums cross AAR boundaries cleanly, but
+ * the JNI/MediaCodec layer wants a primitive) and convert at the edges.
+ *
+ *   MONO                       — single channel.
+ *   STEREO                     — L/R, front-facing.
+ *   AMBISONICS_FOA_ACN_SN3D    — first-order ambisonics, ACN channel order
+ *                                (W, Y, Z, X), SN3D normalization. This is
+ *                                the layout Google's spatial-audio MP4 atom
+ *                                set (SA3D/SAND) describes; for now we only
+ *                                tag it via stream metadata, with a TODO to
+ *                                write the proper SA3D box once the patched
+ *                                FFmpeg gains an emitter.
+ *   RAW_4CH                    — 4 channels in capture-device order, NOT
+ *                                ambisonic. Provider produced raw mic-array
+ *                                inputs (no beamforming) and the post-process
+ *                                pass will convert offline.
+ */
+enum class AudioChannelLayout(val code: Int, val channelCount: Int, val tag: String) {
+    MONO(0, 1, "mono"),
+    STEREO(1, 2, "stereo"),
+    AMBISONICS_FOA_ACN_SN3D(2, 4, "foa_acn_sn3d"),
+    RAW_4CH(3, 4, "raw_4ch");
+
+    companion object {
+        fun fromCode(code: Int): AudioChannelLayout =
+            values().firstOrNull { it.code == code } ?: STEREO
+    }
+}
+
+/**
+ * One-shot audio stream description, emitted as soon as the AAC encoder
+ * produces its codec-specific data (AudioSpecificConfig blob in `csd`).
+ * `sampleRateHz` and `channelCount` are the values actually used by the
+ * encoder after the device may have ignored the requested rate.
+ */
+data class AudioStreamConfig(
+    val sampleRateHz: Int,
+    val channelCount: Int,
+    val channelLayout: AudioChannelLayout,
+    val csd: ByteArray
+) {
+    // ByteArray equality is reference-based in data classes; override so unit
+    // tests / golden comparisons behave intuitively (mirrors RgbStreamConfig).
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is AudioStreamConfig) return false
+        return sampleRateHz == other.sampleRateHz &&
+            channelCount == other.channelCount &&
+            channelLayout == other.channelLayout &&
+            csd.contentEquals(other.csd)
+    }
+
+    override fun hashCode(): Int {
+        var result = sampleRateHz
+        result = 31 * result + channelCount
+        result = 31 * result + channelLayout.hashCode()
+        result = 31 * result + csd.contentHashCode()
         return result
     }
 }
@@ -267,6 +348,42 @@ interface SpatialDataSink {
         ptsNs: Long,
         durationNs: Long
     )
+
+    // ---- v3 audio hot path -------------------------------------------------
+    //
+    // Default no-ops keep v2 sinks bind-compatible. A v3 provider can call
+    // onAudioCsd / onAudioPacket unconditionally; if the muxer is older the
+    // bytes are dropped on the floor. The provider is responsible for
+    // honouring SessionConfig.audioExpected and not invoking these when the
+    // host disabled audio capture.
+
+    /**
+     * Called once when the AAC encoder emits its codec-specific data
+     * (AudioSpecificConfig). Default no-op for v2 compatibility.
+     */
+    fun onAudioCsd(config: AudioStreamConfig) {}
+
+    /**
+     * One encoded AAC packet. `data` is typically a direct ByteBuffer aliased
+     * to a MediaCodec output buffer whose memory becomes invalid the moment
+     * this call returns -- copy out before deferring work. ptsNs is in the
+     * same `godot_ticks_ns` domain as RGB; providers must anchor MediaCodec's
+     * `presentationTimeUs` to that domain before invoking. Default no-op for
+     * v2 compatibility.
+     */
+    fun onAudioPacket(
+        data: ByteBuffer,
+        ptsNs: Long,
+        durationNs: Long,
+        isKeyframe: Boolean
+    ) {}
+
+    /**
+     * Called by a provider after it requested audio in [SessionConfig] but
+     * cannot deliver AAC CSD/packets after all. Muxers should clear any pending
+     * audio gate so the rest of the session can continue writing.
+     */
+    fun onAudioUnavailable(reason: String) {}
 
     // ---- optional hooks ----------------------------------------------------
 
