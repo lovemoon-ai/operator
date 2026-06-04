@@ -16,15 +16,15 @@ BUILD_TYPE="${1:-Release}"
 BUILD_JOBS="${AHB_BUILD_JOBS:-4}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-DEPS_ROOT="${DEPS_ROOT:-$REPO_ROOT/.deps}"
-GODOT_CPP_SOURCE="$DEPS_ROOT/src/godot-cpp"
+OPERATOR_DEPS_CACHE_ROOT="${OPERATOR_DEPS_CACHE_ROOT:-$REPO_ROOT/.deps}"
+GODOT_CPP_SOURCE="$OPERATOR_DEPS_CACHE_ROOT/src/godot-cpp"
 GODOT_CPP_LINK="$SCRIPT_DIR/godot-cpp"
-if [[ "$DEPS_ROOT" == "$REPO_ROOT/.deps" ]]; then
+if [[ "$OPERATOR_DEPS_CACHE_ROOT" == "$REPO_ROOT/.deps" ]]; then
     GODOT_CPP_LINK_TARGET="../../../.deps/src/godot-cpp"
 else
     GODOT_CPP_LINK_TARGET="$GODOT_CPP_SOURCE"
 fi
-GODOT_CPP_BUILD="$DEPS_ROOT/build/godot-cpp"
+GODOT_CPP_BUILD="$OPERATOR_DEPS_CACHE_ROOT/build/godot-cpp"
 DEPS_SCRIPT="$REPO_ROOT/scripts/sync_deps.sh"
 cd "$SCRIPT_DIR"
 
@@ -38,7 +38,7 @@ if [[ -z "${ANDROID_NDK:-}" ]]; then
 fi
 
 ensure_godot_cpp_link() {
-    mkdir -p "$DEPS_ROOT/src" "$DEPS_ROOT/build"
+    mkdir -p "$OPERATOR_DEPS_CACHE_ROOT/src" "$OPERATOR_DEPS_CACHE_ROOT/build"
 
     if [[ -L "$GODOT_CPP_LINK" ]]; then
         rm -f "$GODOT_CPP_LINK"
