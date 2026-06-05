@@ -26,11 +26,16 @@ interface SessionPayload {
 }
 
 export async function getServerComponentUser(): Promise<User | null> {
-  const cfg = loadAuthConfig();
-  const store = await cookies();
-  const raw = store.get(COOKIE_NAME)?.value;
-  if (!raw) return null;
+  // Catch every conceivable failure mode (missing env at build time, no
+  // cookie, decode error, expired seal, deleted user). The caller's
+  // contract is "null means render as logged-out"; throwing here would
+  // either 500 a page or break Next's static prerender of the
+  // /_not-found shell.
   try {
+    const cfg = loadAuthConfig();
+    const store = await cookies();
+    const raw = store.get(COOKIE_NAME)?.value;
+    if (!raw) return null;
     const data = (await unsealData<SessionPayload>(raw, {
       password: cfg.sessionSecret,
     })) as SessionPayload;
