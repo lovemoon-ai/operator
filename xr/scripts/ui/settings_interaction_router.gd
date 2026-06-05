@@ -236,7 +236,14 @@ func _show_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3, target
 	var hit_point := ray_origin + ray_direction.normalized() * 0.25
 	if target.has_method("get_ray_hit_point"):
 		hit_point = target.get_ray_hit_point(ray_origin, ray_direction)
-	ui_pointer_visual.show_ray(ray_origin, ray_direction, hit_point, pressed)
+	# OpenXR composition layers are blended on top of the 3D scene by the XR
+	# runtime's compositor, so any 3D cursor mesh placed at the hit point
+	# would render BEHIND the panel no matter what (no_depth_test /
+	# render_priority only affect 3D-pass ordering). Composition-layer panels
+	# have their own in-viewport 2D cursor — suppress our 3D sphere in that
+	# case and let the laser carry the directional cue.
+	var suppress_target := target is OpenXRCompositionLayer
+	ui_pointer_visual.show_ray(ray_origin, ray_direction, hit_point, pressed, suppress_target)
 
 
 func _show_idle_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3) -> void:

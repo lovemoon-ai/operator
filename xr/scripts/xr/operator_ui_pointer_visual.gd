@@ -17,6 +17,10 @@ const IDLE_CORE_COLOR := Color(0.72, 0.74, 0.76, 0.24)
 const IDLE_TIP_COLOR := Color(0.72, 0.74, 0.76, 0.04)
 const HIT_FADE_START := 0.58
 const IDLE_FADE_START := 0.24
+# Lift the cursor + pulse off the panel along the ray so they never sit
+# half-embedded inside the UI quad (which renders with ALPHA_SCISSOR in
+# the opaque pass and would otherwise occlude the back half of the sphere).
+const TARGET_SURFACE_CLEARANCE_M := 0.003
 
 var _laser: MeshInstance3D
 var _target: MeshInstance3D
@@ -47,7 +51,19 @@ func _process(delta: float) -> void:
 	_pulse_material.albedo_color = Color(1.0, 0.647, 0.169, 0.18 - pulse * 0.08)
 
 
-func show_ray(ray_origin: Vector3, ray_direction: Vector3, hit_point: Vector3, pressed: bool = false) -> void:
+func show_ray(
+		ray_origin: Vector3,
+		ray_direction: Vector3,
+		hit_point: Vector3,
+		pressed: bool = false,
+		suppress_target: bool = false
+) -> void:
+	# `suppress_target` is set when pointing at an OpenXR composition-layer
+	# panel — that panel is blended by the XR compositor on top of the 3D
+	# scene, so a 3D sphere here can never appear in front of it. The panel
+	# draws its own 2D cursor inside its SubViewport (see
+	# CompositionViewportUI._build_cursor), so we just hide our sphere and
+	# leave the laser as the directional cue.
 	_build_visuals()
 
 	var direction := ray_direction.normalized()
@@ -59,16 +75,24 @@ func show_ray(ray_origin: Vector3, ray_direction: Vector3, hit_point: Vector3, p
 	_place_ray(ray_origin, direction, length_m, RAY_THICKNESS_M)
 	_apply_ray_style(HIT_CORE_COLOR, HIT_TIP_COLOR, HIT_FADE_START, 1.18 if pressed else 1.0)
 
-	_target_mesh.radius = TARGET_PRESSED_RADIUS_M if pressed else TARGET_RADIUS_M
-	_target_mesh.height = _target_mesh.radius * 2.0
 	_pressed = pressed
-	_target_material.albedo_color = Color(1.0, 0.647, 0.169, 0.72 if pressed else 0.50)
-	_target.global_position = hit_point
-	_pulse.global_position = hit_point
-	_pulse.visible = pressed
-
 	visible = true
 	_laser.visible = true
+
+	if suppress_target:
+		_target.visible = false
+		_pulse.visible = false
+		return
+
+	_target_mesh.radius = TARGET_PRESSED_RADIUS_M if pressed else TARGET_RADIUS_M
+	_target_mesh.height = _target_mesh.radius * 2.0
+	_target_material.albedo_color = Color(1.0, 0.647, 0.169, 0.72 if pressed else 0.50)
+	# Float the cursor slightly off the panel surface along the ray so the
+	# back of the sphere doesn't sink into the UI quad.
+	var lifted := hit_point - direction * (_target_mesh.radius + TARGET_SURFACE_CLEARANCE_M)
+	_target.global_position = lifted
+	_pulse.global_position = lifted
+	_pulse.visible = pressed
 	_target.visible = true
 
 
@@ -125,6 +149,11 @@ func _build_visuals() -> void:
 	_target_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_target_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_target_material.albedo_color = Color(1.0, 0.647, 0.169, 0.50)
+	# Always draw on top of UI panels — Viewport2Din3D quads render in the
+	# opaque pass with ALPHA_SCISSOR and would otherwise win the depth test
+	# against the half of the cursor sphere that sits at panel z.
+	_target_material.no_depth_test = true
+	_target_material.render_priority = 2
 
 	_target_mesh = SphereMesh.new()
 	_target_mesh.radius = TARGET_RADIUS_M
@@ -143,6 +172,8 @@ func _build_visuals() -> void:
 	_pulse_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	_pulse_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_pulse_material.albedo_color = Color(1.0, 0.647, 0.169, 0.16)
+	_pulse_material.no_depth_test = true
+	_pulse_material.render_priority = 1
 
 	_pulse_mesh = SphereMesh.new()
 	_pulse_mesh.radius = PULSE_RADIUS_M
