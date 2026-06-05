@@ -28,7 +28,7 @@ crash.log
 .deps/
 
 # Web workspace dependency/build output.
-web/node_modules/
+web/node_modules
 web/.next/
 web/modules/*/dist/
 web/data/

@@ -7,5 +7,6 @@ worktree:
     - xr/android/build/.gradle
     - xr/.gradle
     - examples/mujuco-arm-so101/.venv
+    - web/node_modules
 
 icon: ../xr/icon.png
