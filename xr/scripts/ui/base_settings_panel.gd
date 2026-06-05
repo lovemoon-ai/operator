@@ -89,10 +89,14 @@ func _setup_settings_panel(
 		title_key: String,
 		confirm_key: String,
 		layer_sort_order: int = 2,
-		initial_visible: bool = true
+		initial_visible: bool = true,
+		use_outer_scroll: bool = true
 ) -> void:
+	# `use_outer_scroll`: when true, _content is wrapped in a single ScrollContainer
+	# so the entire form scrolls as one. Subclasses like TwoColumnSettingsPanel pass
+	# false because they install per-section ScrollContainers inside _content instead.
 	var viewport := _setup_viewport_layer("SettingsViewport", viewport_size, quad_size_m, layer_sort_order, 18.0)
-	_build_panel(viewport, title_key, confirm_key)
+	_build_panel(viewport, title_key, confirm_key, use_outer_scroll)
 	visible = initial_visible
 
 
@@ -226,7 +230,7 @@ func _on_pointer_cleared() -> void:
 	_set_highlighted_slot(null)
 
 
-func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String) -> void:
+func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String, use_outer_scroll: bool = true) -> void:
 	var panel := PanelContainer.new()
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	# 保存引用以便 open/close 做缩放与淡入淡出动效
@@ -258,17 +262,20 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String)
 	title.add_theme_color_override("font_color", COL_TITLE)
 	root.add_child(title)
 
-	_scroll_container = ScrollContainer.new()
-	_scroll_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_scroll_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_scroll_container.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_scroll_container.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
-	root.add_child(_scroll_container)
-
 	_content = VBoxContainer.new()
 	_content.add_theme_constant_override("separation", 14)
 	_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_scroll_container.add_child(_content)
+	_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	if use_outer_scroll:
+		_scroll_container = ScrollContainer.new()
+		_scroll_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_scroll_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		_scroll_container.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+		_scroll_container.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+		root.add_child(_scroll_container)
+		_scroll_container.add_child(_content)
+	else:
+		root.add_child(_content)
 
 	_build_settings_content(_content)
 

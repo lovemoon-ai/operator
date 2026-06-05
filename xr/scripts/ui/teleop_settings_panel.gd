@@ -1,4 +1,4 @@
-extends "res://scripts/ui/base_settings_panel.gd"
+extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name TeleopSettingsPanel
 
 const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
@@ -64,7 +64,10 @@ var _discovered: Dictionary = {}
 
 
 func _init() -> void:
-	_setup_settings_panel(Vector2i(720, 884), Vector2(0.54, 0.663), "UI_SETTINGS_TITLE", "UI_OK", 2, false)
+	# 840 wide gives ~430px of detail column after sidebar + margins,
+	# 720 tall replaces the legacy 884 — there's no longer a single tall
+	# scroll list, each group fits comfortably.
+	_setup_two_column_panel(Vector2i(840, 720), Vector2(0.63, 0.54), "UI_SETTINGS_TITLE", "UI_OK", 2, false)
 	var settings := load_settings()
 	set_options(settings)
 	set_status(tr("UI_LOADED_SETTINGS" if bool(settings.get("loaded", false)) else "UI_USING_DEFAULTS"))
@@ -72,46 +75,37 @@ func _init() -> void:
 	print("[SettingsUI] ready (manual mode; %d discovered)" % (_discovery_option.item_count - 1))
 
 
-func _build_settings_content(_parent: VBoxContainer) -> void:
-	add_section_label("UI_CONNECT_TO")
+func _build_settings_content(parent: VBoxContainer) -> void:
+	build_two_column(parent)
+
+	# --- Connection group --------------------------------------------------
+	var connection := register_group("connection", "UI_GROUP_CONNECTION", "signal")
 
 	_discovery_option = OptionButton.new()
 	_discovery_option.custom_minimum_size.y = 55
 	_discovery_option.add_theme_font_size_override("font_size", 23)
 	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 	_discovery_option.item_selected.connect(_on_discovery_selected)
-	add_interactive(_content, _discovery_option)
+	add_interactive(connection, _discovery_option)
 
 	_ip_input = LineEdit.new()
 	_ip_input.placeholder_text = tr("UI_ROBOT_IP")
 	_ip_input.text = DEFAULT_IP
 	_ip_input.custom_minimum_size.y = 55
 	_ip_input.add_theme_font_size_override("font_size", 21)
-	add_interactive(_content, _ip_input)
+	add_interactive(connection, _ip_input)
 
 	_port_input = LineEdit.new()
 	_port_input.placeholder_text = tr("UI_PORT")
 	_port_input.text = str(DEFAULT_PORT)
 	_port_input.custom_minimum_size.y = 55
 	_port_input.add_theme_font_size_override("font_size", 21)
-	add_interactive(_content, _port_input)
-
-	add_section_label("UI_ROBOT_TYPE")
-
-	_type_option = OptionButton.new()
-	_type_option.custom_minimum_size.y = 55
-	_type_option.add_theme_font_size_override("font_size", 23)
-	for t in ROBOT_TYPES:
-		_add_option_item(_type_option, _robot_type_display(t), t, _icon_name_for_robot_type(t))
-	add_interactive(_content, _type_option)
-
-	_video_face_toggle = add_toggle(_content, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
-	_show_on_launch_toggle = add_toggle(_content, tr("UI_SHOW_SETTINGS_ON_LAUNCH"), DEFAULT_SHOW_ON_LAUNCH, 22)
+	add_interactive(connection, _port_input)
 
 	var status_row := HBoxContainer.new()
 	status_row.add_theme_constant_override("separation", 10)
 	status_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_content.add_child(status_row)
+	connection.add_child(status_row)
 
 	_discovery_spinner = DiscoverySpinner.new()
 	_discovery_spinner.accent_color = COL_ACCENT
@@ -124,6 +118,26 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	status_row.add_child(_status_label)
+
+	# --- Robot group -------------------------------------------------------
+	var robot := register_group("robot", "UI_GROUP_ROBOT", "robot-arm")
+
+	_type_option = OptionButton.new()
+	_type_option.custom_minimum_size.y = 55
+	_type_option.add_theme_font_size_override("font_size", 23)
+	for t in ROBOT_TYPES:
+		_add_option_item(_type_option, _robot_type_display(t), t, _icon_name_for_robot_type(t))
+	add_interactive(robot, _type_option)
+
+	# --- Display group -----------------------------------------------------
+	var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
+	_video_face_toggle = add_toggle(display, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
+
+	# --- Startup group -----------------------------------------------------
+	var startup := register_group("startup", "UI_GROUP_STARTUP", "power")
+	_show_on_launch_toggle = add_toggle(startup, tr("UI_SHOW_SETTINGS_ON_LAUNCH"), DEFAULT_SHOW_ON_LAUNCH, 22)
+
+	# Connection is shown by default (first registered), no explicit select needed.
 
 
 func _on_confirm_requested() -> void:

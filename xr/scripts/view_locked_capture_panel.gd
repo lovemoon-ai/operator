@@ -1,4 +1,4 @@
-extends "res://scripts/ui/base_settings_panel.gd"
+extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name ViewLockedCapturePanel
 
 const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
@@ -10,7 +10,10 @@ signal saved(options: Dictionary)
 ## `exit_requested` is inherited from BaseSettingsPanel — don't redeclare.
 signal scan_upload_url_requested
 
-const VIEWPORT_SIZE := Vector2i(720, 1180)
+# 840 wide gives ~430px of detail column after sidebar + margins. The 1180-tall
+# legacy viewport went away once the form was split into groups — every group
+# fits comfortably in 720, including the upload section.
+const VIEWPORT_SIZE := Vector2i(840, 720)
 const DEFAULT_SAVE_ROOT := "/sdcard/Movies/SpatialMP4"
 const STORAGE_REFRESH_SECONDS := 3.0
 const SETTINGS_PATH := "user://capture_settings.cfg"
@@ -32,10 +35,10 @@ var _storage_plugin_checked := false
 
 
 func _init() -> void:
-	# The shared BaseSettingsPanel keeps Save/Exit fixed and scrolls the
-	# middle form content, so this taller panel can absorb optional upload
-	# fields without hiding the action row.
-	_setup_settings_panel(VIEWPORT_SIZE, Vector2(0.54, 0.885), "UI_CAPTURE_SETTINGS_TITLE", "UI_SAVE", 2, true)
+	# Two-column layout: left sidebar of group names, right pane holds the
+	# active group's controls. Each group has its own scroll, so adding new
+	# fields only grows the affected group instead of stretching the panel.
+	_setup_two_column_panel(VIEWPORT_SIZE, Vector2(0.63, 0.54), "UI_CAPTURE_SETTINGS_TITLE", "UI_SAVE", 2, true)
 	set_options(load_settings())
 
 
@@ -92,8 +95,11 @@ func open() -> void:
 	_refresh_storage_usage()
 
 
-func _build_settings_content(_parent: VBoxContainer) -> void:
-	add_section_label("UI_RECORD_CONTROL")
+func _build_settings_content(parent: VBoxContainer) -> void:
+	build_two_column(parent)
+
+	# --- Recording group ---------------------------------------------------
+	var recording := register_group("recording", "UI_RECORD_CONTROL", "handshake")
 
 	_mode = OptionButton.new()
 	_mode.custom_minimum_size.y = 55
@@ -104,28 +110,29 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	_mode.set_item_metadata(1, "hands")
 	_mode.add_item(tr("UI_HEAD_BUTTONS"))
 	_mode.set_item_metadata(2, "head")
-	add_interactive(_content, _mode)
+	add_interactive(recording, _mode)
 
-	add_section_label("UI_CAPTURED_STREAMS")
-
-	_add_stream_toggle("stereo_rgb", tr("UI_STEREO_RGB"))
-	_add_stream_toggle("record_depth", tr("UI_DEPTH"))
-	_add_stream_toggle("record_head_pose", tr("UI_HEAD_POSE"))
-	_add_stream_toggle("record_controller_pose", tr("UI_CONTROLLER_POSES"))
-	_add_stream_toggle("record_hand_data", tr("UI_HAND_JOINTS"))
+	# --- Streams group -----------------------------------------------------
+	var streams := register_group("streams", "UI_CAPTURED_STREAMS", "camera")
+	_add_stream_toggle(streams, "stereo_rgb", tr("UI_STEREO_RGB"))
+	_add_stream_toggle(streams, "record_depth", tr("UI_DEPTH"))
+	_add_stream_toggle(streams, "record_head_pose", tr("UI_HEAD_POSE"))
+	_add_stream_toggle(streams, "record_controller_pose", tr("UI_CONTROLLER_POSES"))
+	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"))
 	# Audio is privacy-sensitive (opens the microphone), so the toggle starts
 	# OFF -- the operator has to flip it explicitly. The capture pipeline
 	# additionally gates on RECORD_AUDIO runtime permission downstream.
-	_add_stream_toggle("record_audio", tr("UI_RECORD_AUDIO"), false)
+	_add_stream_toggle(streams, "record_audio", tr("UI_RECORD_AUDIO"), false)
 
-	add_section_label("UI_OUTPUTS")
-
+	# --- Outputs group -----------------------------------------------------
+	var outputs := register_group("outputs", "UI_OUTPUTS", "check")
 	# Controller/hand poses always go into the MP4 mett tracks. This toggle only
 	# controls whether they are ALSO written as separate JSONL sidecar files for
 	# debugging. Default off to avoid the extra main-thread JSON cost.
-	_add_stream_toggle("save_controller_hand_sidecar", tr("UI_CONTROLLER_HAND_SIDECAR"), false)
+	_add_stream_toggle(outputs, "save_controller_hand_sidecar", tr("UI_CONTROLLER_HAND_SIDECAR"), false)
 
-	add_section_label("UI_SAVE_PATH")
+	# --- Storage group -----------------------------------------------------
+	var storage := register_group("storage", "UI_GROUP_STORAGE", "plug")
 
 	_save_root = LineEdit.new()
 	_save_root.text = DEFAULT_SAVE_ROOT
@@ -133,17 +140,17 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	_save_root.custom_minimum_size.y = 55
 	_save_root.add_theme_font_size_override("font_size", 19)
 	_save_root.text_changed.connect(_on_save_root_changed)
-	add_interactive(_content, _save_root)
+	add_interactive(storage, _save_root)
 
-	_storage_label = add_status_label(tr("UI_STORAGE_CHECKING"))
+	_storage_label = _add_status_label_to(storage, tr("UI_STORAGE_CHECKING"))
 
-	# --- Upload section -----------------------------------------------
+	# --- Upload group ------------------------------------------------------
 	# Optional: if `upload_url` is non-empty and `upload_on_finalize` is
 	# on, every finalized session is queued for resumable upload (TUS
 	# 1.0.0) to the configured endpoint. See
 	# `claw/issues/010-ego-data-upload.md`. Settings persist via
 	# EgoSettingsStore across app launches.
-	add_section_label("UI_UPLOAD")
+	var upload := register_group("upload", "UI_UPLOAD", "signal")
 
 	# [LineEdit — Upload URL] [📷 scan button]
 	# The scan button only renders on Android (gated by
@@ -153,7 +160,7 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 	var upload_url_row := HBoxContainer.new()
 	upload_url_row.add_theme_constant_override("separation", 8)
 	upload_url_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_content.add_child(upload_url_row)
+	upload.add_child(upload_url_row)
 
 	_upload_url = LineEdit.new()
 	_upload_url.placeholder_text = "https://my-ingest.local:8443/ingest"
@@ -176,11 +183,11 @@ func _build_settings_content(_parent: VBoxContainer) -> void:
 		scan_slot.size_flags_horizontal = Control.SIZE_SHRINK_END
 		scan_slot.custom_minimum_size = Vector2(78, 55)
 
-	_upload_status_label = add_status_label("")
+	_upload_status_label = _add_status_label_to(upload, "")
 	_upload_status_label.visible = false
 
-	_add_stream_toggle("upload_on_finalize", tr("UI_AUTO_UPLOAD_ON_STOP"), true)
-	_add_stream_toggle("keep_local_after_upload", tr("UI_KEEP_LOCAL_AFTER_UPLOAD"), true)
+	_add_stream_toggle(upload, "upload_on_finalize", tr("UI_AUTO_UPLOAD_ON_STOP"), true)
+	_add_stream_toggle(upload, "keep_local_after_upload", tr("UI_KEEP_LOCAL_AFTER_UPLOAD"), true)
 
 
 func _on_confirm_requested() -> void:
@@ -190,9 +197,21 @@ func _on_confirm_requested() -> void:
 	saved.emit(options)
 
 
-func _add_stream_toggle(key: String, label: String, default_on: bool = true) -> void:
-	var toggle := add_toggle(_content, label, default_on, 23)
+func _add_stream_toggle(parent: Container, key: String, label: String, default_on: bool = true) -> void:
+	var toggle := add_toggle(parent, label, default_on, 23)
 	_stream_toggles[key] = toggle
+
+
+func _add_status_label_to(parent: Container, initial_text: String) -> Label:
+	# add_status_label() in BaseSettingsPanel hard-codes _content as the parent,
+	# but in the two-column layout we want the label inside a specific group.
+	var lbl := Label.new()
+	lbl.text = initial_text
+	lbl.add_theme_font_size_override("font_size", 18)
+	lbl.add_theme_color_override("font_color", COL_STATUS)
+	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	parent.add_child(lbl)
+	return lbl
 
 
 func _toggle_enabled(key: String) -> bool:
