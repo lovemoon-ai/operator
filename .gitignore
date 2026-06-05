@@ -81,3 +81,7 @@ xr/addons/qr_scanner/bin/*.jar
 # claude
 *.lock
 settings.local.json
+
+# soft link, ignore 
+xr/addons/godot-xr-tools
+xr/native/ahb_decoder/godot-cpp
