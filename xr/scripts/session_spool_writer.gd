@@ -146,6 +146,77 @@ func close() -> void:
 	if saved_path.is_empty() and not attempted_native_finish and not output_mp4_path.is_empty():
 		saved_path = output_mp4_path
 
+	# Compute SHA-256 of the finalized mp4 and patch it into the
+	# manifest. The ingest server uses this to detect transit corruption
+	# (proxy bug, half-PATCH on flaky Wi-Fi that somehow still satisfied
+	# Content-Length, etc.). Hashing a 100 MB mp4 takes ~200 ms on the
+	# Quest 3, well inside the post-stop UX budget — the user already
+	# sees the "Saved" toast while we run.
+	if not saved_path.is_empty():
+		var media_hash := _compute_file_sha256(saved_path)
+		if not media_hash.is_empty():
+			_rewrite_manifest_with_media_integrity(saved_path, media_hash)
+		else:
+			push_warning("session_spool_writer: sha256 compute failed for %s" % saved_path)
+
+
+# Stream the file in chunks so we never hold more than CHUNK bytes in
+# memory; the Quest 3 IO subsystem reads ~1 GB/s sequentially so the
+# wall time is dominated by SHA cost (~80 MB/s on this hardware).
+func _compute_file_sha256(path: String) -> String:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		push_warning("session_spool_writer: cannot open %s for hashing (%d)" % [path, FileAccess.get_open_error()])
+		return ""
+	const CHUNK := 4 * 1024 * 1024
+	var ctx := HashingContext.new()
+	if ctx.start(HashingContext.HASH_SHA256) != OK:
+		f.close()
+		return ""
+	while f.get_position() < f.get_length():
+		var data := f.get_buffer(CHUNK)
+		if data.is_empty():
+			break
+		if ctx.update(data) != OK:
+			f.close()
+			return ""
+	f.close()
+	return ctx.finish().hex_encode()
+
+
+# Rewrite manifest.json in place to add the freshly-computed media
+# hash + size + filename under `artifacts.media`. We keep the original
+# top-level fields untouched so any v3 reader that doesn't know about
+# `artifacts` keeps working — this is purely additive.
+func _rewrite_manifest_with_media_integrity(media_path: String, media_sha256: String) -> void:
+	var manifest_path := "%s/manifest.json" % session_dir
+	var reader := FileAccess.open(manifest_path, FileAccess.READ)
+	if reader == null:
+		push_warning("session_spool_writer: manifest missing at %s; skipping integrity rewrite" % manifest_path)
+		return
+	var text := reader.get_as_text()
+	reader.close()
+	var parsed: Variant = JSON.parse_string(text)
+	if not (parsed is Dictionary):
+		push_warning("session_spool_writer: manifest at %s is not a JSON object; skipping integrity rewrite" % manifest_path)
+		return
+	var manifest: Dictionary = parsed
+	var media_bytes := 0
+	var size_probe := FileAccess.open(media_path, FileAccess.READ)
+	if size_probe != null:
+		media_bytes = int(size_probe.get_length())
+		size_probe.close()
+	var artifacts_field: Variant = manifest.get("artifacts", {})
+	var artifacts: Dictionary = artifacts_field if artifacts_field is Dictionary else {}
+	artifacts["media"] = {
+		"filename": media_path.get_file(),
+		"bytes": media_bytes,
+		"sha256": media_sha256,
+		"hash_algo": "sha256",
+	}
+	manifest["artifacts"] = artifacts
+	_write_json(manifest_path, manifest)
+
 
 func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, write_jsonl: bool = true) -> void:
 	# The mp4 `mett` head-pose stream is always fed at the caller's sample
