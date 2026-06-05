@@ -8,6 +8,9 @@ const IDLE_CORE_COLOR := Color(0.72, 0.74, 0.76, 0.24)
 const IDLE_TIP_COLOR := Color(0.72, 0.74, 0.76, 0.04)
 const HIT_FADE_START := 0.58
 const IDLE_FADE_START := 0.24
+# Extra clearance pushed on top of the sphere radius so the cursor never
+# z-fights with or sinks into the panel surface it is pointing at.
+const TARGET_SURFACE_CLEARANCE := 0.002
 
 
 func _enter_tree() -> void:
@@ -32,12 +35,14 @@ func _button_released() -> void:
 
 func _visible_hit(at: Vector3) -> void:
 	super._visible_hit(at)
+	_lift_target_above_surface(at)
 	_apply_ray_style(HIT_CORE_COLOR, HIT_TIP_COLOR, HIT_FADE_START, 1.0)
 	_sync_laser_shader_length()
 
 
 func _visible_move(at: Vector3) -> void:
 	super._visible_move(at)
+	_lift_target_above_surface(at)
 	_apply_ray_style(HIT_CORE_COLOR, HIT_TIP_COLOR, HIT_FADE_START, 1.0)
 	_sync_laser_shader_length()
 
@@ -48,6 +53,36 @@ func _visible_miss() -> void:
 	if has_node("Laser"):
 		$Laser.visible = enabled and show_laser != LaserShow.HIDE
 	_sync_laser_shader_length()
+
+
+# Push the cursor sphere along the hit surface normal so it sits in front of
+# the panel instead of being half-embedded inside it. The base
+# XRToolsFunctionPointer parks `$Target` with its center on the collision
+# point, which puts the back hemisphere of the sphere behind the panel
+# surface — and because both the panel quad and the sphere are transparent
+# (no depth write), the transparency sort can also draw the panel quad over
+# the sphere, making the cursor look like it lives "behind" the UI.
+func _lift_target_above_surface(at: Vector3) -> void:
+	if not show_target:
+		return
+	var target_node := get_node_or_null("Target") as MeshInstance3D
+	if target_node == null or not target_node.visible:
+		return
+
+	var normal := Vector3.ZERO
+	var raycast := get_node_or_null("RayCast") as RayCast3D
+	if raycast and raycast.is_colliding():
+		normal = raycast.get_collision_normal()
+	if normal == Vector3.ZERO:
+		# Fall back to the direction from the hit point back toward the
+		# pointer origin — guaranteed to push the sphere toward the user.
+		normal = global_transform.origin - at
+	if normal.length_squared() < 0.000001:
+		return
+	normal = normal.normalized()
+
+	var offset := target_radius + TARGET_SURFACE_CLEARANCE
+	target_node.global_transform.origin = at + normal * offset
 
 
 func _sync_laser_shader_length() -> void:
