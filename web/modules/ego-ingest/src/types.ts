@@ -39,6 +39,14 @@ export interface SessionRecord {
   totalBytes: number;
   /** Best-effort parsed from manifest.json after it's uploaded. */
   manifest?: Record<string, unknown>;
+  /**
+   * Set when the orphan watchdog declared this session abandoned
+   * (manifest landed but media didn't show up within
+   * `IngestOptions.orphanTimeoutMs`). Visible to the UI so the
+   * "Incomplete upload" banner can distinguish "still waiting" from
+   * "gave up waiting".
+   */
+  expired?: { at: string; reason: string };
 }
 
 export interface FinalizedArtifact {
@@ -82,4 +90,12 @@ export interface IngestOptions {
   onSession?: OnSessionHook;
   /** Schema versions this server will accept. Default: current only. */
   acceptedSchemas?: readonly string[];
+  /**
+   * How long to wait, after a session's manifest has landed, for the
+   * companion media artifact before declaring the session abandoned.
+   * Default 15 minutes. Set `0` (or a negative value) to disable the
+   * watchdog entirely — useful for tests + ingest pipelines where
+   * media might arrive hours later.
+   */
+  orphanTimeoutMs?: number;
 }

@@ -28,6 +28,17 @@ export interface SessionStore {
     manifest?: Record<string, unknown>,
   ): Promise<SessionRecord>;
 
+  /**
+   * Mark a session as abandoned (manifest arrived but media didn't
+   * follow within the orphan timeout). Returns the updated record so
+   * the caller can emit a `session.updated` event. No-op if the
+   * session doesn't exist; idempotent if already expired.
+   */
+  markSessionExpired(
+    sessionId: string,
+    expired: { at: string; reason: string },
+  ): Promise<SessionRecord | null>;
+
   getSession(id: string): Promise<SessionRecord | null>;
 
   listSessions(opts?: {

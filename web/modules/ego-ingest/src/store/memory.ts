@@ -79,6 +79,19 @@ export class MemoryStore implements SessionStore {
     return { ...session, artifacts: { ...session.artifacts } };
   }
 
+  async markSessionExpired(
+    sessionId: string,
+    expired: { at: string; reason: string },
+  ): Promise<SessionRecord | null> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    if (!s.expired) {
+      s.expired = expired;
+      this.schedulePersist();
+    }
+    return { ...s, artifacts: { ...s.artifacts } };
+  }
+
   async getSession(id: string): Promise<SessionRecord | null> {
     const s = this.sessions.get(id);
     return s ? { ...s, artifacts: { ...s.artifacts } } : null;

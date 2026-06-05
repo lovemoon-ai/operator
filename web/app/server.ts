@@ -89,6 +89,13 @@ async function main() {
         : undefined,
       acceptedSchemas: [SCHEMA_VERSION],
       maxUploadSizeBytes: Number(process.env.MAX_BYTES ?? 100 * 1024 ** 3),
+      // Manifest-only sessions get marked `expired` after this long.
+      // Default 15min; the env var accepts ms for tests
+      // (`ORPHAN_TIMEOUT_MS=5000` to validate the watchdog without
+      // waiting). Set to 0 to disable.
+      orphanTimeoutMs: process.env.ORPHAN_TIMEOUT_MS
+        ? Number(process.env.ORPHAN_TIMEOUT_MS)
+        : undefined,
       onSession: async (session) => {
         // eslint-disable-next-line no-console
         console.log(

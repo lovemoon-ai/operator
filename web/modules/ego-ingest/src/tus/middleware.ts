@@ -15,6 +15,7 @@ import { parseUploadMetadata } from "./metadata.js";
 
 const TUS_EXTENSIONS = "creation,termination";
 const DEFAULT_MAX_UPLOAD = 100 * 1024 ** 3; // 100 GB
+const DEFAULT_ORPHAN_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
 /**
  * Mount as `app.use('/ingest', createIngestMiddleware(...))`.
@@ -37,6 +38,121 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
   const auth = opts.auth ?? alwaysAllow;
   const acceptedSchemas = new Set(opts.acceptedSchemas ?? [SCHEMA_VERSION]);
   const maxUploadBytes = opts.maxUploadSizeBytes ?? DEFAULT_MAX_UPLOAD;
+  const orphanTimeoutMs = opts.orphanTimeoutMs ?? DEFAULT_ORPHAN_TIMEOUT_MS;
+
+  // Map of session_id → setTimeout handle for the watchdog. Scheduled
+  // when manifest lands without media; cleared when media (or any
+  // non-manifest artifact, which counts as the session "really
+  // started") arrives. We use a sparse Map instead of a per-session
+  // record so the orphan logic costs zero memory for sessions that
+  // complete normally.
+  const orphanTimers = new Map<string, NodeJS.Timeout>();
+  function clearOrphanTimer(sessionId: string): void {
+    const t = orphanTimers.get(sessionId);
+    if (t) {
+      clearTimeout(t);
+      orphanTimers.delete(sessionId);
+    }
+  }
+  function scheduleOrphanTimer(sessionId: string, durationMs?: number): void {
+    const ms = durationMs ?? orphanTimeoutMs;
+    if (orphanTimeoutMs <= 0) return; // watchdog globally disabled
+    clearOrphanTimer(sessionId);
+    if (ms <= 0) {
+      // Resume path: the deadline has already passed (manifest is
+      // older than orphanTimeoutMs). Fire immediately on the next
+      // tick so the persisted index gets the `expired` flag without
+      // blocking server startup on a sync call.
+      setImmediate(() => void runOrphanCheck(sessionId).catch(logTimerError));
+      return;
+    }
+    orphanTimers.set(
+      sessionId,
+      setTimeout(() => {
+        orphanTimers.delete(sessionId);
+        // The setTimeout callback can't be async (Node treats a
+        // returned Promise rejection as unhandled), so we wrap the
+        // real work in an explicitly-caught helper. Any store/event
+        // failure now lands in a clear log line instead of crashing
+        // the ingest process.
+        void runOrphanCheck(sessionId).catch(logTimerError);
+      }, ms).unref(),
+    );
+  }
+
+  async function runOrphanCheck(sessionId: string): Promise<void> {
+    const s = await opts.store.getSession(sessionId);
+    if (!s) return; // session got deleted in the meantime
+    if (s.artifacts["media"]) return; // raced — media arrived just before timer fired
+    if (s.expired) return; // already marked
+    const reason =
+      `no media artifact within ${formatDuration(orphanTimeoutMs)} of manifest landing`;
+    const updated = await opts.store.markSessionExpired(sessionId, {
+      at: new Date().toISOString(),
+      reason,
+    });
+    // eslint-disable-next-line no-console
+    console.warn(`[ego-ingest] session ${sessionId} expired: ${reason}`);
+    if (updated) events.emit({ type: "session.updated", session: updated });
+    events.emit({ type: "session.expired", sessionId, reason });
+  }
+
+  function logTimerError(err: unknown): void {
+    // eslint-disable-next-line no-console
+    console.error(`[ego-ingest] orphan watchdog failed:`, err);
+  }
+
+  /**
+   * Resume watchdogs after a server restart. The in-memory timer
+   * map is process-local — without this, a manifest that landed
+   * 14 minutes before a restart would lose its 1-minute remaining
+   * countdown and get a fresh 15 minutes instead, hiding stuck
+   * uploads from the dashboard.
+   *
+   * For each session that has a manifest but no media and isn't
+   * already flagged expired, compute remaining time = (manifest
+   * storedAt + orphanTimeoutMs) − now and schedule with that.
+   * Sessions whose deadline already passed fire on the next tick
+   * via the `durationMs <= 0` branch in scheduleOrphanTimer.
+   *
+   * The scan pages through `listSessions` 500 at a time so even a
+   * 100k-session deployment is bounded by store IO, not by us
+   * holding the whole index in memory at once.
+   */
+  async function rehydrateOrphanTimers(): Promise<number> {
+    if (orphanTimeoutMs <= 0) return 0;
+    let cursor: string | undefined;
+    let resumed = 0;
+    const now = Date.now();
+    do {
+      const page = await opts.store.listSessions({ limit: 500, cursor, order: "desc" });
+      for (const s of page.items) {
+        if (s.expired) continue;
+        const manifest = s.artifacts["manifest"];
+        if (!manifest) continue;
+        if (s.artifacts["media"]) continue;
+        const landedAt = Date.parse(manifest.storedAt);
+        if (!Number.isFinite(landedAt)) continue; // pathological; let it expire on next manifest event
+        const remaining = landedAt + orphanTimeoutMs - now;
+        scheduleOrphanTimer(s.id, remaining);
+        resumed += 1;
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    return resumed;
+  }
+
+  // Kick off rehydration without blocking the middleware constructor
+  // return. The middleware is ready to accept uploads immediately;
+  // resumed timers just settle into place in the background.
+  rehydrateOrphanTimers()
+    .then((n) => {
+      if (n > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[ego-ingest] resumed ${n} orphan watchdog timer(s) from disk`);
+      }
+    })
+    .catch(logTimerError);
 
   const router = express.Router();
 
@@ -235,13 +351,29 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
         record.metadata.artifact_kind,
       );
       let corrupt: boolean | undefined;
-      if (declared && finalized.sha256 && declared !== finalized.sha256) {
-        corrupt = true;
-        // eslint-disable-next-line no-console
-        console.error(
-          `[ego-ingest] sha256 mismatch for ${record.sessionId}/${record.metadata.artifact_kind}: ` +
-            `expected=${declared} actual=${finalized.sha256}`,
-        );
+      if (declared) {
+        if (!finalized.sha256) {
+          // Manifest expects us to verify but the storage layer was
+          // configured without `computeHashes`. We CANNOT prove
+          // integrity here, so fail closed rather than silently
+          // letting an unverified artifact through. This is the only
+          // way to keep the "media corrupt → worker skipped"
+          // guarantee meaningful — otherwise a misconfigured
+          // deployment looks fine until corruption silently happens.
+          corrupt = true;
+          // eslint-disable-next-line no-console
+          console.error(
+            `[ego-ingest] declared sha256 ${declared} for ${record.sessionId}/${record.metadata.artifact_kind} ` +
+              `but server-side hashing is disabled — failing closed (set computeHashes:true on the storage driver)`,
+          );
+        } else if (declared !== finalized.sha256) {
+          corrupt = true;
+          // eslint-disable-next-line no-console
+          console.error(
+            `[ego-ingest] sha256 mismatch for ${record.sessionId}/${record.metadata.artifact_kind}: ` +
+              `expected=${declared} actual=${finalized.sha256}`,
+          );
+        }
       }
 
       let session = await opts.store.upsertSessionArtifact(
@@ -267,11 +399,22 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
         for (const [kind, art] of Object.entries(session.artifacts)) {
           if (kind === "manifest" || art.corrupt) continue;
           const expected = extractDeclaredSha256(manifestJson, kind);
-          if (!expected || !art.sha256 || expected === art.sha256) continue;
+          if (!expected) continue;
+          // Symmetric to part 1: missing server-side hash is a fail-closed
+          // condition when the manifest declares one.
+          let reason: string | null = null;
+          if (!art.sha256) {
+            reason =
+              `declared sha256 ${expected} but no server-computed sha256 on the stored artifact ` +
+              `(computeHashes likely disabled when this artifact landed)`;
+          } else if (art.sha256 !== expected) {
+            reason = `expected=${expected} actual=${art.sha256}`;
+          }
+          if (!reason) continue;
           // eslint-disable-next-line no-console
           console.error(
-            `[ego-ingest] sha256 mismatch for ${record.sessionId}/${kind} (detected via late manifest): ` +
-              `expected=${expected} actual=${art.sha256}`,
+            `[ego-ingest] integrity failure for ${record.sessionId}/${kind} ` +
+              `(detected via late manifest): ${reason}`,
           );
           session = await opts.store.upsertSessionArtifact(record.sessionId, {
             ...art,
@@ -284,6 +427,20 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
       await opts.store.deleteResource(id);
       events.emit({ type: "resource.finalized", resourceId: id, sessionId: record.sessionId });
       events.emit({ type: "session.updated", session });
+
+      // Orphan watchdog wiring:
+      //   - manifest landed, media not yet → arm the timer
+      //   - media (or anything other than manifest) landed → disarm
+      //   - already-expired sessions can recover: receiving media
+      //     after expiration is benign because we just clear the
+      //     timer and let the worker pipeline gate decide (still
+      //     gated on !corrupt + manifest present)
+      const kind = record.metadata.artifact_kind;
+      if (kind === "manifest" && !session.artifacts["media"]) {
+        scheduleOrphanTimer(record.sessionId);
+      } else if (kind !== "manifest") {
+        clearOrphanTimer(record.sessionId);
+      }
 
       // Gate the worker pipeline on three conditions:
       //   (1) media artifact is on disk
@@ -351,6 +508,12 @@ function newResourceId(): string {
 
 function trimSlashes(s: string): string {
   return s.replace(/\/+$/, "");
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 60 * 60_000) return `${Math.round(ms / 60_000)}m`;
+  return `${(ms / (60 * 60_000)).toFixed(1)}h`;
 }
 
 /**

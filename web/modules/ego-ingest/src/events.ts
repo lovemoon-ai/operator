@@ -6,7 +6,18 @@ export type IngestEvent =
   | { type: "resource.created"; resource: ResourceRecord }
   | { type: "resource.progress"; resourceId: string; offset: number; uploadLength: number }
   | { type: "resource.finalized"; resourceId: string; sessionId: string }
-  | { type: "session.updated"; session: SessionRecord };
+  | { type: "session.updated"; session: SessionRecord }
+  | {
+      /**
+       * Fired by the orphan watchdog when a session has had a
+       * manifest artifact for longer than the configured timeout
+       * without media following it. The session is left in-place
+       * (artifacts still on disk) but workers never fire.
+       */
+      type: "session.expired";
+      sessionId: string;
+      reason: string;
+    };
 
 /**
  * Tiny typed wrapper around node:events. The dashboard's SSE endpoint

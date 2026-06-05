@@ -113,6 +113,10 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders?.();
+    // Tell the EventSource client to back off to 15s reconnects on
+    // disconnect (default is 3s, which would thunder-herd the server
+    // on restart when every open dashboard tab reconnects at once).
+    res.write("retry: 15000\n\n");
     // Heartbeat every 25 s to keep proxies from idling out the socket.
     const heartbeat = setInterval(() => res.write(": ping\n\n"), 25_000);
     const unsubscribe = opts.events.subscribe((event) => {
@@ -147,7 +151,12 @@ function contentTypeFor(kind: string, filename: string): string {
   const ext = filename.includes(".") ? filename.split(".").pop()!.toLowerCase() : "";
   if (ext === "json" || kind === "manifest") return "application/json";
   if (ext === "mp4" || kind === "media" || kind === "preview") return "video/mp4";
-  if (ext === "rrd" || kind === "rrd") return "application/vnd.rerun.rrd";
+  // Rerun web-viewer dispatches purely on the URL's `.rrd` suffix —
+  // it never reads Content-Type. `application/vnd.rerun.rrd` would be
+  // the "spec-correct" MIME but isn't registered with IANA, and some
+  // strict corporate proxies bounce unknown vendor MIMEs. Plain
+  // octet-stream is safer and doesn't change viewer behavior.
+  if (ext === "rrd" || kind === "rrd") return "application/octet-stream";
   if (ext === "tar") return "application/x-tar";
   if (ext === "zip") return "application/zip";
   return "application/octet-stream";
