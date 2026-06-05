@@ -1,9 +1,9 @@
 /**
  * Express middleware + auth routes used by server.ts.
  *
- *   GET  /login                  → start OIDC flow (or stamp dev cookie)
- *   GET  /api/auth/callback      → finish OIDC flow
- *   POST /logout                 → clear cookie
+ *   GET  /auth/start             → start conductor SSO (or stamp dev cookie)
+ *   GET  /api/auth/callback      → finish conductor SSO
+ *   GET|POST /auth/logout        → clear cookie
  *
  *   browserAuthMiddleware()      → for every browser-facing route, looks
  *                                  up the user from the iron-session
@@ -13,14 +13,14 @@
  *                                  requests get a 302 to /login (HTML
  *                                  navigations) or 401 (XHR / fetch).
  */
-import type { NextFunction, Request, RequestHandler, Response } from "express";
+import type { Request, RequestHandler, Response } from "express";
 import express from "express";
 
 import { runAsUser } from "../auth-context.js";
 import { findOrCreateUserBySub, getUserById, type User } from "../users.js";
 import { seedDemoForUser } from "../seed.js";
 import { loadAuthConfig, type AuthConfig } from "./config.js";
-import { exchangeCode, getOidcClient, newAuthRequest } from "./oidc.js";
+import { buildAuthorizeUrl, exchangeCode } from "./conductor.js";
 import { readSession } from "./session.js";
 
 declare module "express-serve-static-core" {
@@ -36,12 +36,12 @@ function config(): AuthConfig {
   return cachedConfig;
 }
 
-// --- /login ---------------------------------------------------------------
+// --- /auth/start ----------------------------------------------------------
 
 /**
  * Bypass mode shortcut: stamp a session for the fixed dev user and
- * redirect home. In OIDC mode: capture state + verifier in the session,
- * 302 to the authorization endpoint.
+ * redirect home. In SSO mode: capture state in the cookie session, 302
+ * to conductor's `/oauth/authorize`.
  */
 function loginHandler(): RequestHandler {
   return async (req: Request, res: Response) => {
@@ -64,10 +64,8 @@ function loginHandler(): RequestHandler {
       return res.redirect(safeReturnTo(returnTo));
     }
 
-    const client = await getOidcClient(cfg);
-    const { url, state, verifier } = newAuthRequest(cfg, client);
+    const { url, state } = buildAuthorizeUrl(cfg);
     session.oauthState = state;
-    session.pkceVerifier = verifier;
     session.returnTo = safeReturnTo(returnTo);
     await session.save();
     res.redirect(url);
@@ -83,28 +81,34 @@ function callbackHandler(): RequestHandler {
 
     const session = await readSession(req, res, cfg.sessionSecret);
     const expectedState = session.oauthState;
-    const verifier = session.pkceVerifier;
     const returnTo = session.returnTo ?? "/";
-    if (!expectedState || !verifier) {
+    const code = typeof req.query.code === "string" ? req.query.code : "";
+    const callbackState = typeof req.query.state === "string" ? req.query.state : "";
+
+    if (!expectedState) {
       return res.status(400).type("text/plain").send("missing oauth state");
+    }
+    if (!code || !callbackState || callbackState !== expectedState) {
+      return res.status(400).type("text/plain").send("invalid state");
     }
     // Single-use: clear before we attempt the exchange so a retry can't
     // reuse a captured state value.
     session.oauthState = undefined;
-    session.pkceVerifier = undefined;
     session.returnTo = undefined;
     await session.save();
 
     try {
-      const client = await getOidcClient(cfg);
-      const query: Record<string, string> = {};
-      for (const [k, v] of Object.entries(req.query)) {
-        if (typeof v === "string") query[k] = v;
-      }
-      const profile = await exchangeCode(client, cfg, query, expectedState, verifier);
-      const user = findOrCreateUserBySub(profile.sub, {
-        email: profile.email ?? null,
-        name: profile.name ?? null,
+      const tok = await exchangeCode(cfg, code);
+      // Conductor's user.id is opaque and stable — slot it into the
+      // same `oidc_sub` column the schema reserves for the upstream
+      // identity. (The column name predates conductor SSO; renaming
+      // the column would be a wider migration.)
+      const sub = tok.user.id;
+      const displayName =
+        tok.user.name ?? tok.user.email ?? tok.user.phone ?? sub;
+      const user = findOrCreateUserBySub(sub, {
+        email: tok.user.email ?? null,
+        name: displayName ?? null,
       });
       session.userId = user.id;
       await session.save();
@@ -116,7 +120,10 @@ function callbackHandler(): RequestHandler {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[auth] callback failed:", err);
-      res.status(401).type("text/plain").send(`callback failed: ${(err as Error).message}`);
+      res
+        .status(401)
+        .type("text/plain")
+        .send(`callback failed: ${(err as Error).message}`);
     }
   };
 }
@@ -176,9 +183,6 @@ function failAuth(req: Request, res: Response): void {
     return;
   }
   const returnTo = encodeURIComponent(url);
-  // Surface the marketing/login page rather than redirecting straight
-  // into the IdP — gives the user a chance to read what they're about
-  // to authorize against.
   res.redirect(`/login?returnTo=${returnTo}`);
 }
 
@@ -186,23 +190,26 @@ function failAuth(req: Request, res: Response): void {
 
 export function authRoutes(): express.Router {
   const r = express.Router();
-  // `/auth/start` kicks off the flow (so the Next.js page at `/login`
-  // can render the marketing copy + "Continue" button without clashing
-  // with the redirect handler).
+  // `/auth/start` kicks off the flow so the static /login page can show
+  // marketing copy + a "Continue" button without clashing with this
+  // redirect handler.
   r.get("/auth/start", loginHandler());
   r.get("/api/auth/callback", callbackHandler());
   r.post("/auth/logout", logoutHandler());
-  // Also accept GET so a plain <a> link works without a form.
   r.get("/auth/logout", logoutHandler());
   return r;
 }
 
 /** Surface the loaded config so server.ts can log status at boot. */
-export function describeAuth(): { mode: "bypass" | "oidc"; baseUrl: string; issuer?: string } {
+export function describeAuth(): {
+  mode: "bypass" | "conductor";
+  baseUrl: string;
+  conductor?: string;
+} {
   const cfg = config();
   return cfg.bypass
     ? { mode: "bypass", baseUrl: cfg.baseUrl }
-    : { mode: "oidc", baseUrl: cfg.baseUrl, issuer: cfg.oidc!.issuer };
+    : { mode: "conductor", baseUrl: cfg.baseUrl, conductor: cfg.conductor!.baseUrl };
 }
 
 /**

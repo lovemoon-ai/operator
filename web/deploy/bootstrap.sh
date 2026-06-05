@@ -84,10 +84,11 @@ INGEST_CONNECT_SECRET=$(openssl rand -hex 32)
 # dev user. SWITCH OFF before exposing to real users.
 AUTH_BYPASS=1
 
-# Uncomment and fill in to use real OIDC:
-# OIDC_ISSUER=https://accounts.google.com
-# OIDC_CLIENT_ID=...apps.googleusercontent.com
-# OIDC_CLIENT_SECRET=...
+# Uncomment + fill in to use Conductor SSO (see
+# conductor's claw/developer/add-new-sso-client.md):
+# CONDUCTOR_BASE_URL=https://conductor-ai.top
+# CONDUCTOR_CLIENT_ID=operator
+# CONDUCTOR_CLIENT_SECRET=...
 
 # Rerun worker requires SpatialMP4 SDK + uv + python 3.13; skip on
 # first deploy and pre-bake .rrd into the seed data instead.

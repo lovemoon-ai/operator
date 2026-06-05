@@ -3,32 +3,33 @@
  *
  * Required for prod:
  *   - AUTH_SESSION_SECRET      32+ char random string (iron-session)
- *   - OIDC_ISSUER              e.g. https://auth.example.com/realms/main
- *   - OIDC_CLIENT_ID
- *   - OIDC_CLIENT_SECRET
+ *   - CONDUCTOR_BASE_URL       e.g. https://conductor-ai.top
+ *   - CONDUCTOR_CLIENT_ID      client_id registered in conductor's
+ *                              CONDUCTOR_SSO_CLIENTS_JSON
+ *   - CONDUCTOR_CLIENT_SECRET  matching plaintext shared secret
  *
  * Optional:
  *   - AUTH_BASE_URL            full origin we'll receive callbacks on,
- *                              e.g. https://demo.example.com (default
- *                              http://localhost:<PORT>)
- *   - OIDC_SCOPES              default "openid profile email"
- *   - AUTH_BYPASS=1            skip OIDC entirely, use a fixed dev user
+ *                              e.g. https://operator.conductor-ai.top
+ *                              (default http://localhost:<PORT>)
+ *   - AUTH_BYPASS=1            skip SSO entirely, use a fixed dev user
  *                              (intended for local dev only)
  *   - DEV_USER_SUB             override the fixed dev user's sub
  *                              (default "dev@localhost")
  *
- * In bypass mode every env var above except SESSION_SECRET is optional
- * — we synthesize a sensible default so `npm run dev` works zero-config.
+ * In bypass mode every env var above except SESSION_SECRET is optional.
+ *
+ * Why "conductor" instead of "oidc": conductor's SSO is a custom
+ * OAuth-style flow, not OIDC. See lib/auth/conductor.ts.
  */
 export interface AuthConfig {
   bypass: boolean;
   sessionSecret: string;
   baseUrl: string;
-  oidc: {
-    issuer: string;
+  conductor: {
+    baseUrl: string;
     clientId: string;
     clientSecret: string;
-    scopes: string;
   } | null;
   devUser: {
     sub: string;
@@ -71,16 +72,17 @@ export function loadAuthConfig(): AuthConfig {
   };
 
   if (bypass) {
-    return { bypass, sessionSecret, baseUrl, oidc: null, devUser };
+    return { bypass, sessionSecret, baseUrl, conductor: null, devUser };
   }
 
-  const issuer = process.env.OIDC_ISSUER ?? "";
-  const clientId = process.env.OIDC_CLIENT_ID ?? "";
-  const clientSecret = process.env.OIDC_CLIENT_SECRET ?? "";
-  if (!issuer || !clientId || !clientSecret) {
+  const conductorBase = process.env.CONDUCTOR_BASE_URL ?? "";
+  const clientId = process.env.CONDUCTOR_CLIENT_ID ?? "";
+  const clientSecret = process.env.CONDUCTOR_CLIENT_SECRET ?? "";
+  if (!conductorBase || !clientId || !clientSecret) {
     throw new Error(
-      "OIDC config missing. Set OIDC_ISSUER + OIDC_CLIENT_ID + OIDC_CLIENT_SECRET, " +
-        "or AUTH_BYPASS=1 for local dev.",
+      "Conductor SSO config missing. Set CONDUCTOR_BASE_URL + " +
+        "CONDUCTOR_CLIENT_ID + CONDUCTOR_CLIENT_SECRET, or AUTH_BYPASS=1 " +
+        "for local dev.",
     );
   }
 
@@ -88,11 +90,10 @@ export function loadAuthConfig(): AuthConfig {
     bypass: false,
     sessionSecret,
     baseUrl,
-    oidc: {
-      issuer,
+    conductor: {
+      baseUrl: conductorBase.replace(/\/+$/, ""),
       clientId,
       clientSecret,
-      scopes: process.env.OIDC_SCOPES ?? "openid profile email",
     },
     devUser,
   };

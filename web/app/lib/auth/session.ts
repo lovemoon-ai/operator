@@ -20,11 +20,9 @@ const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export interface SessionData {
   userId?: string;
-  /** OAuth state token kept around between /login and /callback. */
+  /** CSRF state token kept around between /auth/start and /callback. */
   oauthState?: string;
-  /** OIDC PKCE verifier kept around between /login and /callback. */
-  pkceVerifier?: string;
-  /** Optional post-login redirect, captured before /login. */
+  /** Optional post-login redirect, captured before /auth/start. */
   returnTo?: string;
 }
 
