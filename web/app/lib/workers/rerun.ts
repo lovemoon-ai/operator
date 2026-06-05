@@ -50,6 +50,7 @@
  * <video> preview still works.
  */
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -107,16 +108,7 @@ function discoverSpatialmp4Home(): string | null {
     path.join(home, "SpatialMP4"),
   ];
   for (const c of candidates) {
-    try {
-      // Sync existsSync would be fine here too, but we already
-      // imported nothing from fs in this file's hot path — use a
-      // cheap stat via the dynamic require below.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const fs = require("node:fs") as typeof import("node:fs");
-      if (fs.existsSync(c)) return c;
-    } catch {
-      /* ignore */
-    }
+    if (existsSync(c)) return c;
   }
   return null;
 }

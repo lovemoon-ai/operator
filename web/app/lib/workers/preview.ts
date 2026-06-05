@@ -88,15 +88,19 @@ export async function runPreviewWorker(
   const sessionDir = path.dirname(media.uri);
   const previewPath = path.join(sessionDir, "preview.mp4");
 
-  // Detect stereo from the manifest the headset uploaded alongside
-  // the mp4. `capture_options.stereo_rgb` is the authoritative flag
-  // (see xr/scripts/ego_uploader.gd + the JNI muxer for who sets it).
-  const stereoRgb = isStereo(session);
+  // Detect stereo + layout from the manifest the headset uploaded
+  // alongside the mp4. `capture_options.stereo_rgb` is the
+  // authoritative flag (see xr/scripts/ego_uploader.gd + the JNI
+  // muxer). Layout defaults to side-by-side L|R which is what
+  // SpatialMp4Native currently produces; if a future muxer variant
+  // packs top|bottom or right|left, the manifest can override via
+  // `capture_options.stereo_layout` (sbs_lr | sbs_rl | tb_lr | tb_rl).
+  const stereo = detectStereo(session);
   let args: string[];
   let mode: "remux" | "transcode" | "crop";
-  if (stereoRgb) {
-    args = cropLeftEyeArgs(media.uri, previewPath);
-    mode = "crop";
+  if (stereo) {
+    args = cropEyeArgs(media.uri, previewPath, stereo);
+    mode = `crop:${stereo}` as "crop";
   } else if (TRANSCODE) {
     args = transcodeArgs(media.uri, previewPath);
     mode = "transcode";
@@ -164,21 +168,40 @@ function remuxArgs(input: string, output: string): string[] {
   ];
 }
 
+type StereoLayout = "sbs_lr" | "sbs_rl" | "tb_lr" | "tb_rl";
+
 /**
- * Stereo crop: take the left half of a side-by-side stereo video and
- * re-encode to H.264. `crop=in_w/2:in_h:0:0` is "first half of the
- * width". libx264 ultrafast keeps wall-clock close to remux speed
- * while halving the output size and ditching HEVC for max browser
+ * Stereo crop: extract the "primary eye" half of a packed-stereo
+ * video and re-encode to H.264. The four layout variants:
+ *
+ *   sbs_lr  ─ side-by-side, left then right  →  crop left half
+ *   sbs_rl  ─ side-by-side, right then left  →  crop right half
+ *   tb_lr   ─ top-bottom,  left then right   →  crop top half
+ *   tb_rl   ─ top-bottom,  right then left   →  crop bottom half
+ *
+ * libx264 ultrafast keeps wall-clock close to remux speed while
+ * halving the output size and ditching HEVC for max browser
  * compatibility (a free win, since we're already paying the decode).
  */
-function cropLeftEyeArgs(input: string, output: string): string[] {
+function cropEyeArgs(
+  input: string,
+  output: string,
+  layout: StereoLayout,
+): string[] {
+  // ffmpeg crop:  crop=w:h:x:y
+  const filter: Record<StereoLayout, string> = {
+    sbs_lr: "crop=in_w/2:in_h:0:0",
+    sbs_rl: "crop=in_w/2:in_h:in_w/2:0",
+    tb_lr: "crop=in_w:in_h/2:0:0",
+    tb_rl: "crop=in_w:in_h/2:0:in_h/2",
+  };
   return [
     "-y",
     "-loglevel", "error",
     "-i", input,
     "-map", "0:v:0",
     "-map", "0:a?",
-    "-filter:v", "crop=in_w/2:in_h:0:0",
+    "-filter:v", filter[layout],
     "-c:v", "libx264",
     "-preset", "ultrafast",
     "-crf", "26",
@@ -231,15 +254,25 @@ function truncate(s: string, n: number): string {
 }
 
 /**
- * Pull `capture_options.stereo_rgb` out of the session manifest.
- * Falls back to `false` if the manifest is missing or doesn't carry
- * the flag — `false` is the conservative default (treats as mono,
- * skips the crop), since cropping a mono video to half-width would
- * silently corrupt the preview.
+ * Pull stereo flag + layout out of the session manifest. Returns the
+ * concrete layout to crop, or `null` if mono (treats anything
+ * unknown as mono — safer than guessing wrong and mangling the
+ * preview).
+ *
+ *   capture_options.stereo_rgb: true               → defaults to sbs_lr
+ *   capture_options.stereo_layout: "sbs_lr" | ...  → explicit override
  */
-function isStereo(session: SessionRecord): boolean {
-  const m = session.manifest as
-    | { capture_options?: { stereo_rgb?: unknown } }
-    | undefined;
-  return m?.capture_options?.stereo_rgb === true;
+function detectStereo(session: SessionRecord): StereoLayout | null {
+  const opts = (session.manifest as
+    | { capture_options?: { stereo_rgb?: unknown; stereo_layout?: unknown } }
+    | undefined)?.capture_options;
+  if (!opts || opts.stereo_rgb !== true) return null;
+  const explicit = typeof opts.stereo_layout === "string"
+    ? opts.stereo_layout.toLowerCase()
+    : "";
+  if (explicit === "sbs_lr" || explicit === "sbs_rl" || explicit === "tb_lr" || explicit === "tb_rl") {
+    return explicit;
+  }
+  // Default for current Quest3 muxer: side-by-side, left first.
+  return "sbs_lr";
 }

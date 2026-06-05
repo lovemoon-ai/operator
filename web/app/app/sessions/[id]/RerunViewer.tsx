@@ -2,6 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 
+// Type-only import: pulls signatures + the WebViewer class type at
+// compile time but NEVER emits a `require` of the package into the
+// bundle. We still do a runtime dynamic `import()` inside useEffect
+// so the WASM blob loads lazily on the client.
+import type { WebViewer as WebViewerType } from "@rerun-io/web-viewer";
+
 interface Props {
   /** URL the Rerun web viewer should load the .rrd from. */
   rrdUrl: string;
@@ -38,19 +44,7 @@ export function RerunViewer({ rrdUrl, height = 720 }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    // The viewer type is intentionally loose — `@rerun-io/web-viewer` is
-    // an optional dependency and we don't want a hard import-time
-    // reference to its types in case it isn't installed yet.
-    type AnyViewer = {
-      start: (
-        rrd: string,
-        parent: HTMLElement | null,
-        opts: Record<string, unknown>,
-      ) => Promise<void>;
-      stop: () => void;
-      on: (event: "ready", cb: () => void) => () => void;
-    };
-    let viewer: AnyViewer | null = null;
+    let viewer: WebViewerType | null = null;
     let unsubscribeReady: (() => void) | null = null;
 
     (async () => {
@@ -60,8 +54,7 @@ export function RerunViewer({ rrdUrl, height = 720 }: Props) {
           "@rerun-io/web-viewer"
         );
         if (cancelled) return;
-        const WebViewer = (mod as { WebViewer: new () => AnyViewer }).WebViewer;
-        viewer = new WebViewer();
+        viewer = new mod.WebViewer();
         if (!containerRef.current) return;
         unsubscribeReady = viewer.on("ready", () => {
           if (!cancelled) setReady(true);
