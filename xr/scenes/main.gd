@@ -131,6 +131,11 @@ func _ready() -> void:
 	_user_robot_type_hint = persisted.get("robot_type", "robot_arm")
 	if _robot_view:
 		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
+		# `show_video_panel` defaults to false: a fresh install should NOT
+		# pop a placeholder quad in front of the operator before any robot
+		# has sent a frame. The user opts in via the Settings panel toggle.
+		if _robot_view.has_method("set_show_video_panel"):
+			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
 
 	var xr_interface := XRServer.find_interface("OpenXR")
 	if xr_interface and xr_interface.is_initialized():
@@ -304,9 +309,9 @@ func _configure_passthrough() -> void:
 ## Called by SettingsUI when the user presses Confirm.
 ## Saves the panel state, hides it, then connects/reconnects with the chosen
 ## endpoint. robot_type is a hint that the descriptor will override on handshake.
-func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_on_launch: bool) -> void:
-	print("[Operator] Settings applied: ip=%s port=%d type=%s face_locked=%s show_on_launch=%s" % [
-		ip, port, robot_type, video_face_locked, show_on_launch,
+func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool) -> void:
+	print("[Operator] Settings applied: ip=%s port=%d type=%s face_locked=%s show_video=%s show_on_launch=%s" % [
+		ip, port, robot_type, video_face_locked, show_video_panel, show_on_launch,
 	])
 	_cancel_launch_window()
 	_user_robot_type_hint = robot_type
@@ -314,6 +319,8 @@ func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_
 	# Apply video window mode immediately.
 	if _robot_view:
 		_robot_view.follow_camera = video_face_locked
+		if _robot_view.has_method("set_show_video_panel"):
+			_robot_view.set_show_video_panel(show_video_panel)
 
 	_hide_settings_panel()
 
@@ -468,6 +475,8 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	var persisted: Dictionary = SettingsUI.load_settings()
 	if _robot_view:
 		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
+		if _robot_view.has_method("set_show_video_panel"):
+			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
 	_user_robot_type_hint = String(info.get("device_type", persisted.get("robot_type", "robot_arm")))
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)

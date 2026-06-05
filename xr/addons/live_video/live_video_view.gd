@@ -84,6 +84,13 @@ var _last_ahb_frame_count: int = 0
 @export var display_size: Vector2 = Vector2(3.2, 1.8)
 ## Godot Android plugin singleton that exposes start_decoder/submit_access_unit.
 @export var decoder_singleton_name: String = DEFAULT_VIDEO_DECODER_SINGLETON
+## When false, the panel stays hidden even when the robot is sending frames —
+## the user opted out of the video display entirely. When true, the panel
+## still only becomes visible AFTER `_receiving_video` flips on (i.e. a NAL
+## from the robot actually arrived). Default OFF so a fresh install doesn't
+## park a placeholder quad in front of the operator before they've connected
+## to anything.
+@export var show_video_panel: bool = false
 
 var _xr_camera: XRCamera3D = null
 
@@ -146,13 +153,38 @@ func initialize() -> void:
 	_create_placeholder_texture()
 	_setup_material()
 	_try_create_ahb_texture()
-	visible = true
 	_initialized = true
 	# Cache XRCamera3D so _process can keep the panel in front of the user.
 	_resolve_camera()
-	print("[LiveVideo] Display initialized (follow_camera=%s, ahb=%s)" % [
-		follow_camera, _ahb_texture != null,
+	# Defer visibility to `_update_panel_visibility`: even when the user has
+	# opted in via `show_video_panel`, we only un-hide once the robot is
+	# actually sending frames — otherwise the operator sees the blue
+	# placeholder quad floating in front of them.
+	_update_panel_visibility()
+	print("[LiveVideo] Display initialized (follow_camera=%s, show_video_panel=%s, ahb=%s)" % [
+		follow_camera, show_video_panel, _ahb_texture != null,
 	])
+
+
+## External setter so main.gd can flip the preference without touching the
+## exported property directly (keeps the visibility invariant centralised).
+func set_show_video_panel(value: bool) -> void:
+	if show_video_panel == value:
+		return
+	show_video_panel = value
+	_update_panel_visibility()
+
+
+## Single source of truth for whether the 3D panel should be on screen.
+## The panel is visible iff (a) the user opted in via `show_video_panel`,
+## AND (b) we've seen at least one frame from the robot. Called from
+## `_process` so transitions (`_receiving_video` flips, `clear_video_stream`)
+## are picked up within one frame without us having to sprinkle calls at
+## every state mutation site.
+func _update_panel_visibility() -> void:
+	var want_visible := _initialized and show_video_panel and _receiving_video
+	if visible != want_visible:
+		visible = want_visible
 
 
 func _resolve_camera() -> void:
@@ -206,6 +238,10 @@ func _process(_delta: float) -> void:
 	if _ahb_bound_to_shader and _video_layout_stereo != _desired_stereo_layout:
 		_apply_video_layout(_desired_stereo_layout)
 
+	# Cheap idempotent check; flips visibility on the frame after
+	# `_receiving_video` (or `show_video_panel`) changes — keeps the panel
+	# hidden until the robot is actually streaming and the user opted in.
+	_update_panel_visibility()
 	_update_latency_hud()
 
 	# Once the AHB path is live, the YUV-frame-ready signal stops firing

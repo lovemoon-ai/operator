@@ -3,7 +3,7 @@ class_name TeleopSettingsPanel
 
 const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
 
-signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_on_launch: bool)
+signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool)
 signal close_requested
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
@@ -14,6 +14,10 @@ const DEFAULT_IP: String = "127.0.0.1"
 const DEFAULT_PORT: int = 63901
 const DEFAULT_TYPE: String = "robot_arm"
 const DEFAULT_FACE_LOCKED: bool = true
+# Default OFF so a freshly installed app doesn't blast a placeholder quad in
+# front of the user. Showing the panel requires both this opt-in AND the robot
+# actually sending frames — see LiveVideoView._update_panel_visibility.
+const DEFAULT_SHOW_VIDEO_PANEL: bool = false
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
 
@@ -56,6 +60,7 @@ var _ip_input: LineEdit
 var _port_input: LineEdit
 var _type_option: OptionButton
 var _video_face_toggle: CheckButton
+var _show_video_panel_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
 var _status_label: Label
 var _discovery_spinner: DiscoverySpinner
@@ -132,6 +137,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# --- Display group -----------------------------------------------------
 	var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
 	_video_face_toggle = add_toggle(display, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
+	_show_video_panel_toggle = add_toggle(display, tr("UI_SHOW_VIDEO_PANEL"), DEFAULT_SHOW_VIDEO_PANEL, 22)
 
 	# --- Startup group -----------------------------------------------------
 	var startup := register_group("startup", "UI_GROUP_STARTUP", "power")
@@ -159,6 +165,7 @@ func _on_confirm_requested() -> void:
 			int(options.get("port", DEFAULT_PORT)),
 			str(options.get("robot_type", DEFAULT_TYPE)),
 			bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED)),
+			bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL)),
 			bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
 	)
 
@@ -230,6 +237,7 @@ func get_options() -> Dictionary:
 		"port": _port_input.text.strip_edges().to_int(),
 		"robot_type": rtype,
 		"video_face_locked": _video_face_toggle.button_pressed,
+		"show_video_panel": _show_video_panel_toggle.button_pressed,
 		"show_on_launch": _show_on_launch_toggle.button_pressed
 	}
 
@@ -243,6 +251,7 @@ func set_options(options: Dictionary) -> void:
 		type_idx = 0
 	_type_option.select(type_idx)
 	_video_face_toggle.button_pressed = bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED))
+	_show_video_panel_toggle.button_pressed = bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL))
 	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
 
 
@@ -338,5 +347,6 @@ static func _default_options() -> Dictionary:
 		"port": DEFAULT_PORT,
 		"robot_type": DEFAULT_TYPE,
 		"video_face_locked": DEFAULT_FACE_LOCKED,
+		"show_video_panel": DEFAULT_SHOW_VIDEO_PANEL,
 		"show_on_launch": DEFAULT_SHOW_ON_LAUNCH
 	}
