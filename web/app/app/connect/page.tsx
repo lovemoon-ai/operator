@@ -1,49 +1,39 @@
 import { networkInterfaces } from "node:os";
 
 import { headers } from "next/headers";
+import { redirect } from "next/navigation";
 import QRCode from "qrcode";
 
 import { buildConnectTicket } from "../../lib/connect-ticket";
+import { getServerComponentUser } from "../../lib/auth/server-component";
 import { RefreshableQr } from "./RefreshableQr";
 
-// "Connect" tab. Shows one QR code per LAN-reachable IPv4 address
-// pointing at /api/ingest, so the operator can scan from the headset
-// (or a phone) and avoid typing a long URL into a VR text field.
-//
-// Server-rendered: we read os.networkInterfaces() and generate inline
-// SVG QR codes at request time. Nothing ships to the browser beyond
-// the rendered HTML — no QR JS dep on the client.
+// "Connect" tab. One QR per LAN-reachable IPv4 address pointing at
+// /api/ingest. The QR ack endpoint trades the (signed, 5-min) ticket
+// for the current dashboard user's permanent upload token, so the
+// headset never has to see — or type — the token.
 
 export const dynamic = "force-dynamic";
 
 interface Endpoint {
-  /** Network interface name (en0, eth0, …) for the operator to recognize. */
   iface: string;
-  /** Display address (ip:port). */
   host: string;
-  /** Full upload URL the XR headset pastes into "Upload URL". */
   url: string;
-  /** Signed, short-lived URL encoded into the QR. */
   ackUrl: string;
-  /** Unix ms timestamp. */
   expiresAt: number;
-  /** Inline SVG markup. */
   qrSvg: string;
 }
 
 export default async function ConnectPage() {
-  // Use whatever port the user reached us on. If the page was served
-  // via http://localhost:3000/connect, port = 3000; via a reverse
-  // proxy on 443, port = 443 (and we'll honor x-forwarded-proto for
-  // the scheme).
+  const user = await getServerComponentUser();
+  if (!user) redirect("/login?returnTo=/connect");
+
   const h = await headers();
   const hostHeader = h.get("host") ?? `localhost:${process.env.PORT ?? 3000}`;
   const port = hostHeader.includes(":") ? hostHeader.split(":").pop() ?? "3000" : "3000";
   const proto = (h.get("x-forwarded-proto") ?? "http").split(",")[0]!.trim();
 
-  const endpoints = await collectEndpoints(proto, port);
-
-  const tokenRequired = Boolean(process.env.INGEST_TOKEN);
+  const endpoints = await collectEndpoints(proto, port, user.id);
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -51,15 +41,14 @@ export default async function ConnectPage() {
         <h2>Connect headset</h2>
         <p style={{ marginTop: 0, color: "var(--muted)" }}>
           Scan one of the short-lived QR codes below from the headset. The
-          headset will ack the endpoint, fill the upload URL, and enable
-          upload after stop when the handshake succeeds.
+          headset acks the endpoint, fills the upload URL, and enables upload
+          after stop when the handshake succeeds. The QR carries an HMAC
+          signature bound to <strong>your</strong> account — recordings the
+          headset uploads will land on your dashboard.
         </p>
         <ol style={{ color: "var(--muted)", fontSize: 13, lineHeight: 1.8, marginTop: 8 }}>
           <li>In headset: Ego settings → camera button next to <strong>Upload URL</strong>.</li>
           <li>Point at a QR code, then click the green arrow.</li>
-          {tokenRequired && (
-            <li>Bearer auth is attached by the QR ack; no token typing in-headset.</li>
-          )}
           <li>Tap <strong>Save</strong> — recordings upload automatically after each Stop.</li>
         </ol>
       </section>
@@ -102,20 +91,24 @@ export default async function ConnectPage() {
       )}
 
       <section className="panel">
-        <h2>Auth</h2>
-        {tokenRequired ? (
-          <div style={{ fontSize: 13 }}>
-            Bearer auth is <span className="badge flagged">REQUIRED</span>. The
-            QR ack hands the headset the server token after verifying the
-            5-minute ticket.
-          </div>
-        ) : (
-          <div style={{ fontSize: 13 }}>
-            Bearer auth is <span className="badge reviewed">OFF</span>. Anyone on
-            the same network can upload. Set the <code>INGEST_TOKEN</code> env var
-            and restart to require authentication.
-          </div>
-        )}
+        <h2>Your upload token</h2>
+        <p style={{ fontSize: 13, marginTop: 0 }}>
+          The QR ack hands this token to the headset automatically — you
+          shouldn&apos;t need to copy it by hand. Kept here for visibility /
+          API testing.
+        </p>
+        <code
+          style={{
+            display: "block",
+            marginTop: 8,
+            padding: 8,
+            background: "var(--panel-deep, rgba(255,255,255,0.04))",
+            fontSize: 11,
+            wordBreak: "break-all",
+          }}
+        >
+          {user.uploadToken}
+        </code>
       </section>
     </div>
   );
@@ -123,19 +116,17 @@ export default async function ConnectPage() {
 
 // --- helpers --------------------------------------------------------------
 
-async function collectEndpoints(proto: string, port: string): Promise<Endpoint[]> {
+async function collectEndpoints(proto: string, port: string, userId: string): Promise<Endpoint[]> {
   const out: Endpoint[] = [];
   const nics = networkInterfaces();
   for (const [iface, addrs] of Object.entries(nics)) {
     if (!addrs) continue;
     for (const addr of addrs) {
-      // Node 18+ returns family as "IPv4" string; older runtimes used
-      // the numeric 4. Handle both for forward compatibility.
       const isV4 = addr.family === "IPv4" || (addr.family as unknown as number) === 4;
       if (!isV4 || addr.internal) continue;
       const host = `${addr.address}:${port}`;
       const url = `${proto}://${host}/api/ingest`;
-      const ticket = buildConnectTicket(url);
+      const ticket = buildConnectTicket(url, userId);
       const qrSvg = await QRCode.toString(ticket.ackUrl, {
         type: "svg",
         margin: 1,
@@ -145,8 +136,6 @@ async function collectEndpoints(proto: string, port: string): Promise<Endpoint[]
       out.push({ iface, host, url, ackUrl: ticket.ackUrl, expiresAt: ticket.expiresAt, qrSvg });
     }
   }
-  // Sort so the order is stable across renders (and so Wi-Fi-ish
-  // interfaces come first on most platforms).
   out.sort((a, b) => a.iface.localeCompare(b.iface));
   return out;
 }

@@ -1,9 +1,10 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 
+import { getServerComponentUser } from "@/lib/auth/server-component";
+import { ingest } from "@/lib/ingest";
 import { getReview } from "@/lib/reviews";
 import { fmtBytes, fmtDate } from "@/lib/format";
-import type { SessionRecord } from "@love-moon/ego-ingest";
 
 import { ReviewForm } from "./ReviewForm";
 import { RerunViewer } from "./RerunViewer";
@@ -17,42 +18,23 @@ interface PageProps {
 /**
  * Server-rendered session detail.
  *
- * We HTTP-fetch our own `/api/ingest-read/sessions/:id` instead of
- * calling `ingest.store.getSession(id)` directly. The latter looks
- * simpler but blows up under Next 15 production: Next bundles
- * `lib/ingest.ts` into the page server module, so the page renders
- * against a SECOND `MemoryStore` instance with its own in-memory map.
- * That second store loaded the disk index once at boot, never gets
- * write notifications from the live ingest pipeline (which writes
- * into server.ts's instance), and so always returns `null` →
- * `notFound()` for sessions that came in after the page module was
- * first imported.
+ * We hit the SqliteStore directly. The Next-15 "two MemoryStore
+ * instances" hazard that previously forced a loopback fetch is gone
+ * — SQLite is file-backed, so any number of in-process Database
+ * handles see the same rows. Skipping the round-trip also fixes the
+ * "loopback fetch has no cookie → 401 from the user-scoped read API"
+ * problem we'd otherwise hit now that the read API is authenticated.
  *
- * Going through the Express read API guarantees we hit the same
- * singleton that the TUS middleware writes to — at the price of one
- * extra loopback round-trip per render, which at session-detail page
- * volumes is invisible.
+ * The current user is read from AsyncLocalStorage, bound by the
+ * Express `browserAuthMiddleware` wrapper around handleNext().
  */
 export const dynamic = "force-dynamic";
 
-const INTERNAL_API_BASE =
-  process.env.INTERNAL_API_BASE ?? `http://127.0.0.1:${process.env.PORT ?? "3000"}`;
-
-async function fetchSession(id: string): Promise<SessionRecord | null> {
-  const url = `${INTERNAL_API_BASE}/api/ingest-read/sessions/${encodeURIComponent(id)}`;
-  // `cache: "no-store"` so Next doesn't memoize the fetch across
-  // requests — sessions get artifacts appended (preview, rrd, …) over
-  // time as workers finish, and we want every navigation to see the
-  // freshest snapshot.
-  const r = await fetch(url, { cache: "no-store" });
-  if (r.status === 404) return null;
-  if (!r.ok) throw new Error(`read API ${r.status} for ${id}`);
-  return (await r.json()) as SessionRecord;
-}
-
 export default async function SessionDetailPage({ params }: PageProps) {
   const { id } = await params;
-  const session = await fetchSession(id);
+  const user = await getServerComponentUser();
+  if (!user) redirect(`/login?returnTo=/sessions/${encodeURIComponent(id)}`);
+  const session = await ingest.store.getSession(id, { userId: user.id });
   if (!session) notFound();
   const review = getReview(id);
   const mediaArtifact = session.artifacts["media"];

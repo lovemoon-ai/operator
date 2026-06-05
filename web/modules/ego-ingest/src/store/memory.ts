@@ -92,12 +92,12 @@ export class MemoryStore implements SessionStore {
     return { ...s, artifacts: { ...s.artifacts } };
   }
 
-  async getSession(id: string): Promise<SessionRecord | null> {
+  async getSession(id: string, _opts?: { userId?: string }): Promise<SessionRecord | null> {
     const s = this.sessions.get(id);
     return s ? { ...s, artifacts: { ...s.artifacts } } : null;
   }
 
-  async listSessions(opts: { limit?: number; cursor?: string; order?: "asc" | "desc" } = {}) {
+  async listSessions(opts: { limit?: number; cursor?: string; order?: "asc" | "desc"; userId?: string } = {}) {
     const order = opts.order ?? "desc";
     const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
     const all = Array.from(this.sessions.values()).sort((a, b) => {
@@ -114,7 +114,7 @@ export class MemoryStore implements SessionStore {
     return { items, nextCursor };
   }
 
-  async stats(): Promise<StoreStats> {
+  async stats(_opts?: { userId?: string }): Promise<StoreStats> {
     const perDay: StoreStats["perDay"] = {};
     let totalBytes = 0;
     for (const s of this.sessions.values()) {

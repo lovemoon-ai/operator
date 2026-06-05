@@ -41,15 +41,21 @@ process that:
 - exposes per-session review state at `/api/reviews/*`,
 - delegates everything else to Next.js.
 
-Configure via env vars (all optional):
+Configure via env vars:
 
 | var | default | meaning |
 |-----|---------|---------|
 | `PORT` | `3000` | listen port |
-| `DATA_ROOT` | `./data` | where sessions + index + reviews are stored |
-| `INGEST_TOKEN` | unset | when set, require `Authorization: Bearer <token>` |
+| `DATA_ROOT` | `./data` | sessions + `operator.db` (sqlite) live here |
 | `MAX_BYTES` | `100 GB` | hard cap on Upload-Length |
-| `INTERNAL_API_BASE` | `http://localhost:3000` | base used by server-side fetches |
+| `AUTH_BYPASS` | unset | `1` skips OIDC and logs in as a fixed dev user |
+| `AUTH_SESSION_SECRET` | dev fallback | iron-session cookie secret (32+ chars); REQUIRED in prod |
+| `AUTH_BASE_URL` | `http://localhost:<PORT>` | origin used to build the OIDC `redirect_uri` |
+| `OIDC_ISSUER` | — | OIDC discovery URL |
+| `OIDC_CLIENT_ID` | — | OIDC client id |
+| `OIDC_CLIENT_SECRET` | — | OIDC client secret |
+| `OIDC_SCOPES` | `openid profile email` | scopes requested |
+| `DEV_USER_SUB` | `dev@localhost` | bypass-mode dev user's `sub` |
 | `FFMPEG_BIN` | `ffmpeg` | binary used by the preview worker |
 | `PREVIEW_TRANSCODE` | unset | when `1`, re-encode preview to H.264 instead of stream-copy |
 | `UV_BIN` | `uv` | uv binary used to run the rerun sidecar |
@@ -124,12 +130,40 @@ sequentially (see `app/lib/workers/`):
    itself, the `<video>` preview still works. Check the dev-server
    log for the `[workers] rerun …` line.
 
+## Identity & multi-user
+
+- Browsers sign in via OIDC (Authorization Code + PKCE) and get an
+  iron-session cookie. Set `AUTH_BYPASS=1` for local dev to skip OIDC
+  and auto-login as a fixed dev user.
+- Headsets authenticate via a **per-user upload token**. Each signed-in
+  user has exactly one token, displayed on `/connect`. The QR ack
+  endpoint hands the token to the device after verifying the 5-minute
+  signed ticket — the device never has to type it.
+- All reads and writes are scoped to the requesting user. The same
+  database can host many users without leakage between them.
+
+## Demo seeding (optional)
+
+Drop seed files into `$DATA_ROOT/seed/` to give every newly-logged-in
+user a pre-baked sample session so they can see playback / Rerun /
+review without owning a headset:
+
+```
+$DATA_ROOT/seed/manifest.json
+$DATA_ROOT/seed/media.mp4
+$DATA_ROOT/seed/preview.mp4    # optional, regenerable by the worker
+$DATA_ROOT/seed/session.rrd    # optional, regenerable by the worker
+```
+
+The seed is hardlinked into `$DATA_ROOT/sessions/<userId>-demo/` on
+first login and the user's `seeded` flag is set so it doesn't recreate.
+
 ## Point the XR client at it
 
 In the headset's Ego settings panel:
 
 - **Upload URL**: `http://<your-mac-ip>:3000/api/ingest`
-- **Bearer token**: only if you set `INGEST_TOKEN`
+- **Bearer token**: filled automatically by the `/connect` QR scan
 - **Auto-upload on stop**: ON
 
 After tapping Stop, the recording appears in the dashboard within a
@@ -138,18 +172,27 @@ SSE stream is open — pages refresh automatically.
 
 ## Smoke test without a headset
 
+In bypass mode the dev user's upload token is in the sqlite DB:
+
 ```bash
+AUTH_BYPASS=1 npm run dev &
+sleep 4
+TOKEN=$(sqlite3 ./data/operator.db "SELECT upload_token FROM users LIMIT 1;")
+
 META="session_id $(printf 'demo-1' | base64),artifact_kind $(printf 'manifest' | base64),filename $(printf 'manifest.json' | base64)"
 
 LOC=$(curl -s -i -X POST http://localhost:3000/api/ingest \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Tus-Resumable: 1.0.0' -H 'Upload-Length: 27' \
   -H "Upload-Metadata: $META" | awk '/^Location:/ {print $2}' | tr -d '\r')
 
 printf '{"schema":"v2","note":"yo"}' | curl -X PATCH "http://localhost:3000$LOC" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Tus-Resumable: 1.0.0' \
   -H 'Content-Type: application/offset+octet-stream' \
   -H 'Upload-Offset: 0' -H 'Content-Length: 27' --data-binary @-
 ```
 
-Refresh `http://localhost:3000/` — the `demo-1` session shows up
-under "Sessions". Click in to mark it reviewed, add notes, etc.
+Visit `http://localhost:3000/` — you'll be auto-logged-in (bypass) and
+the `demo-1` session shows up under "Sessions". Click in to mark it
+reviewed, add notes, etc.

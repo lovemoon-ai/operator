@@ -1,20 +1,15 @@
 /**
- * Per-session review state.
+ * Per-session review state (reviewed / flagged / notes).
  *
- * Kept in a separate JSON file from the ingest's session index so the
- * ego-ingest package never has to know about app-specific concepts
- * (reviewed / flagged / notes). If you swap MemoryStore for SQLite
- * later, this file becomes a `reviews` table — the rest of the app
- * doesn't change.
+ * Backed by SQLite (`reviews` table in `./db.ts`). Reads and writes are
+ * always scoped to the current user via a join against `sessions` so a
+ * malicious or careless caller can't read or mutate a row whose
+ * session doesn't belong to them.
  */
-
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import path from "node:path";
-
 import express, { type Request, type Response } from "express";
 
-const DATA_ROOT = path.resolve(process.env.DATA_ROOT ?? "./data");
-const REVIEWS_FILE = path.join(DATA_ROOT, "reviews.json");
+import { db } from "./db.js";
+import { currentUserId } from "./auth-context.js";
 
 export interface Review {
   sessionId: string;
@@ -24,43 +19,74 @@ export interface Review {
   updatedAt: string;
 }
 
-type ReviewsMap = Record<string, Review>;
-
-function load(): ReviewsMap {
-  if (!existsSync(REVIEWS_FILE)) return {};
-  try {
-    return JSON.parse(readFileSync(REVIEWS_FILE, "utf8")) as ReviewsMap;
-  } catch {
-    return {};
-  }
+interface ReviewRow {
+  session_id: string;
+  reviewed: number;
+  flagged: number;
+  notes: string;
+  updated_at: string;
 }
 
-function save(reviews: ReviewsMap): void {
-  mkdirSync(DATA_ROOT, { recursive: true });
-  const tmp = REVIEWS_FILE + ".tmp";
-  writeFileSync(tmp, JSON.stringify(reviews, null, 2), "utf8");
-  renameSync(tmp, REVIEWS_FILE);
+function rowToReview(row: ReviewRow): Review {
+  return {
+    sessionId: row.session_id,
+    reviewed: !!row.reviewed,
+    flagged: !!row.flagged,
+    notes: row.notes,
+    updatedAt: row.updated_at,
+  };
 }
 
-const cache: ReviewsMap = load();
+const stmts = {
+  // Server-side render path: getReview(sessionId) is called for the
+  // session detail page. We don't filter by user here because the
+  // server component has already proven ownership by fetching the
+  // session via the user-scoped read API; we just need the review row.
+  getById: db.prepare<[string], ReviewRow>(`SELECT * FROM reviews WHERE session_id = ?`),
+  // List + mutate paths go through the scoped query.
+  listByUser: db.prepare<[string], ReviewRow>(`
+    SELECT r.* FROM reviews r
+    JOIN sessions s ON s.id = r.session_id
+    WHERE s.user_id = ?
+  `),
+  sessionOwnedBy: db.prepare<[string, string], { id: string }>(`
+    SELECT id FROM sessions WHERE id = ? AND user_id = ?
+  `),
+  upsert: db.prepare<[string, number, number, string, string]>(`
+    INSERT INTO reviews (session_id, reviewed, flagged, notes, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      reviewed = excluded.reviewed,
+      flagged = excluded.flagged,
+      notes = excluded.notes,
+      updated_at = excluded.updated_at
+  `),
+  delete: db.prepare<[string]>(`DELETE FROM reviews WHERE session_id = ?`),
+};
 
 export function getReview(sessionId: string): Review {
-  return (
-    cache[sessionId] ?? {
-      sessionId,
-      reviewed: false,
-      flagged: false,
-      notes: "",
-      updatedAt: "",
-    }
-  );
+  const row = stmts.getById.get(sessionId);
+  return row
+    ? rowToReview(row)
+    : { sessionId, reviewed: false, flagged: false, notes: "", updatedAt: "" };
 }
 
-export function listReviews(): ReviewsMap {
-  return { ...cache };
+export function listReviewsForUser(userId: string): Record<string, Review> {
+  const out: Record<string, Review> = {};
+  for (const row of stmts.listByUser.all(userId)) {
+    out[row.session_id] = rowToReview(row);
+  }
+  return out;
 }
 
-export function updateReview(sessionId: string, patch: Partial<Omit<Review, "sessionId" | "updatedAt">>): Review {
+function ensureOwned(sessionId: string, userId: string): boolean {
+  return !!stmts.sessionOwnedBy.get(sessionId, userId);
+}
+
+export function updateReview(
+  sessionId: string,
+  patch: Partial<Omit<Review, "sessionId" | "updatedAt">>,
+): Review {
   const prev = getReview(sessionId);
   const next: Review = {
     ...prev,
@@ -68,16 +94,18 @@ export function updateReview(sessionId: string, patch: Partial<Omit<Review, "ses
     sessionId,
     updatedAt: new Date().toISOString(),
   };
-  cache[sessionId] = next;
-  save(cache);
+  stmts.upsert.run(
+    sessionId,
+    next.reviewed ? 1 : 0,
+    next.flagged ? 1 : 0,
+    next.notes,
+    next.updatedAt,
+  );
   return next;
 }
 
 export function deleteReview(sessionId: string): void {
-  if (sessionId in cache) {
-    delete cache[sessionId];
-    save(cache);
-  }
+  stmts.delete.run(sessionId);
 }
 
 // --- HTTP router ----------------------------------------------------------
@@ -85,27 +113,50 @@ export function deleteReview(sessionId: string): void {
 export const reviewsRouter = express.Router();
 reviewsRouter.use(express.json({ limit: "256kb" }));
 
-reviewsRouter.get("/", (_req: Request, res: Response) => {
-  res.json(listReviews());
+function requireUser(req: Request, res: Response): string | null {
+  const uid = currentUserId();
+  if (!uid) {
+    res.status(401).json({ error: "auth required" });
+    return null;
+  }
+  return uid;
+}
+
+reviewsRouter.get("/", (req, res) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
+  res.json(listReviewsForUser(uid));
 });
 
-reviewsRouter.get("/:id", (req: Request, res: Response) => {
+reviewsRouter.get("/:id", (req, res) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
+  if (!ensureOwned(req.params.id!, uid)) {
+    return res.status(404).json({ error: "not found" });
+  }
   res.json(getReview(req.params.id!));
 });
 
-reviewsRouter.patch("/:id", (req: Request, res: Response) => {
+reviewsRouter.patch("/:id", (req, res) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
+  if (!ensureOwned(req.params.id!, uid)) {
+    return res.status(404).json({ error: "not found" });
+  }
   const body = (req.body ?? {}) as Partial<Review>;
-  // Hand-pick the fields we accept so a malicious payload can't smuggle
-  // anything weird into the cache.
   const patch: Partial<Review> = {};
   if (typeof body.reviewed === "boolean") patch.reviewed = body.reviewed;
   if (typeof body.flagged === "boolean") patch.flagged = body.flagged;
   if (typeof body.notes === "string") patch.notes = body.notes.slice(0, 4000);
-  const updated = updateReview(req.params.id!, patch);
-  res.json(updated);
+  res.json(updateReview(req.params.id!, patch));
 });
 
-reviewsRouter.delete("/:id", (req: Request, res: Response) => {
+reviewsRouter.delete("/:id", (req, res) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
+  if (!ensureOwned(req.params.id!, uid)) {
+    return res.status(404).end();
+  }
   deleteReview(req.params.id!);
   res.status(204).end();
 });

@@ -9,6 +9,18 @@ export interface ReadApiOptions {
   store: SessionStore;
   storage: StorageDriver;
   events: IngestEvents;
+  /**
+   * App-layer hook for scoping reads to the requesting user. Wired by
+   * the app's auth middleware (e.g. AsyncLocalStorage lookup, or
+   * `req.user.id`). Stores that don't carry a user dimension simply
+   * receive `undefined` and behave as before.
+   *
+   * Returning `null` means "authenticated but no rows match" — the
+   * handler short-circuits with an empty list / 404, avoiding the
+   * "logged-out user sees everyone's sessions" failure mode if the
+   * upstream auth middleware is missing.
+   */
+  userIdFromReq?: (req: Request) => string | null | undefined;
 }
 
 /**
@@ -27,15 +39,19 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
   const router = express.Router();
 
   router.get("/sessions", async (req, res) => {
+    const userId = opts.userIdFromReq?.(req);
+    if (userId === null) return res.json({ items: [], nextCursor: null });
     const limit = parseIntParam(req.query.limit, 50);
     const cursor = typeof req.query.cursor === "string" ? req.query.cursor : undefined;
     const order = req.query.order === "asc" ? "asc" : "desc";
-    const page = await opts.store.listSessions({ limit, cursor, order });
+    const page = await opts.store.listSessions({ limit, cursor, order, userId: userId ?? undefined });
     res.json(page);
   });
 
   router.get("/sessions/:id", async (req, res) => {
-    const session = await opts.store.getSession(req.params.id!);
+    const userId = opts.userIdFromReq?.(req);
+    if (userId === null) return res.status(404).json({ error: "not found" });
+    const session = await opts.store.getSession(req.params.id!, { userId: userId ?? undefined });
     if (!session) return res.status(404).json({ error: "not found" });
     res.json(session);
   });
@@ -49,7 +65,9 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
   // serve both off the same handler — the filename segment is purely
   // cosmetic to satisfy the extension check.
   router.get("/sessions/:id/artifacts/:kind/:filename?", async (req, res) => {
-    const session = await opts.store.getSession(req.params.id!);
+    const userId = opts.userIdFromReq?.(req);
+    if (userId === null) return res.status(404).end();
+    const session = await opts.store.getSession(req.params.id!, { userId: userId ?? undefined });
     if (!session) return res.status(404).end();
     const artifact = session.artifacts[req.params.kind!];
     if (!artifact) return res.status(404).end();
@@ -102,11 +120,18 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
     stream.pipe(res);
   });
 
-  router.get("/stats", async (_req, res) => {
-    res.json(await opts.store.stats());
+  router.get("/stats", async (req, res) => {
+    const userId = opts.userIdFromReq?.(req);
+    if (userId === null) return res.json({ sessionCount: 0, totalBytes: 0, perDay: {} });
+    res.json(await opts.store.stats({ userId: userId ?? undefined }));
   });
 
   router.get("/events", (req: Request, res: Response) => {
+    const userId = opts.userIdFromReq?.(req);
+    // Unauthenticated stream still gets the handshake so EventSource
+    // doesn't enter its retry loop hammering us, but it receives only
+    // heartbeats — no payloads at all.
+    const muted = userId === null;
     // SSE handshake.
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream");
@@ -119,10 +144,33 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
     res.write("retry: 15000\n\n");
     // Heartbeat every 25 s to keep proxies from idling out the socket.
     const heartbeat = setInterval(() => res.write(": ping\n\n"), 25_000);
-    const unsubscribe = opts.events.subscribe((event) => {
-      res.write(`event: ${event.type}\n`);
-      res.write(`data: ${JSON.stringify(event)}\n\n`);
-    });
+    const unsubscribe = muted
+      ? () => {}
+      : opts.events.subscribe(async (event) => {
+          // Per-event user-scope filter: only deliver this row to the
+          // subscriber if the underlying session belongs to them. We
+          // look the session up against the store with the same userId
+          // filter; a miss means "not ours, drop".
+          if (userId) {
+            const sid =
+              event.type === "session.updated"
+                ? event.session.id
+                : event.type === "session.expired"
+                ? event.sessionId
+                : event.type === "resource.finalized"
+                ? event.sessionId
+                : null;
+            if (sid) {
+              const s = await opts.store.getSession(sid, { userId });
+              if (!s) return;
+            }
+            // resource.created / resource.progress carry no sessionId
+            // visible to other users — they're scoped by upload token
+            // upstream, so it's fine to forward as-is to the owner.
+          }
+          res.write(`event: ${event.type}\n`);
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        });
     req.on("close", () => {
       clearInterval(heartbeat);
       unsubscribe();
