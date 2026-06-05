@@ -120,22 +120,47 @@ systemctl daemon-reload
 
 # -- 6. nginx site (HTTP-only stub until certbot runs) ---------------------
 log "installing nginx site (HTTP-only until certbot adds TLS)"
-# Pre-certbot we serve HTTP only — the file we ship has the 443 block
-# present but with ssl_certificate lines commented out, which would
-# fail `nginx -t`. Trim the 443 block off for the initial install and
-# let certbot append it.
-TMP=$(mktemp)
-awk '
-  /^server \{ *$/      { skip=0 }
-  /listen 443 ssl/     { skip=1 }
-  skip==0              { print }
-' "$REPO_DIR/web/deploy/nginx.conf" > "$TMP"
-# Also strip the redirect-to-https inside the :80 block so it serves
-# directly until certbot rewrites the file.
-sed -i 's|return 301 https://\$host\$request_uri;|proxy_pass http://127.0.0.1:'"$PORT"';|' "$TMP" || true
+# Pre-certbot the canonical nginx.conf can't be used as-is: it references
+# /etc/letsencrypt/live/$DOMAIN/* which don't exist yet, and `nginx -t`
+# would refuse to reload. We emit a self-contained HTTP-only stub
+# inline; once certbot runs it can be replaced by `cp web/deploy/nginx.conf
+# /etc/nginx/sites-available/operator` followed by uncommenting the
+# four ssl_* lines (or letting certbot --nginx do it).
+cat > /etc/nginx/sites-available/operator <<NGINX
+server {
+  listen 80;
+  server_name $DOMAIN;
 
-install -m 0644 "$TMP" /etc/nginx/sites-available/operator
-rm -f "$TMP"
+  client_max_body_size 25g;
+  client_body_buffer_size 1m;
+  proxy_request_buffering off;
+  proxy_buffering off;
+  proxy_http_version 1.1;
+  proxy_read_timeout 30m;
+  proxy_send_timeout 30m;
+
+  location /.well-known/acme-challenge/ {
+    root /var/www/html;
+  }
+
+  location /_next/static/ {
+    alias $REPO_DIR/web/app/.next/static/;
+    expires 1y;
+    access_log off;
+    add_header Cache-Control "public, immutable";
+  }
+
+  location / {
+    proxy_pass http://127.0.0.1:$PORT;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_cache_bypass 1;
+    proxy_no_cache 1;
+  }
+}
+NGINX
 ln -sf /etc/nginx/sites-available/operator /etc/nginx/sites-enabled/operator
 
 # Don't reload yet if config is bad — surface the error.
