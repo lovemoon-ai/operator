@@ -1,4 +1,4 @@
-package com.spatialmp4.questcapture
+package com.spatialmp4.muxer
 
 import org.json.JSONArray
 import org.json.JSONObject

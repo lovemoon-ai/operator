@@ -48,6 +48,7 @@ var _last_head_jsonl_us := 0
 var _last_controller_jsonl_us := 0
 var _last_hand_jsonl_us := 0
 var _xr_display_time_provider: Object
+var _capture_provider: Object
 var _xr_display_time_supported := true
 var _xr_time_offset_ns := 0
 var _xr_time_offset_resolved := false
@@ -84,12 +85,14 @@ func configure(
 	p_writer: Object,
 	p_hmd_camera: XRCamera3D,
 	p_left_controller: XRController3D,
-	p_right_controller: XRController3D
+	p_right_controller: XRController3D,
+	p_capture_provider: Object = null
 ) -> void:
 	writer = p_writer
 	hmd_camera = p_hmd_camera
 	left_controller = p_left_controller
 	right_controller = p_right_controller
+	_capture_provider = p_capture_provider
 	_connect_controller_input_signals(left_controller, "left_controller")
 	_connect_controller_input_signals(right_controller, "right_controller")
 	_xr_display_time_provider = null
@@ -123,9 +126,9 @@ func resolve_pose_timestamp_ns(default_ticks_ns: int) -> int:
 func _resolve_xr_time_offset_ns() -> int:
 	if _xr_time_offset_resolved:
 		return _xr_time_offset_ns
-	if not Engine.has_singleton("QuestCapturePlugin"):
-		return 0
-	var plugin := Engine.get_singleton("QuestCapturePlugin")
+	var plugin := _capture_provider
+	if plugin == null and Engine.has_singleton("QuestCapturePlugin"):
+		plugin = Engine.get_singleton("QuestCapturePlugin")
 	if plugin == null:
 		return 0
 	# Same caveat as DepthSampler: Android singleton `has_method` is unreliable

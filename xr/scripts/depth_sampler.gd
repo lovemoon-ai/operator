@@ -16,6 +16,7 @@ var _callback_us := 0
 var _convert_us := 0
 var _native_convert_plugin: Object
 var _native_convert_checked := false
+var _capture_provider: Object
 var _extension_name := ""
 var _drop_count := 0
 var _last_drop_reason := ""
@@ -44,8 +45,9 @@ func pop_metrics() -> Dictionary:
 	return metrics
 
 
-func configure(p_writer: Object) -> void:
+func configure(p_writer: Object, p_capture_provider: Object = null) -> void:
 	writer = p_writer
+	_capture_provider = p_capture_provider
 	for singleton_name in [
 		"OpenXRMetaEnvironmentDepthExtensionWrapper",
 		"OpenXRMetaEnvironmentDepthExtension",
@@ -62,9 +64,9 @@ func configure(p_writer: Object) -> void:
 func _resolve_xr_time_offset_ns() -> int:
 	if _xr_time_offset_resolved:
 		return _xr_time_offset_ns
-	if not Engine.has_singleton("QuestCapturePlugin"):
-		return 0
-	var plugin := Engine.get_singleton("QuestCapturePlugin")
+	var plugin := _capture_provider
+	if plugin == null and Engine.has_singleton("QuestCapturePlugin"):
+		plugin = Engine.get_singleton("QuestCapturePlugin")
 	if plugin == null:
 		return 0
 	# Skip `has_method()` checks here: Godot's Android singleton wrapper does
@@ -227,7 +229,9 @@ func _resolve_native_convert_plugin() -> Object:
 	if _native_convert_checked:
 		return _native_convert_plugin
 	_native_convert_checked = true
-	if Engine.has_singleton("QuestCapturePlugin"):
+	if _capture_provider != null:
+		_native_convert_plugin = _capture_provider
+	elif Engine.has_singleton("QuestCapturePlugin"):
 		var plugin := Engine.get_singleton("QuestCapturePlugin")
 		if plugin != null:
 			_native_convert_plugin = plugin

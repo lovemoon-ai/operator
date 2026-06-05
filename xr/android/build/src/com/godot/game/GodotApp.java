@@ -55,6 +55,9 @@ import java.util.Set;
 public class GodotApp extends GodotActivity {
 	private static final String EXTRA_OPERATOR_MODE = "operator.mode";
 	private static final String EXTRA_OPERATOR_MODE_LEGACY = "operator_mode";
+	private static final String EXTRA_CAPTURE_INTERACTION_MODE = "operator.capture.interaction_mode";
+	private static final String EXTRA_CAPTURE_AUTO_START = "operator.capture.auto_start";
+	private static final String EXTRA_CAPTURE_AUTO_STOP_SECONDS = "operator.capture.auto_stop_seconds";
 
 	static {
 		// .NET libraries.
@@ -109,6 +112,9 @@ public class GodotApp extends GodotActivity {
 			args.add(operatorMode.trim());
 			Log.i("Operator", "Automation operator mode requested: " + operatorMode.trim());
 		}
+		appendIntentExtraArg(args, EXTRA_CAPTURE_INTERACTION_MODE, "--operator-capture-interaction-mode");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_START, "--operator-capture-auto-start");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_STOP_SECONDS, "--operator-capture-auto-stop-seconds");
 		return args;
 	}
 
@@ -116,6 +122,25 @@ public class GodotApp extends GodotActivity {
 		if (!args.contains("--")) {
 			args.add("--");
 		}
+	}
+
+	private void appendIntentExtraArg(ArrayList<String> args, String extraName, String argName) {
+		Bundle extras = getIntent().getExtras();
+		if (extras == null || !extras.containsKey(extraName)) {
+			return;
+		}
+		Object value = extras.get(extraName);
+		if (value == null) {
+			return;
+		}
+		String text = value.toString().trim();
+		if (text.isEmpty()) {
+			return;
+		}
+		ensureUserArgsDelimiter(args);
+		args.add(argName);
+		args.add(text);
+		Log.i("Operator", "Automation extra requested: " + extraName + "=" + text);
 	}
 
 	@Override

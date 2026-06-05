@@ -2,6 +2,7 @@ extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name ViewLockedCapturePanel
 
 const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
+const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
 
 signal saved(options: Dictionary)
 ## Emitted when the user taps the 📷 button next to the Upload URL field.
@@ -9,6 +10,7 @@ signal saved(options: Dictionary)
 ## eventually calls set_upload_url_from_scan() to feed the result back.
 ## `exit_requested` is inherited from BaseSettingsPanel — don't redeclare.
 signal scan_upload_url_requested
+signal tracker_connect_requested
 
 # 840 wide gives ~430px of detail column after sidebar + margins. The 1180-tall
 # legacy viewport went away once the form was split into groups — every group
@@ -39,6 +41,10 @@ var _upload_health_request: HTTPRequest
 # _exit_indicator/_exit_holding/_exit_hold_seconds are all inherited
 # from BaseSettingsPanel — don't redeclare.
 var _storage_label: Label
+var _tracker_section_label: Label
+var _tracker_status_label: Label
+var _tracker_connect_button: Button
+var _tracker_connect_slot: PanelContainer
 var _storage_refresh_accum := STORAGE_REFRESH_SECONDS
 var _storage_plugin: Object
 var _storage_plugin_checked := false
@@ -83,6 +89,9 @@ func get_options() -> Dictionary:
 		"record_head_pose": _toggle_enabled("record_head_pose"),
 		"record_controller_pose": _toggle_enabled("record_controller_pose"),
 		"record_hand_data": _toggle_enabled("record_hand_data"),
+		"record_body_tracking": _toggle_enabled("record_body_tracking"),
+		"record_motion_trackers": _toggle_enabled("record_motion_trackers"),
+		"max_motion_trackers": 3,
 		# v3 spatial audio: opt-in for privacy. The toggle defaults off below
 		# (default_on=false in _add_stream_toggle) so a recording never opens
 		# the mic without the operator explicitly enabling it.
@@ -150,6 +159,19 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_add_stream_toggle(streams, "record_head_pose", tr("UI_HEAD_POSE"))
 	_add_stream_toggle(streams, "record_controller_pose", tr("UI_CONTROLLER_POSES"))
 	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"))
+	_add_stream_toggle(streams, "record_body_tracking", tr("UI_BODY_TRACKING"))
+	_add_stream_toggle(streams, "record_motion_trackers", tr("UI_MOTION_TRACKERS"))
+
+	_tracker_section_label = _add_section_label_to(streams, "UI_TRACKER_SETUP")
+	_tracker_status_label = _add_status_label_to(streams, "")
+	_tracker_connect_button = Button.new()
+	_tracker_connect_button.text = tr("UI_CONNECT_PICO_TRACKERS")
+	_tracker_connect_button.custom_minimum_size.y = 55
+	_tracker_connect_button.add_theme_font_size_override("font_size", 21)
+	_tracker_connect_button.pressed.connect(func() -> void: tracker_connect_requested.emit())
+	_tracker_connect_slot = add_interactive(streams, _tracker_connect_button)
+	set_pico_tracker_status(false, false, 0, false, false, false)
+
 	# Audio is privacy-sensitive (opens the microphone), so the toggle starts
 	# OFF -- the operator has to flip it explicitly. The capture pipeline
 	# additionally gates on RECORD_AUDIO runtime permission downstream.
@@ -240,6 +262,15 @@ func _add_stream_toggle(parent: Container, key: String, label: String, default_o
 	_stream_toggles[key] = toggle
 
 
+func _add_section_label_to(parent: Container, text_key: String) -> Label:
+	var lbl := Label.new()
+	lbl.text = tr(text_key)
+	lbl.add_theme_font_size_override("font_size", 21)
+	lbl.add_theme_color_override("font_color", COL_SECTION)
+	parent.add_child(lbl)
+	return lbl
+
+
 func _add_status_label_to(parent: Container, initial_text: String) -> Label:
 	# add_status_label() in BaseSettingsPanel hard-codes _content as the parent,
 	# but in the two-column layout we want the label inside a specific group.
@@ -250,6 +281,35 @@ func _add_status_label_to(parent: Container, initial_text: String) -> Label:
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	parent.add_child(lbl)
 	return lbl
+
+
+func set_pico_tracker_status(
+		visible_for_capture: bool,
+		connected: bool,
+		tracker_count: int,
+		request_sent: bool,
+		can_open_setup: bool,
+		opening_setup: bool
+) -> void:
+	if _tracker_section_label == null or _tracker_status_label == null or _tracker_connect_button == null or _tracker_connect_slot == null:
+		return
+	_tracker_section_label.visible = visible_for_capture
+	_tracker_status_label.visible = visible_for_capture
+	_tracker_connect_slot.visible = visible_for_capture and not connected
+	if not visible_for_capture:
+		return
+	if connected:
+		_tracker_status_label.text = tr("UI_PICO_TRACKERS_CONNECTED") % tracker_count
+		_tracker_connect_button.disabled = true
+		return
+	if opening_setup:
+		_tracker_status_label.text = tr("UI_OPENING_TRACKER_SETUP")
+	elif request_sent:
+		_tracker_status_label.text = tr("UI_PICO_TRACKER_REQUEST_SENT")
+	else:
+		_tracker_status_label.text = tr("UI_PICO_TRACKERS_DISCONNECTED")
+	_tracker_connect_button.disabled = not can_open_setup or opening_setup
+	_tracker_connect_button.text = tr("UI_OPENING_TRACKER_SETUP") if opening_setup else tr("UI_CONNECT_PICO_TRACKERS")
 
 
 func _toggle_enabled(key: String) -> bool:
@@ -293,6 +353,9 @@ static func _default_options() -> Dictionary:
 		"record_head_pose": true,
 		"record_controller_pose": true,
 		"record_hand_data": true,
+		"record_body_tracking": true,
+		"record_motion_trackers": true,
+		"max_motion_trackers": 3,
 		"record_audio": false,
 		"audio_channel_layout": "stereo",
 		"audio_sample_rate_hz": 48000,
@@ -500,8 +563,7 @@ func _resolve_storage_plugin() -> Object:
 	if _storage_plugin_checked:
 		return _storage_plugin
 	_storage_plugin_checked = true
-	if Engine.has_singleton("QuestCapturePlugin"):
-		_storage_plugin = Engine.get_singleton("QuestCapturePlugin")
+	_storage_plugin = CaptureProviderRegistryScript.bind()
 	return _storage_plugin
 
 

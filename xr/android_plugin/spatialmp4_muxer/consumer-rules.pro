@@ -1,2 +1,1 @@
--keep class com.spatialmp4.questcapture.** { *; }
-
+-keep class com.spatialmp4.muxer.** { *; }

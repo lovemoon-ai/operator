@@ -22,6 +22,8 @@ var _head_file: FileAccess
 var _controller_file: FileAccess
 var _hand_file: FileAccess
 var _depth_file: FileAccess
+var _body_file: FileAccess
+var _motion_file: FileAccess
 # Debug-only: when capture option `dump_raw_depth` is true, every pre-encode
 # depth payload is written here in capture order so the FFV1 mp4 track can be
 # checked bit-for-bit offline (scripts/verify_depth_ffv1.py --reference).
@@ -50,6 +52,9 @@ func start_session(options: Dictionary = {}) -> bool:
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		if _make_dir("%s/poses" % session_dir) != OK:
 			return false
+	if _capture_enabled("record_body_tracking") or _capture_enabled("record_motion_trackers"):
+		if _make_dir("%s/body_motion" % session_dir) != OK:
+			return false
 	if _capture_enabled("record_depth"):
 		if _make_dir("%s/depth" % session_dir) != OK:
 			return false
@@ -66,6 +71,10 @@ func start_session(options: Dictionary = {}) -> bool:
 		sources["depth"] = "OpenXRMetaEnvironmentDepthExtension converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		sources["pose"] = "Godot OpenXR nodes and XRHandTracker; PTS from OpenXRMetaEnvironmentDepthExtensionWrapper.get_predicted_display_time_ns() when available, else Time.get_ticks_usec()"
+	if _capture_enabled("record_body_tracking"):
+		sources["body_tracking"] = "PICO OpenXR XR_BD_body_tracking plus XR_PICO_body_tracking2 state/velocity/acceleration when available; stored as body_motion/body_joints.jsonl sidecar"
+	if _capture_enabled("record_motion_trackers"):
+		sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored as body_motion/motion_trackers.jsonl sidecar"
 	# v3 spatial audio. The audio path is provider-driven (AudioRecord ->
 	# MediaCodec AAC-LC -> SpatialDataSink), so GDScript never sees a frame;
 	# we just record the configured shape in the manifest. The same fields
@@ -120,6 +129,10 @@ func start_session(options: Dictionary = {}) -> bool:
 		_controller_file = FileAccess.open("%s/poses/controllers.jsonl" % session_dir, FileAccess.WRITE)
 	if save_controller_hand_sidecar and _capture_enabled("record_hand_data"):
 		_hand_file = FileAccess.open("%s/poses/hands.jsonl" % session_dir, FileAccess.WRITE)
+	if _capture_enabled("record_body_tracking"):
+		_body_file = FileAccess.open("%s/body_motion/body_joints.jsonl" % session_dir, FileAccess.WRITE)
+	if _capture_enabled("record_motion_trackers"):
+		_motion_file = FileAccess.open("%s/body_motion/motion_trackers.jsonl" % session_dir, FileAccess.WRITE)
 	if _capture_enabled("record_depth"):
 		_depth_file = FileAccess.open("%s/depth/frames.jsonl" % session_dir, FileAccess.WRITE)
 	return true
@@ -138,6 +151,12 @@ func close() -> void:
 	if _depth_file:
 		_depth_file.close()
 		_depth_file = null
+	if _body_file:
+		_body_file.close()
+		_body_file = null
+	if _motion_file:
+		_motion_file.close()
+		_motion_file = null
 	var attempted_native_finish := muxer_plugin != null
 	if muxer_plugin != null:
 		var finalized: String = str(muxer_plugin.call("finishSpatialMp4"))
@@ -352,6 +371,58 @@ func write_depth_frame(
 	_write_jsonl(_depth_file, record)
 
 
+func write_body_joints(timestamp_ns: int, body_flags: int, joints: Array, metadata: Dictionary = {}) -> bool:
+	if _body_file == null or joints.is_empty():
+		return false
+	var json_joints: Array = []
+	for joint in joints:
+		if typeof(joint) == TYPE_DICTIONARY:
+			json_joints.append(_json_safe_joint_record(joint))
+	var record := {
+		"timestamp_ns": timestamp_ns,
+		"body_flags": body_flags,
+		"joint_count": json_joints.size(),
+		"joints": json_joints
+	}
+	for key in metadata.keys():
+		if key == "joints" or key == "transform":
+			continue
+		record[key] = _json_safe_value(metadata[key])
+	_write_jsonl(_body_file, record)
+	return true
+
+
+func write_motion_tracker_pose(
+	tracker_index: int,
+	source: String,
+	timestamp_ns: int,
+	transform: Transform3D,
+	tracking_valid: bool,
+	metadata: Dictionary = {}
+) -> bool:
+	if _motion_file == null:
+		return false
+	var record := _pose_record(timestamp_ns, source, transform, tracking_valid)
+	record["tracker_index"] = tracker_index
+	for key in metadata.keys():
+		if key == "transform" or key == "position" or key == "rotation" or key == "tracker_index":
+			continue
+		record[key] = _json_safe_value(metadata[key])
+	_write_jsonl(_motion_file, record)
+	return true
+
+
+func write_motion_tracker_event(timestamp_ns: int, event_type: String, event: Dictionary) -> bool:
+	if _motion_file == null:
+		return false
+	_write_jsonl(_motion_file, {
+		"timestamp_ns": timestamp_ns,
+		"event_type": event_type,
+		"event": _json_safe_value(event)
+	})
+	return true
+
+
 func ticks_us_to_session_us(ticks_us: int) -> int:
 	return ticks_us - session_start_ticks_us
 
@@ -408,6 +479,50 @@ func _pose_record(timestamp_ns: int, source: String, transform: Transform3D, tra
 		"position": {"x": p.x, "y": p.y, "z": p.z},
 		"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
 	}
+
+
+func _json_safe_joint_record(joint_record: Dictionary) -> Dictionary:
+	var out := {}
+	for key in joint_record.keys():
+		if key == "transform":
+			continue
+		out[key] = _json_safe_value(joint_record[key])
+	return out
+
+
+func _json_safe_value(value: Variant) -> Variant:
+	match typeof(value):
+		TYPE_DICTIONARY:
+			var out := {}
+			var dict := value as Dictionary
+			for key in dict.keys():
+				out[key] = _json_safe_value(dict[key])
+			return out
+		TYPE_ARRAY:
+			var out: Array = []
+			for item in value:
+				out.append(_json_safe_value(item))
+			return out
+		TYPE_PACKED_BYTE_ARRAY:
+			return "<bytes:%d>" % (value as PackedByteArray).size()
+		TYPE_VECTOR2:
+			var v2 := value as Vector2
+			return {"x": v2.x, "y": v2.y}
+		TYPE_VECTOR3:
+			var v3 := value as Vector3
+			return {"x": v3.x, "y": v3.y, "z": v3.z}
+		TYPE_QUATERNION:
+			var q := value as Quaternion
+			return {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
+		TYPE_TRANSFORM3D:
+			var t := value as Transform3D
+			var q := t.basis.get_rotation_quaternion()
+			return {
+				"position": {"x": t.origin.x, "y": t.origin.y, "z": t.origin.z},
+				"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
+			}
+		_:
+			return value
 
 
 func _pack_hand_joints_payload(joints: Array) -> PackedByteArray:

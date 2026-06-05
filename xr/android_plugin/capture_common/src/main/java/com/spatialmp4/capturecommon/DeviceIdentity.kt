@@ -1,4 +1,4 @@
-package com.spatialmp4.questcapture
+package com.spatialmp4.capturecommon
 
 import android.os.Build
 

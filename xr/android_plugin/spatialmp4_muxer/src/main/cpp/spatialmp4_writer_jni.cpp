@@ -539,6 +539,15 @@ class LiveSpatialMp4Writer {
       if (!hevc_configured_) {
         return Fail("HEVC stream was never configured");
       }
+      if (audio_expected_ && !audio_configured_) {
+        // Same shape as the depth fall-through: a recording that never saw a
+        // single AAC packet still produces a valid mp4 with just the streams
+        // we did configure. The io thread also clears this flag when it
+        // observes finish_now (see IoLoop's pre-flush) so the deferred queue
+        // of RGB/depth packets reaches the writer before drained_ is signaled.
+        __android_log_print(ANDROID_LOG_WARN, kTag, "finishing without audio stream; no AAC packets arrived");
+        audio_expected_ = false;
+      }
       if (!header_written_) {
         // Header was never written (no packets arrived). Bail with a clear
         // message rather than letting av_write_trailer crash on an
@@ -1171,7 +1180,7 @@ std::vector<uint8_t> PackPose(double px, double py, double pz, double qx, double
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeStart(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeStart(
     JNIEnv* env,
     jclass,
     jstring partial_path,
@@ -1224,7 +1233,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeStart(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureHevc(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeConfigureHevc(
     JNIEnv* env,
     jclass,
     jlong handle,
@@ -1237,7 +1246,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureHevc(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureDepth(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeConfigureDepth(
     JNIEnv* env,
     jclass,
     jlong handle,
@@ -1259,7 +1268,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureDepth(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureAudio(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeConfigureAudio(
     JNIEnv* env,
     jclass,
     jlong handle,
@@ -1281,7 +1290,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeConfigureAudio(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeDisableAudio(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeDisableAudio(
     JNIEnv*,
     jclass,
     jlong handle) {
@@ -1293,7 +1302,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeDisableAudio(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteAudioPacket(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteAudioPacket(
     JNIEnv* env,
     jclass,
     jlong handle,
@@ -1311,7 +1320,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteAudioPacket(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteHevcPacket(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteHevcPacket(
     JNIEnv* env,
     jclass,
     jlong handle,
@@ -1327,7 +1336,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteHevcPacket(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteDepthPacket(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteDepthPacket(
     JNIEnv* env,
     jclass,
     jlong handle,
@@ -1342,7 +1351,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteDepthPacket(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteHeadPose(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteHeadPose(
     JNIEnv*,
     jclass,
     jlong handle,
@@ -1365,7 +1374,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteHeadPose(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteRigidPose(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteRigidPose(
     JNIEnv*,
     jclass,
     jlong handle,
@@ -1390,7 +1399,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteRigidPose(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteTimedMetadata(
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteTimedMetadata(
     JNIEnv* env,
     jclass,
     jlong handle,
@@ -1408,7 +1417,7 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeWriteTimedMetadata(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeFinish(JNIEnv*, jclass, jlong handle) {
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeFinish(JNIEnv*, jclass, jlong handle) {
   auto* writer = FromHandle(handle);
   if (!writer) {
     return JNI_FALSE;
@@ -1417,13 +1426,13 @@ Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeFinish(JNIEnv*, jclass, 
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeClose(JNIEnv*, jclass, jlong handle) {
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeClose(JNIEnv*, jclass, jlong handle) {
   auto* writer = FromHandle(handle);
   delete writer;
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_spatialmp4_questcapture_SpatialMp4Native_nativeGetLastError(JNIEnv* env, jclass, jlong handle) {
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeGetLastError(JNIEnv* env, jclass, jlong handle) {
   auto* writer = FromHandle(handle);
   if (!writer) {
     return StringToJString(env, "writer handle is null");

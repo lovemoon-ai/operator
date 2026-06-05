@@ -89,8 +89,7 @@ PATCH_MARKERS=(
 
 TEMP_DIRS=()
 cleanup() {
-  [[ ${#TEMP_DIRS[@]} -eq 0 ]] && return 0
-  for d in "${TEMP_DIRS[@]}"; do
+  for d in "${TEMP_DIRS[@]+"${TEMP_DIRS[@]}"}"; do
     [[ -n "$d" && -d "$d" ]] && rm -rf "$d"
   done
   return 0

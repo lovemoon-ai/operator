@@ -19,6 +19,18 @@ apk_androidxr=build/androidxr/Operator.apk
 package=com.lovemoon.operator
 activity=com.godot.game.GodotApp
 mode_extra=$(if $(MODE),--es operator.mode $(MODE),)
+release_manifest=android/build/src/release/AndroidManifest.xml
+
+define godot_export_release
+	@tmp_manifest=$$(mktemp); \
+	cp $(release_manifest) $$tmp_manifest; \
+	set +e; \
+	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3); \
+	status=$$?; \
+	cp $$tmp_manifest $(release_manifest); \
+	rm -f $$tmp_manifest; \
+	exit $$status
+endef
 
 # Plugin/library build rules (setup-vendors, prepare-android-libs, build-ahb,
 # build-capture-plugins, prepare-capture-plugins, clean-addons).
@@ -28,17 +40,17 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: setup-vendors prepare-android-libs build-ahb prepare-capture-plugins
+build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
-	GRADLE_USER_HOME=$(GRADLE_USER_HOME) godot --headless --verbose --path . --export-release "Meta Quest" $(apk_quest)
+	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
-build-pico: setup-vendors prepare-android-libs build-ahb prepare-capture-plugins
+build-pico: setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-capture-plugins
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
-	GRADLE_USER_HOME=$(GRADLE_USER_HOME) godot --headless --verbose --path . --export-release "Pico" $(apk_pico)
+	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 
-build-androidxr: setup-vendors prepare-android-libs build-ahb prepare-capture-plugins
+build-androidxr: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
-	GRADLE_USER_HOME=$(GRADLE_USER_HOME) godot --headless --verbose --path . --export-release "Glass XR" $(apk_androidxr)
+	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
 # ---------------------------------------------------------------------------
 # Device install / run / ship

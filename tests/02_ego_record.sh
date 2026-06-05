@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end ego data recording CI for the Quest build.
+# End-to-end ego data recording CI for Quest/PICO headset builds.
 #
 # The script builds a temporary CI APK with capture_app.gd's device-test
 # auto-start harness enabled, installs it on the attached headset, launches
@@ -20,7 +20,10 @@
 #
 # Environment overrides:
 #   DEVICE_KIND         same as --device; quest or pico (default quest).
-#   QUEST_SERIAL        adb serial to use; defaults to the first attached device.
+#   ADB_SERIAL         adb serial to use for any device kind.
+#   PICO_SERIAL        adb serial to use when --device pico.
+#   QUEST_SERIAL       adb serial to use when --device quest. Also kept as the
+#                      legacy override when ADB_SERIAL/PICO_SERIAL are unset.
 #   CAPTURE_SECONDS     recording duration baked into the CI APK (default 12).
 #   OUTPUT_DIR          artifact directory (default tests/logs/ego-record-<stamp>).
 #   SKIP_BUILD=1        use the existing xr/build/<kind>/Operator.apk.
@@ -48,6 +51,8 @@ PYTHON="${PYTHON:-python3}"
 MAKE="${MAKE:-make}"
 FFPROBE="${FFPROBE:-}"
 
+ADB_SERIAL_OVERRIDE="${ADB_SERIAL:-}"
+PICO_SERIAL="${PICO_SERIAL:-}"
 QUEST_SERIAL="${QUEST_SERIAL:-}"
 CAPTURE_SECONDS="${CAPTURE_SECONDS:-12}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/tests/logs/ego-record-$(date +%Y%m%d-%H%M%S)}"
@@ -57,6 +62,10 @@ SKIP_DEVICE="${SKIP_DEVICE:-0}"
 KEEP_CI_APK="${KEEP_CI_APK:-0}"
 CLEAR_APP_DATA="${CLEAR_APP_DATA:-1}"
 DEVICE_KIND="${DEVICE_KIND:-quest}"
+EXPECT_AUDIO_WAS_SET=0
+if [ "${EXPECT_AUDIO+x}" = "x" ]; then
+  EXPECT_AUDIO_WAS_SET=1
+fi
 EXPECT_AUDIO="${EXPECT_AUDIO:-1}"
 AUDIO_CHANNEL_LAYOUT="${AUDIO_CHANNEL_LAYOUT:-stereo}"
 AUDIO_SAMPLE_RATE_HZ="${AUDIO_SAMPLE_RATE_HZ:-48000}"
@@ -98,6 +107,15 @@ configure_device_kind() {
       exit 1
       ;;
   esac
+
+  if [ "$DEVICE_KIND" = "pico" ] && [ "$EXPECT_AUDIO_WAS_SET" != "1" ]; then
+    # The current PICO camera path captures RGB via XR_PICO_camera_image and
+    # explicitly disables Android AudioRecord in capture_app.gd.
+    EXPECT_AUDIO=0
+  fi
+  if [ "$DEVICE_KIND" = "pico" ] && [ "${DEVICE_ROOT+x}" != "x" ]; then
+    REMOTE_CAPTURE_ROOT="/sdcard/DCIM/SpatialMP4"
+  fi
 }
 
 SERIAL=""
@@ -131,7 +149,7 @@ while (("$#")); do
   case "$1" in
     --capture-seconds) CAPTURE_SECONDS="$2"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; CLEAN_APK_PATH="$OUTPUT_DIR/Operator-clean.apk"; shift 2 ;;
-    --serial) QUEST_SERIAL="$2"; shift 2 ;;
+    --serial) ADB_SERIAL_OVERRIDE="$2"; shift 2 ;;
     --ffprobe) FFPROBE="$2"; shift 2 ;;
     --device) DEVICE_KIND="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
@@ -206,17 +224,85 @@ resolve_ffprobe() {
 }
 
 pick_device() {
-  if [ -n "$QUEST_SERIAL" ]; then
-    echo "$QUEST_SERIAL"
+  local override
+  override="$ADB_SERIAL_OVERRIDE"
+  if [ -z "$override" ] && [ "$DEVICE_KIND" = "pico" ]; then
+    override="$PICO_SERIAL"
+  fi
+  if [ -z "$override" ] && [ "$DEVICE_KIND" = "quest" ]; then
+    override="$QUEST_SERIAL"
+  fi
+  if [ -z "$override" ]; then
+    # Backward compatibility for older invocations that used QUEST_SERIAL as a
+    # generic serial override even when --device pico is selected.
+    override="$QUEST_SERIAL"
+  fi
+  if [ -n "$override" ]; then
+    echo "$override"
     return
   fi
-  local devices
-  devices=$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}' || true)
-  if [ -z "$devices" ]; then
-    err "no adb device attached; set QUEST_SERIAL to override"
+  local device_lines
+  device_lines=$("$ADB" devices -l | awk 'NR>1 && $2=="device" {print}' || true)
+  if [ -z "$device_lines" ]; then
+    err "no adb device attached; set ADB_SERIAL/PICO_SERIAL/QUEST_SERIAL to override"
     exit 1
   fi
-  echo "$devices" | head -n1
+
+  local matches=()
+  local line serial
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    serial="$(awk '{print $1}' <<< "$line")"
+    if adb_device_matches_kind "$serial" "$line"; then
+      matches+=("$serial")
+    fi
+  done <<< "$device_lines"
+
+  if [ "${#matches[@]}" -eq 1 ]; then
+    echo "${matches[0]}"
+    return
+  fi
+  if [ "${#matches[@]}" -gt 1 ]; then
+    err "multiple adb devices match --device $DEVICE_KIND: ${matches[*]}; pass --serial"
+    exit 1
+  fi
+
+  local device_count
+  device_count="$(wc -l <<< "$device_lines" | tr -d ' ')"
+  if [ "$device_count" = "1" ]; then
+    awk '{print $1}' <<< "$device_lines"
+    return
+  fi
+
+  err "no adb device matches --device $DEVICE_KIND; pass --serial"
+  printf '%s\n' "$device_lines" >&2
+  exit 1
+}
+
+adb_device_matches_kind() {
+  local serial="$1"
+  local device_line="$2"
+  local props text
+  props=$("$ADB" -s "$serial" shell 'printf "%s %s %s %s %s\n" "$(getprop ro.product.manufacturer)" "$(getprop ro.product.brand)" "$(getprop ro.product.model)" "$(getprop ro.product.device)" "$(getprop ro.product.name)"' </dev/null 2>/dev/null | tr -d '\r' || true)
+  text="$(printf '%s %s\n' "$device_line" "$props" | tr '[:upper:]' '[:lower:]')"
+  case "$DEVICE_KIND" in
+    pico)
+      grep -Eq 'pico|picovr|sparrow|a9210|a8210|a8110|a8150|pico 4' <<< "$text"
+      ;;
+    quest)
+      grep -Eq 'quest|oculus|meta|eureka|panther|seacliff|hollywood' <<< "$text"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+log_device_identity() {
+  {
+    echo "serial=$SERIAL"
+    run_adb shell 'printf "manufacturer=%s\nbrand=%s\nmodel=%s\ndevice=%s\nproduct=%s\n" "$(getprop ro.product.manufacturer)" "$(getprop ro.product.brand)" "$(getprop ro.product.model)" "$(getprop ro.product.device)" "$(getprop ro.product.name)"' 2>/dev/null | tr -d '\r'
+  } | tee "$OUTPUT_DIR/adb-device-props.txt"
 }
 
 restore_auto_start() {
@@ -355,6 +441,9 @@ grant_permissions() {
     horizonos.permission.AVATAR_CAMERA \
     com.oculus.permission.USE_SCENE \
     horizonos.permission.USE_SCENE \
+    com.picovr.permission.CAMERA \
+    com.picovr.permission.HEAD_TRACKER \
+    com.pico.permission.CAMERA_DATA \
     android.permission.READ_EXTERNAL_STORAGE \
     android.permission.WRITE_EXTERNAL_STORAGE
   do
@@ -368,6 +457,27 @@ grant_permissions() {
   run_adb shell appops set "$PKG" USE_SCENE allow >/dev/null 2>&1 || true
   run_adb shell appops set "$PKG" HEADSET_CAMERA allow >/dev/null 2>&1 || true
   run_adb shell appops set "$PKG" AVATAR_CAMERA allow >/dev/null 2>&1 || true
+  run_adb shell appops set "$PKG" CAMERA allow >/dev/null 2>&1 || true
+  run_adb shell cmd appops set "$PKG" CAMERA allow >/dev/null 2>&1 || true
+}
+
+ensure_screen_awake() {
+  local state
+  run_adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  run_adb shell wm dismiss-keyguard >/dev/null 2>&1 || true
+  state="$(run_adb shell dumpsys power 2>/dev/null | grep -m1 -E 'Display Power|mWakefulness' || true)"
+  if grep -q -E 'ON|Awake' <<< "$state"; then
+    ok "screen is on"
+    return
+  fi
+  run_adb shell input keyevent KEYCODE_POWER >/dev/null 2>&1 || true
+  sleep 3
+  state="$(run_adb shell dumpsys power 2>/dev/null | grep -m1 -E 'Display Power|mWakefulness' || true)"
+  if grep -q -E 'ON|Awake' <<< "$state"; then
+    ok "screen woke up"
+  else
+    warn "screen wake state is unclear: ${state:-<empty>}"
+  fi
 }
 
 dismiss_system_dialogs() {
@@ -388,7 +498,7 @@ prepare_device() {
   run_adb shell "rm -rf /sdcard/Movies/SpatialMP4 /sdcard/DCIM/SpatialMP4" >/dev/null 2>&1 || true
   run_adb shell am force-stop com.oculus.guardian >/dev/null 2>&1 || true
   run_adb shell am force-stop com.android.permissioncontroller >/dev/null 2>&1 || true
-  run_adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+  ensure_screen_awake
   run_adb shell am broadcast -a com.oculus.vrpowermanager.prox_close >/dev/null 2>&1 || true
   dismiss_system_dialogs
   run_adb logcat -c
@@ -556,6 +666,8 @@ min_rgb_frames = int(sys.argv[5]) or max(20, int(capture_seconds * 15))
 min_rgb_fps = float(sys.argv[6])
 expected_device_prefix = sys.argv[7] if len(sys.argv) > 7 else ""
 expect_audio = (sys.argv[8] if len(sys.argv) > 8 else "0") == "1"
+dense_start_limit_us = 750_000 if expected_device_prefix == "pico" else 500_000
+dense_start_limit_ms = dense_start_limit_us // 1000
 
 checks: list[tuple[str, str, str]] = []
 
@@ -681,6 +793,18 @@ def effective_audio_layout_for_request(layout: str) -> str:
     return "stereo"
 
 
+def wants_depth(options: dict[str, Any]) -> bool:
+    return options.get("record_depth") is True
+
+
+def wants_stereo_rgb(options: dict[str, Any]) -> bool:
+    return options.get("stereo_rgb", True) is True
+
+
+def wants_head_pose(options: dict[str, Any]) -> bool:
+    return options.get("record_head_pose", True) is True
+
+
 def check_required_files(session_dir: Path, mp4: Path, options: dict[str, Any]) -> None:
     required = [
         "manifest.json",
@@ -688,9 +812,9 @@ def check_required_files(session_dir: Path, mp4: Path, options: dict[str, Any]) 
         "left_camera_characteristics.json",
         "left_camera_frames.jsonl",
     ]
-    if options.get("stereo_rgb", True):
+    if wants_stereo_rgb(options):
         required += ["right_camera_characteristics.json", "right_camera_frames.jsonl"]
-    if options.get("record_depth", True):
+    if wants_depth(options):
         required += ["depth/frames.jsonl"]
     for rel in required:
         path = session_dir / rel
@@ -720,11 +844,27 @@ def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     else:
         failed("manifest media_pts_clock is clock_monotonic_ns", repr(manifest.get("media_pts_clock")))
     options = manifest.get("capture_options") or {}
-    for key in ("stereo_rgb", "record_depth", "record_head_pose"):
+    for key in ("stereo_rgb", "record_head_pose"):
         if options.get(key) is True:
             passed(f"capture option {key}=true")
         else:
             failed(f"capture option {key}=true", repr(options.get(key)))
+    if expected_device_prefix == "pico":
+        if options.get("record_depth") is False:
+            passed("capture option record_depth=false for pico")
+        elif options.get("record_depth") is True:
+            passed("capture option record_depth=true")
+        else:
+            failed("capture option record_depth is boolean", repr(options.get("record_depth")))
+        for key in ("record_body_tracking", "record_motion_trackers"):
+            if options.get(key) is True:
+                passed(f"capture option {key}=true")
+            else:
+                failed(f"capture option {key}=true", repr(options.get(key)))
+    elif options.get("record_depth") is True:
+        passed("capture option record_depth=true")
+    else:
+        failed("capture option record_depth=true", repr(options.get("record_depth")))
     if expect_audio:
         if options.get("record_audio") is True:
             passed("capture option record_audio=true")
@@ -1018,12 +1158,12 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
                 failed("MP4 RGB frame rate", f"{fps:.1f} fps < {min_rgb_fps:.1f}")
     else:
         failed("MP4 contains HEVC RGB stream")
-    if options.get("record_depth", True):
+    if wants_depth(options):
         if depth:
             passed("MP4 contains depth stream", f"{depth.get('codec_name')}/{depth.get('codec_tag_string')}")
         else:
             failed("MP4 contains depth stream")
-    if options.get("record_head_pose", True):
+    if wants_head_pose(options):
         if mett:
             passed("MP4 contains timed metadata stream", f"{len(mett)} mett stream(s)")
         else:
@@ -1078,13 +1218,14 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
             passed("at least one MP4 stream starts at PTS zero", str(starts))
         else:
             failed("at least one MP4 stream starts at PTS zero", str(starts))
-        dense_streams = [s for s in (rgb, depth if options.get("record_depth", True) else None, audio if options.get("record_audio") is True else None) if s]
+        dense_streams = [s for s in (rgb, depth if wants_depth(options) else None, audio if options.get("record_audio") is True else None) if s]
         dense_starts = {str(s.get("index")): stream_start_us(s) for s in dense_streams}
         worst = max(dense_starts.values()) if dense_starts else 0
-        if worst <= 500_000:
-            passed("MP4 dense media streams start within 500 ms", f"worst={worst} us")
+        check_name = f"MP4 dense media streams start within {dense_start_limit_ms} ms"
+        if worst <= dense_start_limit_us:
+            passed(check_name, f"worst={worst} us")
         else:
-            failed("MP4 dense media streams start within 500 ms", f"starts={dense_starts} worst={worst} us")
+            failed(check_name, f"starts={dense_starts} worst={worst} us")
 
 
 def print_summary() -> int:
@@ -1127,9 +1268,9 @@ device = check_device_block(manifest)
 check_timebase(timebase)
 check_required_files(session_dir, mp4, options)
 check_rgb_index(session_dir, "left", timebase)
-if options.get("stereo_rgb", True):
+if wants_stereo_rgb(options):
     check_rgb_index(session_dir, "right", timebase)
-if options.get("record_depth", True):
+if wants_depth(options):
     check_depth(session_dir)
 check_mp4(mp4, options)
 check_mp4_device_tags(mp4, device)
@@ -1159,6 +1300,7 @@ main() {
   require_tool "$MAKE"
   SERIAL="$(pick_device)"
   ok "adb device: $SERIAL"
+  log_device_identity
 
   if [ "$SKIP_BUILD" != "1" ]; then
     build_clean_apk

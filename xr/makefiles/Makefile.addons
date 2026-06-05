@@ -10,6 +10,8 @@
 #   setup-vendors          — godot-xr-tools symlink + godotopenxrvendors prepare.sh
 #   prepare-android-libs   — extract Godot's android template AARs from export_templates
 #   build-ahb              — build the AHardwareBuffer GDExtension and install both copies of the .so
+#   build-pico-openxr      — build the PICO OpenXR GDExtension used by the Pico export
+#   clean-pico-openxr-loader-stage — remove Pico-only loader staging from Android build dirs
 #   build-capture-plugins  — gradle build the Android capture plugins, drop their .aar/.jar into addons/
 #   prepare-capture-plugins — idempotent guard around build-capture-plugins (rebuilds when stale)
 #   clean-addons           — strip every addon/plugin build artifact; called by `clean` in xr/Makefile
@@ -37,8 +39,14 @@ CAPTURE_GRADLE ?= gradle
 # rebuilds when any of these is missing or older than its sources.
 CAPTURE_PLUGIN_ARTIFACTS := \
 	addons/spatial_capture_contract/bin/contract.jar \
+	addons/capture_common/bin/capture_common-debug.aar \
+	addons/capture_common/bin/capture_common-release.aar \
 	addons/quest_capture_android/bin/questcapture-debug.aar \
 	addons/quest_capture_android/bin/questcapture-release.aar \
+	addons/pico_capture_android/bin/picocapture-debug.aar \
+	addons/pico_capture_android/bin/picocapture-release.aar \
+	addons/live-push/bin/live-push-debug.aar \
+	addons/live-push/bin/live-push-release.aar \
 	addons/spatialmp4_muxer/bin/spatialmp4_muxer-debug.aar \
 	addons/spatialmp4_muxer/bin/spatialmp4_muxer-release.aar \
 	addons/qr_scanner/bin/qrscanner-debug.aar \
@@ -58,6 +66,15 @@ AHB_DIR      := native/ahb_decoder
 AHB_SRC      := $(AHB_DIR)/CMakeLists.txt $(AHB_DIR)/build.sh $(shell find $(AHB_DIR)/src -type f 2>/dev/null)
 AHB_ADDON_SO := addons/ahb_decoder/libahb_decoder.so
 AHB_JNI_SO   := android/build/libs/release/arm64-v8a/libahb_decoder.so
+PICO_OPENXR_DIR := native/pico_openxr
+PICO_OPENXR_SRC := $(PICO_OPENXR_DIR)/CMakeLists.txt $(PICO_OPENXR_DIR)/build.sh $(shell find $(PICO_OPENXR_DIR)/src -type f 2>/dev/null)
+PICO_OPENXR_ADDON_SO := addons/pico_openxr/libpico_openxr.so
+PICO_OPENXR_JNI_SO := android/build/libs/arm64-v8a/libpico_openxr.so
+PICO_OPENXR_LOADER_VERSION := 3.0.0-20250422
+PICO_OPENXR_LOADER_SHA256 := 79882748101e096550f9eccac59f4c4ea6eb99c500001975abe7736bb54d4033
+PICO_OPENXR_LOADER_SRC ?= thirdparty/pico_openxr_loader/$(PICO_OPENXR_LOADER_VERSION)/arm64-v8a/libopenxr_loader.so
+PICO_OPENXR_LOADER_JNI_SO := android/build/libs/pico/arm64-v8a/libopenxr_loader.so
+PICO_OPENXR_LOADER_LEGACY_JNI_SO := android/build/libs/release/arm64-v8a/libopenxr_loader.so
 DEPS_SCRIPT ?= ../scripts/sync_deps.sh
 # Shared dependency cache root. Defaults to <worktree>/.deps. Set
 # OPERATOR_DEPS_CACHE_ROOT=~/.cache/operator/deps in your shell to share the
@@ -73,7 +90,7 @@ GODOT_CPP_BUILD_DIR := $(DEPS_BUILD_DIR)/godot-cpp
 # Phony targets exposed to xr/Makefile
 # ---------------------------------------------------------------------------
 
-.PHONY: deps setup-vendors prepare-android-libs build-ahb build-capture-plugins prepare-capture-plugins clean-addons
+.PHONY: deps setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins clean-addons
 
 # ---------------------------------------------------------------------------
 # Third-party vendored addons
@@ -161,6 +178,60 @@ $(AHB_JNI_SO): $(AHB_ADDON_SO)
 build-ahb: $(AHB_ADDON_SO) $(AHB_JNI_SO)
 
 # ---------------------------------------------------------------------------
+# PICO OpenXR GDExtension (native/pico_openxr)
+# ---------------------------------------------------------------------------
+# This extension owns XR_PICO_camera_image / motion tracking / body tracking.
+# Rebuild it for Pico exports so Godot does not package a stale addon .so.
+$(PICO_OPENXR_ADDON_SO): $(PICO_OPENXR_SRC)
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
+	    if [ -f "$@" ]; then \
+	        echo "[pico-openxr] sources newer than $@ but ANDROID_NDK not set — keeping stale .so. 'export ANDROID_NDK=…' to rebuild."; \
+	        exit 0; \
+	    fi; \
+	    echo "[pico-openxr] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
+	    exit 1; \
+	fi; \
+	$(PICO_OPENXR_DIR)/build.sh Release
+
+$(PICO_OPENXR_JNI_SO): $(PICO_OPENXR_ADDON_SO)
+	@mkdir -p $(@D)
+	@cp -f $< $@
+	@echo "[pico-openxr] installed $@"
+
+prepare-pico-openxr-loader:
+	@if [ ! -s "$(PICO_OPENXR_LOADER_SRC)" ]; then \
+	    echo "[pico-openxr] missing PICO OpenXR loader: $(PICO_OPENXR_LOADER_SRC)" >&2; \
+	    echo "[pico-openxr] restore the thirdparty loader or set PICO_OPENXR_LOADER_SRC explicitly." >&2; \
+	    exit 1; \
+	fi
+	@set -e; \
+	if command -v shasum >/dev/null 2>&1; then \
+	    actual=$$(shasum -a 256 "$(PICO_OPENXR_LOADER_SRC)" | awk '{print $$1}'); \
+	elif command -v sha256sum >/dev/null 2>&1; then \
+	    actual=$$(sha256sum "$(PICO_OPENXR_LOADER_SRC)" | awk '{print $$1}'); \
+	else \
+	    echo "[pico-openxr] shasum or sha256sum is required to verify $(PICO_OPENXR_LOADER_SRC)" >&2; \
+	    exit 1; \
+	fi; \
+	if [ "$$actual" != "$(PICO_OPENXR_LOADER_SHA256)" ]; then \
+	    echo "[pico-openxr] unexpected PICO loader checksum for $(PICO_OPENXR_LOADER_SRC)" >&2; \
+	    echo "[pico-openxr] expected $(PICO_OPENXR_LOADER_SHA256)" >&2; \
+	    echo "[pico-openxr] actual   $$actual" >&2; \
+	    exit 1; \
+	fi
+	@rm -f "$(PICO_OPENXR_LOADER_LEGACY_JNI_SO)"
+	@mkdir -p $$(dirname "$(PICO_OPENXR_LOADER_JNI_SO)")
+	@cp -f "$(PICO_OPENXR_LOADER_SRC)" "$(PICO_OPENXR_LOADER_JNI_SO)"
+	@echo "[pico-openxr] installed PICO loader $(PICO_OPENXR_LOADER_JNI_SO)"
+
+build-pico-openxr: $(PICO_OPENXR_ADDON_SO) $(PICO_OPENXR_JNI_SO) prepare-pico-openxr-loader
+
+clean-pico-openxr-loader-stage:
+	@rm -f \
+		$(PICO_OPENXR_LOADER_JNI_SO) \
+		$(PICO_OPENXR_LOADER_LEGACY_JNI_SO)
+
+# ---------------------------------------------------------------------------
 # SpatialMP4 capture Android plugins
 # ---------------------------------------------------------------------------
 # Migrated Gradle project lives at android_plugin/. After build, copy the
@@ -173,21 +244,39 @@ build-ahb: $(AHB_ADDON_SO) $(AHB_JNI_SO)
 build-capture-plugins: $(FFMPEG_LIB)
 	@mkdir -p $(GRADLE_USER_HOME) \
 		addons/spatial_capture_contract/bin \
+		addons/capture_common/bin \
 		addons/quest_capture_android/bin \
+		addons/pico_capture_android/bin \
+		addons/live-push/bin \
 		addons/spatialmp4_muxer/bin \
 		addons/qr_scanner/bin
 	cd android_plugin && GRADLE_USER_HOME=$(GRADLE_USER_HOME) $(CAPTURE_GRADLE) \
 		:contract:jar \
+		:capture_common:assembleDebug :capture_common:assembleRelease \
 		:questcapture:assembleDebug :questcapture:assembleRelease \
+		:picocapture:assembleDebug :picocapture:assembleRelease \
+		:live_capture_server:assembleDebug :live_capture_server:assembleRelease \
 		:spatialmp4_muxer:assembleDebug :spatialmp4_muxer:assembleRelease \
 		:qrscanner:assembleDebug :qrscanner:assembleRelease \
 		:qrscanner:copyRuntimeDependencies
-	cp -f android_plugin/contract/build/libs/contract.jar \
-		addons/spatial_capture_contract/bin/contract.jar
-	cp -f android_plugin/questcapture/build/outputs/aar/questcapture-debug.aar \
-		addons/quest_capture_android/bin/questcapture-debug.aar
+		cp -f android_plugin/contract/build/libs/contract.jar \
+			addons/spatial_capture_contract/bin/contract.jar
+		cp -f android_plugin/capture_common/build/outputs/aar/capture_common-debug.aar \
+			addons/capture_common/bin/capture_common-debug.aar
+		cp -f android_plugin/capture_common/build/outputs/aar/capture_common-release.aar \
+			addons/capture_common/bin/capture_common-release.aar
+		cp -f android_plugin/questcapture/build/outputs/aar/questcapture-debug.aar \
+			addons/quest_capture_android/bin/questcapture-debug.aar
 	cp -f android_plugin/questcapture/build/outputs/aar/questcapture-release.aar \
 		addons/quest_capture_android/bin/questcapture-release.aar
+	cp -f android_plugin/picocapture/build/outputs/aar/picocapture-debug.aar \
+		addons/pico_capture_android/bin/picocapture-debug.aar
+	cp -f android_plugin/picocapture/build/outputs/aar/picocapture-release.aar \
+		addons/pico_capture_android/bin/picocapture-release.aar
+	cp -f android_plugin/live_capture_server/build/outputs/aar/live_capture_server-debug.aar \
+		addons/live-push/bin/live-push-debug.aar
+	cp -f android_plugin/live_capture_server/build/outputs/aar/live_capture_server-release.aar \
+		addons/live-push/bin/live-push-release.aar
 	cp -f android_plugin/spatialmp4_muxer/build/outputs/aar/spatialmp4_muxer-debug.aar \
 		addons/spatialmp4_muxer/bin/spatialmp4_muxer-debug.aar
 	cp -f android_plugin/spatialmp4_muxer/build/outputs/aar/spatialmp4_muxer-release.aar \
@@ -249,16 +338,28 @@ clean-addons:
 		android_plugin/.kotlin \
 		android_plugin/build \
 		android_plugin/contract/build \
+		android_plugin/capture_common/build \
 		android_plugin/questcapture/.cxx \
 		android_plugin/questcapture/build \
+		android_plugin/picocapture/.cxx \
+		android_plugin/picocapture/build \
+		android_plugin/live_capture_server/build \
 		android_plugin/spatialmp4_muxer/.cxx \
 		android_plugin/spatialmp4_muxer/build \
 		android_plugin/qrscanner/build \
-		native/ahb_decoder/build-*
+		native/ahb_decoder/build-* \
+		native/pico_openxr/build-*
 		# $(GODOT_CPP_BUILD_DIR)
 	rm -f \
 		addons/ahb_decoder/*.so \
+		addons/pico_openxr/*.so \
+		android/build/libs/arm64-v8a/libpico_openxr.so \
+		$(PICO_OPENXR_LOADER_JNI_SO) \
+		$(PICO_OPENXR_LOADER_LEGACY_JNI_SO) \
+		addons/capture_common/bin/*.aar \
 		addons/quest_capture_android/bin/*.aar \
+		addons/pico_capture_android/bin/*.aar \
+		addons/live-push/bin/*.aar \
 		addons/spatial_capture_contract/bin/*.jar \
 		addons/spatialmp4_muxer/bin/*.aar \
 		addons/qr_scanner/bin/*.aar \

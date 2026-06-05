@@ -3,6 +3,7 @@ extends Node3D
 const SessionSpoolWriterScript := preload("res://scripts/session_spool_writer.gd")
 const PoseSamplerScript := preload("res://scripts/pose_sampler.gd")
 const DepthSamplerScript := preload("res://scripts/depth_sampler.gd")
+const BodyMotionSamplerScript := preload("res://scripts/body_motion_sampler.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
@@ -11,6 +12,7 @@ const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_inte
 const EgoSettingsStoreScript := preload("res://scripts/ego_settings_store.gd")
 const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
 const EgoQRScannerScript := preload("res://scripts/ego_qr_scanner.gd")
+const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
 const QR_SCANNER_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
@@ -22,6 +24,9 @@ const STATUS_POPUP_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.9
 const CUE_SAMPLE_RATE := 32000
 const UPLOAD_ACK_TIMEOUT_SECONDS := 8.0
 const AUDIO_PERMISSION_GRACE_US := 3000000
+const TRACKER_STATUS_REFRESH_SECONDS := 0.5
+const TRACKER_REQUEST_RETRY_SECONDS := 3.0
+const TRACKER_SETUP_OPENING_SECONDS := 4.0
 
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
@@ -51,6 +56,7 @@ var settings_interaction_router
 var writer: Object
 var pose_sampler: Node
 var depth_sampler: Node
+var body_motion_sampler: Node
 var ego_uploader: Node
 var qr_scanner: Object
 var upload_ack_request: HTTPRequest
@@ -64,6 +70,7 @@ var _start_cue: AudioStreamWAV
 var _stop_cue: AudioStreamWAV
 var camera_plugin: Object
 var muxer_plugin: Object
+var pico_openxr_bridge: Object
 var capture_options := {
 	"interaction_mode": "controllers",
 	"stereo_rgb": true,
@@ -71,6 +78,9 @@ var capture_options := {
 	"record_head_pose": true,
 	"record_controller_pose": true,
 	"record_hand_data": true,
+	"record_body_tracking": true,
+	"record_motion_trackers": true,
+	"max_motion_trackers": 3,
 	# v3 spatial audio: off by default; flipped on by the capture settings
 	# panel ("Spatial audio (mic)" toggle). The pipeline additionally gates
 	# on the Android RECORD_AUDIO runtime permission.
@@ -92,11 +102,17 @@ var _xr_session_begun := false
 var _camera_configured := false
 var _camera_start_attempted := false
 var _camera_bind_warned := false
+var _capture_provider_name := ""
 var _camera_permission_wait_logged := false
 var _last_capture_error := ""
 var _audio_permission_wait_logged := false
 var _audio_permission_degraded_logged := false
 var _audio_permission_wait_started_ticks_us := 0
+var _active_capture_options := {}
+var _pico_camera_image_started := false
+var _pico_camera_frame_interval_s := 1.0 / DEFAULT_RGB_FPS
+var _pico_camera_frame_accum_s := 0.0
+var _pico_camera_submit_warned := false
 var _passthrough_active := false
 var _previous_transparent_bg := false
 var _previous_environment_blend_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
@@ -112,6 +128,9 @@ var _metrics_accum_s := 0.0
 var _metrics_process_ticks := 0
 var _metrics_pose_loop_iters := 0
 var _metrics_started_ticks_us := 0
+var _tracker_status_refresh_accum := TRACKER_STATUS_REFRESH_SECONDS
+var _tracker_last_request_ticks_us := 0
+var _tracker_setup_opened_ticks_us := 0
 # Per-stage main-thread budgets so we can attribute the engine_fps drop to a
 # specific subsystem (panel update vs pointer raycast vs pose loop vs metrics
 # overhead). Microsecond accumulators; pop_metrics-style reset each second.
@@ -125,6 +144,7 @@ var _stage_us_emit_metrics := 0
 
 func _ready() -> void:
 	_setup_xr_scene()
+	_setup_pico_openxr_bridge()
 	_initialize_openxr()
 	_bind_android_plugin()
 	_setup_audio_cues()
@@ -141,11 +161,14 @@ func _ready() -> void:
 		writer.set_muxer_plugin(muxer_plugin)
 	pose_sampler = PoseSamplerScript.new()
 	depth_sampler = DepthSamplerScript.new()
+	body_motion_sampler = BodyMotionSamplerScript.new()
 
 	add_child(pose_sampler)
 	add_child(depth_sampler)
-	pose_sampler.configure(writer, hmd_camera, left_controller, right_controller)
-	depth_sampler.configure(writer)
+	add_child(body_motion_sampler)
+	pose_sampler.configure(writer, hmd_camera, left_controller, right_controller, camera_plugin)
+	depth_sampler.configure(writer, camera_plugin)
+	body_motion_sampler.configure(writer, pose_sampler, pico_openxr_bridge)
 
 	# EgoUploader runs a background worker thread that drains the
 	# user://ego_upload_queue.json over TUS 1.0.0. We instantiate it
@@ -168,20 +191,36 @@ func _ready() -> void:
 	upload_ack_request.request_completed.connect(_on_upload_ack_completed)
 	add_child(upload_ack_request)
 
-	if AUTO_START_FOR_DEVICE_TEST:
+	var automation := _capture_automation_options_from_args()
+	if automation.has("interaction_mode"):
+		capture_options["interaction_mode"] = automation["interaction_mode"]
+		if settings_panel and settings_panel.has_method("set_options"):
+			settings_panel.set_options(capture_options)
+		print("Capture automation interaction_mode=%s" % capture_options["interaction_mode"])
+
+	if bool(automation.get("auto_start", false)):
+		call_deferred("start_capture")
+		_schedule_auto_stop_for_device_test(float(automation.get("auto_stop_seconds", AUTO_STOP_AFTER_SECONDS)))
+	elif AUTO_START_FOR_DEVICE_TEST:
 		capture_options["interaction_mode"] = "head"
 		if settings_panel and settings_panel.has_method("set_options"):
 			settings_panel.set_options(capture_options)
 		call_deferred("start_capture")
-		var auto_stop_timer := Timer.new()
-		auto_stop_timer.name = "AutoStopForDeviceTest"
-		auto_stop_timer.one_shot = true
-		auto_stop_timer.wait_time = AUTO_STOP_AFTER_SECONDS
-		auto_stop_timer.timeout.connect(_auto_stop_for_device_test)
-		add_child(auto_stop_timer)
-		auto_stop_timer.start()
+		_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)
 	elif auto_start:
 		start_capture()
+
+
+func _schedule_auto_stop_for_device_test(seconds: float) -> void:
+	if seconds <= 0.0:
+		return
+	var auto_stop_timer := Timer.new()
+	auto_stop_timer.name = "AutoStopForDeviceTest"
+	auto_stop_timer.one_shot = true
+	auto_stop_timer.wait_time = seconds
+	auto_stop_timer.timeout.connect(_auto_stop_for_device_test)
+	add_child(auto_stop_timer)
+	auto_stop_timer.start()
 
 
 func _auto_stop_for_device_test() -> void:
@@ -190,6 +229,82 @@ func _auto_stop_for_device_test() -> void:
 	await get_tree().create_timer(2.0).timeout
 	print("AUTO_STOP_FOR_DEVICE_TEST: quitting")
 	get_tree().quit()
+
+
+func _capture_automation_options_from_args() -> Dictionary:
+	var options := {}
+	_collect_capture_automation_args(options, OS.get_cmdline_user_args())
+	_collect_capture_automation_args(options, OS.get_cmdline_args())
+	return options
+
+
+func _collect_capture_automation_args(options: Dictionary, args: PackedStringArray) -> void:
+	var i := 0
+	while i < args.size():
+		var arg := String(args[i]).strip_edges()
+		match arg:
+			"--operator-capture-interaction-mode", "--capture-interaction-mode":
+				if i + 1 < args.size():
+					options["interaction_mode"] = _normalize_capture_interaction_mode(String(args[i + 1]))
+					i += 1
+			"--operator-capture-auto-start", "--capture-auto-start":
+				if i + 1 < args.size() and not String(args[i + 1]).begins_with("--"):
+					options["auto_start"] = _parse_capture_bool(String(args[i + 1]))
+					i += 1
+				else:
+					options["auto_start"] = true
+			"--operator-capture-auto-stop-seconds", "--capture-auto-stop-seconds":
+				if i + 1 < args.size():
+					options["auto_stop_seconds"] = _parse_capture_seconds(String(args[i + 1]), AUTO_STOP_AFTER_SECONDS)
+					i += 1
+			_:
+				if arg.begins_with("--operator-capture-interaction-mode="):
+					options["interaction_mode"] = _normalize_capture_interaction_mode(arg.substr("--operator-capture-interaction-mode=".length()))
+				elif arg.begins_with("--capture-interaction-mode="):
+					options["interaction_mode"] = _normalize_capture_interaction_mode(arg.substr("--capture-interaction-mode=".length()))
+				elif arg.begins_with("operator.capture.interaction_mode="):
+					options["interaction_mode"] = _normalize_capture_interaction_mode(arg.substr("operator.capture.interaction_mode=".length()))
+				elif arg.begins_with("--operator-capture-auto-start="):
+					options["auto_start"] = _parse_capture_bool(arg.substr("--operator-capture-auto-start=".length()))
+				elif arg.begins_with("--capture-auto-start="):
+					options["auto_start"] = _parse_capture_bool(arg.substr("--capture-auto-start=".length()))
+				elif arg.begins_with("operator.capture.auto_start="):
+					options["auto_start"] = _parse_capture_bool(arg.substr("operator.capture.auto_start=".length()))
+				elif arg.begins_with("--operator-capture-auto-stop-seconds="):
+					options["auto_stop_seconds"] = _parse_capture_seconds(arg.substr("--operator-capture-auto-stop-seconds=".length()), AUTO_STOP_AFTER_SECONDS)
+				elif arg.begins_with("--capture-auto-stop-seconds="):
+					options["auto_stop_seconds"] = _parse_capture_seconds(arg.substr("--capture-auto-stop-seconds=".length()), AUTO_STOP_AFTER_SECONDS)
+				elif arg.begins_with("operator.capture.auto_stop_seconds="):
+					options["auto_stop_seconds"] = _parse_capture_seconds(arg.substr("operator.capture.auto_stop_seconds=".length()), AUTO_STOP_AFTER_SECONDS)
+		i += 1
+
+
+func _normalize_capture_interaction_mode(raw_mode: String) -> String:
+	var mode := raw_mode.strip_edges().to_lower().replace("-", "_")
+	match mode:
+		"controller", "controllers":
+			return "controllers"
+		"hand", "hands":
+			return "hands"
+		"head", "head_button", "head_buttons", "volume", "volume_buttons":
+			return "head"
+		_:
+			return mode
+
+
+func _parse_capture_bool(raw_value: String) -> bool:
+	var value := raw_value.strip_edges().to_lower()
+	return value in ["1", "true", "yes", "on", "start", "auto"]
+
+
+func _parse_capture_seconds(raw_value: String, fallback: float) -> float:
+	var value := raw_value.strip_edges()
+	if value.is_empty():
+		return fallback
+	if not value.is_valid_float():
+		push_warning("Invalid capture auto-stop seconds: %s" % value)
+		return fallback
+	return max(value.to_float(), 0.0)
 
 
 func _process(delta: float) -> void:
@@ -208,6 +323,7 @@ func _process(delta: float) -> void:
 	var t_pointer := Time.get_ticks_usec()
 	_update_ui_pointer()
 	_stage_us_pointer += Time.get_ticks_usec() - t_pointer
+	_update_pico_tracker_setup_status(delta)
 
 	if _recording and record_control:
 		var t_record := Time.get_ticks_usec()
@@ -222,6 +338,7 @@ func _process(delta: float) -> void:
 		if camera_plugin != null and not _camera_configured:
 			_start_camera_plugin()
 	_try_start_camera_plugin()
+	_pump_pico_openxr_camera_frames(delta)
 	if _stream_enabled("record_depth"):
 		var t_depth := Time.get_ticks_usec()
 		depth_sampler.pump(delta)
@@ -235,6 +352,8 @@ func _process(delta: float) -> void:
 		_metrics_pose_loop_iters += 1
 		if _has_pose_streams_enabled():
 			pose_sampler.sample(Time.get_ticks_usec() * 1000)
+		if _has_body_motion_streams_enabled():
+			body_motion_sampler.sample(Time.get_ticks_usec() * 1000)
 	_stage_us_pose_loop += Time.get_ticks_usec() - t_pose_loop
 
 
@@ -247,6 +366,9 @@ func _emit_metrics(window_s: float) -> void:
 	var depth_metrics: Dictionary = {}
 	if depth_sampler != null:
 		depth_metrics = depth_sampler.pop_metrics()
+	var body_motion_metrics: Dictionary = {}
+	if body_motion_sampler != null:
+		body_motion_metrics = body_motion_sampler.pop_metrics()
 	var plugin_metrics: Dictionary = {}
 	if camera_plugin != null:
 		var raw: Variant = camera_plugin.call("popMetricsJson")
@@ -264,7 +386,7 @@ func _emit_metrics(window_s: float) -> void:
 	# Compact one-liner so it doesn't drown the rest of logcat. Tagged
 	# "QcMetrics" so adb logcat -s godot:V | grep QcMetrics gives a clean
 	# table.
-	print("QcMetrics %.1fs recording=%s engine_fps=%d process_fps=%.1f pose_loop_iters=%d stages_ms={panel=%.1f,pointer=%.1f,record=%.1f,pose=%.1f,depth=%.1f,metrics=%.1f} pose=%s depth=%s plugin=%s muxer=%s" % [
+	print("QcMetrics %.1fs recording=%s engine_fps=%d process_fps=%.1f pose_loop_iters=%d stages_ms={panel=%.1f,pointer=%.1f,record=%.1f,pose=%.1f,depth=%.1f,metrics=%.1f} pose=%s depth=%s body_motion=%s plugin=%s muxer=%s" % [
 		window_s,
 		str(_recording),
 		engine_fps,
@@ -278,6 +400,7 @@ func _emit_metrics(window_s: float) -> void:
 		_stage_us_emit_metrics / 1000.0,
 		_compact_dict(pose_metrics),
 		_compact_dict(depth_metrics),
+		_compact_dict(body_motion_metrics),
 		_compact_dict(plugin_metrics),
 		_compact_dict(muxer_metrics)
 	])
@@ -324,10 +447,13 @@ func start_capture() -> void:
 
 	if not _ensure_output_storage_ready():
 		return
-	if not bool(writer.start_session(capture_options)):
+	_active_capture_options = _effective_capture_options(capture_options)
+	if not bool(writer.start_session(_active_capture_options)):
 		push_error("Capture session did not start because its output directory could not be created.")
+		_active_capture_options = {}
 		return
-	pose_sampler.set_capture_options(capture_options)
+	pose_sampler.set_capture_options(_active_capture_options)
+	body_motion_sampler.set_capture_options(_active_capture_options)
 	_recording = true
 	_pose_accum = 0.0
 	_capture_started_ticks_us = Time.get_ticks_usec()
@@ -338,6 +464,9 @@ func start_capture() -> void:
 	_audio_permission_wait_logged = false
 	_audio_permission_degraded_logged = false
 	_audio_permission_wait_started_ticks_us = 0
+	_pico_camera_image_started = false
+	_pico_camera_frame_accum_s = 0.0
+	_pico_camera_submit_warned = false
 	if record_control:
 		record_control.set_recording(true)
 	# Park any in-flight upload while we record — see
@@ -347,6 +476,8 @@ func start_capture() -> void:
 	if _xr_session_begun and _stream_enabled("record_depth"):
 		depth_sampler.start()
 	_start_camera_plugin()
+	if not _recording:
+		return
 	_play_cue(_start_cue)
 	print("Capture session started: %s" % writer.get_session_dir())
 
@@ -356,16 +487,21 @@ func stop_capture() -> void:
 		return
 
 	_stop_camera_plugin()
+	body_motion_sampler.stop()
 	depth_sampler.stop()
 	writer.close()
 	var saved_session_dir: String = writer.get_saved_path() if writer.has_method("get_saved_path") else writer.get_session_dir()
 	_recording = false
+	_active_capture_options = {}
 	_camera_configured = false
 	_camera_start_attempted = false
 	_camera_permission_wait_logged = false
 	_audio_permission_wait_logged = false
 	_audio_permission_degraded_logged = false
 	_audio_permission_wait_started_ticks_us = 0
+	_pico_camera_image_started = false
+	_pico_camera_frame_accum_s = 0.0
+	_pico_camera_submit_warned = false
 	if record_control:
 		record_control.set_recording(false)
 	_play_cue(_stop_cue)
@@ -458,6 +594,7 @@ func _setup_xr_scene() -> void:
 	settings_panel = ViewLockedCapturePanelScript.new()
 	settings_panel.name = "ViewLockedSettingsPanel"
 	settings_panel.saved.connect(_on_capture_settings_saved)
+	settings_panel.tracker_connect_requested.connect(_on_tracker_connect_requested)
 	settings_panel.exit_requested.connect(_on_exit_requested)
 	# Camera button on the Upload URL row → open the QR scanner overlay.
 	if settings_panel.has_signal("scan_upload_url_requested"):
@@ -493,6 +630,27 @@ func _setup_xr_scene() -> void:
 	status_popup = ViewLockedStatusPopupScript.new()
 	status_popup.name = "ViewLockedStatusPopup"
 	origin.add_child(status_popup)
+
+
+func _setup_pico_openxr_bridge() -> void:
+	if pico_openxr_bridge != null:
+		return
+	var bridge_autoload := get_node_or_null("/root/PicoOpenXRBridge")
+	if bridge_autoload != null and bridge_autoload.has_method("get_bridge"):
+		pico_openxr_bridge = bridge_autoload.call("get_bridge")
+		if pico_openxr_bridge != null:
+			print("PicoOpenXRExtension bridge bound from autoload")
+			return
+	if Engine.has_singleton("PicoOpenXRBridgeNative"):
+		pico_openxr_bridge = Engine.get_singleton("PicoOpenXRBridgeNative")
+		if pico_openxr_bridge != null:
+			print("PicoOpenXRExtension bridge bound from native singleton")
+			return
+	if not ClassDB.class_exists("PicoOpenXRExtension"):
+		return
+	pico_openxr_bridge = ClassDB.instantiate("PicoOpenXRExtension")
+	if pico_openxr_bridge != null:
+		print("PicoOpenXRExtension bridge instantiated")
 
 
 func _initialize_openxr() -> void:
@@ -544,7 +702,7 @@ func _set_passthrough_visible(enable: bool) -> void:
 				var start_result: Variant = xr_interface.call("start_passthrough")
 				print("OpenXR start_passthrough returned: %s" % start_result)
 		_passthrough_active = true
-		print("Quest passthrough view enabled")
+		print("OpenXR passthrough view enabled")
 	else:
 		if not _passthrough_active:
 			return
@@ -555,23 +713,25 @@ func _set_passthrough_visible(enable: bool) -> void:
 		world_environment.environment.background_color = _previous_background_color
 		xr_interface.environment_blend_mode = _previous_environment_blend_mode
 		_passthrough_active = false
-		print("Quest passthrough view disabled")
+		print("OpenXR passthrough view disabled")
 
 
 func _bind_android_plugin() -> void:
 	if camera_plugin != null and muxer_plugin != null:
 		return
-	# Stage 2b split the monolithic QuestCapturePlugin singleton into a provider
-	# (cameras + clock + depth conversion) and a muxer (writer handle + the
-	# write* RPCs). Both must be present at runtime; bindMuxer wires the
-	# provider's RGB hot path to the muxer through SpatialDataSink.
-	if camera_plugin == null and Engine.has_singleton("QuestCapturePlugin"):
-		camera_plugin = Engine.get_singleton("QuestCapturePlugin")
+	# Stage 2b split the camera provider from the muxer. Quest and PICO now
+	# both export providers; select the one with the best runtime device score
+	# so a PICO APK does not accidentally bind QuestCapturePlugin first.
+	var provider_was_bound := camera_plugin != null
+	if camera_plugin == null:
+		camera_plugin = CaptureProviderRegistryScript.bind()
+	if camera_plugin != null and not provider_was_bound:
+		_capture_provider_name = CaptureProviderRegistryScript.provider_name(camera_plugin)
 		camera_plugin.connect("camera_ready", Callable(self, "_on_camera_ready"))
 		camera_plugin.connect("camera_frame_saved", Callable(self, "_on_camera_frame_saved"))
 		camera_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
 		_camera_bind_warned = false
-		print("QuestCapturePlugin singleton bound")
+		print("Capture provider singleton bound: %s" % _provider_label())
 	if muxer_plugin == null and Engine.has_singleton("SpatialMp4MuxerPlugin"):
 		muxer_plugin = Engine.get_singleton("SpatialMp4MuxerPlugin")
 		muxer_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
@@ -582,7 +742,7 @@ func _bind_android_plugin() -> void:
 		# session_spool_writer.gd to the muxer singleton -- see writer wiring.
 		var bound: Variant = camera_plugin.call("bindMuxer", muxer_plugin)
 		if not bool(bound):
-			push_warning("QuestCapturePlugin.bindMuxer(SpatialMp4MuxerPlugin) returned false; RGB writes will fail")
+			push_warning("%s.bindMuxer(SpatialMp4MuxerPlugin) returned false; RGB writes will fail" % _provider_label())
 		if writer != null and writer.has_method("set_android_plugin"):
 			writer.set_android_plugin(camera_plugin)
 		if writer != null and writer.has_method("set_muxer_plugin"):
@@ -590,54 +750,79 @@ func _bind_android_plugin() -> void:
 		return
 	if camera_plugin == null and not _camera_bind_warned:
 		_camera_bind_warned = true
-		print("QuestCapturePlugin singleton is not installed yet; RGB capture is waiting.")
-		push_warning("QuestCapturePlugin singleton is not installed; RGB capture is disabled.")
+		print("Capture provider singleton is not installed yet; RGB capture is waiting.")
+		push_warning("Capture provider singleton is not installed; RGB capture is disabled.")
 
 
 func _start_camera_plugin() -> void:
 	if camera_plugin == null:
-		print("QuestCapturePlugin start skipped: singleton is not bound")
+		print("Capture provider start skipped: singleton is not bound")
 		return
 
 	var session_dir_absolute: String = writer.get_session_dir_absolute()
 	var output_mp4_absolute: String = writer.get_output_mp4_path_absolute()
 	var partial_mp4_absolute: String = writer.get_partial_mp4_path_absolute()
-	print("QuestCapturePlugin configure begin: %s" % output_mp4_absolute)
+	print("%s configure begin: %s" % [_provider_label(), output_mp4_absolute])
 	# Android Godot plugin singletons do not reliably report @UsedByGodot
 	# methods through has_method(), so call the compact JSON RPC directly.
-	# The QuestCapturePlugin AAR is bundled into this same APK.
-	var want_audio: bool = bool(capture_options.get("record_audio", false))
+	var want_audio: bool = bool(_capture_option("record_audio", false))
 	var layout_code: int = _audio_layout_code_for_label(
-		str(capture_options.get("audio_channel_layout", "stereo"))
+		str(_capture_option("audio_channel_layout", "stereo"))
 	)
-	var session_config := {
-		"final_path": output_mp4_absolute,
-		"partial_path": partial_mp4_absolute,
-		"sidecar_path": session_dir_absolute,
-		"session_start_unix_us": writer.get_session_start_unix_us(),
-		"session_start_godot_ticks_us": writer.get_session_start_ticks_us(),
-		"configure_godot_ticks_us": Time.get_ticks_usec(),
-		"record_depth": _stream_enabled("record_depth"),
-		"record_head_pose": _stream_enabled("record_head_pose"),
-		"record_controller_pose": _stream_enabled("record_controller_pose"),
-		"record_hand_data": _stream_enabled("record_hand_data"),
-		"record_controller_input": _stream_enabled("record_controller_pose"),
-		"stereo_rgb": bool(capture_options.get("stereo_rgb", true)),
-		"rgb_bitrate": int(capture_options.get("rgb_bitrate", DEFAULT_RGB_BITRATE)),
-		"rgb_fps": int(capture_options.get("rgb_fps", DEFAULT_RGB_FPS)),
-		"record_audio": want_audio,
-		"audio_channel_layout_code": layout_code,
-		"audio_sample_rate_hz": int(capture_options.get("audio_sample_rate_hz", 48000)),
-		"audio_bitrate_bps": int(capture_options.get("audio_bitrate_bps", 128000))
-	}
-	var configured_result: Variant = camera_plugin.call(
-		"configureSpatialMp4SessionFromJson",
-		JSON.stringify(session_config)
-	)
+	var configured_result: Variant
+	if _capture_provider_name == "pico":
+		configured_result = camera_plugin.call(
+			"configureSpatialMp4SessionWithTime",
+			output_mp4_absolute,
+			partial_mp4_absolute,
+			session_dir_absolute,
+			writer.get_session_start_unix_us(),
+			writer.get_session_start_ticks_us(),
+			Time.get_ticks_usec(),
+			_stream_enabled("record_depth"),
+			_stream_enabled("record_head_pose"),
+			_stream_enabled("record_controller_pose"),
+			_stream_enabled("record_hand_data"),
+			_stream_enabled("record_controller_pose"),
+			bool(_capture_option("stereo_rgb", true)),
+			int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
+			int(_capture_option("rgb_fps", DEFAULT_RGB_FPS))
+		)
+		camera_plugin.call(
+			"setBodyMotionCaptureOptions",
+			_stream_enabled("record_body_tracking"),
+			_stream_enabled("record_motion_trackers"),
+			int(_capture_option("max_motion_trackers", 3))
+		)
+	else:
+		var session_config := {
+			"final_path": output_mp4_absolute,
+			"partial_path": partial_mp4_absolute,
+			"sidecar_path": session_dir_absolute,
+			"session_start_unix_us": writer.get_session_start_unix_us(),
+			"session_start_godot_ticks_us": writer.get_session_start_ticks_us(),
+			"configure_godot_ticks_us": Time.get_ticks_usec(),
+			"record_depth": _stream_enabled("record_depth"),
+			"record_head_pose": _stream_enabled("record_head_pose"),
+			"record_controller_pose": _stream_enabled("record_controller_pose"),
+			"record_hand_data": _stream_enabled("record_hand_data"),
+			"record_controller_input": _stream_enabled("record_controller_pose"),
+			"stereo_rgb": bool(_capture_option("stereo_rgb", true)),
+			"rgb_bitrate": int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
+			"rgb_fps": int(_capture_option("rgb_fps", DEFAULT_RGB_FPS)),
+			"record_audio": want_audio,
+			"audio_channel_layout_code": layout_code,
+			"audio_sample_rate_hz": int(_capture_option("audio_sample_rate_hz", 48000)),
+			"audio_bitrate_bps": int(_capture_option("audio_bitrate_bps", 128000))
+		}
+		configured_result = camera_plugin.call(
+			"configureSpatialMp4SessionFromJson",
+			JSON.stringify(session_config)
+		)
 	_camera_configured = bool(configured_result)
-	print("QuestCapturePlugin configureSession returned: %s (audio=%s)" % [configured_result, want_audio])
+	print("%s configureSession returned: %s (audio=%s)" % [_provider_label(), configured_result, want_audio])
 	if not _camera_configured:
-		print("QuestCapturePlugin configure failed; RGB capture will retry")
+		_abort_capture_start("%s configure failed" % _provider_label())
 		return
 
 	camera_plugin.call("requestCameraPermission")
@@ -646,7 +831,7 @@ func _start_camera_plugin() -> void:
 	# video-only capture instead of blocking the whole session.
 	if want_audio:
 		camera_plugin.call("requestAudioPermission")
-	print("QuestCapturePlugin requested camera permissions")
+	print("%s requested camera permissions" % _provider_label())
 	_try_start_camera_plugin()
 
 
@@ -674,10 +859,10 @@ func _try_start_camera_plugin() -> void:
 	if not has_permission:
 		if not _camera_permission_wait_logged:
 			_camera_permission_wait_logged = true
-			print("QuestCapturePlugin waiting for camera permission")
+			print("%s waiting for camera permission" % _provider_label())
 		camera_plugin.call("requestCameraPermission")
 		return
-	var wants_audio: bool = bool(capture_options.get("record_audio", false))
+	var wants_audio: bool = bool(_capture_option("record_audio", false))
 	if wants_audio:
 		var has_audio_permission: bool = bool(camera_plugin.call("hasAudioPermission"))
 		if not has_audio_permission:
@@ -685,22 +870,31 @@ func _try_start_camera_plugin() -> void:
 			if not _audio_permission_wait_logged:
 				_audio_permission_wait_logged = true
 				_audio_permission_wait_started_ticks_us = now_us
-				print("QuestCapturePlugin waiting for audio permission")
+				print("%s waiting for audio permission" % _provider_label())
 			camera_plugin.call("requestAudioPermission")
 			if now_us - _audio_permission_wait_started_ticks_us < AUDIO_PERMISSION_GRACE_US:
 				return
 			if not _audio_permission_degraded_logged:
 				_audio_permission_degraded_logged = true
-				print("QuestCapturePlugin audio permission missing; starting without audio")
+				print("%s audio permission missing; starting without audio" % _provider_label())
 	_camera_start_attempted = true
-	print("QuestCapturePlugin invoking startCameras")
-	var started: bool = bool(camera_plugin.call("startCameras"))
-	print("QuestCapturePlugin startCameras returned: %s" % started)
+	var started := false
+	if _capture_provider_name == "pico":
+		started = _start_pico_openxr_camera_image_capture()
+	else:
+		print("%s invoking startCameras" % _provider_label())
+		started = bool(camera_plugin.call("startCameras"))
+		print("%s startCameras returned: %s" % [_provider_label(), started])
+	if not started:
+		_abort_capture_start("%s camera start failed" % _provider_label())
 
 
 func _stop_camera_plugin() -> void:
 	if camera_plugin != null:
 		camera_plugin.call("stopCameras")
+	if _capture_provider_name == "pico" and pico_openxr_bridge != null and pico_openxr_bridge.has_method("stop_camera_image_capture"):
+		pico_openxr_bridge.call("stop_camera_image_capture")
+	_pico_camera_image_started = false
 
 
 func _on_openxr_session_begun() -> void:
@@ -722,17 +916,17 @@ func _on_openxr_session_stopping() -> void:
 
 
 func _on_camera_ready(eye: String, camera_id: String) -> void:
-	print("QuestCapturePlugin camera ready: %s=%s" % [eye, camera_id])
+	print("%s camera ready: %s=%s" % [_provider_label(), eye, camera_id])
 
 
 func _on_camera_frame_saved(eye: String, _path: String, timestamp_ns: int) -> void:
 	if timestamp_ns > 0 and eye == "left":
-		print_verbose("QuestCapturePlugin frames are being recorded")
+		print_verbose("%s frames are being recorded" % _provider_label())
 
 
 func _on_camera_error(message: String) -> void:
 	_last_capture_error = message
-	push_error("QuestCapturePlugin: %s" % message)
+	push_error("%s: %s" % [_provider_label(), message])
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
@@ -764,6 +958,7 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 		return
 	_merge_capture_options(options)
 	capture_options["save_root"] = _configured_save_root()
+	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_release_ui_pointer()
 	record_control.show_for_mode(str(capture_options.get("interaction_mode", "controllers")))
 	_prepare_output_storage()
@@ -827,19 +1022,125 @@ func _on_settings_requested() -> void:
 	if settings_panel != null and settings_panel.has_method("set_feedback_input_mode"):
 		settings_panel.set_feedback_input_mode(mode, right_pointer if mode == "controllers" else null)
 	settings_panel.open()
+	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
+	_update_pico_tracker_setup_status(0.0)
 
 
 func _stream_enabled(option: String) -> bool:
-	return bool(capture_options.get(option, true))
+	return bool(_capture_option(option, true))
 
 
-func _upload_config_available() -> bool:
-	return bool(capture_options.get("upload_on_finalize", false)) and not str(capture_options.get("upload_url", "")).strip_edges().is_empty()
+func _capture_option(option: String, fallback: Variant = null) -> Variant:
+	var source: Dictionary = _active_capture_options if _recording and not _active_capture_options.is_empty() else capture_options
+	return source.get(option, fallback)
+
+
+func _effective_capture_options(options: Dictionary) -> Dictionary:
+	var effective := options.duplicate(true)
+	if camera_plugin == null:
+		_bind_android_plugin()
+	if camera_plugin != null:
+		if not CaptureProviderRegistryScript.supports_depth(camera_plugin):
+			effective["record_depth"] = false
+		if not CaptureProviderRegistryScript.supports_body_motion(camera_plugin):
+			effective["record_body_tracking"] = false
+			effective["record_motion_trackers"] = false
+		if CaptureProviderRegistryScript.provider_name(camera_plugin) == "pico":
+			effective["record_audio"] = false
+	return effective
+
+
+func _provider_label() -> String:
+	return "%sCapturePlugin" % _capture_provider_name.capitalize() if not _capture_provider_name.is_empty() else "CaptureProvider"
+
+
+func _start_pico_openxr_camera_image_capture() -> bool:
+	if pico_openxr_bridge == null:
+		push_error("PicoOpenXRExtension is not available; cannot start XR_PICO_camera_image")
+		return false
+	if not pico_openxr_bridge.has_method("start_camera_image_capture"):
+		push_error("PicoOpenXRExtension does not expose start_camera_image_capture")
+		return false
+	var stereo := bool(_capture_option("stereo_rgb", true))
+	var fps := int(_capture_option("rgb_fps", DEFAULT_RGB_FPS))
+	var info: Variant = pico_openxr_bridge.call("start_camera_image_capture", stereo, 640, 480, fps)
+	if typeof(info) != TYPE_DICTIONARY:
+		push_error("XR_PICO_camera_image start returned invalid info")
+		return false
+	var info_dict := info as Dictionary
+	print("XR_PICO_camera_image start info: %s" % JSON.stringify(info_dict))
+	if not bool(info_dict.get("active", false)):
+		push_error("XR_PICO_camera_image did not become active: %s" % JSON.stringify(info_dict))
+		return false
+	_pico_camera_frame_interval_s = 1.0 / max(float(info_dict.get("fps", DEFAULT_RGB_FPS)), 1.0)
+	if camera_plugin.has_method("setOpenXrCameraImageInfoJson"):
+		camera_plugin.call("setOpenXrCameraImageInfoJson", JSON.stringify(info_dict))
+	var started: bool = bool(camera_plugin.call("startOpenXrCameraImageCapture", JSON.stringify(info_dict)))
+	print("%s startOpenXrCameraImageCapture returned: %s" % [_provider_label(), started])
+	_pico_camera_image_started = started
+	return started
+
+
+func _pump_pico_openxr_camera_frames(delta: float) -> void:
+	if _capture_provider_name != "pico" or not _pico_camera_image_started:
+		return
+	if pico_openxr_bridge == null or camera_plugin == null:
+		return
+	_pico_camera_frame_accum_s += delta
+	if _pico_camera_frame_accum_s < _pico_camera_frame_interval_s * 0.5:
+		return
+	_pico_camera_frame_accum_s = 0.0
+	var frames: Variant = pico_openxr_bridge.call("poll_camera_image_frames")
+	if typeof(frames) != TYPE_ARRAY:
+		return
+	for frame_variant in frames:
+		if typeof(frame_variant) != TYPE_DICTIONARY:
+			continue
+		var frame := frame_variant as Dictionary
+		var data: Variant = frame.get("data", PackedByteArray())
+		if typeof(data) != TYPE_PACKED_BYTE_ARRAY:
+			continue
+		var ok: bool = bool(camera_plugin.call(
+			"submitOpenXrRgbaFrame",
+			str(frame.get("eye", "left")),
+			int(frame.get("xr_time_ns", 0)),
+			int(frame.get("width", 0)),
+			int(frame.get("height", 0)),
+			int(frame.get("stride", 0)),
+			int(frame.get("effective_pixel_stride", frame.get("pixel_stride", frame.get("bytes_per_pixel", 4)))),
+			data
+		))
+		if not ok and not _pico_camera_submit_warned:
+			_pico_camera_submit_warned = true
+			push_warning("Pico OpenXR camera frame submission failed; continuing to poll for later frames.")
+
+
+func _push_pico_external_camera_info_if_available() -> void:
+	if _capture_provider_name != "pico" or pico_openxr_bridge == null:
+		return
+	if not pico_openxr_bridge.has_method("get_external_camera_info"):
+		return
+	var info: Variant = pico_openxr_bridge.call("get_external_camera_info")
+	if typeof(info) != TYPE_DICTIONARY:
+		return
+	var ok: Variant = camera_plugin.call("setOpenXrExternalCameraInfoJson", JSON.stringify(info))
+	print("Pico external camera info forwarded: %s %s" % [ok, JSON.stringify(info)])
+
+
+func _abort_capture_start(message: String) -> void:
+	_last_capture_error = message
+	push_error(message)
+	if _recording:
+		stop_capture()
 
 
 func _merge_capture_options(options: Dictionary) -> void:
 	for key in options.keys():
 		capture_options[key] = options[key]
+
+
+func _upload_config_available() -> bool:
+	return bool(capture_options.get("upload_on_finalize", false)) and not str(capture_options.get("upload_url", "")).strip_edges().is_empty()
 
 
 func _configured_save_root() -> String:
@@ -864,7 +1165,7 @@ func _ensure_output_storage_ready() -> bool:
 		if camera_plugin == null:
 			_bind_android_plugin()
 		if camera_plugin == null:
-			push_error("Storage setup requires the QuestCapturePlugin on Android.")
+			push_error("Storage setup requires an Android capture provider.")
 			return false
 		if not bool(camera_plugin.call("hasStoragePermission")):
 			camera_plugin.call("requestStoragePermission")
@@ -882,6 +1183,81 @@ func _ensure_output_storage_ready() -> bool:
 
 func _has_pose_streams_enabled() -> bool:
 	return _stream_enabled("record_head_pose") or _stream_enabled("record_controller_pose") or _stream_enabled("record_hand_data")
+
+
+func _has_body_motion_streams_enabled() -> bool:
+	return _stream_enabled("record_body_tracking") or _stream_enabled("record_motion_trackers")
+
+
+func _update_pico_tracker_setup_status(delta: float) -> void:
+	if settings_panel == null or not bool(settings_panel.get("visible")):
+		return
+	if not settings_panel.has_method("set_pico_tracker_status"):
+		return
+	_tracker_status_refresh_accum += delta
+	if _tracker_status_refresh_accum < TRACKER_STATUS_REFRESH_SECONDS:
+		return
+	_tracker_status_refresh_accum = 0.0
+	var options: Dictionary = settings_panel.get_options() if settings_panel.has_method("get_options") else capture_options
+	if not _pico_tracker_setup_required(options):
+		settings_panel.call("set_pico_tracker_status", false, false, 0, false, false, false)
+		return
+	var status := _pico_openxr_status()
+	var tracker_count := int(status.get("motion_tracker_count", 0))
+	var connected := tracker_count > 0
+	var request_sent := bool(status.get("motion_request_sent", false))
+	var opening_setup := _tracker_setup_opened_ticks_us > 0 and Time.get_ticks_usec() - _tracker_setup_opened_ticks_us < int(TRACKER_SETUP_OPENING_SECONDS * 1000000.0)
+	var can_open_setup := pico_openxr_bridge != null and (
+			pico_openxr_bridge.has_method("request_motion_trackers")
+			or pico_openxr_bridge.has_method("start_body_tracking_calibration_app")
+	)
+	settings_panel.call("set_pico_tracker_status", true, connected, tracker_count, request_sent, can_open_setup, opening_setup)
+
+
+func _on_tracker_connect_requested() -> void:
+	var options: Dictionary = settings_panel.get_options() if settings_panel != null and settings_panel.has_method("get_options") else capture_options
+	if not _pico_tracker_setup_required(options):
+		return
+	var opened := _request_pico_motion_trackers(options, true)
+	if not opened and pico_openxr_bridge != null and pico_openxr_bridge.has_method("start_body_tracking_calibration_app"):
+		opened = bool(pico_openxr_bridge.call("start_body_tracking_calibration_app"))
+	if opened:
+		_tracker_setup_opened_ticks_us = Time.get_ticks_usec()
+		print("PICO tracker setup requested")
+	else:
+		push_warning("PICO tracker setup is unavailable from the current OpenXR session.")
+	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
+	_update_pico_tracker_setup_status(0.0)
+
+
+func _pico_tracker_setup_required(options: Dictionary) -> bool:
+	if camera_plugin == null:
+		_bind_android_plugin()
+	if camera_plugin == null or CaptureProviderRegistryScript.provider_name(camera_plugin) != "pico":
+		return false
+	return bool(options.get("record_body_tracking", false)) or bool(options.get("record_motion_trackers", false))
+
+
+func _request_pico_motion_trackers(options: Dictionary, force: bool = false) -> bool:
+	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("request_motion_trackers"):
+		return false
+	var max_trackers := clampi(int(options.get("max_motion_trackers", 3)), 0, 6)
+	if max_trackers <= 0:
+		return false
+	var now_us := Time.get_ticks_usec()
+	if not force and _tracker_last_request_ticks_us > 0 and now_us - _tracker_last_request_ticks_us < int(TRACKER_REQUEST_RETRY_SECONDS * 1000000.0):
+		return false
+	_tracker_last_request_ticks_us = now_us
+	return bool(pico_openxr_bridge.call("request_motion_trackers", max_trackers))
+
+
+func _pico_openxr_status() -> Dictionary:
+	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("get_status"):
+		return {}
+	var raw: Variant = pico_openxr_bridge.call("get_status")
+	if typeof(raw) == TYPE_DICTIONARY:
+		return raw
+	return {}
 
 
 func _setup_audio_cues() -> void:

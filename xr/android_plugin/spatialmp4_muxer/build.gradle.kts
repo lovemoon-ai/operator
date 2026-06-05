@@ -7,11 +7,8 @@
 //   - SpatialMp4SideData* (Kotlin)     -- ICAM / ECAM / DSTR bytes packer.
 //   - src/main/cpp/                    -- the patched-FFmpeg writer + headers.
 //
-// The provider module (:questcapture today) declares
-//   implementation(project(":spatialmp4_muxer"))
-// so its existing `SpatialMp4Native.nativeWriteRgbPacket(...)` call sites
-// resolve to these classes without renaming. Stage 2 replaces those direct
-// calls with the SpatialDataSink contract.
+// Provider modules depend on :spatialmp4_muxer through the SpatialDataSink
+// contract and the shared side-data packer, without depending on each other.
 import java.io.File
 
 plugins {
@@ -32,7 +29,7 @@ val ffmpegBuildDir = depsCacheRoot.resolve("build/ffmpeg")
 val ffmpegRoot = ffmpegBuildDir.resolve("arm64-v8a/install")
 
 android {
-    namespace = "com.spatialmp4.questcapture.muxer"
+    namespace = "com.spatialmp4.muxer"
     compileSdk = 35
 
     defaultConfig {

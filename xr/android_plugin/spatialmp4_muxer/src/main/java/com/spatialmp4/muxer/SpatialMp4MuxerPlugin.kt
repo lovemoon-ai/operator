@@ -17,7 +17,7 @@
 // MediaCodec encoder thread + the OpenXR depth callback + GDScript pose
 // signals are already safe at the JNI / FFmpeg layer.
 
-package com.spatialmp4.questcapture
+package com.spatialmp4.muxer
 
 import android.util.Log
 import com.spatialmp4.contract.AudioStreamConfig

@@ -1,0 +1,10 @@
+; PICO OpenXR bridge for external camera metadata, body tracking, and motion trackers.
+
+[configuration]
+entry_symbol = "pico_openxr_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+android.pico.debug.arm64 = "res://addons/pico_openxr/libpico_openxr.so"
+android.pico.release.arm64 = "res://addons/pico_openxr/libpico_openxr.so"

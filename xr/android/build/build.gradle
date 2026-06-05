@@ -33,6 +33,14 @@ configurations {
     monoImplementation {}
 }
 
+boolean isPicoOpenXrLoaderEnabled() {
+    Object value = project.findProperty("pico_openxr_loader_enabled")
+    if (value == null) {
+        value = System.getenv("PICO_OPENXR_LOADER_ENABLED")
+    }
+    return value != null && ["1", "true", "yes", "on"].contains(value.toString().toLowerCase())
+}
+
 dependencies {
     implementation "androidx.fragment:fragment:$versions.fragmentVersion"
     implementation "androidx.core:core-splashscreen:$versions.splashscreenVersion"
@@ -147,6 +155,9 @@ android {
         pickFirst 'lib/x86_64/libc++_shared.so'
         pickFirst 'lib/armeabi-v7a/libc++_shared.so'
         pickFirst 'lib/arm64-v8a/libc++_shared.so'
+        if (isPicoOpenXrLoaderEnabled()) {
+            pickFirst 'lib/arm64-v8a/libopenxr_loader.so'
+        }
     }
 
     signingConfigs {
@@ -237,6 +248,27 @@ android {
         variant.outputs.all { output ->
             String filenameSuffix = variant.flavorName == "mono" ? variant.name : variant.buildType.name
             output.outputFileName = "android_${filenameSuffix}.apk"
+        }
+    }
+}
+
+afterEvaluate {
+    tasks.matching { it.name == "mergeStandardReleaseNativeLibs" }.configureEach { task ->
+        task.doLast {
+            if (!isPicoOpenXrLoaderEnabled()) {
+                return
+            }
+
+            File picoOpenXrLoader = file("libs/pico/arm64-v8a/libopenxr_loader.so")
+            if (!picoOpenXrLoader.isFile()) {
+                throw new GradleException("PICO OpenXR loader is enabled but missing: ${picoOpenXrLoader}")
+            }
+
+            copy {
+                from picoOpenXrLoader
+                into file("$buildDir/intermediates/merged_native_libs/standardRelease/mergeStandardReleaseNativeLibs/out/lib/arm64-v8a")
+            }
+            logger.lifecycle("Using PICO OpenXR loader: ${picoOpenXrLoader}")
         }
     }
 }

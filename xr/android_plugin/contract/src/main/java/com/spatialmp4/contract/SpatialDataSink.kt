@@ -40,6 +40,9 @@ import java.nio.ByteBuffer
 // the provider can hand a MediaCodec-encoded AAC stream to the muxer without
 // going through GDScript. The same SessionConfig also carries device identity
 // fields added in Stage 2 metadata work.
+// The interface methods are append-only with default implementations, but
+// SessionConfig is still a Kotlin data class: provider and muxer AARs should
+// be built against the same contract.jar.
 //
 // Compatibility matrix:
 //   * v2 provider <-> v2 muxer: audio absent on both sides, unchanged.
@@ -389,6 +392,33 @@ interface SpatialDataSink {
 
     /** Forwarded by the provider so the host can show a single error path. */
     fun onError(message: String) {}
+}
+
+/**
+ * Process-local fallback registry for Godot Android plugins that implement
+ * [SpatialDataSink]. Some Godot plugin calls cannot reliably marshal one
+ * singleton plugin object into another as an `Any?`; registering here gives
+ * data producers a typed way to find the active sink without a direct module
+ * dependency on every sink implementation.
+ */
+object SpatialDataSinkRegistry {
+    @Volatile
+    private var activeSink: SpatialDataSink? = null
+
+    @JvmStatic
+    fun register(sink: SpatialDataSink) {
+        activeSink = sink
+    }
+
+    @JvmStatic
+    fun unregister(sink: SpatialDataSink) {
+        if (activeSink === sink) {
+            activeSink = null
+        }
+    }
+
+    @JvmStatic
+    fun getActiveSink(): SpatialDataSink? = activeSink
 }
 
 /**

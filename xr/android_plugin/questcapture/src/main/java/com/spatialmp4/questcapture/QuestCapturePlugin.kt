@@ -27,6 +27,14 @@ import android.util.Log
 import android.util.Size
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.spatialmp4.capturecommon.AudioCapture
+import com.spatialmp4.capturecommon.CapturedYuvFrame
+import com.spatialmp4.capturecommon.ChromaLayout
+import com.spatialmp4.capturecommon.DeviceIdentity
+import com.spatialmp4.capturecommon.StereoHevcEncoder
+import com.spatialmp4.capturecommon.YuvPlaneCapture
+import com.spatialmp4.muxer.SpatialMp4MuxerPlugin
+import com.spatialmp4.muxer.SpatialMp4SideDataPacker
 import org.godotengine.godot.Godot
 import org.godotengine.godot.plugin.GodotPlugin
 import org.godotengine.godot.plugin.SignalInfo
@@ -113,6 +121,27 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     @Volatile private var muxerSink: com.spatialmp4.contract.SpatialDataSink? = null
 
     override fun getPluginName(): String = "QuestCapturePlugin"
+
+    @UsedByGodot
+    fun getCaptureProviderName(): String = "quest"
+
+    @UsedByGodot
+    fun getCaptureProviderDeviceScore(): Int {
+        val device = listOf(Build.MANUFACTURER, Build.BRAND, Build.MODEL, Build.DEVICE, Build.PRODUCT)
+            .joinToString(" ")
+            .lowercase()
+        return when {
+            "quest" in device || "oculus" in device || "meta" in device -> 100
+            "pico" in device || "picovr" in device -> -100
+            else -> 5
+        }
+    }
+
+    @UsedByGodot
+    fun isDepthCaptureSupported(): Boolean = true
+
+    @UsedByGodot
+    fun isBodyMotionCaptureSupported(): Boolean = false
 
     override fun getPluginSignals(): Set<SignalInfo> {
         return setOf(

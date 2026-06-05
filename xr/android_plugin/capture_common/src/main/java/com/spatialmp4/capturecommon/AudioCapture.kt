@@ -1,4 +1,4 @@
-package com.spatialmp4.questcapture
+package com.spatialmp4.capturecommon
 
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -20,7 +20,7 @@ import kotlin.math.max
  * Single-mic / stereo-mic capture driver: routes one AudioRecord stream into
  * an AAC-LC MediaCodec encoder and hands the encoded packets to a
  * SpatialDataSink. Owns its own background thread; start() / stopAndDrain()
- * mirror the lifecycle shape of StereoHevcEncoder so QuestCapturePlugin can
+ * mirror the lifecycle shape of StereoHevcEncoder so provider plugins can
  * manage both with the same pattern.
  *
  * v1 of the audio path captures stereo PCM (channelLayout = STEREO). The

@@ -78,11 +78,16 @@ xr/android_plugin/**/local.properties
 xr/android_plugin/scripts/build_ffmpeg_android/
 
 # Generated from xr/android_plugin by `make build-capture-plugins`.
+xr/addons/capture_common/bin/*.aar
 xr/addons/quest_capture_android/bin/*.aar
+xr/addons/pico_capture_android/bin/*.aar
+xr/addons/live-push/bin/*.aar
 xr/addons/spatial_capture_contract/bin/*.jar
 xr/addons/spatialmp4_muxer/bin/*.aar
 xr/addons/qr_scanner/bin/*.aar
 xr/addons/qr_scanner/bin/*.jar
+xr/addons/pico_openxr/*.so
+xr/native/pico_openxr/build-*/
 
 # claude
 *.lock
@@ -91,3 +96,4 @@ settings.local.json
 # soft link, ignore 
 xr/addons/godot-xr-tools
 xr/native/ahb_decoder/godot-cpp
+xr/native/pico_openxr/godot-cpp

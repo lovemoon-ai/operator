@@ -1,4 +1,4 @@
-package com.spatialmp4.questcapture
+package com.spatialmp4.capturecommon
 
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -46,7 +46,7 @@ class StereoHevcEncoder(
     // RgbStreamConfig when MediaCodec emits codec-specific data.
     private val cameraIntrinsics: List<Intrinsics>,
     private val onError: (String) -> Unit,
-    // Lightweight counters surfaced by QuestCapturePlugin.popMetricsJson so
+    // Lightweight counters surfaced by provider popMetricsJson hooks so
     // the 1Hz GDScript ticker can spot stereo-pair / encoder-output backlogs.
     private val onPairEncoded: () -> Unit = {},
     private val onMonoEncoded: () -> Unit = {},

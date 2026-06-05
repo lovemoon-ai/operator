@@ -16,7 +16,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "QuestCaptureAndroidPlugin"
 include(":contract")
+include(":capture_common")
 include(":spatialmp4_muxer")
 include(":questcapture")
 include(":qrscanner")
-
+include(":picocapture")
+include(":live_capture_server")
