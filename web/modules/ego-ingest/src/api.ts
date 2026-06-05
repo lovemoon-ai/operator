@@ -40,16 +40,65 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
     res.json(session);
   });
 
-  router.get("/sessions/:id/artifacts/:kind", async (req, res) => {
+  // The trailing `:filename?` is intentionally permissive — Rerun
+  // 0.33's URL categorizer (Rust `url` crate inside the WASM viewer)
+  // refuses to load a recording unless the path ends in `.rrd`,
+  // even when the response is served with the right content-type.
+  // So the viewer hits `.../artifacts/rrd/session.rrd` while the
+  // dashboard's "download" link sticks with `.../artifacts/rrd`. We
+  // serve both off the same handler — the filename segment is purely
+  // cosmetic to satisfy the extension check.
+  router.get("/sessions/:id/artifacts/:kind/:filename?", async (req, res) => {
     const session = await opts.store.getSession(req.params.id!);
     if (!session) return res.status(404).end();
     const artifact = session.artifacts[req.params.kind!];
     if (!artifact) return res.status(404).end();
+
+    const contentType = contentTypeFor(artifact.kind, artifact.filename);
+    // "Inline" kinds are the ones a browser is expected to render in
+    // place (a <video> tag, the Rerun WASM viewer, …) — these need
+    // Range support so seeking and Safari/iOS playback work, and they
+    // must NOT carry Content-Disposition: attachment (which forces a
+    // download). Anything else (the raw SpatialMP4 archive, the
+    // manifest JSON, controller dumps, …) keeps the attachment
+    // disposition so a "download" link still feels like a download.
+    const inlineKind = isInlineKind(artifact.kind, artifact.filename);
+
+    // Always advertise Range capability so the browser knows it can
+    // issue Range requests on the next round-trip.
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Content-Type", contentType);
+
+    const rangeHeader = req.headers.range;
+    if (inlineKind && typeof rangeHeader === "string") {
+      const parsed = parseRange(rangeHeader, artifact.bytes);
+      if (parsed === "invalid") {
+        res.setHeader("Content-Range", `bytes */${artifact.bytes}`);
+        return res.status(416).end();
+      }
+      if (parsed) {
+        const { start, end } = parsed;
+        const stream = await opts.storage.openFinalized(artifact.uri, { start, end });
+        if (!stream) return res.status(410).end();
+        res.status(206);
+        res.setHeader("Content-Length", String(end - start + 1));
+        res.setHeader("Content-Range", `bytes ${start}-${end}/${artifact.bytes}`);
+        res.setHeader(
+          "Content-Disposition",
+          `inline; filename="${safeFilename(artifact.filename)}"`,
+        );
+        return stream.pipe(res);
+      }
+      // Header present but empty match → fall through to a full 200.
+    }
+
     const stream = await opts.storage.openFinalized(artifact.uri);
     if (!stream) return res.status(410).end();
     res.setHeader("Content-Length", String(artifact.bytes));
-    res.setHeader("Content-Disposition", `attachment; filename="${safeFilename(artifact.filename)}"`);
-    res.setHeader("Content-Type", contentTypeFor(artifact.kind, artifact.filename));
+    res.setHeader(
+      "Content-Disposition",
+      `${inlineKind ? "inline" : "attachment"}; filename="${safeFilename(artifact.filename)}"`,
+    );
     stream.pipe(res);
   });
 
@@ -97,8 +146,64 @@ function safeFilename(name: string): string {
 function contentTypeFor(kind: string, filename: string): string {
   const ext = filename.includes(".") ? filename.split(".").pop()!.toLowerCase() : "";
   if (ext === "json" || kind === "manifest") return "application/json";
-  if (ext === "mp4" || kind === "media") return "video/mp4";
+  if (ext === "mp4" || kind === "media" || kind === "preview") return "video/mp4";
+  if (ext === "rrd" || kind === "rrd") return "application/vnd.rerun.rrd";
   if (ext === "tar") return "application/x-tar";
   if (ext === "zip") return "application/zip";
   return "application/octet-stream";
+}
+
+// Anything we expect a browser to render in place. Everything else is
+// treated as a download. We key off both `kind` (set by the producer)
+// and the file extension so adding new derived artifacts only needs
+// updates here.
+function isInlineKind(kind: string, filename: string): boolean {
+  if (kind === "media" || kind === "preview" || kind === "rrd") return true;
+  const ext = filename.includes(".") ? filename.split(".").pop()!.toLowerCase() : "";
+  return ext === "mp4" || ext === "rrd";
+}
+
+/**
+ * Parse a single-range `Range: bytes=start-end` header. We deliberately
+ * do not support multipart byte ranges — `<video>` and Rerun's loader
+ * only ever issue single ranges, and 2-byte tail probes for
+ * `bytes=-N` are normalized into `[bytes - N, bytes - 1]`.
+ *
+ * Returns:
+ *   - `{ start, end }`   when the header parsed and is satisfiable
+ *   - `"invalid"`        when the header is malformed or out of range
+ *   - `null`             when the header isn't a `bytes=…` range at all
+ */
+function parseRange(
+  header: string,
+  totalBytes: number,
+): { start: number; end: number } | "invalid" | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null;
+  const rawStart = match[1] ?? "";
+  const rawEnd = match[2] ?? "";
+  if (rawStart === "" && rawEnd === "") return "invalid";
+
+  let start: number;
+  let end: number;
+  if (rawStart === "") {
+    // Suffix form: last N bytes.
+    const suffix = Number.parseInt(rawEnd, 10);
+    if (!Number.isFinite(suffix) || suffix <= 0) return "invalid";
+    start = Math.max(0, totalBytes - suffix);
+    end = totalBytes - 1;
+  } else {
+    start = Number.parseInt(rawStart, 10);
+    if (!Number.isFinite(start) || start < 0) return "invalid";
+    if (rawEnd === "") {
+      end = totalBytes - 1;
+    } else {
+      end = Number.parseInt(rawEnd, 10);
+      if (!Number.isFinite(end) || end < start) return "invalid";
+      // Cap to file size — RFC 7233 §4.1 says servers may do this.
+      if (end >= totalBytes) end = totalBytes - 1;
+    }
+  }
+  if (start >= totalBytes) return "invalid";
+  return { start, end };
 }

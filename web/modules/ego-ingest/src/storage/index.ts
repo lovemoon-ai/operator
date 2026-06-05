@@ -45,8 +45,18 @@ export interface StorageDriver {
   /** Current persisted offset for an in-progress upload. */
   resourceOffset(resourceId: string): Promise<number>;
 
-  /** Stream a finalized artifact back out (for the dashboard's download endpoint). */
-  openFinalized(uri: string): Promise<NodeJS.ReadableStream | null>;
+  /**
+   * Stream a finalized artifact back out (for the dashboard's download endpoint).
+   *
+   * If `range` is provided, the returned stream emits only bytes
+   * `[start, end]` inclusive — the read API uses this to satisfy HTTP
+   * `Range: bytes=…` requests so `<video>` can seek without re-fetching
+   * the whole file.
+   */
+  openFinalized(
+    uri: string,
+    range?: { start: number; end: number },
+  ): Promise<NodeJS.ReadableStream | null>;
 
   /** Delete a finalized artifact. Used by the dashboard's session-delete action. */
   deleteFinalized(uri: string): Promise<void>;

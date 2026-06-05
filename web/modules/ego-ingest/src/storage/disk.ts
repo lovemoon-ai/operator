@@ -74,11 +74,19 @@ export class DiskStorage implements StorageDriver {
     }
   }
 
-  async openFinalized(uri: string): Promise<NodeJS.ReadableStream | null> {
+  async openFinalized(
+    uri: string,
+    range?: { start: number; end: number },
+  ): Promise<NodeJS.ReadableStream | null> {
     try {
       await stat(uri);
     } catch {
       return null;
+    }
+    if (range) {
+      // createReadStream's `end` is inclusive — same semantics as HTTP
+      // Range, so the read API can hand the parsed pair straight through.
+      return createReadStream(uri, { start: range.start, end: range.end });
     }
     return createReadStream(uri);
   }

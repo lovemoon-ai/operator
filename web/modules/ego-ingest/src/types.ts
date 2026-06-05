@@ -45,10 +45,25 @@ export interface FinalizedArtifact {
   kind: ArtifactKind;
   filename: string;
   bytes: number;
+  /** Server-computed SHA-256 (DiskStorage with `computeHashes: true`). */
   sha256?: string;
   storedAt: string;
   /** Storage-driver-specific opaque locator (path / S3 key / …). */
   uri: string;
+  /**
+   * Set when the manifest declared a `sha256` for this artifact and
+   * the server-computed value didn't match. The bytes are still on
+   * disk for forensics, but downstream workers (preview / rrd) MUST
+   * NOT consume a corrupt artifact — see the integrity gate in
+   * `tus/middleware.ts`.
+   */
+  corrupt?: boolean;
+  /**
+   * The SHA-256 declared in the manifest's `artifacts.<kind>.sha256`
+   * field, if any. Kept on the artifact for diagnostic UI even when
+   * the comparison passed.
+   */
+  expectedSha256?: string;
 }
 
 /** Hook invoked once a session's `media` artifact has finalized. */

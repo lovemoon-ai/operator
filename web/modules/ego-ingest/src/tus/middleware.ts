@@ -221,7 +221,30 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
           /* still record the artifact even if parse fails */
         }
       }
-      const session = await opts.store.upsertSessionArtifact(
+
+      // Integrity check, part 1 of 2: if the artifact we just received
+      // is something the manifest already declared a SHA-256 for,
+      // compare server-computed bytes-on-disk hash against the
+      // client-declared hash. Mismatch → mark corrupt + log loud.
+      // The common case (mp4 arriving after manifest) is fully
+      // covered here; the late-manifest path (mp4 first, manifest
+      // after) is handled in "part 2 of 2" just below.
+      const existingSession = await opts.store.getSession(record.sessionId);
+      const declared = extractDeclaredSha256(
+        existingSession?.manifest,
+        record.metadata.artifact_kind,
+      );
+      let corrupt: boolean | undefined;
+      if (declared && finalized.sha256 && declared !== finalized.sha256) {
+        corrupt = true;
+        // eslint-disable-next-line no-console
+        console.error(
+          `[ego-ingest] sha256 mismatch for ${record.sessionId}/${record.metadata.artifact_kind}: ` +
+            `expected=${declared} actual=${finalized.sha256}`,
+        );
+      }
+
+      let session = await opts.store.upsertSessionArtifact(
         record.sessionId,
         {
           kind: record.metadata.artifact_kind,
@@ -230,19 +253,58 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
           sha256: finalized.sha256,
           storedAt: now,
           uri: finalized.uri,
+          corrupt,
+          expectedSha256: declared,
         },
         manifestJson,
       );
+
+      // Integrity check, part 2 of 2: when manifest is the artifact we
+      // just received, retroactively verify every PRIOR artifact whose
+      // hash the manifest now declares. This catches the rare ordering
+      // where the mp4 PATCH completes before the manifest PATCH does.
+      if (record.metadata.artifact_kind === "manifest" && manifestJson) {
+        for (const [kind, art] of Object.entries(session.artifacts)) {
+          if (kind === "manifest" || art.corrupt) continue;
+          const expected = extractDeclaredSha256(manifestJson, kind);
+          if (!expected || !art.sha256 || expected === art.sha256) continue;
+          // eslint-disable-next-line no-console
+          console.error(
+            `[ego-ingest] sha256 mismatch for ${record.sessionId}/${kind} (detected via late manifest): ` +
+              `expected=${expected} actual=${art.sha256}`,
+          );
+          session = await opts.store.upsertSessionArtifact(record.sessionId, {
+            ...art,
+            corrupt: true,
+            expectedSha256: expected,
+          });
+        }
+      }
+
       await opts.store.deleteResource(id);
       events.emit({ type: "resource.finalized", resourceId: id, sessionId: record.sessionId });
       events.emit({ type: "session.updated", session });
-      if (opts.onSession && session.artifacts["media"]) {
-        // Fire the user-supplied hook only once the media artifact has
-        // landed; firing on every artifact would surprise pipeline code.
+
+      // Gate the worker pipeline on three conditions:
+      //   (1) media artifact is on disk
+      //   (2) media isn't flagged corrupt
+      //   (3) manifest is present (so any declared hash got a chance
+      //       to compare against the media)
+      // Bullet (3) prevents the late-manifest race from kicking off
+      // a preview/.rrd job against bytes we're about to mark corrupt.
+      const media = session.artifacts["media"];
+      const hookReady =
+        !!media && !media.corrupt && !!session.manifest;
+      if (opts.onSession && hookReady) {
         Promise.resolve(opts.onSession(session)).catch((err) => {
           // eslint-disable-next-line no-console
           console.error("[ego-ingest] onSession hook threw:", err);
         });
+      } else if (media && media.corrupt) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ego-ingest] session ${record.sessionId}: media corrupt, NOT firing onSession`,
+        );
       }
     }
 
@@ -289,6 +351,40 @@ function newResourceId(): string {
 
 function trimSlashes(s: string): string {
   return s.replace(/\/+$/, "");
+}
+
+/**
+ * Pull a declared SHA-256 for a given artifact kind out of a parsed
+ * manifest. Returns the hex string normalised to lowercase, or
+ * `undefined` if the manifest didn't declare a hash for this kind.
+ *
+ * Manifest shape (set by xr/scripts/session_spool_writer.gd):
+ *   {
+ *     ...,
+ *     "artifacts": {
+ *       "media":    { "filename": "...", "bytes": N, "sha256": "abc…", "hash_algo": "sha256" },
+ *       "manifest": { ... optional ... }
+ *     }
+ *   }
+ *
+ * We accept either uppercase or lowercase hex (the GDScript
+ * `hex_encode` happens to be lowercase, but we don't bind to that),
+ * and reject anything that isn't exactly 64 hex chars to avoid
+ * spurious matches against random fields.
+ */
+function extractDeclaredSha256(
+  manifest: Record<string, unknown> | undefined,
+  kind: string,
+): string | undefined {
+  if (!manifest) return undefined;
+  const artifacts = manifest["artifacts"];
+  if (!artifacts || typeof artifacts !== "object") return undefined;
+  const slot = (artifacts as Record<string, unknown>)[kind];
+  if (!slot || typeof slot !== "object") return undefined;
+  const sha = (slot as Record<string, unknown>)["sha256"];
+  if (typeof sha !== "string") return undefined;
+  if (!/^[a-f0-9]{64}$/i.test(sha)) return undefined;
+  return sha.toLowerCase();
 }
 
 // Re-export the metadata type so consumers can import from one entry.
