@@ -382,15 +382,30 @@ func _apply_button_icon(button: Button, icon_name: String) -> void:
 
 
 func _load_icon(icon_name: String) -> Texture2D:
+	# Load the IMPORTED texture (.ctex) via Godot's standard resource loader.
+	#
+	# Earlier this function read the raw .svg via FileAccess and decoded with
+	# Image.load_svg_from_string() at runtime. That depended on the runtime SVG
+	# decoder being compiled into the *export template* — Meta Quest / Pico
+	# templates frequently omit it, so every icon silently came back blank in
+	# the headset (success in the editor, failure on device). load() returns
+	# the .ctex that Godot baked at import time and works in every export
+	# configuration.
 	if _icon_cache.has(icon_name):
 		return _icon_cache[icon_name]
-	var texture: Texture2D = null
 	var path := ICON_PATH % icon_name
-	if FileAccess.file_exists(path):
-		var svg := FileAccess.get_file_as_string(path)
-		var image := Image.new()
-		if image.load_svg_from_string(svg, 1.0) == OK:
-			texture = ImageTexture.create_from_image(image)
+	var texture: Texture2D = null
+	if not ResourceLoader.exists(path):
+		push_warning("[Icon] resource not registered: %s (missing .svg or stale .import?)" % path)
+	else:
+		var res := load(path)
+		if res is Texture2D:
+			texture = res
+			print("[Icon] loaded %s (%dx%d)" % [icon_name, texture.get_width(), texture.get_height()])
+		else:
+			push_warning("[Icon] load() returned %s, not Texture2D, for %s" % [typeof(res), path])
+	if texture == null:
+		push_warning("[Icon] returning null texture for '%s'" % icon_name)
 	_icon_cache[icon_name] = texture
 	return texture
 

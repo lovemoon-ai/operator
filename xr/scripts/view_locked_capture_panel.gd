@@ -18,6 +18,11 @@ const DEFAULT_SAVE_ROOT := "/sdcard/Movies/SpatialMP4"
 const STORAGE_REFRESH_SECONDS := 3.0
 const SETTINGS_PATH := "user://capture_settings.cfg"
 const SECTION := "capture"
+# Health check timeout: keep short so the user is not stuck staring at
+# "Checking..." if the endpoint is firewalled/dead. 8 s is enough for a
+# TLS handshake on slow Wi-Fi but short enough that the operator can
+# react. Anything longer feels broken in a HMD.
+const UPLOAD_HEALTH_TIMEOUT_S := 8.0
 
 var _mode: OptionButton
 var _save_root: LineEdit
@@ -25,6 +30,11 @@ var _stream_toggles: Dictionary = {}
 var _upload_url: LineEdit
 var _upload_token := ""
 var _upload_status_label: Label
+# Dedicated HTTPRequest for the open()-time upload-URL health probe.
+# Separate from capture_app.gd's upload_ack_request so the two flows
+# (QR ACK challenge vs plain reachability check) don't clobber each
+# other if the user scans a code while a probe is in flight.
+var _upload_health_request: HTTPRequest
 # _cursor, _pointer_position/_pointer_pressed, _highlighted_slot,
 # _exit_indicator/_exit_holding/_exit_hold_seconds are all inherited
 # from BaseSettingsPanel — don't redeclare.
@@ -39,7 +49,20 @@ func _init() -> void:
 	# active group's controls. Each group has its own scroll, so adding new
 	# fields only grows the affected group instead of stretching the panel.
 	_setup_two_column_panel(VIEWPORT_SIZE, Vector2(0.63, 0.54), "UI_CAPTURE_SETTINGS_TITLE", "UI_SAVE", 2, true)
+	_setup_upload_health_request()
 	set_options(load_settings())
+
+
+func _setup_upload_health_request() -> void:
+	# HTTPRequest needs to live in the scene tree to drive its internal
+	# HTTPClient. We add it as a child here in _init(); the engine will
+	# call _ready() once the panel itself enters the tree.
+	_upload_health_request = HTTPRequest.new()
+	_upload_health_request.name = "UploadHealthRequest"
+	_upload_health_request.timeout = UPLOAD_HEALTH_TIMEOUT_S
+	_upload_health_request.use_threads = true
+	add_child(_upload_health_request)
+	_upload_health_request.request_completed.connect(_on_upload_health_completed)
 
 
 func _process(delta: float) -> void:
@@ -93,6 +116,14 @@ func open() -> void:
 	super.open()
 	_storage_refresh_accum = STORAGE_REFRESH_SECONDS
 	_refresh_storage_usage()
+	# Don't auto-probe on open — every open() would hit the operator's
+	# network even when they're just toggling a stream switch. Reset
+	# the status row so a stale result from a previous open doesn't
+	# linger, and let the operator press the pulse button to actually
+	# run the check.
+	if _upload_status_label != null:
+		_upload_status_label.text = ""
+		_upload_status_label.visible = false
 
 
 func _build_settings_content(parent: VBoxContainer) -> void:
@@ -152,11 +183,15 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# EgoSettingsStore across app launches.
 	var upload := register_group("upload", "UI_UPLOAD", "signal")
 
-	# [LineEdit — Upload URL] [📷 scan button]
-	# The scan button only renders on Android (gated by
-	# _qr_scan_supported), where the QR Scanner plugin AAR is bundled
-	# into the APK. On macOS / Linux dev builds the column is just the
-	# LineEdit. See claw/issues/011-xr-qr-scanner.md.
+	# [LineEdit — Upload URL] [💓 health-check] [📷 scan]
+	# The health-check button (pulse icon) probes the configured URL
+	# on demand — no auto-trigger on panel open, so we don't hit the
+	# operator's network every time they tweak a stream toggle.
+	# The QR scan button (camera icon) only renders on Android (gated
+	# by _qr_scan_supported), where the QR Scanner plugin AAR is bundled
+	# into the APK. On macOS / Linux dev builds the row is just the
+	# LineEdit + the health-check button. See
+	# claw/issues/011-xr-qr-scanner.md.
 	var upload_url_row := HBoxContainer.new()
 	upload_url_row.add_theme_constant_override("separation", 8)
 	upload_url_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -169,19 +204,22 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_upload_url.add_theme_font_size_override("font_size", 19)
 	add_interactive(upload_url_row, _upload_url)
 
+	# Manual health-check trigger. Always available — even on desktop
+	# dev builds we want a way to verify the server is up.
+	_add_url_action_button(
+		upload_url_row,
+		"pulse",
+		tr("UI_UPLOAD_HEALTH_CHECK_TOOLTIP"),
+		_on_health_check_button_pressed
+	)
+
 	if _qr_scan_supported():
-		var scan_button := Button.new()
-		scan_button.text = ""
-		scan_button.tooltip_text = tr("UI_SCAN_QR_TOOLTIP")
-		scan_button.clip_text = true
-		scan_button.custom_minimum_size = Vector2(70, 55)
-		scan_button.size_flags_horizontal = Control.SIZE_SHRINK_END
-		_apply_button_icon(scan_button, "camera")
-		scan_button.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		scan_button.pressed.connect(_on_scan_button_pressed)
-		var scan_slot := add_interactive(upload_url_row, scan_button)
-		scan_slot.size_flags_horizontal = Control.SIZE_SHRINK_END
-		scan_slot.custom_minimum_size = Vector2(78, 55)
+		_add_url_action_button(
+			upload_url_row,
+			"camera",
+			tr("UI_SCAN_QR_TOOLTIP"),
+			_on_scan_button_pressed
+		)
 
 	_upload_status_label = _add_status_label_to(upload, "")
 	_upload_status_label.visible = false
@@ -292,6 +330,47 @@ func _on_scan_button_pressed() -> void:
 	scan_upload_url_requested.emit()
 
 
+func _on_health_check_button_pressed() -> void:
+	# Operator pressed the pulse icon — run the reachability probe now.
+	# Always re-runs (cancels in-flight requests in _trigger_upload_health_check)
+	# so a second tap retries instead of being dropped.
+	print("[UploadHealth] manual check requested")
+	_trigger_upload_health_check()
+
+
+# Build a square icon-only button that sits to the right of the upload-URL
+# LineEdit. Both the health-check and the QR scan buttons use the same
+# geometry so the row stays tidy regardless of which buttons are present.
+#
+# Note on icon rendering: _apply_button_icon() in the base class is tuned
+# for text+icon buttons (confirm/exit). For icon-only buttons we override
+# the size constants — expand_icon with empty text can collapse the icon
+# to zero in some Godot 4 builds. Setting an explicit icon_max_width and
+# disabling expand_icon makes the result deterministic.
+func _add_url_action_button(
+		row: HBoxContainer,
+		icon_name: String,
+		tooltip: String,
+		handler: Callable
+) -> Button:
+	var btn := Button.new()
+	btn.tooltip_text = tooltip
+	btn.custom_minimum_size = Vector2(70, 55)
+	btn.size_flags_horizontal = Control.SIZE_SHRINK_END
+	var icon := _load_icon(icon_name)
+	if icon == null:
+		push_warning("[ViewLockedCapturePanel] icon '%s' failed to load — button will be blank" % icon_name)
+	btn.icon = icon
+	btn.expand_icon = false
+	btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	btn.add_theme_constant_override("icon_max_width", 36)
+	btn.pressed.connect(handler)
+	var slot := add_interactive(row, btn)
+	slot.size_flags_horizontal = Control.SIZE_SHRINK_END
+	slot.custom_minimum_size = Vector2(78, 55)
+	return btn
+
+
 ## Called by capture_app.gd once the QR scanner overlay returns a payload.
 ## We DO NOT close the panel here — the user still needs to review + Save.
 func set_upload_url_from_scan(url: String, token: String = "", enable_auto_upload: bool = false) -> void:
@@ -316,7 +395,91 @@ func set_upload_connectivity_status(text: String, level: String = "normal") -> v
 		color = Color(1.0, 0.36, 0.28)
 	elif level == "success":
 		color = Color(0.36, 0.96, 0.58)
+	elif level == "warning":
+		# Amber — server responded but probe wasn't conclusive (e.g. 401/404
+		# on OPTIONS, or missing Tus-Resumable header). The endpoint is up,
+		# but we can't promise the actual upload will succeed.
+		color = Color(1.0, 0.78, 0.40)
 	_upload_status_label.add_theme_color_override("font_color", color)
+
+
+# --- Upload URL reachability probe -----------------------------------------
+# Triggered every time the panel opens. The user asked for "if the upload
+# URL is non-empty, every time you open settings, check whether it's healthy
+# and show the status — don't show nothing." So:
+#   - empty URL  → hide the label (no row at all; nothing to check)
+#   - bad URL    → red, "invalid URL"
+#   - probe      → an OPTIONS request to the configured endpoint
+#       - 2xx/3xx + Tus-Resumable header → green, TUS endpoint ready
+#       - 2xx/3xx without Tus-Resumable  → green, generic reachable
+#       - 4xx                            → amber (reachable but probe rejected)
+#       - 5xx / network error / timeout  → red
+
+func _trigger_upload_health_check() -> void:
+	if _upload_status_label == null:
+		return
+	var url := ""
+	if _upload_url != null:
+		url = _upload_url.text.strip_edges()
+	if url.is_empty():
+		# Nothing configured — collapse the status row entirely so we don't
+		# show stale "OK" text from a previous URL the user just cleared.
+		_upload_status_label.text = ""
+		_upload_status_label.visible = false
+		return
+	if not (url.begins_with("http://") or url.begins_with("https://")):
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_INVALID_URL"), "error")
+		return
+	if _upload_health_request == null:
+		# Panel was constructed without the helper somehow — at least surface
+		# that a check would have happened so the row isn't blank.
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_UNAVAILABLE"), "warning")
+		return
+	# Cancel any in-flight probe before issuing the new one so back-to-back
+	# open() calls don't deliver stale callbacks.
+	if _upload_health_request.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
+		_upload_health_request.cancel_request()
+	set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_CHECKING"), "normal")
+	# Tus-Resumable in the *request* is recommended by the TUS spec for
+	# OPTIONS probes. Many ingest servers also accept a plain OPTIONS.
+	var headers := PackedStringArray([
+		"User-Agent: ego-uploader/1.0 (godot)",
+		"Tus-Resumable: 1.0.0",
+	])
+	var err := _upload_health_request.request(url, headers, HTTPClient.METHOD_OPTIONS)
+	if err != OK:
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_REQUEST_FAILED") % err, "error")
+
+
+func _on_upload_health_completed(result: int, response_code: int, headers: PackedStringArray, _body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS:
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_NETWORK_ERROR") % result, "error")
+		return
+	# Look for Tus-Resumable / Tus-Version response headers (case-insensitive).
+	# Their presence is a strong signal that the URL is actually a TUS ingest
+	# endpoint, not just some web server that happens to be reachable.
+	var tus_version := ""
+	for h in headers:
+		var idx := h.find(":")
+		if idx < 0:
+			continue
+		var name := h.substr(0, idx).strip_edges().to_lower()
+		if name == "tus-version":
+			tus_version = h.substr(idx + 1).strip_edges()
+			break
+		if name == "tus-resumable" and tus_version.is_empty():
+			tus_version = h.substr(idx + 1).strip_edges()
+	if not tus_version.is_empty():
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_TUS_OK") % tus_version, "success")
+		return
+	if response_code >= 200 and response_code < 400:
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_OK") % response_code, "success")
+	elif response_code >= 400 and response_code < 500:
+		# Reachable but rejected the probe. Plenty of perfectly fine ingest
+		# servers return 401/404 to OPTIONS — flag as warning, not error.
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_HTTP_WARN") % response_code, "warning")
+	else:
+		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_HTTP_ERROR") % response_code, "error")
 
 
 func _on_save_root_changed(_new_text: String) -> void:
