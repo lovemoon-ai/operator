@@ -50,6 +50,79 @@ Configure via env vars (all optional):
 | `INGEST_TOKEN` | unset | when set, require `Authorization: Bearer <token>` |
 | `MAX_BYTES` | `100 GB` | hard cap on Upload-Length |
 | `INTERNAL_API_BASE` | `http://localhost:3000` | base used by server-side fetches |
+| `FFMPEG_BIN` | `ffmpeg` | binary used by the preview worker |
+| `PREVIEW_TRANSCODE` | unset | when `1`, re-encode preview to H.264 instead of stream-copy |
+| `UV_BIN` | `uv` | uv binary used to run the rerun sidecar |
+| `RERUN_PYTHON_BIN` | unset | escape hatch: run sidecar with this Python directly, bypassing uv (deps must already be installed) |
+| `SPATIALMP4_HOME` | autodetect | local SpatialMP4 SDK checkout; sidecar uses its prebuilt `.so` |
+| `RERUN_TOPK_FRAMES` | unset (unlimited) | cap on RGB+depth frames logged into the .rrd |
+| `RERUN_JPEG_QUALITY` | `85` | JPEG quality for RGB frames stored in the .rrd |
+| `RERUN_DISABLED` | unset | when `1`, skip the rerun worker entirely |
+
+## Post-ingest workers
+
+After a session's `media` artifact lands, two derivation workers run
+sequentially (see `app/lib/workers/`):
+
+1. **preview** — `ffmpeg -map 0:v:0 -map 0:a? -c copy -movflags +faststart`
+   strips the FFV1 depth track and the seven `mett` timed-metadata
+   tracks out of the SpatialMP4, leaving a clean RGB-only MP4 the
+   browser can `<video>` inline. Set `PREVIEW_TRANSCODE=1` to swap the
+   stream-copy for an H.264 re-encode (slower, but plays on Firefox /
+   Linux Chrome).
+
+2. **rerun** — invokes `app/scripts/spatialmp4_to_rrd.py` which uses
+   the [SpatialMP4 SDK](https://github.com/Pico-Developer/SpatialMP4)
+   (same one as the reference visualizer
+   `examples/python/visualize_rerun_quest.py` in that repo) to read
+   the container, then logs RGB / depth / head trajectory /
+   controller poses / hand joints into a Rerun `.rrd` that the
+   embedded `@rerun-io/web-viewer` loads in the session detail page.
+
+   Coordinate conventions match the SDK reference verbatim
+   (`world = RUB`, camera Pinhole = `RDF`, head gaze along local
+   `-Z`, `T_W_camera = T_W_head ⋅ T_imu_camera` with SVD reproject),
+   so a coordinate-frame intuition built against the local viewer
+   transfers 1-for-1 to the embedded one.
+
+   The sidecar's Python environment is managed by
+   [`uv`](https://docs.astral.sh/uv/) via PEP 723 inline metadata at
+   the top of the script — `rerun-sdk`, `numpy`, `scipy`, and
+   `opencv-python` resolve on first run, cached after. The
+   SpatialMP4 SDK itself is **not** on PyPI; we expect a local
+   checkout (auto-detected via `SPATIALMP4_HOME` or these dev paths,
+   first match wins):
+
+   * `$HOME/ws/spatialmp4-quest/SpatialMP4`
+   * `$HOME/spatialmp4-quest/SpatialMP4`
+   * `$HOME/SpatialMP4`
+
+   The sidecar's bootstrap walks the checkout for a
+   `spatialmp4.cpython-<abi>-<plat>.so` matching its own Python
+   ABI (uv picks 3.13 by default) and prepends that directory to
+   `sys.path`.
+
+   One-time setup:
+
+   ```bash
+   # 1. uv + ffmpeg for the preview worker
+   brew install ffmpeg uv             # macOS
+   # or: sudo apt install ffmpeg && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   # 2. SpatialMP4 SDK — build once for the Python ABI uv will pick
+   git clone https://github.com/Pico-Developer/SpatialMP4 \
+       ~/ws/spatialmp4-quest/SpatialMP4
+   cd ~/ws/spatialmp4-quest/SpatialMP4
+   cmake -S . -B build/host_py \
+       -DPython_EXECUTABLE=$(uv python find)
+   cmake --build build/host_py -j
+   ```
+
+   Subsequent ingests just trigger `uv run --script …`, which is
+   ~instant after the first warm-up. The worker fails open: missing
+   uv / missing SDK / sidecar exception → the Rerun panel hides
+   itself, the `<video>` preview still works. Check the dev-server
+   log for the `[workers] rerun …` line.
 
 ## Point the XR client at it
 

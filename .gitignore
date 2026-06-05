@@ -30,9 +30,15 @@ crash.log
 # Web workspace dependency/build output.
 web/node_modules
 web/.next/
+web/app/.next/
 web/modules/*/dist/
 web/data/
+web/app/data/
 *.tsbuildinfo
+
+# Python bytecode (sidecars in web/app/scripts, etc.)
+__pycache__/
+*.pyc
 
 # OS
 .DS_Store

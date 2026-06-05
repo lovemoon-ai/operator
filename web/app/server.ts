@@ -36,6 +36,7 @@ import {
 import { verifyConnectTicket } from "./lib/connect-ticket.js";
 import { ingest } from "./lib/ingest.js";
 import { reviewsRouter } from "./lib/reviews.js";
+import { runPostIngestWorkers } from "./lib/workers/index.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const dev = process.env.NODE_ENV !== "production";
@@ -93,6 +94,18 @@ async function main() {
         console.log(
           `[ingest] session ${session.id} complete · ${session.totalBytes} bytes`,
         );
+        // Kick the post-ingest pipeline: preview.mp4 (browser-playable
+        // RGB) first, then session.rrd (Rerun web viewer). Both derive
+        // new artifacts on disk and register them with the same store
+        // so the UI picks them up on its next render. Errors are
+        // logged but never bubble up — the raw upload is still safe
+        // on disk and re-runnable manually.
+        try {
+          await runPostIngestWorkers(session);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error(`[workers] orchestrator threw for ${session.id}:`, err);
+        }
       },
     }),
   );

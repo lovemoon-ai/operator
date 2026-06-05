@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@love-moon/ego-ingest": "*",
+    "@rerun-io/web-viewer": "0.33.0",
     "express": "^4.19.2",
     "next": "^15.0.0",
     "qrcode": "^1.5.3",

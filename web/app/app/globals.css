@@ -137,6 +137,50 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   border-radius: 8px;
 }
 
+.rerun-frame {
+  position: relative;
+  width: 100%;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.rerun-frame > div { background: #000; }
+/* Thin indeterminate progress bar that lives ABOVE the canvas
+   without occluding any of Rerun's own URL / status text. Disappears
+   as soon as the viewer fires its `ready` event. */
+.rerun-frame__progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--accent) 40%,
+    var(--accent) 60%,
+    transparent 100%
+  );
+  background-size: 250% 100%;
+  animation: rerun-progress 1.4s linear infinite;
+  pointer-events: none;
+  z-index: 2;
+}
+@keyframes rerun-progress {
+  from { background-position: 120% 0; }
+  to   { background-position: -120% 0; }
+}
+.rerun-frame--error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+.rerun-frame--error p { margin: 0; max-width: 480px; text-align: center; }
+
 .empty-state { padding: 48px 16px; text-align: center; color: var(--muted); }
 .empty-state code { background: var(--panel-2); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 .button-row { display: flex; gap: 8px; flex-wrap: wrap; }
