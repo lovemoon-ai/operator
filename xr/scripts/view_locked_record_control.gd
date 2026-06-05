@@ -79,6 +79,9 @@ func _process(delta: float) -> void:
 		return
 	var completed_action := _hold_action
 	_cancel_hold()
+	if completed_action == "stop":
+		# 倒计时已完成，立即截断持续音，避免和 confirm 三连音重叠。
+		_stop_feedback("stop_countdown")
 	_play_feedback("confirm")
 	match completed_action:
 		"start":
@@ -226,6 +229,7 @@ func _build_viewport() -> void:
 	_primary_button = _make_circle_button(primary_slot, PRIMARY_DIAMETER, tr("UI_START"), 20)
 	_primary_button.button_down.connect(_on_primary_button_down)
 	_primary_button.button_up.connect(_on_primary_button_up)
+	_primary_button.mouse_entered.connect(_on_primary_mouse_entered)
 	_primary_button.mouse_exited.connect(_on_primary_mouse_exited)
 	_primary_button.pressed.connect(_on_primary_pressed)
 	_primary_ring = _make_ring(primary_slot, PRIMARY_DIAMETER)
@@ -235,6 +239,7 @@ func _build_viewport() -> void:
 	_settings_button = _make_circle_button(settings_slot, SETTINGS_DIAMETER, tr("UI_SET"), 16)
 	_settings_button.button_down.connect(_on_settings_button_down)
 	_settings_button.button_up.connect(_on_settings_button_up)
+	_settings_button.mouse_entered.connect(_on_settings_mouse_entered)
 	_settings_button.mouse_exited.connect(_on_settings_mouse_exited)
 	_settings_button.pressed.connect(_on_settings_pressed)
 	_settings_ring = _make_ring(settings_slot, SETTINGS_DIAMETER)
@@ -268,7 +273,8 @@ func _make_circle_button(slot: Control, diameter: float, text: String, font_size
 	button.add_theme_stylebox_override("hover", _circle_style(diameter, Color(0.08, 0.11, 0.12, 0.64)))
 	button.add_theme_stylebox_override("pressed", _circle_style(diameter, Color(0.10, 0.14, 0.15, 0.78)))
 	button.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
-	button.mouse_entered.connect(func() -> void: _play_feedback("hover", -5.0))
+	# NOTE: hover 音效由调用方在 _build_viewport 中显式连接，方便针对
+	# 录制中的 stop 按钮抑制 hover 反馈。
 	slot.add_child(button)
 	return button
 
@@ -324,16 +330,28 @@ func _on_primary_button_down() -> void:
 		_suppress_primary_pressed = false
 	var action := "stop" if _recording else "start"
 	if _requires_hold(action):
-		_play_feedback("exit_charging", -4.0)
+		# 仅在用户真正按住开始停止采集时，播放与按住时长同步的持续倒计时音效。
+		# start 仍沿用短促的 exit_charging，避免误触发时太刺耳。
+		var feedback_event := "stop_countdown" if action == "stop" else "exit_charging"
+		_play_feedback(feedback_event, -4.0)
 		_begin_hold(action)
 
 func _on_primary_button_up() -> void:
 	if _hold_action == "start" or _hold_action == "stop":
 		_cancel_hold()
+		_stop_feedback("stop_countdown")
+
+func _on_primary_mouse_entered() -> void:
+	# 录制中（射线 hover 到 stop button）时不播 hover 音；
+	# 只有按住才播 stop_countdown 倒计时反馈。
+	if _recording:
+		return
+	_play_feedback("hover", -5.0)
 
 func _on_primary_mouse_exited() -> void:
 	if _hold_action == "start" or _hold_action == "stop":
 		_cancel_hold()
+		_stop_feedback("stop_countdown")
 
 func _on_primary_pressed() -> void:
 	if _suppress_primary_pressed:
@@ -351,6 +369,9 @@ func _on_settings_button_down() -> void:
 func _on_settings_button_up() -> void:
 	if _hold_action == "settings":
 		_cancel_hold()
+
+func _on_settings_mouse_entered() -> void:
+	_play_feedback("hover", -5.0)
 
 func _on_settings_mouse_exited() -> void:
 	if _hold_action == "settings":
@@ -378,6 +399,13 @@ func _play_feedback(action: String, volume_db: float = 0.0) -> void:
 			var sound_bus := _get_ui_sound_bus()
 			if sound_bus != null and sound_bus.has_method("play"):
 				sound_bus.call("play", action, volume_db)
+
+
+func _stop_feedback(action: String) -> void:
+	# 提前松开/移开时，立即中止持续型音效（如 stop_countdown）。
+	var sound_bus := _get_ui_sound_bus()
+	if sound_bus != null and sound_bus.has_method("stop"):
+		sound_bus.call("stop", action)
 
 
 func _get_ui_sound_bus() -> Node:

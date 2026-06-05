@@ -25,6 +25,7 @@ const UI_EVENT_TO_HAPTIC: Dictionary = {
 	"error": "error",
 	"disconnected": "error",
 	"exit_charging": "exit_charging",
+	"stop_countdown": "exit_charging",
 	"discovery_found": "hover_cross",
 }
 

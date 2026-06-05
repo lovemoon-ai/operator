@@ -51,6 +51,17 @@ func play(event: String, volume_db: float = 0.0) -> void:
 		print("QcUISound play event=%s volume_db=%.1f" % [event, player.volume_db])
 
 
+func stop(event: String) -> void:
+	## 中止所有正在播放该事件的 2D 播放器（用于持续型音效，例如
+	## stop_countdown 在用户提前松开按钮时立刻静音）。
+	if not _streams.has(event):
+		return
+	var target_stream: AudioStreamWAV = _streams[event]
+	for p in _players:
+		if p.playing and p.stream == target_stream:
+			p.stop()
+
+
 func play_at(node3d: Node3D, event: String, volume_db: float = 0.0) -> void:
 	## 在指定 3D 节点位置播放，结束后自动释放。
 	## 若 node3d 为 null 或未入树，退化为 2D 播放。
@@ -112,6 +123,10 @@ func _build_streams() -> void:
 	_streams["discovery_found"] = _make_tone(1800.0, 0.060, _WAVE_SINE, 0.35, true)
 	# exit_charging：200→900Hz 线性扫频 300ms
 	_streams["exit_charging"] = _make_sweep(200.0, 900.0, 0.300, _WAVE_SINE, 0.35)
+	# stop_countdown：与 ViewLockedRecordControl.LONG_HOLD_SECONDS 同步的
+	# 2 秒持续上升扫频，提供"持续倒计时"听感。仅在用户真正按住 stop
+	# 按钮、开始 2 秒倒计时停止 ego 采集时播放，松开应立即中止。
+	_streams["stop_countdown"] = _make_sweep(220.0, 1500.0, 2.0, _WAVE_SINE, 0.32)
 
 
 # ---------- 合成原语 ----------
