@@ -160,15 +160,22 @@ export function browserAuthMiddleware(): RequestHandler {
 }
 
 function failAuth(req: Request, res: Response): void {
+  // Use originalUrl, not req.path — inside an `app.use("/api/...", mw)`
+  // mount, req.path has the mount prefix stripped (`/sessions` instead
+  // of `/api/ingest-read/sessions`), so checking req.path.startsWith
+  // "/api/" misclassifies JSON endpoints as HTML navigations and
+  // 302s them into the login page (which EventSource / fetch can't
+  // follow).
+  const url = req.originalUrl || req.path || "/";
   const wantsJson =
     req.xhr ||
-    req.path.startsWith("/api/") ||
+    url.startsWith("/api/") ||
     (req.headers.accept ?? "").includes("application/json");
   if (wantsJson) {
     res.status(401).json({ error: "auth required" });
     return;
   }
-  const returnTo = encodeURIComponent(req.originalUrl || "/");
+  const returnTo = encodeURIComponent(url);
   // Surface the marketing/login page rather than redirecting straight
   // into the IdP — gives the user a chance to read what they're about
   // to authorize against.

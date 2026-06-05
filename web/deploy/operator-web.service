@@ -1,6 +1,12 @@
 [Unit]
 Description=Operator web app (subsite on conductor-ai.top)
 After=network.target nginx.service
+# Cap restart loop: at most 5 restarts in 120s before systemd backs off
+# permanently. Keys belong in [Unit] for current systemd versions; older
+# guides put them under [Service] and the unit boots with a "Unknown
+# key" warning that's harmless but noisy.
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -19,8 +25,6 @@ ExecStart=/bin/bash -lc 'source /root/.nvm/nvm.sh && exec npm run start'
 
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=120
-StartLimitBurst=5
 
 # Big uploads + many concurrent SSE subscribers can push the per-process
 # fd ceiling above the default 1024.
