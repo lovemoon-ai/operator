@@ -1,0 +1,257 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="980" viewBox="0 0 1800 980" role="img" aria-labelledby="title desc">
+  <title id="title">Operator body tracking joint set comparison</title>
+  <desc id="desc">Three T-pose human diagrams comparing Godot Humanoid, Pico body plus hand tracking, and Quest Meta full-body tracking joint sets.</desc>
+  <defs>
+    <style>
+      .bg { fill: #fafafa; }
+      .panel { fill: #ffffff; stroke: #d8d8d8; stroke-width: 1.2; rx: 16; }
+      .title { font: 700 24px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #202124; }
+      .subtitle { font: 500 15px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5f6368; }
+      .small { font: 500 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5f6368; }
+      .label { font: 600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3c4043; }
+      .callout { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3c4043; }
+      .skeleton { fill: none; stroke: #c5c8cc; stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; opacity: 0.72; }
+      .skeleton-thin { fill: none; stroke: #d7dade; stroke-width: 3.5; stroke-linecap: round; stroke-linejoin: round; opacity: 0.85; }
+      .joint { fill: currentColor; stroke: #ffffff; stroke-width: 2.3; }
+      .joint-sm { r: 4.2; stroke-width: 1.6; }
+      .joint-md { r: 6.2; }
+      .joint-lg { r: 8.2; }
+      .godot { color: #d93025; }
+      .pico { color: #188038; }
+      .quest { color: #1967d2; }
+      .godot-soft { fill: #fce8e6; stroke: #fad2cf; }
+      .pico-soft { fill: #e6f4ea; stroke: #ceead6; }
+      .quest-soft { fill: #e8f0fe; stroke: #d2e3fc; }
+      .dim { opacity: 0.28; }
+      .link { stroke: currentColor; stroke-width: 2; opacity: 0.35; stroke-linecap: round; }
+    </style>
+
+    <g id="tpose-skeleton">
+      <path class="skeleton" d="M 0 58 L 0 118 L 0 178 L 0 250 L 0 324" />
+      <path class="skeleton" d="M -64 190 L -132 190 L -190 190 L -246 190" />
+      <path class="skeleton" d="M 64 190 L 132 190 L 190 190 L 246 190" />
+      <path class="skeleton" d="M -36 330 L -58 470 L -74 632 L -90 742" />
+      <path class="skeleton" d="M 36 330 L 58 470 L 74 632 L 90 742" />
+      <path class="skeleton-thin" d="M -64 190 L 0 178 L 64 190" />
+      <path class="skeleton-thin" d="M -36 330 L 0 324 L 36 330" />
+      <circle cx="0" cy="84" r="30" fill="none" stroke="#c5c8cc" stroke-width="5" opacity="0.65" />
+      <path class="skeleton-thin" d="M -246 190 L -282 190" />
+      <path class="skeleton-thin" d="M 246 190 L 282 190" />
+    </g>
+
+    <g id="left-hand-26">
+      <circle class="joint joint-sm" cx="-246" cy="190" />
+      <circle class="joint joint-sm" cx="-270" cy="190" />
+      <circle class="joint joint-sm" cx="-286" cy="176" />
+      <circle class="joint joint-sm" cx="-306" cy="162" />
+      <circle class="joint joint-sm" cx="-326" cy="151" />
+      <circle class="joint joint-sm" cx="-343" cy="143" />
+      <circle class="joint joint-sm" cx="-294" cy="185" />
+      <circle class="joint joint-sm" cx="-317" cy="181" />
+      <circle class="joint joint-sm" cx="-340" cy="178" />
+      <circle class="joint joint-sm" cx="-363" cy="177" />
+      <circle class="joint joint-sm" cx="-385" cy="177" />
+      <circle class="joint joint-sm" cx="-294" cy="197" />
+      <circle class="joint joint-sm" cx="-319" cy="199" />
+      <circle class="joint joint-sm" cx="-344" cy="201" />
+      <circle class="joint joint-sm" cx="-369" cy="203" />
+      <circle class="joint joint-sm" cx="-393" cy="205" />
+      <circle class="joint joint-sm" cx="-292" cy="209" />
+      <circle class="joint joint-sm" cx="-315" cy="215" />
+      <circle class="joint joint-sm" cx="-338" cy="220" />
+      <circle class="joint joint-sm" cx="-361" cy="224" />
+      <circle class="joint joint-sm" cx="-383" cy="228" />
+      <circle class="joint joint-sm" cx="-286" cy="221" />
+      <circle class="joint joint-sm" cx="-306" cy="232" />
+      <circle class="joint joint-sm" cx="-326" cy="242" />
+      <circle class="joint joint-sm" cx="-346" cy="251" />
+      <circle class="joint joint-sm" cx="-365" cy="259" />
+    </g>
+
+    <g id="right-hand-26">
+      <use href="#left-hand-26" transform="scale(-1 1)" />
+    </g>
+
+    <g id="godot-body-dots" class="godot">
+      <circle class="joint joint-lg" cx="0" cy="324" />
+      <circle class="joint joint-md" cx="0" cy="302" />
+      <circle class="joint joint-md" cx="0" cy="266" />
+      <circle class="joint joint-md" cx="0" cy="236" />
+      <circle class="joint joint-md" cx="0" cy="210" />
+      <circle class="joint joint-md" cx="0" cy="178" />
+      <circle class="joint joint-md" cx="0" cy="140" />
+      <circle class="joint joint-lg" cx="0" cy="86" />
+      <circle class="joint joint-sm" cx="0" cy="42" />
+
+      <circle class="joint joint-md" cx="-64" cy="190" />
+      <circle class="joint joint-sm" cx="-42" cy="206" />
+      <circle class="joint joint-md" cx="-124" cy="190" />
+      <circle class="joint joint-md" cx="-190" cy="190" />
+      <circle class="joint joint-sm" cx="-224" cy="190" />
+      <circle class="joint joint-md" cx="-246" cy="190" />
+      <circle class="joint joint-md" cx="-270" cy="190" />
+      <circle class="joint joint-md" cx="-282" cy="190" />
+      <use href="#left-hand-26" />
+
+      <circle class="joint joint-md" cx="64" cy="190" />
+      <circle class="joint joint-sm" cx="42" cy="206" />
+      <circle class="joint joint-md" cx="124" cy="190" />
+      <circle class="joint joint-md" cx="190" cy="190" />
+      <circle class="joint joint-sm" cx="224" cy="190" />
+      <circle class="joint joint-md" cx="246" cy="190" />
+      <circle class="joint joint-md" cx="270" cy="190" />
+      <circle class="joint joint-md" cx="282" cy="190" />
+      <use href="#right-hand-26" />
+
+      <circle class="joint joint-md" cx="-36" cy="330" />
+      <circle class="joint joint-md" cx="-58" cy="470" />
+      <circle class="joint joint-md" cx="-74" cy="632" />
+      <circle class="joint joint-sm" cx="-84" cy="690" />
+      <circle class="joint joint-md" cx="-98" cy="724" />
+      <circle class="joint joint-sm" cx="-122" cy="742" />
+      <circle class="joint joint-sm" cx="-72" cy="746" />
+      <circle class="joint joint-sm" cx="-104" cy="744" />
+
+      <circle class="joint joint-md" cx="36" cy="330" />
+      <circle class="joint joint-md" cx="58" cy="470" />
+      <circle class="joint joint-md" cx="74" cy="632" />
+      <circle class="joint joint-sm" cx="84" cy="690" />
+      <circle class="joint joint-md" cx="98" cy="724" />
+      <circle class="joint joint-sm" cx="122" cy="742" />
+      <circle class="joint joint-sm" cx="72" cy="746" />
+      <circle class="joint joint-sm" cx="104" cy="744" />
+    </g>
+
+    <g id="pico-body-dots" class="pico">
+      <circle class="joint joint-lg" cx="0" cy="324" />
+      <circle class="joint joint-md" cx="-36" cy="330" />
+      <circle class="joint joint-md" cx="36" cy="330" />
+      <circle class="joint joint-md" cx="0" cy="266" />
+      <circle class="joint joint-md" cx="0" cy="226" />
+      <circle class="joint joint-md" cx="0" cy="186" />
+      <circle class="joint joint-md" cx="0" cy="140" />
+      <circle class="joint joint-lg" cx="0" cy="86" />
+
+      <circle class="joint joint-sm" cx="-44" cy="182" />
+      <circle class="joint joint-md" cx="-70" cy="190" />
+      <circle class="joint joint-md" cx="-162" cy="190" />
+      <circle class="joint joint-md" cx="-246" cy="190" />
+      <circle class="joint joint-md" cx="-270" cy="190" />
+      <use href="#left-hand-26" />
+
+      <circle class="joint joint-sm" cx="44" cy="182" />
+      <circle class="joint joint-md" cx="70" cy="190" />
+      <circle class="joint joint-md" cx="162" cy="190" />
+      <circle class="joint joint-md" cx="246" cy="190" />
+      <circle class="joint joint-md" cx="270" cy="190" />
+      <use href="#right-hand-26" />
+
+      <circle class="joint joint-md" cx="-58" cy="470" />
+      <circle class="joint joint-md" cx="-74" cy="632" />
+      <circle class="joint joint-md" cx="-90" cy="742" />
+      <circle class="joint joint-md" cx="58" cy="470" />
+      <circle class="joint joint-md" cx="74" cy="632" />
+      <circle class="joint joint-md" cx="90" cy="742" />
+    </g>
+
+    <g id="quest-body-dots" class="quest">
+      <circle class="joint joint-lg" cx="0" cy="324" />
+      <circle class="joint joint-md" cx="0" cy="302" />
+      <circle class="joint joint-md" cx="0" cy="266" />
+      <circle class="joint joint-md" cx="0" cy="226" />
+      <circle class="joint joint-md" cx="0" cy="186" />
+      <circle class="joint joint-md" cx="0" cy="160" />
+      <circle class="joint joint-md" cx="0" cy="140" />
+      <circle class="joint joint-lg" cx="0" cy="86" />
+
+      <circle class="joint joint-md" cx="-64" cy="190" />
+      <circle class="joint joint-sm" cx="-42" cy="206" />
+      <circle class="joint joint-md" cx="-124" cy="190" />
+      <circle class="joint joint-md" cx="-190" cy="190" />
+      <circle class="joint joint-sm" cx="-224" cy="190" />
+      <circle class="joint joint-md" cx="-246" cy="190" />
+      <circle class="joint joint-md" cx="-282" cy="190" />
+      <use href="#left-hand-26" />
+
+      <circle class="joint joint-md" cx="64" cy="190" />
+      <circle class="joint joint-sm" cx="42" cy="206" />
+      <circle class="joint joint-md" cx="124" cy="190" />
+      <circle class="joint joint-md" cx="190" cy="190" />
+      <circle class="joint joint-sm" cx="224" cy="190" />
+      <circle class="joint joint-md" cx="246" cy="190" />
+      <circle class="joint joint-md" cx="282" cy="190" />
+      <use href="#right-hand-26" />
+
+      <circle class="joint joint-md" cx="-36" cy="330" />
+      <circle class="joint joint-md" cx="-58" cy="470" />
+      <circle class="joint joint-md" cx="-74" cy="632" />
+      <circle class="joint joint-sm" cx="-84" cy="676" />
+      <circle class="joint joint-sm" cx="-84" cy="708" />
+      <circle class="joint joint-sm" cx="-96" cy="728" />
+      <circle class="joint joint-sm" cx="-116" cy="736" />
+      <circle class="joint joint-sm" cx="-136" cy="742" />
+
+      <circle class="joint joint-md" cx="36" cy="330" />
+      <circle class="joint joint-md" cx="58" cy="470" />
+      <circle class="joint joint-md" cx="74" cy="632" />
+      <circle class="joint joint-sm" cx="84" cy="676" />
+      <circle class="joint joint-sm" cx="84" cy="708" />
+      <circle class="joint joint-sm" cx="96" cy="728" />
+      <circle class="joint joint-sm" cx="116" cy="736" />
+      <circle class="joint joint-sm" cx="136" cy="742" />
+    </g>
+  </defs>
+
+  <rect class="bg" width="1800" height="980" />
+  <text class="title" x="900" y="42" text-anchor="middle">Operator human-pose IR: raw vendor joints map into one canonical semantic view</text>
+  <text class="subtitle" x="900" y="68" text-anchor="middle">Every dot is a joint slot or raw pose sample. Labels are selective to keep the full-body comparison readable.</text>
+
+  <rect class="panel godot-soft" x="30" y="96" width="560" height="820" />
+  <rect class="panel pico-soft" x="620" y="96" width="560" height="820" />
+  <rect class="panel quest-soft" x="1210" y="96" width="560" height="820" />
+
+  <g transform="translate(310 122)">
+    <text class="title godot" x="0" y="0" text-anchor="middle" fill="currentColor">Godot Humanoid IR</text>
+    <text class="subtitle" x="0" y="24" text-anchor="middle">XRBodyTracker, 87 canonical slots</text>
+    <use href="#tpose-skeleton" transform="translate(0 62) scale(0.68 0.9)" />
+    <use href="#godot-body-dots" transform="translate(0 62) scale(0.68 0.9)" />
+    <text class="label" x="20" y="200">neck/head/head_tip</text>
+    <text class="label" x="24" y="268">spine/chest/upper_chest</text>
+    <text class="label" x="-160" y="166" text-anchor="middle">scapula + wrist_twist</text>
+    <text class="label" x="160" y="166" text-anchor="middle">hands/fingers</text>
+    <text class="label" x="0" y="842" text-anchor="middle">extra foot slots: toes, heel, middle_foot, foot_twist</text>
+  </g>
+
+  <g transform="translate(900 122)">
+    <text class="title pico" x="0" y="0" text-anchor="middle" fill="currentColor">Pico</text>
+    <text class="subtitle" x="0" y="24" text-anchor="middle">XR_BD body 24 + XR_EXT hands 52 = 76 raw poses</text>
+    <use href="#tpose-skeleton" transform="translate(0 62) scale(0.68 0.9)" />
+    <use href="#pico-body-dots" transform="translate(0 62) scale(0.68 0.9)" />
+    <text class="label" x="20" y="204">head/neck</text>
+    <text class="label" x="20" y="286">spine1/2/3</text>
+    <text class="label" x="-160" y="166" text-anchor="middle">wrist + hand tracker</text>
+    <text class="label" x="160" y="166" text-anchor="middle">no BD finger joints</text>
+    <text class="label" x="0" y="842" text-anchor="middle">sparser lower body: hip, knee, ankle, foot</text>
+  </g>
+
+  <g transform="translate(1490 122)">
+    <text class="title quest" x="0" y="0" text-anchor="middle" fill="currentColor">Quest / Meta</text>
+    <text class="subtitle" x="0" y="24" text-anchor="middle">XR_META full-body 84; XR_FB 70 is the upper-body+hands subset</text>
+    <use href="#tpose-skeleton" transform="translate(0 62) scale(0.68 0.9)" />
+    <use href="#quest-body-dots" transform="translate(0 62) scale(0.68 0.9)" />
+    <text class="label" x="20" y="204">head/neck/chest</text>
+    <text class="label" x="-160" y="166" text-anchor="middle">scapula + wrist_twist</text>
+    <text class="label" x="160" y="166" text-anchor="middle">hands/fingers</text>
+    <text class="label" x="0" y="842" text-anchor="middle">full-body extension adds detailed ankle/foot chain</text>
+  </g>
+
+  <g transform="translate(58 930)">
+    <circle class="joint joint-md godot" cx="0" cy="0" />
+    <text class="callout" x="16" y="5">Red: Godot canonical Humanoid slots</text>
+    <circle class="joint joint-md pico" cx="330" cy="0" />
+    <text class="callout" x="346" y="5">Green: Pico body + standard hand tracking</text>
+    <circle class="joint joint-md quest" cx="730" cy="0" />
+    <text class="callout" x="746" y="5">Blue: Quest/Meta raw body definitions</text>
+    <text class="small" x="1180" y="5">Raw sidecar keeps vendor-specific fields; canonical IR keeps source/source_joint provenance.</text>
+  </g>
+</svg>
