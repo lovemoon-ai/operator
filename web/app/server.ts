@@ -183,7 +183,7 @@ async function main() {
     console.log(`[ego-app] ingest at  http://localhost:${PORT}/api/ingest`);
     console.log(`[ego-app] files at   ${path.resolve(ingest.dataRoot)}`);
     console.log(
-      `[ego-app] auth       ${auth.mode === "bypass" ? "BYPASS (dev)" : `OIDC ${auth.issuer}`}`,
+      `[ego-app] auth       ${auth.mode === "bypass" ? "BYPASS (dev)" : `Conductor SSO ${auth.conductor}`}`,
     );
   });
 }
