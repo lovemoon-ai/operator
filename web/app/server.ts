@@ -3,22 +3,26 @@
  *
  * Why custom: the TUS upload protocol (PATCH with a streaming body,
  * HEAD for resume, OPTIONS for capabilities) doesn't fit cleanly into
- * Next.js Route Handlers — Route Handlers expect a single Request/
- * Response per call and don't expose the underlying req pipe we need
- * to stream a 10 GB MP4 chunk straight into storage.
+ * Next.js Route Handlers — they expect a single Request/Response per
+ * call and don't expose the underlying req pipe we need to stream a
+ * 10 GB MP4 chunk straight into storage.
  *
- * Architecture:
+ * Routing model:
  *
- *   Browser → Next.js pages              ── handled by next() ──┐
- *   XR client → POST/PATCH /api/ingest   ── ego-ingest mw    ──┤
- *   Browser → GET /api/ingest/api/...    ── ego-ingest mw    ──┤   one Express
- *   Browser → review actions on /api/reviews ── our routes   ──┤   process
- *                                                              ┘
- *
- * The shared store / storage / events bus is created once in
- * `lib/ingest.ts` and imported by both the ingest middleware (here)
- * and by the React pages (server components fetch directly).
+ *   POST/PATCH/HEAD /api/ingest         ← per-user bearer token (headset)
+ *   GET             /api/ingest/ack     ← QR handshake (unauthenticated;
+ *                                          carries its own HMAC signature)
+ *   GET             /api/ingest-read/*  ← browser cookie auth
+ *   /api/reviews/*                       ← browser cookie auth
+ *   /login, /api/auth/callback, /logout ← auth flow
+ *   everything else                      ← Next.js (cookie auth except
+ *                                          /login itself)
  */
+
+// Set the process title BEFORE any other code runs so `ps`, `pgrep`,
+// and pkill-by-title see a name distinct from conductor's sibling
+// `tsx server.ts` process on the same box. (See web/deploy/README.md.)
+process.title = "operator-web";
 
 import { createServer } from "node:http";
 import path from "node:path";
@@ -33,14 +37,20 @@ import {
   TUS_VERSION,
 } from "@love-moon/ego-ingest";
 
+import {
+  authRoutes,
+  browserAuthMiddleware,
+  describeAuth,
+} from "./lib/auth/index.js";
+import { runAsSystem, runAsUser } from "./lib/auth-context.js";
 import { verifyConnectTicket } from "./lib/connect-ticket.js";
 import { ingest } from "./lib/ingest.js";
 import { reviewsRouter } from "./lib/reviews.js";
+import { getUserById, getUserByUploadToken } from "./lib/users.js";
 import { runPostIngestWorkers } from "./lib/workers/index.js";
 
 const PORT = Number(process.env.PORT ?? 3000);
 const dev = process.env.NODE_ENV !== "production";
-const BEARER_TOKEN = process.env.INGEST_TOKEN ?? null;
 
 async function main() {
   const nextApp = next({ dev, hostname: "0.0.0.0", port: PORT });
@@ -50,24 +60,29 @@ async function main() {
   const app = express();
   app.disable("x-powered-by");
 
+  // --- auth flow (no auth required to hit these) ------------------------- //
+  app.use(authRoutes());
+
   // --- /api/ingest/ack — QR handshake ------------------------------------ //
-  // The QR code on /connect points here, not directly at the TUS endpoint.
-  // It is signed and expires after 5 minutes. A successful ack returns the
-  // stable upload URL plus the optional bearer token so the headset no longer
-  // needs a visible token input field.
+  // Verifies the short-lived HMAC ticket, looks up the user named by the
+  // QR, and hands the headset their permanent upload token. No browser
+  // cookie required — the signature replaces auth here.
   app.get("/api/ingest/ack", (req, res) => {
     const uploadUrl = singleQuery(req.query.u);
+    const userId = singleQuery(req.query.uid);
     const expiresAt = Number(singleQuery(req.query.exp));
     const signature = singleQuery(req.query.sig);
-    const verified = verifyConnectTicket(uploadUrl, expiresAt, signature);
+    const verified = verifyConnectTicket(uploadUrl, userId, expiresAt, signature);
     if (!verified.ok) {
       const status = verified.error === "expired" ? 410 : 400;
       return res.status(status).json({ ok: false, error: verified.error ?? "invalid" });
     }
+    const user = getUserById(userId);
+    if (!user) return res.status(404).json({ ok: false, error: "user_not_found" });
     return res.json({
       ok: true,
       uploadUrl,
-      uploadToken: BEARER_TOKEN ?? "",
+      uploadToken: user.uploadToken,
       expiresAt,
       serverTime: Date.now(),
       tusVersion: TUS_VERSION,
@@ -75,65 +90,101 @@ async function main() {
   });
 
   // --- /api/ingest — TUS upload endpoint --------------------------------- //
-  // This is where the XR client (xr/scripts/ego_uploader.gd) sends data.
-  // Mounted under the `/api` namespace so it sits behind whatever reverse
-  // proxy / auth layer the rest of the app uses.
-  app.use(
-    "/api/ingest",
-    createIngestMiddleware({
-      store: ingest.store,
-      storage: ingest.storage,
-      events: ingest.events,
-      auth: BEARER_TOKEN
-        ? (req) => req.header("Authorization") === `Bearer ${BEARER_TOKEN}`
-        : undefined,
-      acceptedSchemas: [SCHEMA_VERSION],
-      maxUploadSizeBytes: Number(process.env.MAX_BYTES ?? 100 * 1024 ** 3),
-      // Manifest-only sessions get marked `expired` after this long.
-      // Default 15min; the env var accepts ms for tests
-      // (`ORPHAN_TIMEOUT_MS=5000` to validate the watchdog without
-      // waiting). Set to 0 to disable.
-      orphanTimeoutMs: process.env.ORPHAN_TIMEOUT_MS
-        ? Number(process.env.ORPHAN_TIMEOUT_MS)
-        : undefined,
-      onSession: async (session) => {
-        // eslint-disable-next-line no-console
-        console.log(
-          `[ingest] session ${session.id} complete · ${session.totalBytes} bytes`,
-        );
-        // Kick the post-ingest pipeline: preview.mp4 (browser-playable
-        // RGB) first, then session.rrd (Rerun web viewer). Both derive
-        // new artifacts on disk and register them with the same store
-        // so the UI picks them up on its next render. Errors are
-        // logged but never bubble up — the raw upload is still safe
-        // on disk and re-runnable manually.
+  // Each request needs `Authorization: Bearer <upload_token>` matching
+  // exactly one users row. We wrap the TUS middleware in an outer
+  // middleware that:
+  //   (1) looks the user up,
+  //   (2) rejects with 401 if no match,
+  //   (3) binds the userId to AsyncLocalStorage so SqliteStore's
+  //       createResource / first upsertSessionArtifact can attach it
+  //       to the new rows.
+  //
+  // We pass `auth: () => true` to the TUS middleware itself — we've
+  // already verified upstream; doing it twice would just duplicate the
+  // DB hit.
+  const tusMiddleware = createIngestMiddleware({
+    store: ingest.store,
+    storage: ingest.storage,
+    events: ingest.events,
+    acceptedSchemas: [SCHEMA_VERSION],
+    maxUploadSizeBytes: Number(process.env.MAX_BYTES ?? 100 * 1024 ** 3),
+    orphanTimeoutMs: process.env.ORPHAN_TIMEOUT_MS
+      ? Number(process.env.ORPHAN_TIMEOUT_MS)
+      : undefined,
+    auth: () => true,
+    onSession: async (session) => {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ingest] session ${session.id} complete · ${session.totalBytes} bytes`,
+      );
+      // Workers fire OUTSIDE any HTTP request, so they don't have a
+      // user context. The session row already has user_id from the
+      // first artifact insert; UPDATEs by the workers preserve it.
+      // We run the workers as system so any defensive listSessions /
+      // getSession calls inside future workers don't get scoped out.
+      runAsSystem(async () => {
         try {
           await runPostIngestWorkers(session);
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error(`[workers] orchestrator threw for ${session.id}:`, err);
         }
-      },
+      });
+    },
+  });
+
+  app.use("/api/ingest", (req, res, next) => {
+    const header = req.header("Authorization") ?? "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+    const user = getUserByUploadToken(token);
+    if (!user) {
+      res.status(401).setHeader("WWW-Authenticate", "Bearer").end();
+      return;
+    }
+    runAsUser(user.id, () => tusMiddleware(req, res, next));
+  });
+
+  // --- /api/ingest-read — browser cookie auth + per-user scope ----------- //
+  // We pull the user from the iron-session cookie that
+  // `browserAuthMiddleware` validates and stashes on `req.user`. The
+  // read API uses that to filter sessions/getSession/stats/SSE.
+  app.use(
+    "/api/ingest-read",
+    browserAuthMiddleware(),
+    createReadApi({
+      ...ingest,
+      userIdFromReq: (req) => req.user?.id ?? null,
     }),
   );
 
-  // --- /api/ingest-read — read-only API used by the UI ------------------- //
-  // Mounted under a SEPARATE path from /api/ingest so the TUS prefix
-  // routing stays simple. The pages and React components consume this.
-  app.use("/api/ingest-read", createReadApi(ingest));
+  // --- /api/reviews — per-session review state --------------------------- //
+  app.use("/api/reviews", browserAuthMiddleware(), reviewsRouter);
 
-  // --- /api/reviews — per-session review state (this app's own data) ----- //
-  app.use("/api/reviews", reviewsRouter);
-
-  // --- everything else → Next.js ----------------------------------------- //
-  app.all("*", (req, res) => handleNext(req, res));
+  // --- Next.js pages: cookie auth except the public ones ----------------- //
+  // /login is the unauthenticated entry point. Everything else is gated.
+  // We let the cookie middleware do its thing and fall through to Next.
+  app.all("*", (req, res) => {
+    const p = req.path;
+    if (
+      p === "/login" ||
+      p.startsWith("/_next/") ||
+      p === "/favicon.ico" ||
+      p === "/api/auth/callback"
+    ) {
+      return handleNext(req, res);
+    }
+    browserAuthMiddleware()(req, res, () => handleNext(req, res));
+  });
 
   createServer(app).listen(PORT, () => {
+    const auth = describeAuth();
     // eslint-disable-next-line no-console
     console.log(`[ego-app] http://localhost:${PORT}/`);
     console.log(`[ego-app] ingest at  http://localhost:${PORT}/api/ingest`);
     console.log(`[ego-app] files at   ${path.resolve(ingest.dataRoot)}`);
-    console.log(`[ego-app] auth       ${BEARER_TOKEN ? "ON (Bearer)" : "OFF"}`);
+    console.log(
+      `[ego-app] auth       ${auth.mode === "bypass" ? "BYPASS (dev)" : `OIDC ${auth.issuer}`}`,
+    );
   });
 }
 

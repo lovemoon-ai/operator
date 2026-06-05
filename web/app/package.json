@@ -13,13 +13,17 @@
   "dependencies": {
     "@love-moon/ego-ingest": "*",
     "@rerun-io/web-viewer": "0.33.0",
+    "better-sqlite3": "^11.5.0",
     "express": "^4.19.2",
+    "iron-session": "^8.0.4",
     "next": "^15.0.0",
+    "openid-client": "^5.7.0",
     "qrcode": "^1.5.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",
     "@types/qrcode": "^1.5.5",

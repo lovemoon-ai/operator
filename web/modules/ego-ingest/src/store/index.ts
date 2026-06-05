@@ -39,16 +39,25 @@ export interface SessionStore {
     expired: { at: string; reason: string },
   ): Promise<SessionRecord | null>;
 
-  getSession(id: string): Promise<SessionRecord | null>;
+  /**
+   * Fetch a session by id.
+   *
+   * `opts.userId`, when set, scopes the lookup: returns `null` if the
+   * stored row belongs to a different user. Stores that don't carry a
+   * user dimension (e.g. `MemoryStore`) should ignore it.
+   */
+  getSession(id: string, opts?: { userId?: string }): Promise<SessionRecord | null>;
 
   listSessions(opts?: {
     limit?: number;
     cursor?: string;
     order?: "asc" | "desc";
+    /** Restrict to sessions owned by this user. */
+    userId?: string;
   }): Promise<{ items: SessionRecord[]; nextCursor: string | null }>;
 
   /** Lifetime-aggregated stats. Cheap implementations can recompute on call. */
-  stats(): Promise<StoreStats>;
+  stats(opts?: { userId?: string }): Promise<StoreStats>;
 }
 
 export interface StoreStats {

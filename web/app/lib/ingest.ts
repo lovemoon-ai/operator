@@ -6,26 +6,23 @@
  *   - the read API on /api/ingest-read (reads + SSE)
  *   - any server component that fetches sessions directly
  *
- * If you later split the ingest server onto its own process (so the
- * Next app only renders), point the React components at the remote
- * /api/ingest-read URL and delete this file.
+ * Storage is the on-disk byte tier (DiskStorage); the metadata store is
+ * SqliteStore (`./db.ts` schema), which gives us per-user filtering and
+ * survives restarts without re-parsing a JSON index.
  */
 
 import path from "node:path";
 
-import {
-  DiskStorage,
-  IngestEvents,
-  MemoryStore,
-} from "@love-moon/ego-ingest";
+import { DiskStorage, IngestEvents } from "@love-moon/ego-ingest";
 
-const DATA_ROOT = path.resolve(process.env.DATA_ROOT ?? "./data");
+import { DATA_ROOT } from "./db.js";
+import { SqliteStore } from "./sqlite-store.js";
+
 const SESSIONS_DIR = path.join(DATA_ROOT, "sessions");
-const INDEX_FILE = path.join(DATA_ROOT, "sessions.index.json");
 
 export const ingest = {
   dataRoot: DATA_ROOT,
   events: new IngestEvents(),
-  store: new MemoryStore({ persistTo: INDEX_FILE }),
+  store: new SqliteStore(),
   storage: new DiskStorage({ root: SESSIONS_DIR, computeHashes: true }),
 };

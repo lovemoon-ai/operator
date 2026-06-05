@@ -1,0 +1,35 @@
+[Unit]
+Description=Operator web app (subsite on conductor-ai.top)
+After=network.target nginx.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/conductor/operator/web/app
+EnvironmentFile=/opt/conductor/operator/web/app/.env.production
+
+# Start command:
+#   - source nvm so `node` and `tsx` resolve
+#   - `exec` so systemd tracks the actual node process, not a wrapper bash
+#   - `process.title = 'operator-web'` is set at the top of server.ts so
+#     `ps` and `pgrep` see this name. Conductor's deploy script also got
+#     patched to scope its pkill to /opt/conductor/conductor/, but the
+#     readable process name is still useful for ops.
+ExecStart=/bin/bash -lc 'source /root/.nvm/nvm.sh && exec npm run start'
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Big uploads + many concurrent SSE subscribers can push the per-process
+# fd ceiling above the default 1024.
+LimitNOFILE=65536
+
+# Container-friendly logging — journald gets stdout/stderr.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=operator-web
+
+[Install]
+WantedBy=multi-user.target
