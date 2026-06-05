@@ -63,22 +63,8 @@ else
   log "linked $APP_DATA_LINK -> $DATA_DIR"
 fi
 
-# -- 3. install + build -----------------------------------------------------
-# shellcheck disable=SC1091
-source /root/.nvm/nvm.sh
-log "node $(node -v) npm $(npm -v)"
-
-cd "$REPO_DIR/web"
-log "npm install (this can take ~1m on first run; better-sqlite3 will native-compile)"
-npm install
-
-log "build:ingest"
-npm run build:ingest
-
-log "next build"
-(cd app && npx next build)
-
-# -- 4. .env.production stub ----------------------------------------------
+# -- 3. .env.production stub (write BEFORE build so next build can ----------
+#       read AUTH_SESSION_SECRET during /_not-found prerender) -------------
 ENV_FILE="$REPO_DIR/web/app/.env.production"
 if [[ ! -f "$ENV_FILE" ]]; then
   log "writing starter $ENV_FILE — EDIT BEFORE STARTING SERVICE"
@@ -111,6 +97,21 @@ EOF
 else
   log "$ENV_FILE already exists; not overwriting"
 fi
+
+# -- 4. install + build -----------------------------------------------------
+# shellcheck disable=SC1091
+source /root/.nvm/nvm.sh
+log "node $(node -v) npm $(npm -v)"
+
+cd "$REPO_DIR/web"
+log "npm install (this can take ~1m on first run; better-sqlite3 will native-compile)"
+npm install
+
+log "build:ingest"
+npm run build:ingest
+
+log "next build"
+(cd app && npx next build)
 
 # -- 5. systemd unit -------------------------------------------------------
 log "installing systemd unit"
