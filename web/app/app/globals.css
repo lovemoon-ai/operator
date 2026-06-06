@@ -54,9 +54,25 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
 .app-header {
   padding: 14px 24px;
   border-bottom: 1px solid var(--border);
-  display: flex; align-items: baseline; gap: 16px;
+  display: flex; align-items: center; gap: 16px;
 }
 .app-header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+.app-header__brand {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.app-header__brand img {
+  display: block;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+}
+.app-header__brand:hover img,
+.app-header__brand:focus-visible img {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .app-header nav { display: flex; gap: 14px; }
 .app-header nav a { color: var(--muted); }
 .app-header nav a:hover { color: var(--text); text-decoration: none; }
@@ -301,16 +317,29 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  min-width: 118px;
-  min-height: 44px;
-  border-color: rgba(63,185,80,0.92);
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(63,185,80,0.92);
+  border-radius: 50%;
   background: rgba(13,16,20,0.92);
   color: var(--good);
-  font-weight: 700;
   box-shadow: 0 8px 24px rgba(0,0,0,0.34);
 }
+.qr-reset-overlay svg { display: block; }
 .qr-reset-overlay:hover:not(:disabled),
 .qr-reset-overlay:focus-visible {
   border-color: var(--good);
   outline: none;
+}
+.qr-reset-overlay[data-refreshing="true"] svg {
+  animation: qr-reset-spin 700ms linear infinite;
+}
+@keyframes qr-reset-spin {
+  /* Lucide rotate-ccw faces counter-clockwise, so spin negative. */
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(-360deg); }
 }
