@@ -8,6 +8,7 @@ import { getServerComponentUser } from "@/lib/auth/server-component";
 export const metadata: Metadata = {
   title: "operator",
   description: "Teleoperate-anything data manager.",
+  icons: { icon: "/icon.png", shortcut: "/icon.png", apple: "/icon.png" },
 };
 
 export default async function RootLayout({ children }: { children: ReactNode }) {
@@ -25,7 +26,10 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
         {user ? (
           <>
             <header className="app-header">
-              <h1>operator</h1>
+              <a href="/" className="app-header__brand" aria-label="operator home">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/icon.png" alt="" width={28} height={28} />
+              </a>
               <nav>
                 <a href="/">Sessions</a>
                 <a href="/stats">Stats</a>

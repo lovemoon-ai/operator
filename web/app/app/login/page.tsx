@@ -19,7 +19,10 @@ export default async function LoginPage({
     <div className="login-shell">
       <AnimatedGraphBackground />
       <div className="login-content">
-        <h1 className="login-title">operator</h1>
+        <h1 className="login-title">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/icon.png" alt="operator" width={96} height={96} />
+        </h1>
         <a
           className="login-cta"
           href={`/auth/start?returnTo=${encodeURIComponent(returnTo)}`}
