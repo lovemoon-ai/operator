@@ -5,3 +5,4 @@ data/
 *.log
 .env*.local
 .DS_Store
+.env

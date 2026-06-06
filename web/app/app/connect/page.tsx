@@ -8,10 +8,18 @@ import { buildConnectTicket } from "../../lib/connect-ticket";
 import { getServerComponentUser } from "../../lib/auth/server-component";
 import { RefreshableQr } from "./RefreshableQr";
 
-// "Connect" tab. One QR per LAN-reachable IPv4 address pointing at
-// /api/ingest. The QR ack endpoint trades the (signed, 5-min) ticket
-// for the current dashboard user's permanent upload token, so the
-// headset never has to see — or type — the token.
+// "Connect" tab.
+//
+// Endpoint selection priority:
+//   1. `OPERATOR_INGEST_URL` from .env — when set, we render a single
+//      QR pointing at it (typical for prod where the box sits behind
+//      a public hostname like operator.conductor-ai.top).
+//   2. Otherwise, one QR per LAN-reachable IPv4 address pointing at
+//      /api/ingest on this host (typical for local dev / on-site LAN).
+//
+// In both cases the QR ack endpoint trades the (signed, 5-min)
+// ticket for the current dashboard user's permanent upload token, so
+// the headset never has to see — or type — the token.
 
 export const dynamic = "force-dynamic";
 
@@ -117,6 +125,14 @@ export default async function ConnectPage() {
 // --- helpers --------------------------------------------------------------
 
 async function collectEndpoints(proto: string, port: string, userId: string): Promise<Endpoint[]> {
+  // .env override wins over auto-detection: if OPERATOR_INGEST_URL is
+  // set we emit exactly one QR pointing at it and skip the NIC scan.
+  const overrideUrl = (process.env.OPERATOR_INGEST_URL ?? "").trim();
+  if (overrideUrl) {
+    const ep = await buildEndpoint("configured", overrideUrl, userId);
+    return [ep];
+  }
+
   const out: Endpoint[] = [];
   const nics = networkInterfaces();
   for (const [iface, addrs] of Object.entries(nics)) {
@@ -124,18 +140,31 @@ async function collectEndpoints(proto: string, port: string, userId: string): Pr
     for (const addr of addrs) {
       const isV4 = addr.family === "IPv4" || (addr.family as unknown as number) === 4;
       if (!isV4 || addr.internal) continue;
-      const host = `${addr.address}:${port}`;
-      const url = `${proto}://${host}/api/ingest`;
-      const ticket = buildConnectTicket(url, userId);
-      const qrSvg = await QRCode.toString(ticket.ackUrl, {
-        type: "svg",
-        margin: 1,
-        errorCorrectionLevel: "M",
-        color: { dark: "#0d1014", light: "#ffffff" },
-      });
-      out.push({ iface, host, url, ackUrl: ticket.ackUrl, expiresAt: ticket.expiresAt, qrSvg });
+      const url = `${proto}://${addr.address}:${port}/api/ingest`;
+      const ep = await buildEndpoint(iface, url, userId);
+      out.push(ep);
     }
   }
   out.sort((a, b) => a.iface.localeCompare(b.iface));
   return out;
+}
+
+async function buildEndpoint(iface: string, url: string, userId: string): Promise<Endpoint> {
+  const ticket = buildConnectTicket(url, userId);
+  const qrSvg = await QRCode.toString(ticket.ackUrl, {
+    type: "svg",
+    margin: 1,
+    errorCorrectionLevel: "M",
+    color: { dark: "#0d1014", light: "#ffffff" },
+  });
+  const host = hostFromUrl(url);
+  return { iface, host, url, ackUrl: ticket.ackUrl, expiresAt: ticket.expiresAt, qrSvg };
+}
+
+function hostFromUrl(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
