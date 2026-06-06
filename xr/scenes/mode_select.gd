@@ -1,9 +1,14 @@
 extends Node3D
 
+const LIVE_FEED_SCENE := "res://scenes/live_feed_app.tscn"
+const VR_SCENE := "res://scenes/vr_mode.tscn"
 const TELEOP_SCENE := "res://scenes/teleop_main.tscn"
-const EGO_SCENE := "res://scenes/capture_app.tscn"
+const EGO_CAPTURE_SCENE := "res://scenes/capture_app.tscn"
 const MODE_TELEOP := "teleop"
-const MODE_EGO := "ego"
+const MODE_EGO_CAPTURE := "ego_capture"
+const MODE_LIVE_FEED := "live_feed"
+const MODE_VR := "vr"
+const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
 
 @onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
 @onready var _mode_panel: Node3D = $XROrigin3D/XRCamera3D/ModePanel
@@ -33,6 +38,7 @@ func _ready() -> void:
 	else:
 		call_deferred("_on_xr_started")
 
+	_arm_startup_fallback()
 	print("[Operator] Mode select initialized")
 
 
@@ -59,6 +65,19 @@ func _on_xr_failed() -> void:
 		_mode_ui.set_status(tr("UI_OPENXR_FAILED"))
 
 
+func _arm_startup_fallback() -> void:
+	await get_tree().create_timer(MODE_PANEL_FALLBACK_DELAY_SEC).timeout
+	if _xr_started or _changing_scene:
+		return
+	_mode_panel.visible = true
+	for i in range(60):
+		await get_tree().process_frame
+		if _mode_panel.has_method("get_scene_instance") and _mode_panel.get_scene_instance() != null:
+			break
+	_wire_mode_ui()
+	print("[Operator] Mode select fallback ready")
+
+
 func _wire_mode_ui() -> void:
 	if _mode_ui != null:
 		return
@@ -70,16 +89,28 @@ func _wire_mode_ui() -> void:
 		return
 	if _mode_ui.has_signal("teleop_selected"):
 		_mode_ui.teleop_selected.connect(_open_teleop)
-	if _mode_ui.has_signal("ego_selected"):
-		_mode_ui.ego_selected.connect(_open_ego)
+	if _mode_ui.has_signal("ego_capture_selected"):
+		_mode_ui.ego_capture_selected.connect(_open_ego_capture)
+	if _mode_ui.has_signal("live_feed_selected"):
+		_mode_ui.live_feed_selected.connect(_open_live_feed)
+	if _mode_ui.has_signal("vr_selected"):
+		_mode_ui.vr_selected.connect(_open_vr)
 
 
 func _open_teleop() -> void:
 	_open_mode(MODE_TELEOP)
 
 
-func _open_ego() -> void:
-	_open_mode(MODE_EGO)
+func _open_ego_capture() -> void:
+	_open_mode(MODE_EGO_CAPTURE)
+
+
+func _open_live_feed() -> void:
+	_open_mode(MODE_LIVE_FEED)
+
+
+func _open_vr() -> void:
+	_open_mode(MODE_VR)
 
 
 func _open_mode(mode: String) -> void:
@@ -112,8 +143,12 @@ func _scene_for_mode(mode: String) -> String:
 	match _normalize_mode(mode):
 		MODE_TELEOP:
 			return TELEOP_SCENE
-		MODE_EGO:
-			return EGO_SCENE
+		MODE_EGO_CAPTURE:
+			return EGO_CAPTURE_SCENE
+		MODE_LIVE_FEED:
+			return LIVE_FEED_SCENE
+		MODE_VR:
+			return VR_SCENE
 		_:
 			return ""
 
@@ -158,12 +193,16 @@ func _normalize_mode(raw_mode: String) -> String:
 	match mode:
 		MODE_TELEOP, "teleoperation", "remote", "remote_control", "driver":
 			return MODE_TELEOP
-		MODE_EGO, "egocentric", "capture", "capture_app":
-			return MODE_EGO
+		MODE_EGO_CAPTURE, "ego", "ego_record", "egocentric", "capture", "capture_app", "record", "recording", "spatialmp4":
+			return MODE_EGO_CAPTURE
+		MODE_LIVE_FEED, "live_capture", "live", "live_server", "server_capture", "cloud_capture":
+			return MODE_LIVE_FEED
+		MODE_VR, "pure_vr", "robot_vr":
+			return MODE_VR
 		"":
 			return ""
 		_:
-			push_warning("[Operator] Unknown automation mode '%s' (expected teleop or ego)" % raw_mode)
+			push_warning("[Operator] Unknown automation mode '%s' (expected teleop, ego_capture, live_feed, live_capture, or vr)" % raw_mode)
 			return ""
 
 

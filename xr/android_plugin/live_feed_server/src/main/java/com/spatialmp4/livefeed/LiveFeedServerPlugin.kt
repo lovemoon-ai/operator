@@ -1,4 +1,4 @@
-package com.spatialmp4.livecapture
+package com.spatialmp4.livefeed
 
 import android.util.Base64
 import android.util.Log
@@ -32,6 +32,9 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
     override fun getPluginName(): String = "LivePushPlugin"
 
     override fun getPluginSignals(): Set<SignalInfo> = setOf(
+        SignalInfo("live_feed_connected", String::class.java),
+        SignalInfo("live_feed_disconnected", String::class.java),
+        SignalInfo("live_feed_error", String::class.java),
         SignalInfo("live_capture_connected", String::class.java),
         SignalInfo("live_capture_disconnected", String::class.java),
         SignalInfo("live_capture_error", String::class.java)
@@ -42,7 +45,7 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
     @Volatile private var streamName: String = ""
     @Volatile private var authToken: String = ""
     @Volatile private var connectTimeoutMs: Int = DEFAULT_CONNECT_TIMEOUT_MS
-    @Volatile private var queue: ArrayBlockingQueue<Frame> = ArrayBlockingQueue(DEFAULT_QUEUE_FRAMES)
+    @Volatile private var queue: ArrayBlockingQueue<QueuedFrame> = ArrayBlockingQueue(DEFAULT_QUEUE_FRAMES)
     @Volatile private var socket: Socket? = null
     @Volatile private var output: DataOutputStream? = null
     @Volatile private var senderThread: Thread? = null
@@ -92,6 +95,9 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
     fun isConnected(): Boolean = running.get() && socket?.isConnected == true && socket?.isClosed == false
 
     @UsedByGodot
+    fun finishLiveFeed(): String = finishSession()
+
+    @UsedByGodot
     fun finishLiveCapture(): String = finishSession()
 
     @UsedByGodot
@@ -121,16 +127,16 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
             output = DataOutputStream(BufferedOutputStream(newSocket.getOutputStream(), SOCKET_BUFFER_BYTES))
             running.set(true)
             lastEndpoint = endpoint
-            senderThread = Thread({ senderLoop() }, "LiveCaptureServerWriter").apply {
+            senderThread = Thread({ senderLoop() }, "LiveFeedServerWriter").apply {
                 isDaemon = true
                 start()
             }
             val sessionJson = sessionConfigJson(config)
                 .put("stream_name", streamName)
                 .put("auth_token", authToken)
-                .put("protocol", "operator.live_capture.v1")
+                .put("protocol", "operator.live_feed.v1")
             enqueueImportant(Frame(TYPE_SESSION_START, 0, 0L, 0L, sessionJson.toString().toByteArray(Charsets.UTF_8)))
-            emitSignal("live_capture_connected", endpoint)
+            emitConnected(endpoint)
             Log.i(TAG, "Live-push connected to $endpoint")
             true
         } catch (error: Exception) {
@@ -156,7 +162,7 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         senderThread?.joinQuietly(FINISH_JOIN_MS)
         closeSocket()
         SpatialDataSinkRegistry.unregister(this)
-        emitSignal("live_capture_disconnected", endpoint)
+        emitDisconnected(endpoint)
         Log.i(TAG, "Live-push disconnected from $endpoint")
         return if (endpoint.isEmpty()) "" else "tcp://$endpoint/$streamName"
     }
@@ -327,7 +333,8 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         }
         try {
             while (running.get() || queue.isNotEmpty()) {
-                val frame = queue.poll(QUEUE_POLL_MS, TimeUnit.MILLISECONDS) ?: continue
+                val queued = queue.poll(QUEUE_POLL_MS, TimeUnit.MILLISECONDS) ?: continue
+                val frame = queued.frame
                 writeFrame(out, frame)
                 metricFramesSent.incrementAndGet()
                 metricBytesSent.addAndGet(frame.payload.size.toLong())
@@ -361,22 +368,55 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         if (!running.get()) {
             return false
         }
-        if (queue.offer(frame)) {
+        val queued = QueuedFrame(frame, droppable)
+        if (queue.offer(queued)) {
             return true
         }
         if (droppable) {
-            val dropped = queue.poll()
+            val dropped = removeOldestDroppable()
             if (dropped != null) {
-                metricFramesDropped.incrementAndGet()
-                metricBytesDropped.addAndGet(dropped.payload.size.toLong())
+                recordDroppedFrame(dropped.frame)
             }
-            if (queue.offer(frame)) {
+            if (queue.offer(queued)) {
+                return true
+            }
+            recordDroppedFrame(frame)
+            return false
+        }
+
+        val dropped = removeOldestDroppable()
+        if (dropped != null) {
+            recordDroppedFrame(dropped.frame)
+            if (queue.offer(queued)) {
                 return true
             }
         }
+        try {
+            if (queue.offer(queued, IMPORTANT_OFFER_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                return true
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        emitError("Live-push queue is full of non-droppable frames; dropping critical frame type=${frame.type}")
+        recordDroppedFrame(frame)
+        return false
+    }
+
+    private fun removeOldestDroppable(): QueuedFrame? {
+        val iterator = queue.iterator()
+        while (iterator.hasNext()) {
+            val candidate = iterator.next()
+            if (candidate.droppable && queue.remove(candidate)) {
+                return candidate
+            }
+        }
+        return null
+    }
+
+    private fun recordDroppedFrame(frame: Frame) {
         metricFramesDropped.incrementAndGet()
         metricBytesDropped.addAndGet(frame.payload.size.toLong())
-        return false
     }
 
     private fun closeSocket() {
@@ -395,7 +435,18 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
 
     private fun emitError(message: String) {
         Log.e(TAG, message)
+        emitSignal("live_feed_error", message)
         emitSignal("live_capture_error", message)
+    }
+
+    private fun emitConnected(endpoint: String) {
+        emitSignal("live_feed_connected", endpoint)
+        emitSignal("live_capture_connected", endpoint)
+    }
+
+    private fun emitDisconnected(endpoint: String) {
+        emitSignal("live_feed_disconnected", endpoint)
+        emitSignal("live_capture_disconnected", endpoint)
     }
 
     private fun sessionConfigJson(config: SessionConfig): JSONObject {
@@ -457,6 +508,11 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         val payload: ByteArray
     )
 
+    private data class QueuedFrame(
+        val frame: Frame,
+        val droppable: Boolean
+    )
+
     companion object {
         private const val TAG = "LivePush"
         private const val DEFAULT_HOST = "127.0.0.1"
@@ -468,6 +524,7 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         private const val SOCKET_BUFFER_BYTES = 256 * 1024
         private const val FINISH_JOIN_MS = 1500L
         private const val QUEUE_POLL_MS = 100L
+        private const val IMPORTANT_OFFER_TIMEOUT_MS = 250L
         private val MAGIC = byteArrayOf('O'.code.toByte(), 'L'.code.toByte(), 'C'.code.toByte(), 'P'.code.toByte())
         private const val PROTOCOL_VERSION = 1
 
@@ -490,6 +547,10 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         private const val DEFAULT_HAND_DURATION_NS = 33_333_000L
         private const val DEFAULT_INPUT_DURATION_NS = 1_000_000L
     }
+}
+
+class LiveFeedServerPlugin(godot: Godot) : LivePushPlugin(godot) {
+    override fun getPluginName(): String = "LiveFeedServerPlugin"
 }
 
 class LiveCaptureServerPlugin(godot: Godot) : LivePushPlugin(godot) {

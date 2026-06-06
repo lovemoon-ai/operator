@@ -26,6 +26,7 @@ import com.spatialmp4.contract.Intrinsics
 import com.spatialmp4.contract.RgbStreamConfig
 import com.spatialmp4.contract.SessionConfig
 import com.spatialmp4.contract.SpatialDataSink
+import com.spatialmp4.contract.SpatialDataSinkRegistry
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicLong
@@ -44,6 +45,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         // explicit bindMuxer(Object) RPC from GDScript cannot pass a sink ref
         // across plugins -- the registry is the contract-aligned escape hatch.
         activeSink = this
+        SpatialDataSinkRegistry.register(this)
     }
 
     override fun getPluginName(): String = "SpatialMp4MuxerPlugin"

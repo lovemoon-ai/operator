@@ -1,6 +1,8 @@
 extends Node3D
 
 const SessionSpoolWriterScript := preload("res://scripts/session_spool_writer.gd")
+const LivePushWriterScript := preload("res://addons/live-push/live_push_writer.gd")
+const LivePullDenseMapViewScript := preload("res://addons/live-pull/live_pull_dense_map_view.gd")
 const PoseSamplerScript := preload("res://scripts/pose_sampler.gd")
 const DepthSamplerScript := preload("res://scripts/depth_sampler.gd")
 const BodyMotionSamplerScript := preload("res://scripts/body_motion_sampler.gd")
@@ -14,6 +16,8 @@ const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
 const EgoQRScannerScript := preload("res://scripts/ego_qr_scanner.gd")
 const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
 const QR_SCANNER_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
+const QR_TARGET_UPLOAD_URL := "upload_url"
+const QR_TARGET_LIVE_SERVER := "live_server"
 
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
@@ -31,6 +35,12 @@ const TRACKER_SETUP_OPENING_SECONDS := 4.0
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
 @export var keep_passthrough_visible := true
+@export_enum("spatialmp4", "server") var capture_sink := "spatialmp4"
+@export var default_live_server_host := "127.0.0.1"
+@export var default_live_server_port := 63910
+@export var default_live_result_port := 63912
+@export var default_live_server_auth_token := ""
+@export var enable_live_pull := true
 
 # Optional host-driven validation override: flip to true (and rebuild/install)
 # to start a recording at _ready(), let it run for AUTO_STOP_AFTER_SECONDS,
@@ -61,6 +71,7 @@ var ego_uploader: Node
 var qr_scanner: Object
 var upload_ack_request: HTTPRequest
 var _pending_upload_ack_payload := ""
+var _qr_scan_target := ""
 var _active_upload_session_id := ""
 var _upload_popup_hold_until_msec := 0
 var _pending_upload_popup_update: Dictionary = {}
@@ -71,6 +82,8 @@ var _stop_cue: AudioStreamWAV
 var camera_plugin: Object
 var muxer_plugin: Object
 var pico_openxr_bridge: Object
+var live_server_plugin: Object
+var live_pull_view: Node3D
 var capture_options := {
 	"interaction_mode": "controllers",
 	"stereo_rgb": true,
@@ -91,6 +104,9 @@ var capture_options := {
 	"audio_channel_layout": "stereo",
 	"audio_sample_rate_hz": 48000,
 	"audio_bitrate_bps": 128000,
+	"server_host": "127.0.0.1",
+	"server_port": 63910,
+	"server_result_port": 63912,
 	"save_controller_hand_sidecar": false,
 	"save_root": DEFAULT_SAVE_ROOT
 }
@@ -145,11 +161,12 @@ var _stage_us_emit_metrics := 0
 func _ready() -> void:
 	_setup_xr_scene()
 	_setup_pico_openxr_bridge()
+	_apply_automation_args()
 	_initialize_openxr()
 	_bind_android_plugin()
 	_setup_audio_cues()
 
-	writer = SessionSpoolWriterScript.new()
+	writer = _create_writer()
 	# _bind_android_plugin ran above when `writer` was still null, so its own
 	# writer.set_*_plugin attempts were skipped; we re-wire both singletons
 	# here against the freshly-created spool writer. Stage 2b's split moved
@@ -159,6 +176,8 @@ func _ready() -> void:
 		writer.set_android_plugin(camera_plugin)
 	if muxer_plugin != null and writer.has_method("set_muxer_plugin"):
 		writer.set_muxer_plugin(muxer_plugin)
+	if live_server_plugin != null and writer.has_method("set_live_server_plugin"):
+		writer.set_live_server_plugin(live_server_plugin)
 	pose_sampler = PoseSamplerScript.new()
 	depth_sampler = DepthSamplerScript.new()
 	body_motion_sampler = BodyMotionSamplerScript.new()
@@ -170,26 +189,25 @@ func _ready() -> void:
 	depth_sampler.configure(writer, camera_plugin)
 	body_motion_sampler.configure(writer, pose_sampler, pico_openxr_bridge)
 
-	# EgoUploader runs a background worker thread that drains the
-	# user://ego_upload_queue.json over TUS 1.0.0. We instantiate it
-	# unconditionally so any jobs left over from the previous launch
-	# resume even if the user hasn't opened the settings panel yet;
-	# enqueue() is a no-op when upload_url is unset.
-	ego_uploader = EgoUploaderScript.new()
-	ego_uploader.name = "EgoUploader"
-	add_child(ego_uploader)
-	ego_uploader.upload_started.connect(_on_upload_started)
-	ego_uploader.upload_progress.connect(_on_upload_progress)
-	ego_uploader.upload_finished.connect(_on_upload_finished)
-	ego_uploader.upload_failed.connect(_on_upload_failed)
-	ego_uploader.session_uploaded.connect(_on_session_uploaded)
-	ego_uploader.queue_changed.connect(_on_upload_queue_changed)
+	if not _is_live_feed_mode():
+		# EgoUploader drains user://ego_upload_queue.json for ego capture only.
+		# Live Feed is a push-only session and must not resume old local upload
+		# jobs or surface upload progress/errors.
+		ego_uploader = EgoUploaderScript.new()
+		ego_uploader.name = "EgoUploader"
+		add_child(ego_uploader)
+		ego_uploader.upload_started.connect(_on_upload_started)
+		ego_uploader.upload_progress.connect(_on_upload_progress)
+		ego_uploader.upload_finished.connect(_on_upload_finished)
+		ego_uploader.upload_failed.connect(_on_upload_failed)
+		ego_uploader.session_uploaded.connect(_on_session_uploaded)
+		ego_uploader.queue_changed.connect(_on_upload_queue_changed)
 
-	upload_ack_request = HTTPRequest.new()
-	upload_ack_request.name = "UploadAckRequest"
-	upload_ack_request.timeout = UPLOAD_ACK_TIMEOUT_SECONDS
-	upload_ack_request.request_completed.connect(_on_upload_ack_completed)
-	add_child(upload_ack_request)
+		upload_ack_request = HTTPRequest.new()
+		upload_ack_request.name = "UploadAckRequest"
+		upload_ack_request.timeout = UPLOAD_ACK_TIMEOUT_SECONDS
+		upload_ack_request.request_completed.connect(_on_upload_ack_completed)
+		add_child(upload_ack_request)
 
 	var automation := _capture_automation_options_from_args()
 	if automation.has("interaction_mode"):
@@ -209,6 +227,25 @@ func _ready() -> void:
 		_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)
 	elif auto_start:
 		start_capture()
+	elif _is_live_feed_mode():
+		call_deferred("_open_live_feed_settings")
+
+
+func _apply_automation_args() -> void:
+	var args := OS.get_cmdline_user_args()
+	if args.is_empty():
+		args = OS.get_cmdline_args()
+	for arg_value in args:
+		var arg := String(arg_value).strip_edges()
+		if arg == "--operator-auto-start":
+			auto_start = true
+		elif arg.begins_with("operator.auto_start="):
+			auto_start = _truthy_string(arg.substr("operator.auto_start=".length()))
+
+
+func _truthy_string(value: String) -> bool:
+	var text := value.strip_edges().to_lower()
+	return text == "true" or text == "1" or text == "yes" or text == "on"
 
 
 func _schedule_auto_stop_for_device_test(seconds: float) -> void:
@@ -372,10 +409,11 @@ func _emit_metrics(window_s: float) -> void:
 	var plugin_metrics: Dictionary = {}
 	if camera_plugin != null:
 		var raw: Variant = camera_plugin.call("popMetricsJson")
+		var parsed: Variant = null
 		if typeof(raw) == TYPE_STRING and not String(raw).is_empty():
-			var parsed: Variant = JSON.parse_string(String(raw))
-			if typeof(parsed) == TYPE_DICTIONARY:
-				plugin_metrics = parsed
+			parsed = JSON.parse_string(String(raw))
+		if typeof(parsed) == TYPE_DICTIONARY:
+			plugin_metrics = parsed
 	var muxer_metrics: Dictionary = {}
 	if muxer_plugin != null:
 		var raw_muxer: Variant = muxer_plugin.call("popMuxerMetricsJson")
@@ -383,6 +421,10 @@ func _emit_metrics(window_s: float) -> void:
 			var parsed_muxer: Variant = JSON.parse_string(String(raw_muxer))
 			if typeof(parsed_muxer) == TYPE_DICTIONARY:
 				muxer_metrics = parsed_muxer
+	if writer != null and writer.has_method("pop_metrics"):
+		var writer_metrics: Dictionary = writer.pop_metrics()
+		for key in writer_metrics.keys():
+			plugin_metrics["sink_%s" % key] = writer_metrics[key]
 	# Compact one-liner so it doesn't drown the rest of logcat. Tagged
 	# "QcMetrics" so adb logcat -s godot:V | grep QcMetrics gives a clean
 	# table.
@@ -425,6 +467,7 @@ func _compact_dict(d: Dictionary) -> String:
 
 func _exit_tree() -> void:
 	stop_capture()
+	_stop_live_pull()
 	_set_passthrough_visible(false)
 
 
@@ -452,6 +495,7 @@ func start_capture() -> void:
 		push_error("Capture session did not start because its output directory could not be created.")
 		_active_capture_options = {}
 		return
+	_start_live_pull()
 	pose_sampler.set_capture_options(_active_capture_options)
 	body_motion_sampler.set_capture_options(_active_capture_options)
 	_recording = true
@@ -471,7 +515,7 @@ func start_capture() -> void:
 		record_control.set_recording(true)
 	# Park any in-flight upload while we record — see
 	# claw/issues/010-ego-data-upload.md "Trip-wires".
-	if ego_uploader:
+	if ego_uploader and not _is_live_feed_mode():
 		ego_uploader.pause()
 	if _xr_session_begun and _stream_enabled("record_depth"):
 		depth_sampler.start()
@@ -486,11 +530,16 @@ func stop_capture() -> void:
 	if not _recording:
 		return
 
+	var is_live_feed := _is_live_feed_mode()
 	_stop_camera_plugin()
 	body_motion_sampler.stop()
+	if not is_live_feed:
+		_stop_live_pull()
 	depth_sampler.stop()
 	writer.close()
-	var saved_session_dir: String = writer.get_saved_path() if writer.has_method("get_saved_path") else writer.get_session_dir()
+	var saved_session_dir := ""
+	if not is_live_feed:
+		saved_session_dir = writer.get_saved_path() if writer.has_method("get_saved_path") else writer.get_session_dir()
 	_recording = false
 	_active_capture_options = {}
 	_camera_configured = false
@@ -505,6 +554,9 @@ func stop_capture() -> void:
 	if record_control:
 		record_control.set_recording(false)
 	_play_cue(_stop_cue)
+	if is_live_feed:
+		print("Live feed push stopped; live-pull remains connected for algorithm results")
+		return
 	var upload_expected := _upload_config_available()
 	if status_popup:
 		if saved_session_dir.is_empty():
@@ -591,14 +643,36 @@ func _setup_xr_scene() -> void:
 	settings_interaction_router.configure(origin, hmd_camera, left_pointer, right_pointer, ui_pointer_visual)
 	origin.add_child(settings_interaction_router)
 
-	settings_panel = ViewLockedCapturePanelScript.new()
+	if _is_live_feed_mode() and enable_live_pull:
+		live_pull_view = LivePullDenseMapViewScript.new()
+		live_pull_view.name = "LivePullDenseMapView"
+		if live_pull_view.has_signal("connected_to_server"):
+			live_pull_view.connected_to_server.connect(_on_live_pull_connected)
+		if live_pull_view.has_signal("disconnected_from_server"):
+			live_pull_view.disconnected_from_server.connect(_on_live_pull_disconnected)
+		if live_pull_view.has_signal("connection_failed"):
+			live_pull_view.connection_failed.connect(_on_live_pull_connection_failed)
+		origin.add_child(live_pull_view)
+
+	settings_panel = ViewLockedCapturePanelScript.new(_is_live_feed_mode())
 	settings_panel.name = "ViewLockedSettingsPanel"
+	if settings_panel.has_method("set_live_server_defaults"):
+		settings_panel.set_live_server_defaults(
+			default_live_server_host,
+			default_live_server_port,
+			default_live_server_auth_token,
+			default_live_result_port
+		)
 	settings_panel.saved.connect(_on_capture_settings_saved)
 	settings_panel.tracker_connect_requested.connect(_on_tracker_connect_requested)
 	settings_panel.exit_requested.connect(_on_exit_requested)
 	# Camera button on the Upload URL row → open the QR scanner overlay.
 	if settings_panel.has_signal("scan_upload_url_requested"):
 		settings_panel.scan_upload_url_requested.connect(_on_scan_upload_url_requested)
+	if settings_panel.has_signal("scan_live_server_requested"):
+		settings_panel.scan_live_server_requested.connect(_on_scan_live_server_requested)
+	if settings_panel.has_signal("connect_live_server_requested"):
+		settings_panel.connect_live_server_requested.connect(_on_connect_live_server_requested)
 	origin.add_child(settings_panel)
 
 	# QR scanner overlay (Camera2 + ZXing). Sits in the same scene tree as
@@ -615,6 +689,11 @@ func _setup_xr_scene() -> void:
 	# upload toggles) survive an app restart. See EgoSettingsStore +
 	# claw/issues/010-ego-data-upload.md PR-1.
 	var persisted := EgoSettingsStoreScript.load_options()
+	if _is_live_feed_mode():
+		persisted["server_host"] = str(persisted.get("server_host", default_live_server_host))
+		persisted["server_port"] = int(persisted.get("server_port", default_live_server_port))
+		persisted["server_result_port"] = int(persisted.get("server_result_port", default_live_result_port))
+		persisted["server_auth_token"] = str(persisted.get("server_auth_token", default_live_server_auth_token))
 	if settings_panel.has_method("set_options"):
 		settings_panel.set_options(persisted)
 	_merge_capture_options(settings_panel.get_options())
@@ -717,7 +796,7 @@ func _set_passthrough_visible(enable: bool) -> void:
 
 
 func _bind_android_plugin() -> void:
-	if camera_plugin != null and muxer_plugin != null:
+	if camera_plugin != null and _active_sink_plugin() != null:
 		return
 	# Stage 2b split the camera provider from the muxer. Quest and PICO now
 	# both export providers; select the one with the best runtime device score
@@ -732,26 +811,57 @@ func _bind_android_plugin() -> void:
 		camera_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
 		_camera_bind_warned = false
 		print("Capture provider singleton bound: %s" % _provider_label())
-	if muxer_plugin == null and Engine.has_singleton("SpatialMp4MuxerPlugin"):
-		muxer_plugin = Engine.get_singleton("SpatialMp4MuxerPlugin")
-		muxer_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
-		print("SpatialMp4MuxerPlugin singleton bound (contract v%d)" % int(muxer_plugin.call("getMuxerContractVersion")))
-	if camera_plugin != null and muxer_plugin != null:
+
+	if _is_live_feed_mode():
+		if live_server_plugin == null and Engine.has_singleton("LivePushPlugin"):
+			live_server_plugin = Engine.get_singleton("LivePushPlugin")
+		elif live_server_plugin == null and Engine.has_singleton("LiveFeedServerPlugin"):
+			live_server_plugin = Engine.get_singleton("LiveFeedServerPlugin")
+		elif live_server_plugin == null and Engine.has_singleton("LiveCaptureServerPlugin"):
+			live_server_plugin = Engine.get_singleton("LiveCaptureServerPlugin")
+		if live_server_plugin != null:
+			if live_server_plugin.has_signal("live_feed_error"):
+				live_server_plugin.connect("live_feed_error", Callable(self, "_on_camera_error"))
+			elif live_server_plugin.has_signal("live_capture_error"):
+				live_server_plugin.connect("live_capture_error", Callable(self, "_on_camera_error"))
+			if live_server_plugin.has_signal("live_feed_connected"):
+				live_server_plugin.connect("live_feed_connected", Callable(self, "_on_live_feed_connected"))
+			elif live_server_plugin.has_signal("live_capture_connected"):
+				live_server_plugin.connect("live_capture_connected", Callable(self, "_on_live_feed_connected"))
+			if live_server_plugin.has_signal("live_feed_disconnected"):
+				live_server_plugin.connect("live_feed_disconnected", Callable(self, "_on_live_feed_disconnected"))
+			elif live_server_plugin.has_signal("live_capture_disconnected"):
+				live_server_plugin.connect("live_capture_disconnected", Callable(self, "_on_live_feed_disconnected"))
+			print("LivePushPlugin singleton bound")
+	else:
+		if muxer_plugin == null and Engine.has_singleton("SpatialMp4MuxerPlugin"):
+			muxer_plugin = Engine.get_singleton("SpatialMp4MuxerPlugin")
+			muxer_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
+			print("SpatialMp4MuxerPlugin singleton bound (contract v%d)" % int(muxer_plugin.call("getMuxerContractVersion")))
+
+	var sink_plugin := _active_sink_plugin()
+	if camera_plugin != null and sink_plugin != null:
 		# Kotlin-direct sink binding: RGB CSD + packets bypass GDScript on the
-		# per-frame path. Depth / pose / hand / input still flow through
-		# session_spool_writer.gd to the muxer singleton -- see writer wiring.
-		var bound: Variant = camera_plugin.call("bindMuxer", muxer_plugin)
+		# per-frame path. Depth / pose / hand / input still flow through the
+		# selected writer adapter -- see writer wiring.
+		if _is_live_feed_mode():
+			camera_plugin.call("bindMuxer", null)
+		var bound: Variant = camera_plugin.call("bindMuxer", sink_plugin)
 		if not bool(bound):
-			push_warning("%s.bindMuxer(SpatialMp4MuxerPlugin) returned false; RGB writes will fail" % _provider_label())
+			push_warning("%s.bindMuxer(%s) returned false; registry fallback will be used if available" % [_provider_label(), sink_plugin])
 		if writer != null and writer.has_method("set_android_plugin"):
 			writer.set_android_plugin(camera_plugin)
 		if writer != null and writer.has_method("set_muxer_plugin"):
 			writer.set_muxer_plugin(muxer_plugin)
+		if writer != null and writer.has_method("set_live_server_plugin"):
+			writer.set_live_server_plugin(live_server_plugin)
 		return
 	if camera_plugin == null and not _camera_bind_warned:
 		_camera_bind_warned = true
 		print("Capture provider singleton is not installed yet; RGB capture is waiting.")
 		push_warning("Capture provider singleton is not installed; RGB capture is disabled.")
+	if _is_live_feed_mode() and live_server_plugin == null:
+		push_warning("LivePushPlugin singleton is not installed; live feed streaming is disabled.")
 
 
 func _start_camera_plugin() -> void:
@@ -929,6 +1039,14 @@ func _on_camera_error(message: String) -> void:
 	push_error("%s: %s" % [_provider_label(), message])
 
 
+func _on_live_feed_connected(endpoint: String) -> void:
+	print("Live feed push connected: %s" % endpoint)
+
+
+func _on_live_feed_disconnected(endpoint: String) -> void:
+	print("Live feed push disconnected: %s" % endpoint)
+
+
 func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey):
 		return
@@ -973,10 +1091,67 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 	print("Capture options updated: %s" % JSON.stringify(log_view))
 
 
+func _on_connect_live_server_requested(options: Dictionary) -> void:
+	if not _is_live_feed_mode():
+		return
+	_merge_capture_options(options)
+	var host := str(capture_options.get("server_host", default_live_server_host))
+	var port := int(capture_options.get("server_result_port", default_live_result_port))
+	_set_live_server_connectivity_status(
+		tr("UI_LIVE_SERVER_CONNECTING") % [host, port],
+		"normal"
+	)
+	_start_live_pull()
+
+
+func _start_live_pull() -> void:
+	if not _is_live_feed_mode() or live_pull_view == null:
+		return
+	if not live_pull_view.has_method("connect_to_server"):
+		return
+	var host := str(capture_options.get("server_host", default_live_server_host))
+	var port := int(capture_options.get("server_result_port", default_live_result_port))
+	print("Live feed pull connecting: %s:%d" % [host, port])
+	live_pull_view.call("connect_to_server", host, port)
+
+
+func _stop_live_pull() -> void:
+	if live_pull_view != null and live_pull_view.has_method("disconnect_from_server"):
+		print("Live feed pull disconnecting")
+		live_pull_view.call("disconnect_from_server")
+
+
+func _on_live_pull_connected(host: String, port: int) -> void:
+	_set_live_server_connectivity_status(
+		tr("UI_LIVE_SERVER_CONNECTED") % [host, port],
+		"success"
+	)
+
+
+func _on_live_pull_disconnected(host: String, port: int) -> void:
+	_set_live_server_connectivity_status(
+		tr("UI_LIVE_SERVER_DISCONNECTED") % [host, port],
+		"warning"
+	)
+
+
+func _on_live_pull_connection_failed(_host: String, _port: int, reason: String) -> void:
+	_set_live_server_connectivity_status(
+		tr("UI_LIVE_SERVER_CONNECTION_FAILED") % reason,
+		"error"
+	)
+
+
+func _set_live_server_connectivity_status(text: String, level: String) -> void:
+	if settings_panel != null and settings_panel.has_method("set_live_server_connectivity_status"):
+		settings_panel.set_live_server_connectivity_status(text, level)
+
+
 func _on_exit_requested() -> void:
 	_release_ui_pointer()
 	if _recording:
 		stop_capture()
+	_stop_live_pull()
 	_set_passthrough_visible(false)
 	get_tree().quit()
 
@@ -1024,6 +1199,34 @@ func _on_settings_requested() -> void:
 	settings_panel.open()
 	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_update_pico_tracker_setup_status(0.0)
+
+
+func _open_live_feed_settings() -> void:
+	if not _is_live_feed_mode() or settings_panel == null:
+		return
+	_release_ui_pointer()
+	if record_control != null:
+		record_control.hide_control()
+	if settings_panel.has_method("show_live_server_settings"):
+		settings_panel.show_live_server_settings()
+	else:
+		settings_panel.open()
+
+
+func _create_writer() -> Object:
+	if _is_live_feed_mode():
+		var live_writer = LivePushWriterScript.new()
+		live_writer.configure_server(default_live_server_host, default_live_server_port, default_live_server_auth_token)
+		return live_writer
+	return SessionSpoolWriterScript.new()
+
+
+func _is_live_feed_mode() -> bool:
+	return capture_sink == "server"
+
+
+func _active_sink_plugin() -> Object:
+	return live_server_plugin if _is_live_feed_mode() else muxer_plugin
 
 
 func _stream_enabled(option: String) -> bool:
@@ -1149,6 +1352,8 @@ func _configured_save_root() -> String:
 
 
 func _prepare_output_storage() -> void:
+	if _is_live_feed_mode():
+		return
 	if OS.get_name() != "Android" or camera_plugin == null:
 		return
 	if not bool(camera_plugin.call("hasStoragePermission")):
@@ -1159,6 +1364,8 @@ func _prepare_output_storage() -> void:
 
 
 func _ensure_output_storage_ready() -> bool:
+	if _is_live_feed_mode():
+		return true
 	capture_options["save_root"] = _configured_save_root()
 	var capture_root := _configured_save_root()
 	if OS.get_name() == "Android":
@@ -1307,9 +1514,19 @@ func _make_beep_stream(frequency_hz: float, duration_seconds: float) -> AudioStr
 
 func _on_scan_upload_url_requested() -> void:
 	print("[QR] scan_upload_url_requested received")
+	_open_qr_scanner(QR_TARGET_UPLOAD_URL)
+
+
+func _on_scan_live_server_requested() -> void:
+	print("[QR] scan_live_server_requested received")
+	_open_qr_scanner(QR_TARGET_LIVE_SERVER)
+
+
+func _open_qr_scanner(target: String) -> void:
 	if qr_scanner == null:
 		push_warning("[QR] scan requested but EgoQRScanner is null")
 		return
+	_qr_scan_target = target
 	# Park the capture panel so the user's view isn't double-occluded with
 	# two world-locked quads. Saved state is preserved.
 	if settings_panel and settings_panel.visible:
@@ -1323,14 +1540,28 @@ func _on_scan_upload_url_requested() -> void:
 
 func _on_qr_payload_accepted(payload: String) -> void:
 	# Re-open the settings panel so the user can review + Save.
-	if settings_panel:
-		settings_panel.open()
+	var target := _qr_scan_target
+	_restore_settings_after_qr(target)
+	_qr_scan_target = ""
+	if target == QR_TARGET_LIVE_SERVER:
+		if settings_panel and settings_panel.has_method("set_live_server_host_from_scan"):
+			settings_panel.set_live_server_host_from_scan(payload)
+		return
 	_start_upload_ack(payload)
 
 
 func _on_qr_cancelled() -> void:
 	# Restore the settings panel without touching the upload URL.
-	if settings_panel:
+	_restore_settings_after_qr(_qr_scan_target)
+	_qr_scan_target = ""
+
+
+func _restore_settings_after_qr(target: String) -> void:
+	if settings_panel == null:
+		return
+	if target == QR_TARGET_LIVE_SERVER and settings_panel.has_method("show_live_server_settings"):
+		settings_panel.show_live_server_settings()
+	else:
 		settings_panel.open()
 
 

@@ -1,4 +1,4 @@
-# RFC-002 Live Capture Cloud Protocol and VGGT-SLAM2 Result Streaming
+# RFC-002 Live Feed Cloud Protocol and VGGT-SLAM2 Result Streaming
 
 ## Status
 
@@ -14,7 +14,7 @@ TBD
 
 ## Summary
 
-Live Capture should be a server-driven cloud pipeline. The XR client
+Live Feed should be a server-driven cloud pipeline. The XR client
 reports what it can produce and render, the server chooses an algorithm
 and validates its data demand against those capabilities, then XR streams
 only the requested sensor data. The server processes the data through a
@@ -88,7 +88,7 @@ runtime performance of a production VGGT-SLAM2 cloud worker.
 
 ## Terminology
 
-- `OLCP`: Operator Live Capture Protocol.
+- `OLCP`: Operator Live Feed Protocol.
 - `XR`: the headset client running the Operator Godot app.
 - `control channel`: reliable small-message channel for capabilities,
   capture requests, accept/reject, budget, status, and cancellation.
@@ -104,7 +104,7 @@ runtime performance of a production VGGT-SLAM2 cloud worker.
 
 ## Current OLCP v1
 
-OLCP v1 is already implemented by the Live Capture Android plugin. It is
+OLCP v1 is already implemented by the Live Feed Android plugin. It is
 a single TCP stream from XR to server.
 
 Frame header:
@@ -206,7 +206,7 @@ XR opens TCP to `server:63910`.
 ```json
 {
   "schema": "operator.client_capabilities.v1",
-  "protocol": "operator.live_capture.v2",
+  "protocol": "operator.live_feed.v2",
   "device": "quest",
   "app_version": "0.1.0",
   "streams": {
@@ -357,10 +357,10 @@ persisted artifacts.
 
 ## XR Client Design
 
-The XR client should split Live Capture into these components:
+The XR client should split Live Feed into these components:
 
 ```text
-LiveCaptureMode
+LiveFeedMode
   CapabilityReporter
   CaptureNegotiator
   SensorProducerRegistry
@@ -442,7 +442,7 @@ The server should be split into protocol, ingest, algorithm, and result
 layers:
 
 ```text
-LiveCaptureServer
+LiveFeedServer
   AlgorithmRegistry
   CapabilityValidator
   CaptureSession
@@ -740,7 +740,7 @@ first, then refinements only if network and render budgets allow.
 Prototype path:
 
 ```text
-examples/live-capture-vggt-slam2/
+examples/live-feed-vggt-slam2/
 ```
 
 ### Phase 1: v2 control handshake
