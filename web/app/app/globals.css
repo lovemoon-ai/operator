@@ -66,7 +66,8 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   display: block;
   width: 28px;
   height: 28px;
-  border-radius: 6px;
+  /* 22% matches iOS app-icon squircle — scales with any future size bump. */
+  border-radius: 22%;
 }
 .app-header__brand:hover img,
 .app-header__brand:focus-visible img {
@@ -131,6 +132,14 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   letter-spacing: -0.01em;
   /* Tinted off-white so the glyphs lift cleanly off the animated bg. */
   color: #f0f6fc;
+}
+.login-title img {
+  display: block;
+  /* Same 22% squircle as the header brand — softer look on the big
+     96 px landing logo, square-edge would feel out of place against
+     the animated graph backdrop. */
+  border-radius: 22%;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
 }
 .login-cta {
   display: inline-flex;
