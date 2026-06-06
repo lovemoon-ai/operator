@@ -162,14 +162,19 @@ async function main() {
 
   // --- Next.js pages: cookie auth except the public ones ----------------- //
   // /login is the unauthenticated entry point. Everything else is gated.
-  // We let the cookie middleware do its thing and fall through to Next.
+  // Top-level static assets under `public/` (logo, favicon, robots.txt, …)
+  // need to load on the login page itself, so they're allowlisted by
+  // extension here — the rule matches `/foo.ext` but never `/foo/bar.ext`,
+  // so nothing inside Next's app routes can leak through.
+  const PUBLIC_STATIC_RE = /^\/[^/]+\.(?:png|jpg|jpeg|svg|webp|gif|ico|txt|webmanifest)$/i;
   app.all("*", (req, res) => {
     const p = req.path;
     if (
       p === "/login" ||
       p.startsWith("/_next/") ||
       p === "/favicon.ico" ||
-      p === "/api/auth/callback"
+      p === "/api/auth/callback" ||
+      PUBLIC_STATIC_RE.test(p)
     ) {
       return handleNext(req, res);
     }
