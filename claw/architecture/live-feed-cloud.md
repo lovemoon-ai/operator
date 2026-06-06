@@ -1,4 +1,4 @@
-# Live Capture Cloud Architecture
+# Live Feed Cloud Architecture
 
 ## Goal
 
@@ -14,7 +14,7 @@ which adds capability negotiation and a server-to-XR result channel.
 
 - XR client: owns sensors, capture permissions, compression, local throttling,
   and real-time rendering of returned algorithm results.
-- Live capture server: owns algorithm selection, demand validation, ingestion,
+- Live Feed server: owns algorithm selection, demand validation, ingestion,
   queues, persistence, time synchronization, and result publication.
 - Algorithm worker: consumes a selected frame bus and emits map/status updates.
 
@@ -42,7 +42,7 @@ Capabilities are named streams, not raw packet types:
 
 ```json
 {
-  "protocol": "operator.live_capture.v2",
+  "protocol": "operator.live_feed.v2",
   "device": "quest",
   "streams": {
     "rgb.hevc": {
@@ -193,7 +193,7 @@ Small result frames use the OLCP header with server-reserved types:
 
 Dense map updates are manifest/fragment/commit deltas. A full submap can
 be around 28 MiB, so it must not be sent as one payload. The detailed
-transport design is in `claw/rfcs/002-live-capture-cloud-vggt-slam2.md`.
+transport design is in `claw/rfcs/002-live-feed-cloud-vggt-slam2.md`.
 
 Manifest entries describe chunks:
 
@@ -231,7 +231,7 @@ status.
 
 ## Prototype Location
 
-The server prototype is in `examples/live-capture-vggt-slam2/`.
+The server prototype is in `examples/live-feed-vggt-slam2/`.
 
 It validates a VGGT-SLAM2 demand against a Quest capture profile, ingests the
 current OLCP v1 stream, writes durable logs, exposes per-stream queues, and

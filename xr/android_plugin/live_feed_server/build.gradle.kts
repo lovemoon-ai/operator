@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.spatialmp4.livecapture"
+    namespace = "com.spatialmp4.livefeed"
     compileSdk = 35
 
     defaultConfig {

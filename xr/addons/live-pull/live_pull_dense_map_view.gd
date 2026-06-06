@@ -2,6 +2,10 @@ class_name LivePullDenseMapView
 extends Node3D
 
 signal chunk_rendered(chunk_id: String, point_count: int)
+signal connected_to_server(host: String, port: int)
+signal disconnected_from_server(host: String, port: int)
+signal connection_failed(host: String, port: int, reason: String)
+signal connection_status_changed(status: String, detail: String)
 
 const LivePullClientScript := preload("res://addons/live-pull/live_pull_client.gd")
 
@@ -9,12 +13,22 @@ const LivePullClientScript := preload("res://addons/live-pull/live_pull_client.g
 @export var result_port := 63912
 @export var connect_on_ready := false
 @export var max_points_per_chunk := 120000
+@export var max_rendered_chunks := 64
+@export var max_rendered_points := 1200000
 @export var auto_create_client := true
+@export var reconnect_enabled := true
+@export var reconnect_delay_s := 1.0
 
 var client: LivePullClient
 var _chunks: Dictionary = {}
+var _chunk_point_counts: Dictionary = {}
+var _chunk_order: Array[String] = []
+var _rendered_point_count := 0
 var _material: StandardMaterial3D
 var _unsupported_encodings: Dictionary = {}
+var _want_connection := false
+var _retry_pending := false
+var _retry_after_s := 0.0
 
 
 func _ready() -> void:
@@ -27,14 +41,35 @@ func _ready() -> void:
 		connect_to_server(result_host, result_port)
 
 
+func _process(delta: float) -> void:
+	if not _want_connection or client == null or not reconnect_enabled:
+		return
+	if client.is_result_active():
+		return
+	if not _retry_pending:
+		_schedule_reconnect("disconnected")
+		return
+	_retry_after_s -= delta
+	if _retry_after_s <= 0.0:
+		_retry_pending = false
+		_connect_client("retry")
+
+
 func connect_to_server(host: String = result_host, port: int = result_port) -> void:
 	result_host = host
 	result_port = port
 	_ensure_client()
-	client.connect_result(result_host, result_port)
+	_want_connection = true
+	_retry_pending = false
+	if client.is_result_active() and client.host == result_host and client.port == result_port:
+		print("Live-pull already %s: %s:%d" % [client.get_connection_state(), result_host, result_port])
+		return
+	_connect_client("start")
 
 
 func disconnect_from_server() -> void:
+	_want_connection = false
+	_retry_pending = false
 	if client != null:
 		client.disconnect_result()
 
@@ -45,21 +80,80 @@ func _ensure_client() -> void:
 	client = LivePullClientScript.new()
 	client.name = "LivePullClient"
 	add_child(client)
+	client.connected_to_server.connect(_on_connected_to_server)
+	client.disconnected_from_server.connect(_on_disconnected_from_server)
+	client.connection_failed.connect(_on_connection_failed)
+	client.status_received.connect(_on_status_received)
+	client.manifest_received.connect(_on_manifest_received)
 	client.dense_chunk_ready.connect(_on_dense_chunk_ready)
+	client.dense_commit_received.connect(_on_dense_commit_received)
+	client.trajectory_received.connect(_on_trajectory_received)
 	client.map_reset_received.connect(_on_map_reset)
 	client.map_transform_received.connect(_on_map_transform)
 
 
+func _on_connected_to_server() -> void:
+	_retry_pending = false
+	print("Live-pull connected: %s:%d" % [result_host, result_port])
+	connected_to_server.emit(result_host, result_port)
+	connection_status_changed.emit("connected", "%s:%d" % [result_host, result_port])
+
+
+func _on_disconnected_from_server() -> void:
+	print("Live-pull disconnected: %s:%d" % [result_host, result_port])
+	disconnected_from_server.emit(result_host, result_port)
+	connection_status_changed.emit("disconnected", "%s:%d" % [result_host, result_port])
+	if _want_connection:
+		_schedule_reconnect("socket disconnected")
+
+
+func _on_connection_failed(reason: String) -> void:
+	push_warning("Live-pull connection failed %s:%d: %s" % [result_host, result_port, reason])
+	connection_failed.emit(result_host, result_port, reason)
+	connection_status_changed.emit("failed", reason)
+	if _want_connection:
+		_schedule_reconnect(reason)
+
+
+func _on_status_received(status: Dictionary) -> void:
+	print("Live-pull status: %s" % JSON.stringify(status))
+
+
+func _on_manifest_received(manifest: Dictionary) -> void:
+	print("Live-pull manifest map_version=%d chunks=%d" % [
+		int(manifest.get("map_version", -1)),
+		_array_size(manifest.get("chunks", []))
+	])
+
+
+func _on_dense_commit_received(commit: Dictionary) -> void:
+	print("Live-pull commit map_version=%d chunks=%d" % [
+		int(commit.get("map_version", -1)),
+		_array_size(commit.get("committed_chunks", []))
+	])
+
+
+func _on_trajectory_received(trajectory: Dictionary) -> void:
+	print("Live-pull trajectory poses=%d" % [
+		_array_size(trajectory.get("poses", []))
+	])
+
+
 func _on_map_reset(_reset: Dictionary) -> void:
+	print("Live-pull map reset")
 	for child in _chunks.values():
 		if child is Node:
 			(child as Node).queue_free()
 	_chunks.clear()
+	_chunk_point_counts.clear()
+	_chunk_order.clear()
+	_rendered_point_count = 0
 
 
 func _on_map_transform(message: Dictionary) -> void:
 	if message.has("T_openxr_map"):
 		transform = _matrix_to_transform(message["T_openxr_map"])
+	print("Live-pull map transform received")
 
 
 func _on_dense_chunk_ready(metadata: Dictionary, payload: PackedByteArray) -> void:
@@ -74,8 +168,14 @@ func _on_dense_chunk_ready(metadata: Dictionary, payload: PackedByteArray) -> vo
 	var vertices: PackedVector3Array = decoded["vertices"]
 	var colors: PackedColorArray = decoded["colors"]
 	if vertices.is_empty():
+		print("Live-pull dense chunk skipped: %s bytes=%d encoding=%s" % [
+			chunk_id,
+			payload.size(),
+			str(metadata.get("encoding", metadata.get("point_format", "")))
+		])
 		return
 	_upsert_chunk(chunk_id, vertices, colors)
+	print("Live-pull rendered chunk: %s points=%d bytes=%d" % [chunk_id, vertices.size(), payload.size()])
 	chunk_rendered.emit(chunk_id, vertices.size())
 
 
@@ -93,6 +193,10 @@ func _upsert_chunk(chunk_id: String, vertices: PackedVector3Array, colors: Packe
 	instance.material_override = _material
 	add_child(instance)
 	_chunks[chunk_id] = instance
+	_chunk_point_counts[chunk_id] = vertices.size()
+	_chunk_order.append(chunk_id)
+	_rendered_point_count += vertices.size()
+	_enforce_render_budget()
 
 
 func _delete_chunk(chunk_id: String) -> void:
@@ -100,8 +204,18 @@ func _delete_chunk(chunk_id: String) -> void:
 		return
 	var node: Node = _chunks[chunk_id]
 	_chunks.erase(chunk_id)
+	_rendered_point_count = maxi(0, _rendered_point_count - int(_chunk_point_counts.get(chunk_id, 0)))
+	_chunk_point_counts.erase(chunk_id)
+	_chunk_order.erase(chunk_id)
 	if node != null:
 		node.queue_free()
+
+
+func _enforce_render_budget() -> void:
+	while max_rendered_chunks > 0 and _chunks.size() > max_rendered_chunks and not _chunk_order.is_empty():
+		_delete_chunk(_chunk_order[0])
+	while max_rendered_points > 0 and _rendered_point_count > max_rendered_points and not _chunk_order.is_empty():
+		_delete_chunk(_chunk_order[0])
 
 
 func _decode_points(metadata: Dictionary, payload: PackedByteArray) -> Dictionary:
@@ -192,6 +306,29 @@ func _vector_from_array(value: Variant) -> Vector3:
 		return Vector3.ZERO
 	var items: Array = value
 	return Vector3(float(items[0]), float(items[1]), float(items[2]))
+
+
+func _array_size(value: Variant) -> int:
+	if typeof(value) != TYPE_ARRAY:
+		return 0
+	return (value as Array).size()
+
+
+func _connect_client(reason: String) -> void:
+	if client == null:
+		return
+	print("Live-pull connecting to %s:%d (%s)" % [result_host, result_port, reason])
+	connection_status_changed.emit("connecting", "%s:%d" % [result_host, result_port])
+	client.connect_result(result_host, result_port)
+
+
+func _schedule_reconnect(reason: String) -> void:
+	if not reconnect_enabled:
+		return
+	_retry_pending = true
+	_retry_after_s = maxf(reconnect_delay_s, 0.05)
+	print("Live-pull reconnect scheduled in %.2fs: %s" % [_retry_after_s, reason])
+	connection_status_changed.emit("retrying", reason)
 
 
 func _le_u16(bytes: PackedByteArray, offset: int) -> int:

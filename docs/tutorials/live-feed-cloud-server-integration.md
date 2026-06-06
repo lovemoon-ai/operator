@@ -1,6 +1,6 @@
-# 云端服务器接入 Live Capture
+# 云端服务器接入 Live Feed
 
-本文说明云端服务器如何接入 Operator XR 的 Live Capture 通路。当前 XR 端已经拆成两个 addon：
+本文说明云端服务器如何接入 Operator XR 的 Live Feed 通路。当前 XR 端已经拆成两个 addon：
 
 - `live-push`：XR -> server，发送 Quest capture 产生的传感器数据。
 - `live-pull`：server -> XR，接收算法结果并在 XR 中渲染，例如 dense map 点云。
@@ -23,9 +23,9 @@ adb -s <quest-serial> reverse tcp:63910 tcp:63910
 adb -s <quest-serial> reverse tcp:63912 tcp:63912
 ```
 
-如果服务器在局域网或云端，则在 Live Capture 设置里把 server host 改成服务器 IP 或域名，不需要 `adb reverse`。
+如果服务器在局域网或云端，则在 Live Feed 设置里把 server host 改成服务器 IP 或域名，不需要 `adb reverse`。
 
-XR 端启动 Live Capture 后：
+XR 端启动 Live Feed 后：
 
 1. `QuestCapturePlugin` 采集 RGB、depth、pose、hand、controller input。
 2. `live-push` 的 `LivePushPlugin` 连接 `server_host:server_port`，发送 OLCP v1 frame。
@@ -98,7 +98,7 @@ flags：
 
 ```json
 {
-  "protocol": "operator.live_capture.v1",
+  "protocol": "operator.live_feed.v1",
   "stream_name": "session_...",
   "auth_token": "",
   "contract_version": 1,
@@ -408,22 +408,23 @@ push reader -> durable log -> bounded queues -> algorithm worker -> result queue
 
 ```bash
 # 示例命令；具体入口由你的服务器实现决定。
-python your_live_capture_server.py \
+python your_live_feed_server.py \
   --host 0.0.0.0 \
   --push-port 63910 \
   --pull-port 63912 \
   --algorithm vggt_slam2 \
-  --out live_capture_out
+  --out live_feed_out
 ```
 
-如果只想先验证 OLCP v1 入站解析，可以运行当前 prototype：
+如果只想先验证 OLCP v1 入站解析和真实 depth-fusion 回传，可以运行当前 prototype：
 
 ```bash
-python examples/live-capture-vggt-slam2/operator_live_capture_server.py \
+python examples/live-feed-demo/operator_live_feed_server.py \
   --host 127.0.0.1 \
-  --port 63910 \
-  --out live_capture_out \
-  --algorithm vggt_slam2
+  --push-port 63910 \
+  --pull-port 63912 \
+  --out live_feed_out \
+  --algorithm depth_fusion_pointcloud
 ```
 
 Quest 通过 USB 连接开发机时，映射两个端口：
@@ -433,7 +434,7 @@ adb -s <quest-serial> reverse tcp:63910 tcp:63910
 adb -s <quest-serial> reverse tcp:63912 tcp:63912
 ```
 
-在 XR 里进入 Live Capture 后，设置：
+在 XR 里进入 Live Feed 后，设置：
 
 ```text
 server host: 127.0.0.1
@@ -441,11 +442,12 @@ server port: 63910
 result port: 63912
 ```
 
-注意：`examples/live-capture-vggt-slam2/operator_live_capture_server.py` 是 prototype。它展示 OLCP v1 parse、queue、mock worker 和 result packing，但 result frame type 仍可能落后于当前 `live-pull`。新的服务器实现应以本文和 `xr/addons/live-pull/live_pull_client.gd` 中的 110-116 result type 为准。
+`examples/live-feed-demo/operator_live_feed_server.py` 是 prototype。它展示 OLCP v1 parse、queue、depth/head-pose 点云 worker、独立 result port 和与当前 `live-pull` 对齐的 110-116 result frame type。生产 VGGT-SLAM2 服务器可以复用这个边界，但应替换 worker、持久化策略和 result client 重连策略。
 
 ## 接入检查清单
 
 - push reader 和 pull publisher 使用不同 socket。
+- XR `live-pull` 和 `live-push` 生命周期独立；push 端 session end 后，pull 端仍应保持连接或自动重连，等待算法处理 buffered frames 后回传结果。
 - push reader 不跑算法，只 parse、落盘、入队。
 - RGB CSD 必须在 RGB packet 前进入 decoder。
 - 所有队列有上限，高频流可丢旧帧。
@@ -459,8 +461,8 @@ result port: 63912
 ## 相关代码
 
 - `xr/addons/live-push/live_push_writer.gd`
-- `xr/android_plugin/live_capture_server/src/main/java/com/spatialmp4/livecapture/LiveCaptureServerPlugin.kt`
+- `xr/android_plugin/live_feed_server/src/main/java/com/spatialmp4/livefeed/LiveFeedServerPlugin.kt`
 - `xr/addons/live-pull/live_pull_client.gd`
 - `xr/addons/live-pull/live_pull_dense_map_view.gd`
-- `examples/live-capture-vggt-slam2/operator_live_capture_server.py`
-- `claw/rfcs/002-live-capture-cloud-vggt-slam2.md`
+- `examples/live-feed-demo/operator_live_feed_server.py`
+- `claw/rfcs/002-live-feed-cloud-vggt-slam2.md`

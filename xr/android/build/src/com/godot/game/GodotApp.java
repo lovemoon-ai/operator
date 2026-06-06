@@ -58,6 +58,8 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_CAPTURE_INTERACTION_MODE = "operator.capture.interaction_mode";
 	private static final String EXTRA_CAPTURE_AUTO_START = "operator.capture.auto_start";
 	private static final String EXTRA_CAPTURE_AUTO_STOP_SECONDS = "operator.capture.auto_stop_seconds";
+	private static final String EXTRA_OPERATOR_AUTO_START = "operator.auto_start";
+	private static final String EXTRA_OPERATOR_AUTO_START_LEGACY = "operator_auto_start";
 
 	static {
 		// .NET libraries.
@@ -115,7 +117,28 @@ public class GodotApp extends GodotActivity {
 		appendIntentExtraArg(args, EXTRA_CAPTURE_INTERACTION_MODE, "--operator-capture-interaction-mode");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_START, "--operator-capture-auto-start");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_STOP_SECONDS, "--operator-capture-auto-stop-seconds");
+		if (readBooleanExtra(EXTRA_OPERATOR_AUTO_START) || readBooleanExtra(EXTRA_OPERATOR_AUTO_START_LEGACY)) {
+			ensureUserArgsDelimiter(args);
+			args.add("--operator-auto-start");
+			Log.i("Operator", "Automation auto-start requested");
+		}
 		return args;
+	}
+
+	private boolean readBooleanExtra(String key) {
+		Bundle extras = getIntent().getExtras();
+		if (extras == null || !extras.containsKey(key)) {
+			return false;
+		}
+		Object value = extras.get(key);
+		if (value instanceof Boolean) {
+			return (Boolean)value;
+		}
+		if (value instanceof String) {
+			String text = ((String)value).trim();
+			return text.equalsIgnoreCase("true") || text.equals("1") || text.equalsIgnoreCase("yes");
+		}
+		return false;
 	}
 
 	private static void ensureUserArgsDelimiter(ArrayList<String> args) {

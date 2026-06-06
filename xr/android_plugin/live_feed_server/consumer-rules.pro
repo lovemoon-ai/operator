@@ -1,0 +1,1 @@
+-keep class com.spatialmp4.livefeed.** { *; }

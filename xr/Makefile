@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: log build-quest build-pico build-androidxr install-quest install-pico install-androidxr run run-teleop run-ego stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: log build-quest build-pico build-androidxr install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 # ADB=adb -s PB321XKGL4210070B
 ADB=adb
@@ -70,6 +70,16 @@ uninstall:
 
 run:
 	$(ADB) shell am start -n $(package)/$(activity) $(mode_extra)
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+
+run-live-feed:
+	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode live_feed
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+
+run-live-capture: run-live-feed
+
+run-vr:
+	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode vr
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
 
 run-teleop:

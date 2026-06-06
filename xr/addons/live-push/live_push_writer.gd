@@ -5,13 +5,14 @@ const DEFAULT_SERVER_HOST := "127.0.0.1"
 const DEFAULT_SERVER_PORT := 63910
 const DEFAULT_QUEUE_FRAMES := 256
 const PUSH_PLUGIN_SINGLETON := "LivePushPlugin"
-const LEGACY_PUSH_PLUGIN_SINGLETON := "LiveCaptureServerPlugin"
+const PUSH_PLUGIN_FALLBACK_SINGLETONS := ["LiveFeedServerPlugin", "LiveCaptureServerPlugin"]
 
 var session_id := ""
 var session_dir := ""
 var output_mp4_path := ""
 var partial_mp4_path := ""
 var saved_path := ""
+var last_endpoint := ""
 var session_start_unix_us := 0
 var session_start_ticks_us := 0
 var capture_options: Dictionary = {}
@@ -62,14 +63,14 @@ func start_session(options: Dictionary = {}) -> bool:
 	session_start_ticks_us = Time.get_ticks_usec()
 	session_id = _make_session_id()
 	saved_path = ""
-	var root := "user://live_capture"
+	var root := "user://live_feed"
 	session_dir = root.path_join(session_id)
 	output_mp4_path = root.path_join("%s.mp4" % session_id)
 	partial_mp4_path = root.path_join("%s.partial.mp4" % session_id)
 	var absolute_dir := get_session_dir_absolute()
 	var err := DirAccess.make_dir_recursive_absolute(absolute_dir)
 	if err != OK:
-		push_error("Unable to prepare live capture working directory: %s" % absolute_dir)
+		push_error("Unable to prepare live feed working directory: %s" % absolute_dir)
 		session_dir = ""
 		return false
 
@@ -83,16 +84,19 @@ func start_session(options: Dictionary = {}) -> bool:
 		int(capture_options.get("server_connect_timeout_ms", 2500))
 	))
 	if not configured:
-		push_error("Live capture server sink could not be configured.")
+		push_error("Live feed server sink could not be configured.")
 		return false
+	print("Live feed push configured: %s:%d session=%s" % [_server_host, _server_port, session_id])
 	return true
 
 
 func close() -> void:
 	if live_server_plugin != null:
-		var result := str(live_server_plugin.call("finishLiveCapture"))
+		var finish_method := "finishLiveFeed" if live_server_plugin.has_method("finishLiveFeed") else "finishLiveCapture"
+		var result := str(live_server_plugin.call(finish_method))
 		if not result.is_empty():
-			saved_path = result
+			last_endpoint = result
+	saved_path = ""
 
 
 func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_jsonl: bool = true) -> bool:
@@ -248,8 +252,11 @@ func _bind_live_plugin() -> bool:
 		return true
 	if Engine.has_singleton(PUSH_PLUGIN_SINGLETON):
 		live_server_plugin = Engine.get_singleton(PUSH_PLUGIN_SINGLETON)
-	elif Engine.has_singleton(LEGACY_PUSH_PLUGIN_SINGLETON):
-		live_server_plugin = Engine.get_singleton(LEGACY_PUSH_PLUGIN_SINGLETON)
+	else:
+		for singleton in PUSH_PLUGIN_FALLBACK_SINGLETONS:
+			if Engine.has_singleton(singleton):
+				live_server_plugin = Engine.get_singleton(singleton)
+				break
 	return live_server_plugin != null
 
 

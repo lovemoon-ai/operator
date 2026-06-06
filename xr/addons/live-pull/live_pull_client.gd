@@ -83,6 +83,19 @@ func is_result_connected() -> bool:
 	return _state == State.CONNECTED
 
 
+func is_result_active() -> bool:
+	return _state == State.CONNECTING or _state == State.CONNECTED
+
+
+func get_connection_state() -> String:
+	match _state:
+		State.CONNECTING:
+			return "connecting"
+		State.CONNECTED:
+			return "connected"
+	return "disconnected"
+
+
 func _process(delta: float) -> void:
 	match _state:
 		State.CONNECTING:
@@ -248,6 +261,7 @@ func _handle_fragment(payload: PackedByteArray) -> void:
 			"metadata": metadata,
 			"payload": assembled
 		}
+		_fragment_sets.erase(chunk_id)
 
 
 func _handle_commit(commit: Dictionary) -> void:
@@ -255,11 +269,23 @@ func _handle_commit(commit: Dictionary) -> void:
 	var replace_before := int(commit.get("replace_versions_before", -1))
 	if replace_before >= 0:
 		_drop_versions_before(replace_before)
-	for chunk_id_value in commit.get("committed_chunks", []):
+	var committed := commit.get("committed_chunks", [])
+	if typeof(committed) != TYPE_ARRAY:
+		committed = []
+	var missing_chunks: Array[String] = []
+	for chunk_id_value in committed:
 		var chunk_id := str(chunk_id_value)
 		if _complete_chunks.has(chunk_id):
 			var chunk: Dictionary = _complete_chunks[chunk_id]
+			_complete_chunks.erase(chunk_id)
 			dense_chunk_ready.emit(chunk["metadata"], chunk["payload"])
+		else:
+			missing_chunks.append(chunk_id)
+	if not missing_chunks.is_empty():
+		push_warning("Live-pull commit missing complete chunks map_version=%d chunks=%s" % [
+			int(commit.get("map_version", -1)),
+			",".join(missing_chunks)
+		])
 	dense_commit_received.emit(commit)
 
 

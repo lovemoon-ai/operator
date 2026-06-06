@@ -31,6 +31,10 @@ const DEFAULTS := {
 	"audio_channel_layout": "stereo",
 	"audio_sample_rate_hz": 48000,
 	"audio_bitrate_bps": 128000,
+	"server_host": "127.0.0.1",
+	"server_port": 63910,
+	"server_result_port": 63912,
+	"server_auth_token": "",
 	"save_controller_hand_sidecar": false,
 	"save_root": DEFAULT_SAVE_ROOT,
 	"upload_url": "",
@@ -58,6 +62,9 @@ static func load_options() -> Dictionary:
 		"audio_channel_layout",
 		"audio_sample_rate_hz",
 		"audio_bitrate_bps",
+		"server_host",
+		"server_port",
+		"server_result_port",
 		"save_controller_hand_sidecar",
 		"save_root",
 	]:
@@ -76,6 +83,10 @@ static func load_options() -> Dictionary:
 	if cfg.has_section_key(SECTION_UPLOAD, "upload_token_b64"):
 		var encoded := str(cfg.get_value(SECTION_UPLOAD, "upload_token_b64", ""))
 		out["upload_token"] = _decode_token(encoded)
+
+	if cfg.has_section_key(SECTION, "server_auth_token_b64"):
+		var encoded_live_token := str(cfg.get_value(SECTION, "server_auth_token_b64", ""))
+		out["server_auth_token"] = _decode_token(encoded_live_token)
 
 	return out
 
@@ -97,6 +108,9 @@ static func save_options(options: Dictionary) -> Error:
 		"audio_channel_layout",
 		"audio_sample_rate_hz",
 		"audio_bitrate_bps",
+		"server_host",
+		"server_port",
+		"server_result_port",
 		"save_controller_hand_sidecar",
 		"save_root",
 	]:
@@ -121,6 +135,14 @@ static func save_options(options: Dictionary) -> Error:
 				cfg.erase_section_key(SECTION_UPLOAD, "upload_token_b64")
 		else:
 			cfg.set_value(SECTION_UPLOAD, "upload_token_b64", _encode_token(token))
+
+	if options.has("server_auth_token"):
+		var live_token := str(options["server_auth_token"])
+		if live_token.is_empty():
+			if cfg.has_section_key(SECTION, "server_auth_token_b64"):
+				cfg.erase_section_key(SECTION, "server_auth_token_b64")
+		else:
+			cfg.set_value(SECTION, "server_auth_token_b64", _encode_token(live_token))
 
 	var err := cfg.save(SETTINGS_PATH)
 	if err != OK:

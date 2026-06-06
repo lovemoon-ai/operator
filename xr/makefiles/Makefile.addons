@@ -255,7 +255,7 @@ build-capture-plugins: $(FFMPEG_LIB)
 		:capture_common:assembleDebug :capture_common:assembleRelease \
 		:questcapture:assembleDebug :questcapture:assembleRelease \
 		:picocapture:assembleDebug :picocapture:assembleRelease \
-		:live_capture_server:assembleDebug :live_capture_server:assembleRelease \
+		:live_feed_server:assembleDebug :live_feed_server:assembleRelease \
 		:spatialmp4_muxer:assembleDebug :spatialmp4_muxer:assembleRelease \
 		:qrscanner:assembleDebug :qrscanner:assembleRelease \
 		:qrscanner:copyRuntimeDependencies
@@ -273,9 +273,9 @@ build-capture-plugins: $(FFMPEG_LIB)
 		addons/pico_capture_android/bin/picocapture-debug.aar
 	cp -f android_plugin/picocapture/build/outputs/aar/picocapture-release.aar \
 		addons/pico_capture_android/bin/picocapture-release.aar
-	cp -f android_plugin/live_capture_server/build/outputs/aar/live_capture_server-debug.aar \
+	cp -f android_plugin/live_feed_server/build/outputs/aar/live_feed_server-debug.aar \
 		addons/live-push/bin/live-push-debug.aar
-	cp -f android_plugin/live_capture_server/build/outputs/aar/live_capture_server-release.aar \
+	cp -f android_plugin/live_feed_server/build/outputs/aar/live_feed_server-release.aar \
 		addons/live-push/bin/live-push-release.aar
 	cp -f android_plugin/spatialmp4_muxer/build/outputs/aar/spatialmp4_muxer-debug.aar \
 		addons/spatialmp4_muxer/bin/spatialmp4_muxer-debug.aar
@@ -343,7 +343,7 @@ clean-addons:
 		android_plugin/questcapture/build \
 		android_plugin/picocapture/.cxx \
 		android_plugin/picocapture/build \
-		android_plugin/live_capture_server/build \
+		android_plugin/live_feed_server/build \
 		android_plugin/spatialmp4_muxer/.cxx \
 		android_plugin/spatialmp4_muxer/build \
 		android_plugin/qrscanner/build \

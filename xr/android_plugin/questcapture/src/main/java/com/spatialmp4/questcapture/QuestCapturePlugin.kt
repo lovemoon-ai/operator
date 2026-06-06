@@ -50,6 +50,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import com.spatialmp4.contract.SpatialDataSinkRegistry
 
 class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private val mainActivity: Activity?
@@ -856,9 +857,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         // which the SpatialMp4MuxerPlugin populates from its init { } block.
         // This is necessary because @UsedByGodot does not marshal arbitrary
         // Godot Object arguments, so GDScript cannot hand us the sink ref.
-        val sink = muxerSink ?: SpatialMp4MuxerPlugin.activeSink
+        val sink = muxerSink ?: SpatialDataSinkRegistry.getActiveSink() ?: SpatialMp4MuxerPlugin.activeSink
         if (sink == null) {
-            emitSignal("camera_error", "SpatialMp4MuxerPlugin singleton not installed; add the spatialmp4_muxer addon AAR")
+            emitSignal("camera_error", "No SpatialDataSink singleton is active; add the spatialmp4_muxer or live-push addon AAR")
             return false
         }
         if (stereoRgb && rightConfig == null) {
