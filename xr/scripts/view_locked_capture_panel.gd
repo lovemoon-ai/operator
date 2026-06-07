@@ -59,6 +59,17 @@ var _storage_refresh_accum := STORAGE_REFRESH_SECONDS
 var _storage_plugin: Object
 var _storage_plugin_checked := false
 var _live_server_mode := false
+# Mirror of the live-server connection state reported by capture_app via
+# set_live_server_connectivity_status(). Used by _on_confirm_requested to
+# gate the Save button in live-feed mode.
+var _live_server_connected := false
+# Inline "popup-style" callout that appears under the server-host row when
+# the user tries to save without a configured + connected server. See
+# _build_live_server_required_callout().
+var _live_server_required_callout: PanelContainer
+var _live_server_required_label: Label
+var _live_server_required_timer: Timer
+const LIVE_SERVER_REQUIRED_VISIBLE_S := 5.0
 
 
 func _init(live_server_mode: bool = false) -> void:
@@ -326,6 +337,9 @@ func _build_live_server_group() -> void:
 	_server_host.custom_minimum_size.y = 55
 	_server_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_server_host.add_theme_font_size_override("font_size", 19)
+	# Any keystroke invalidates a prior successful connection (it was bound
+	# to the old host) and dismisses a stale "must connect" callout.
+	_server_host.text_changed.connect(_on_server_host_text_changed)
 	add_interactive(server_host_row, _server_host)
 
 	if _qr_scan_supported():
@@ -336,6 +350,9 @@ func _build_live_server_group() -> void:
 			_on_scan_live_server_button_pressed
 		)
 	_add_live_connect_button(server_host_row)
+	# Callout sits between the host row and the connection-status label so the
+	# warning visually attaches to the input the user must fix.
+	_build_live_server_required_callout(live)
 	_live_server_status_label = _add_status_label_to(live, "")
 	_live_server_status_label.visible = false
 
@@ -371,6 +388,15 @@ func _build_live_server_group() -> void:
 
 
 func _on_confirm_requested() -> void:
+	# Live-feed mode requires a configured + connected live server before the
+	# user can leave settings — otherwise capture starts pointing at a dead
+	# endpoint. Surface the reason inline next to the host input instead of
+	# silently failing the dependent steps later.
+	if _live_server_mode:
+		var blocker := _live_server_save_blocker()
+		if blocker != "":
+			_show_live_server_required_callout(blocker)
+			return
 	var options := get_options()
 	_save_to_disk(options)
 	close()
@@ -798,6 +824,12 @@ func set_upload_connectivity_status(text: String, level: String = "normal") -> v
 
 
 func set_live_server_connectivity_status(text: String, level: String = "normal") -> void:
+	# Mirror connection state so _on_confirm_requested can gate Save without
+	# polling capture_app. capture_app drives this with "success" on connect,
+	# "warning" on disconnect, "error" on failure — only "success" unblocks.
+	_live_server_connected = (level == "success")
+	if _live_server_connected:
+		_hide_live_server_required_callout()
 	if _live_server_status_label == null:
 		return
 	_live_server_status_label.text = text
@@ -810,6 +842,114 @@ func set_live_server_connectivity_status(text: String, level: String = "normal")
 	elif level == "warning":
 		color = Color(1.0, 0.78, 0.40)
 	_live_server_status_label.add_theme_color_override("font_color", color)
+
+
+# --- Live-server save gating ----------------------------------------------
+# Returns the localized reason the Save button should be blocked in
+# live-feed mode, or "" if everything is good.
+
+func _live_server_save_blocker() -> String:
+	if _server_host == null:
+		return ""
+	if _server_host.text.strip_edges().is_empty():
+		return tr("UI_LIVE_SERVER_HOST_REQUIRED")
+	if not _live_server_connected:
+		return tr("UI_LIVE_SERVER_CONNECT_REQUIRED")
+	return ""
+
+
+# Construct the inline "popup" callout that surfaces under the server-host
+# row. We build it once in _build_live_server_group and toggle visibility
+# from _show_live_server_required_callout / _hide_live_server_required_callout.
+# Using an inline PanelContainer (instead of a real PopupPanel) keeps the
+# rendering inside the SubViewport that OpenXR composition layers consume
+# — native popups risk landing outside the layer.
+func _build_live_server_required_callout(parent: Container) -> void:
+	_live_server_required_callout = PanelContainer.new()
+	_live_server_required_callout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_live_server_required_callout.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var style := StyleBoxFlat.new()
+	# Translucent dark-red background so the callout reads as a warning
+	# without overpowering the rest of the form. White text on this is
+	# WCAG-AA contrast.
+	style.bg_color = Color(0.62, 0.13, 0.16, 0.96)
+	style.border_color = Color(1.0, 0.36, 0.28)
+	style.border_width_left = 4
+	style.border_width_right = 1
+	style.border_width_top = 1
+	style.border_width_bottom = 1
+	style.corner_radius_top_left = 8
+	style.corner_radius_top_right = 8
+	style.corner_radius_bottom_left = 8
+	style.corner_radius_bottom_right = 8
+	style.content_margin_left = 16
+	style.content_margin_right = 16
+	style.content_margin_top = 12
+	style.content_margin_bottom = 12
+	_live_server_required_callout.add_theme_stylebox_override("panel", style)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 12)
+	_live_server_required_callout.add_child(row)
+	# ⚠ as a leading glyph keeps the i18n surface small — no icon resource
+	# to ship per locale, and the meaning translates across cultures.
+	var icon_label := Label.new()
+	icon_label.text = "⚠"
+	icon_label.add_theme_font_size_override("font_size", 26)
+	icon_label.add_theme_color_override("font_color", Color(1.0, 0.90, 0.45))
+	row.add_child(icon_label)
+	_live_server_required_label = Label.new()
+	_live_server_required_label.text = ""
+	_live_server_required_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_live_server_required_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_live_server_required_label.add_theme_font_size_override("font_size", 19)
+	_live_server_required_label.add_theme_color_override("font_color", Color(1.0, 1.0, 1.0))
+	row.add_child(_live_server_required_label)
+	_live_server_required_callout.visible = false
+	_live_server_required_callout.modulate.a = 0.0
+	parent.add_child(_live_server_required_callout)
+	# Auto-dismiss timer so a stale callout doesn't keep obscuring layout if
+	# the user wanders off to another group without fixing the issue.
+	_live_server_required_timer = Timer.new()
+	_live_server_required_timer.one_shot = true
+	_live_server_required_timer.wait_time = LIVE_SERVER_REQUIRED_VISIBLE_S
+	_live_server_required_timer.timeout.connect(_hide_live_server_required_callout)
+	_live_server_required_callout.add_child(_live_server_required_timer)
+
+
+func _show_live_server_required_callout(message: String) -> void:
+	if _live_server_required_callout == null or _live_server_required_label == null:
+		return
+	_live_server_required_label.text = message
+	_live_server_required_callout.visible = true
+	# Fade in for visibility — also re-tween on repeat taps so the user
+	# perceives "the warning fired again" rather than a static frozen panel.
+	var tween := create_tween()
+	tween.tween_property(_live_server_required_callout, "modulate:a", 1.0, 0.20)
+	if _live_server_required_timer != null:
+		_live_server_required_timer.stop()
+		_live_server_required_timer.start()
+
+
+func _hide_live_server_required_callout() -> void:
+	if _live_server_required_callout == null or not _live_server_required_callout.visible:
+		return
+	if _live_server_required_timer != null:
+		_live_server_required_timer.stop()
+	var tween := create_tween()
+	tween.tween_property(_live_server_required_callout, "modulate:a", 0.0, 0.15)
+	tween.tween_callback(func() -> void:
+		if _live_server_required_callout != null:
+			_live_server_required_callout.visible = false
+	)
+
+
+func _on_server_host_text_changed(_new_text: String) -> void:
+	# Any edit invalidates a prior successful connection (the connection was
+	# bound to the previous host string); the user must reconnect before
+	# saving. Also dismiss any stale "must connect" callout so it doesn't
+	# linger over the field they are actively editing.
+	_live_server_connected = false
+	_hide_live_server_required_callout()
 
 
 # --- Upload URL reachability probe -----------------------------------------

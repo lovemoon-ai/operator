@@ -41,6 +41,11 @@ const TRACKER_SETUP_OPENING_SECONDS := 4.0
 @export var default_live_result_port := 63912
 @export var default_live_server_auth_token := ""
 @export var enable_live_pull := true
+## When false (default), the headset's safety / guardian / boundary overlay is
+## hidden on session begin so it doesn't intrude on passthrough captures. Set
+## to true to leave the platform overlay alone (Quest only; the Pico runtime
+## already suppresses its safe zone while in passthrough).
+@export var keep_safety_zone_visible := false
 
 # Optional host-driven validation override: flip to true (and rebuild/install)
 # to start a recording at _ready(), let it run for AUTO_STOP_AFTER_SECONDS,
@@ -646,6 +651,10 @@ func _setup_xr_scene() -> void:
 	if _is_live_feed_mode() and enable_live_pull:
 		live_pull_view = LivePullDenseMapViewScript.new()
 		live_pull_view.name = "LivePullDenseMapView"
+		# Head-lock the dense-map minimap to the HMD so the scaled-down cloud
+		# stays pinned in front of the user's view instead of riding XROrigin.
+		if "head_lock_target" in live_pull_view:
+			live_pull_view.head_lock_target = hmd_camera
 		if live_pull_view.has_signal("connected_to_server"):
 			live_pull_view.connected_to_server.connect(_on_live_pull_connected)
 		if live_pull_view.has_signal("disconnected_from_server"):
@@ -1013,7 +1022,8 @@ func _on_openxr_session_begun() -> void:
 	_xr_session_begun = true
 	if keep_passthrough_visible:
 		_set_passthrough_visible(true)
-	_suppress_boundary_visibility()
+	if not keep_safety_zone_visible:
+		_suppress_boundary_visibility()
 	if _recording and _stream_enabled("record_depth"):
 		depth_sampler.start()
 

@@ -19,7 +19,36 @@ const LivePullClientScript := preload("res://addons/live-pull/live_pull_client.g
 @export var reconnect_enabled := true
 @export var reconnect_delay_s := 1.0
 
+@export_group("Display")
+## When true, ignore the server's T_openxr_map (which puts the cloud at real
+## 1:1 world scale where it was captured) and render the dense map as a
+## scaled-down view-anchored "minimap" in front of the user instead. Useful
+## for previewing a live VGGT-SLAM reconstruction without standing inside it.
+##
+## When the minimap is on:
+##   * scale     = display_scale (uniform)
+##   * position  = HMD position + horizontal heading * display_distance,
+##                 with Y = HMD.y - display_height_below_head
+##   * rotation  = the latest T_openxr_map basis (world-aligned; does NOT
+##                 follow head rotation, so the cloud's heading stays stable
+##                 even when the user turns)
+@export var display_as_minimap := true
+## Uniform scale applied in minimap mode. 1.0 means real-world size; 0.2
+## means a 5m room renders as a 1m model (5:1 shrink — the default).
+@export var display_scale := 0.2
+## Horizontal distance, in meters, from the HMD to the minimap centre along
+## the user's current yaw (head forward projected onto the XZ plane).
+@export var display_distance := 1.0
+## Vertical drop, in meters, of the minimap centre relative to the HMD
+## position. 0.3 puts it ~30cm below eye level so it sits in the natural
+## reading zone without occluding straight-ahead view.
+@export var display_height_below_head := 0.3
+## Scene path to the XRCamera3D used as the view anchor. May also be
+## assigned at runtime via the `head_lock_target` property.
+@export var head_lock_target_path: NodePath
+
 var client: LivePullClient
+var head_lock_target: Node3D
 var _chunks: Dictionary = {}
 var _chunk_point_counts: Dictionary = {}
 var _chunk_order: Array[String] = []
@@ -29,6 +58,13 @@ var _unsupported_encodings: Dictionary = {}
 var _want_connection := false
 var _retry_pending := false
 var _retry_after_s := 0.0
+# Latest world-aligned rotation reported by the server via T_openxr_map. We
+# only keep the basis (rotation) because position/scale are overridden by the
+# view-anchored placement computed each frame in `_process`.
+var _map_basis: Basis = Basis.IDENTITY
+# Cached horizontal forward used when the user looks straight up/down and the
+# instantaneous head forward has no usable XZ component.
+var _last_horizontal_forward: Vector3 = Vector3(0.0, 0.0, -1.0)
 
 
 func _ready() -> void:
@@ -37,11 +73,23 @@ func _ready() -> void:
 	_material.vertex_color_use_as_albedo = true
 	_material.no_depth_test = false
 	_ensure_client()
+	if head_lock_target == null and head_lock_target_path != NodePath():
+		head_lock_target = get_node_or_null(head_lock_target_path) as Node3D
+	if display_as_minimap and head_lock_target != null:
+		# Lay down a first transform so the cloud doesn't briefly appear at
+		# the XR origin before the first `_process` tick.
+		_refresh_view_anchored_transform()
 	if connect_on_ready:
 		connect_to_server(result_host, result_port)
 
 
 func _process(delta: float) -> void:
+	# Re-anchor the minimap to the user's view every frame: horizontal position
+	# follows head yaw, vertical position drops by display_height_below_head,
+	# rotation stays aligned with T_openxr_map (so the captured world doesn't
+	# spin when the user turns).
+	if display_as_minimap and head_lock_target != null:
+		_refresh_view_anchored_transform()
 	if not _want_connection or client == null or not reconnect_enabled:
 		return
 	if client.is_result_active():
@@ -152,13 +200,13 @@ func _on_map_reset(_reset: Dictionary) -> void:
 
 func _on_map_transform(message: Dictionary) -> void:
 	if message.has("T_openxr_map"):
-		transform = _matrix_to_transform(message["T_openxr_map"])
+		_apply_map_pose(message["T_openxr_map"])
 	print("Live-pull map transform received")
 
 
 func _on_dense_chunk_ready(metadata: Dictionary, payload: PackedByteArray) -> void:
 	if metadata.has("T_openxr_map"):
-		transform = _matrix_to_transform(metadata["T_openxr_map"])
+		_apply_map_pose(metadata["T_openxr_map"])
 	var operation := str(metadata.get("operation", "upsert"))
 	var chunk_id := str(metadata.get("chunk_id", "chunk_%d" % _chunks.size()))
 	if operation == "delete":
@@ -286,6 +334,64 @@ func _decode_quantized_points(metadata: Dictionary, payload: PackedByteArray) ->
 			payload[offset + 9]
 		)
 	return {"vertices": vertices, "colors": colors}
+
+
+## Switch between view-anchored minimap rendering and world-aligned
+## (T_openxr_map) rendering at runtime, and optionally retune the minimap
+## parameters. Pass NAN to keep the current value of a given field.
+func set_minimap_display(
+	enabled: bool,
+	scale_override: float = NAN,
+	distance_override: float = NAN,
+	height_below_head_override: float = NAN
+) -> void:
+	display_as_minimap = enabled
+	if not is_nan(scale_override):
+		display_scale = scale_override
+	if not is_nan(distance_override):
+		display_distance = distance_override
+	if not is_nan(height_below_head_override):
+		display_height_below_head = height_below_head_override
+	if display_as_minimap and head_lock_target != null:
+		_refresh_view_anchored_transform()
+
+
+func _apply_map_pose(matrix: Variant) -> void:
+	var server_xform := _matrix_to_transform(matrix)
+	if display_as_minimap:
+		# In view-anchored mode the world-locked pose is ignored for position
+		# and scale — but we keep its rotation so the cloud's heading still
+		# matches the captured world (north stays north when the user turns).
+		_map_basis = server_xform.basis
+		if head_lock_target != null:
+			_refresh_view_anchored_transform()
+	else:
+		transform = server_xform
+
+
+## Re-compute and apply the view-anchored transform from the current HMD
+## pose. Safe to call multiple times per frame; cheap (no allocations).
+func _refresh_view_anchored_transform() -> void:
+	if head_lock_target == null:
+		return
+	var head: Transform3D = head_lock_target.transform
+	# OpenXR cameras look down -Z. Project onto XZ for yaw-only forward.
+	var forward := -head.basis.z
+	var horiz := Vector3(forward.x, 0.0, forward.z)
+	if horiz.length_squared() < 0.000001:
+		# User is staring almost straight up or down; reuse the last good yaw
+		# so the minimap doesn't snap to the origin.
+		horiz = _last_horizontal_forward
+	else:
+		horiz = horiz.normalized()
+		_last_horizontal_forward = horiz
+	var anchor_pos := Vector3(
+		head.origin.x + horiz.x * display_distance,
+		head.origin.y - display_height_below_head,
+		head.origin.z + horiz.z * display_distance
+	)
+	var basis := _map_basis.scaled(Vector3.ONE * maxf(display_scale, 0.0001))
+	transform = Transform3D(basis, anchor_pos)
 
 
 func _matrix_to_transform(value: Variant) -> Transform3D:
