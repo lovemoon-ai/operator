@@ -1,0 +1,165 @@
+# Cross-compiled Pinocchio (Android arm64-v8a) for the pinocchio Godot addon.
+#
+# Included from xr/Makefile (via Makefile.addons). The actual heavy lifting —
+# fetching pinocchio source, installing Eigen3 + Boost through vcpkg, running
+# the upstream Android cmake build — is delegated to the scripts that ship
+# inside the pinocchio-android wrapper repo:
+#   scripts/fetch-pinocchio.sh
+#   scripts/bootstrap-vcpkg-android.sh
+#   scripts/build-android.sh
+# This file layers idempotency, sibling-repo auto-discovery (.deps cache), and
+# clean wiring on top, the same way Makefile.ffmpeg layers on top of
+# android_plugin/scripts/build_android_ffmpeg.sh.
+#
+# Targets exposed here:
+#   build-pinocchio    — build & install (no-op if libpinocchio_default.so is
+#                        already there)
+#   clean-pinocchio    — nuke the per-ABI worktree, build & install tree
+#   pinocchio-info     — print where pinocchio would be built and its current
+#                        status
+#
+# Variables (override on the make command line or in the environment):
+#   OPERATOR_DEPS_CACHE_ROOT  default ../.deps — shared dep cache root, see
+#                             Makefile.addons. Point at e.g.
+#                             ~/.cache/operator/deps to share the pinocchio
+#                             source + build cache across branches/worktrees.
+#                             PINOCCHIO_SOURCE and PINOCCHIO_BUILD_DIR derive
+#                             from this unless overridden directly.
+#   PINOCCHIO_SOURCE          default $(OPERATOR_DEPS_CACHE_ROOT)/src/pinocchio-android
+#                             Pinned wrapper checkout (synced by sync_deps.sh).
+#   PINOCCHIO_BUILD_DIR       default $(OPERATOR_DEPS_CACHE_ROOT)/build/pinocchio-android
+#                             Per-ABI git worktree + cmake build + install root.
+#   PINOCCHIO_ANDROID_ABI     default arm64-v8a — Pico/Quest ship arm64 only.
+#   PINOCCHIO_ANDROID_API     default android-29 — matches AHB/PICO OpenXR floor.
+#   PINOCCHIO_VCPKG_TRIPLET   default arm64-android (derived from ABI).
+#   ANDROID_NDK_HOME / ANDROID_NDK_ROOT / ANDROID_NDK
+#                             NDK location; one of them must be set.
+#   VCPKG_ROOT                vcpkg checkout root; required by upstream
+#                             bootstrap-vcpkg-android.sh.
+
+OPERATOR_DEPS_CACHE_ROOT ?= ../.deps
+PINOCCHIO_SOURCE         ?= $(abspath $(OPERATOR_DEPS_CACHE_ROOT)/src/pinocchio-android)
+PINOCCHIO_BUILD_DIR      ?= $(abspath $(OPERATOR_DEPS_CACHE_ROOT)/build/pinocchio-android)
+PINOCCHIO_ANDROID_ABI    ?= arm64-v8a
+PINOCCHIO_ANDROID_API    ?= android-29
+
+# vcpkg triplet derivation — see pinocchio-android/scripts/build-android.sh.
+ifeq ($(PINOCCHIO_ANDROID_ABI),arm64-v8a)
+PINOCCHIO_VCPKG_TRIPLET ?= arm64-android
+else ifeq ($(PINOCCHIO_ANDROID_ABI),armeabi-v7a)
+PINOCCHIO_VCPKG_TRIPLET ?= arm-neon-android
+else ifeq ($(PINOCCHIO_ANDROID_ABI),x86_64)
+PINOCCHIO_VCPKG_TRIPLET ?= x64-android
+else ifeq ($(PINOCCHIO_ANDROID_ABI),x86)
+PINOCCHIO_VCPKG_TRIPLET ?= x86-android
+else
+$(error Unsupported PINOCCHIO_ANDROID_ABI: $(PINOCCHIO_ANDROID_ABI))
+endif
+
+# Persistent per-ABI worktree. The upstream scripts write into
+# `third_party/pinocchio` and `build/android/<abi>` relative to ROOT_DIR
+# (i.e. wherever the script is invoked from). Running them inside a git
+# worktree keeps those byproducts off the pristine $(PINOCCHIO_SOURCE), so
+# the next `make deps` (which runs `git clean -fdx` on PINOCCHIO_SOURCE)
+# does NOT wipe our build artifacts.
+PINOCCHIO_WORKTREE := $(PINOCCHIO_BUILD_DIR)/$(PINOCCHIO_ANDROID_ABI)/src
+PINOCCHIO_INSTALL  := $(PINOCCHIO_WORKTREE)/build/android/$(PINOCCHIO_ANDROID_ABI)/install
+PINOCCHIO_LIB      := $(PINOCCHIO_INSTALL)/lib/libpinocchio_default.so
+
+DEPS_SCRIPT ?= ../scripts/sync_deps.sh
+
+.PHONY: build-pinocchio clean-pinocchio pinocchio-info
+
+build-pinocchio: $(PINOCCHIO_LIB)
+
+# Sentinel rule.
+#
+# We deliberately do NOT list the upstream `scripts/*.sh` as Make
+# prerequisites: those files only appear after `make deps pinocchio-android`
+# syncs the source, so Make would otherwise error out with
+# "No rule to make target …/scripts/fetch-pinocchio.sh" before ever entering
+# the recipe. The recipe checks for the source's presence explicitly and
+# directs the user to `make deps`. Same idempotency trade-off as
+# Makefile.ffmpeg: editing the upstream scripts will NOT auto-rebuild — to
+# pick up such an edit, bypass the sentinel:
+#   - shared cache:  make clean-pinocchio FORCE=1 && make build-pinocchio
+#                    (warning: nukes the cache for EVERY worktree using it)
+#   - private cache: unset OPERATOR_DEPS_CACHE_ROOT first.
+$(PINOCCHIO_LIB):
+	@if [ ! -d "$(PINOCCHIO_SOURCE)/.git" ]; then \
+		echo "[pinocchio] pinocchio-android source not found at $(PINOCCHIO_SOURCE)" >&2; \
+		echo "[pinocchio] run: $(DEPS_SCRIPT) pinocchio-android" >&2; \
+		exit 1; \
+	fi
+	@for s in scripts/fetch-pinocchio.sh scripts/bootstrap-vcpkg-android.sh scripts/build-android.sh; do \
+		if [ ! -x "$(PINOCCHIO_SOURCE)/$$s" ]; then \
+			echo "[pinocchio] upstream script missing or not executable: $(PINOCCHIO_SOURCE)/$$s" >&2; \
+			echo "[pinocchio] try: $(DEPS_SCRIPT) pinocchio-android" >&2; \
+			exit 1; \
+		fi; \
+	done
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
+		echo "[pinocchio] ANDROID_NDK / ANDROID_NDK_HOME / ANDROID_NDK_ROOT must be set" >&2; \
+		exit 1; \
+	fi
+	@if [ -z "$$VCPKG_ROOT" ]; then \
+		echo "[pinocchio] VCPKG_ROOT must be set (path to a vcpkg checkout)" >&2; \
+		echo "[pinocchio] vcpkg installs Eigen3 + Boost for the arm64-android triplet." >&2; \
+		exit 1; \
+	fi
+	@echo "[pinocchio] building for $(PINOCCHIO_ANDROID_ABI) (API $(PINOCCHIO_ANDROID_API))"
+	@echo "[pinocchio] PINOCCHIO_SOURCE   = $(PINOCCHIO_SOURCE)"
+	@echo "[pinocchio] PINOCCHIO_WORKTREE = $(PINOCCHIO_WORKTREE)"
+	@echo "[pinocchio] VCPKG triplet      = $(PINOCCHIO_VCPKG_TRIPLET)"
+	@set -e; \
+	mkdir -p "$(dir $(PINOCCHIO_WORKTREE))"; \
+	if [ ! -d "$(PINOCCHIO_WORKTREE)/.git" ] && [ ! -f "$(PINOCCHIO_WORKTREE)/.git" ]; then \
+		head_sha=$$(git -C "$(PINOCCHIO_SOURCE)" rev-parse HEAD); \
+		echo "[pinocchio] git worktree add $(PINOCCHIO_WORKTREE) @ $$head_sha"; \
+		git -C "$(PINOCCHIO_SOURCE)" worktree add --detach "$(PINOCCHIO_WORKTREE)" "$$head_sha"; \
+	fi; \
+	cd "$(PINOCCHIO_WORKTREE)" && \
+		ANDROID_PLATFORM="$(PINOCCHIO_ANDROID_API)" \
+		./scripts/fetch-pinocchio.sh && \
+		./scripts/bootstrap-vcpkg-android.sh "$(PINOCCHIO_VCPKG_TRIPLET)" && \
+		./scripts/build-android.sh "$(PINOCCHIO_ANDROID_ABI)"
+	@test -f "$@" || { echo "[pinocchio] build finished but $@ is missing" >&2; exit 1; }
+	@echo "[pinocchio] installed $(PINOCCHIO_INSTALL)"
+
+# Hose the per-ABI worktree, build directory, and install tree.
+# The pristine PINOCCHIO_SOURCE stays untouched; `make deps` re-resolves it.
+#
+# DESTRUCTIVE WHEN CACHE IS SHARED. If OPERATOR_DEPS_CACHE_ROOT is set away
+# from its per-worktree default (../.deps), this target wipes a directory
+# that every other worktree using the same cache also depends on. Require an
+# explicit FORCE=1 in that mode so it's a deliberate act, not a hand slip.
+clean-pinocchio:
+	@if [ "$(OPERATOR_DEPS_CACHE_ROOT)" != "../.deps" ] && [ "$(FORCE)" != "1" ]; then \
+		echo "[pinocchio] REFUSING to clean a shared cache." >&2; \
+		echo "[pinocchio]   OPERATOR_DEPS_CACHE_ROOT = $(OPERATOR_DEPS_CACHE_ROOT)" >&2; \
+		echo "[pinocchio]   would rm -rf            $(PINOCCHIO_BUILD_DIR)/$(PINOCCHIO_ANDROID_ABI)" >&2; \
+		echo "[pinocchio] Every worktree pointing OPERATOR_DEPS_CACHE_ROOT at this path" >&2; \
+		echo "[pinocchio] would then have to pay the full rebuild." >&2; \
+		echo "[pinocchio] If that's what you want:  make clean-pinocchio FORCE=1" >&2; \
+		exit 1; \
+	fi
+	@if git -C "$(PINOCCHIO_SOURCE)" rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		git -C "$(PINOCCHIO_SOURCE)" worktree remove -f "$(PINOCCHIO_WORKTREE)" >/dev/null 2>&1 || true; \
+		git -C "$(PINOCCHIO_SOURCE)" worktree prune >/dev/null 2>&1 || true; \
+	fi
+	rm -rf $(PINOCCHIO_BUILD_DIR)/$(PINOCCHIO_ANDROID_ABI)
+
+pinocchio-info:
+	@echo "PINOCCHIO_SOURCE        = $(PINOCCHIO_SOURCE)"
+	@echo "PINOCCHIO_BUILD_DIR     = $(PINOCCHIO_BUILD_DIR)"
+	@echo "PINOCCHIO_WORKTREE      = $(PINOCCHIO_WORKTREE)"
+	@echo "PINOCCHIO_ANDROID_ABI   = $(PINOCCHIO_ANDROID_ABI)"
+	@echo "PINOCCHIO_ANDROID_API   = $(PINOCCHIO_ANDROID_API)"
+	@echo "PINOCCHIO_VCPKG_TRIPLET = $(PINOCCHIO_VCPKG_TRIPLET)"
+	@echo "PINOCCHIO_INSTALL       = $(PINOCCHIO_INSTALL)"
+	@echo "PINOCCHIO_LIB           = $(PINOCCHIO_LIB)"
+	@if [ -f "$(PINOCCHIO_LIB)" ]; then \
+		echo "STATUS                  = built ($$(du -h $(PINOCCHIO_LIB) | awk '{print $$1}'))"; \
+	else \
+		echo "STATUS                  = not built — run \`make build-pinocchio\`"; \
+	fi

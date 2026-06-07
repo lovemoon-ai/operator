@@ -89,6 +89,16 @@ xr/addons/qr_scanner/bin/*.jar
 xr/addons/pico_openxr/*.so
 xr/native/pico_openxr/build-*/
 
+# pinocchio addon artifacts (built by `make -C xr build-pinocchio-gdext`)
+xr/addons/pinocchio/*.so
+xr/native/pinocchio/build-*/
+xr/native/pinocchio/godot-cpp
+
+# pinocchio_demo is a downstream verification harness — keep its symlinks +
+# the committed Godot Android template out of git. The whole project is
+# regenerable from echoxr layout + the operator addon.
+examples/pinocchio_demo/
+
 # claude
 *.lock
 settings.local.json
