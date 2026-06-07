@@ -9,73 +9,21 @@ const COL_PANEL_BORDER := Color(0.18, 0.22, 0.26, 1.0)
 const COL_TITLE := Color(0.94, 0.96, 0.98)
 const COL_SECTION := Color(0.65, 0.70, 0.75)
 const COL_STATUS := Color(0.55, 0.80, 0.66)
-const EXIT_HOLD_SECONDS := 2.0
 const ACTION_BUTTON_HEIGHT := 68
 const ACTION_BUTTON_MIN_WIDTH := 260
 const ICON_PATH := "res://assets/icons/%s.svg"
 
-class HoldIndicator:
-	extends Control
-
-	# 橙色到红色渐变 + 完成时的白色闪光
-	const COL_ORANGE := Color(1.0, 0.647, 0.169)
-	const COL_RED := Color(1.0, 0.30, 0.20)
-	const FLASH_DURATION := 0.08
-
-	var progress := 0.0
-	# 闪光衰减计时，>0 时绘制白色填充圆
-	var _flash_remaining := 0.0
-
-	func _ready() -> void:
-		mouse_filter = Control.MOUSE_FILTER_IGNORE
-		# 默认关闭 _process，仅在闪光时启用以节省开销
-		set_process(false)
-
-	func set_progress(value: float) -> void:
-		var prev := progress
-		progress = clampf(value, 0.0, 1.0)
-		# 进度刚好达到 1.0 时触发一帧闪光
-		if progress >= 0.999 and prev < 0.999:
-			_flash_remaining = FLASH_DURATION
-			set_process(true)
-		queue_redraw()
-
-	func _process(delta: float) -> void:
-		# 闪光衰减：到 0 后关闭 _process 并刷新
-		if _flash_remaining <= 0.0:
-			set_process(false)
-			return
-		_flash_remaining -= delta
-		if _flash_remaining <= 0.0:
-			_flash_remaining = 0.0
-			set_process(false)
-		queue_redraw()
-
-	func _draw() -> void:
-		if progress <= 0.0 and _flash_remaining <= 0.0:
-			return
-		# 环形进度几何
-		var center := size * 0.5
-		var radius := minf(size.x, size.y) * 0.42
-		# 底环：暗淡的橙色作为背景
-		var base_color := Color(COL_ORANGE.r, COL_ORANGE.g, COL_ORANGE.b, 0.22)
-		draw_arc(center, radius, 0.0, TAU, 64, base_color, 3.0, true)
-		# 进度弧：从顶部 (-PI/2) 顺时针填充
-		if progress > 0.0:
-			var prog_color := COL_ORANGE.lerp(COL_RED, progress)
-			var start_angle := -PI * 0.5
-			var end_angle := start_angle + TAU * progress
-			draw_arc(center, radius, start_angle, end_angle, 64, prog_color, 4.5, true)
-		# 完成闪光：白色填充圆
-		if _flash_remaining > 0.0:
-			draw_circle(center, radius * 0.55, Color(1.0, 1.0, 1.0, 0.85))
+# Exit used to be a hold-to-confirm action (2 s hold + ring indicator). We
+# moved to single-click because the launcher now owns the actual app-quit
+# affordance — the in-panel Exit only navigates back to the launcher, so
+# the long-hold friction was overkill. The `HoldIndicator` ring and the
+# `_exit_holding`/`_exit_hold_seconds` machinery were removed along with
+# `EXIT_HOLD_SECONDS`. Subclasses that still call `super._process(delta)`
+# get a no-op stub below.
 
 var _content: VBoxContainer
 var _scroll_container: ScrollContainer
 var _highlighted_slot: PanelContainer
-var _exit_indicator: HoldIndicator
-var _exit_holding := false
-var _exit_hold_seconds := 0.0
 # 内部 PanelContainer，用于 open/close 缩放与淡入淡出动效
 var _panel: PanelContainer
 # 当前激活的开/关补间，避免并发冲突
@@ -100,18 +48,11 @@ func _setup_settings_panel(
 	visible = initial_visible
 
 
-func _process(delta: float) -> void:
-	if not _exit_holding:
-		return
-	_exit_hold_seconds = minf(_exit_hold_seconds + delta, EXIT_HOLD_SECONDS)
-	var hold_ratio := _exit_hold_seconds / EXIT_HOLD_SECONDS
-	if _exit_indicator:
-		_exit_indicator.set_progress(hold_ratio)
-	if _exit_hold_seconds < EXIT_HOLD_SECONDS:
-		return
-	_play_ui_sound("confirm")
-	_cancel_exit_hold()
-	exit_requested.emit()
+func _process(_delta: float) -> void:
+	# Kept as a no-op stub so subclasses' `super._process(delta)` continues
+	# to resolve cleanly. There's nothing per-frame for the panel itself
+	# now that the exit hold-to-confirm flow is gone.
+	pass
 
 
 func open() -> void:
@@ -226,7 +167,6 @@ func _on_confirm_requested() -> void:
 
 
 func _on_pointer_cleared() -> void:
-	_cancel_exit_hold()
 	_set_highlighted_slot(null)
 
 
@@ -302,14 +242,12 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 	exit_button.custom_minimum_size = Vector2(ACTION_BUTTON_MIN_WIDTH, ACTION_BUTTON_HEIGHT)
 	exit_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	exit_button.add_theme_font_size_override("font_size", 28)
-	exit_button.button_down.connect(_on_exit_button_down)
-	exit_button.button_up.connect(_on_exit_button_up)
-	exit_button.mouse_exited.connect(_on_exit_mouse_exited)
+	# Single-click exit. Replaces the previous hold-to-confirm flow — the
+	# launcher's own Exit card now owns the irreversible "quit app" affordance,
+	# so the in-panel button just navigates back. No ring indicator needed.
+	exit_button.pressed.connect(_on_exit_button_pressed)
 	var exit_slot := add_interactive(actions, exit_button)
 	_configure_action_slot(exit_slot)
-	_exit_indicator = HoldIndicator.new()
-	_exit_indicator.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	exit_slot.add_child(_exit_indicator)
 
 
 func _configure_action_slot(slot: PanelContainer) -> void:
@@ -320,29 +258,12 @@ func _configure_action_slot(slot: PanelContainer) -> void:
 
 func _on_confirm_button_pressed() -> void:
 	_play_ui_sound("confirm")
-	_cancel_exit_hold()
 	_on_confirm_requested()
 
 
-func _on_exit_button_down() -> void:
-	_cancel_exit_hold()
-	_play_ui_sound("exit_charging", -4.0)
-	_exit_holding = true
-
-
-func _on_exit_button_up() -> void:
-	_cancel_exit_hold()
-
-
-func _on_exit_mouse_exited() -> void:
-	_cancel_exit_hold()
-
-
-func _cancel_exit_hold() -> void:
-	_exit_holding = false
-	_exit_hold_seconds = 0.0
-	if _exit_indicator:
-		_exit_indicator.set_progress(0.0)
+func _on_exit_button_pressed() -> void:
+	_play_ui_sound("confirm")
+	exit_requested.emit()
 
 
 func _on_interactive_mouse_entered(slot: PanelContainer) -> void:

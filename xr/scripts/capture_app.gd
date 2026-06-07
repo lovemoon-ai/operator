@@ -1158,12 +1158,17 @@ func _set_live_server_connectivity_status(text: String, level: String) -> void:
 
 
 func _on_exit_requested() -> void:
+	# Exit from the in-mode settings panel returns to the launcher / mode
+	# select page so the user can pick a different mode without restarting
+	# the app. The launcher's own Exit card is what actually quits the
+	# process (see scenes/mode_select.gd). Any active capture / live pull
+	# is stopped first so we don't leak an MP4 muxer or a network reader.
 	_release_ui_pointer()
 	if _recording:
 		stop_capture()
 	_stop_live_pull()
 	_set_passthrough_visible(false)
-	get_tree().quit()
+	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 
 func _update_view_locked_panel() -> void:
@@ -1579,7 +1584,17 @@ func _start_upload_ack(payload: String) -> void:
 	var trimmed := payload.strip_edges()
 	if trimmed.is_empty():
 		return
+	# A QR carrying a plain ingest URL (no signed-ack challenge) — common
+	# for self-hosted setups where the operator just wants to paste the
+	# endpoint into the field. Skip the ack handshake and apply directly,
+	# so the URL persists into the panel + config the same way a successful
+	# ack would. The signed-ack path stays the secure default for cloud
+	# ingest servers that hand out per-session credentials.
 	if not _is_signed_ack_payload(trimmed):
+		if _looks_like_http_url(trimmed):
+			print("[UploadAck] applying plain URL from QR %s" % trimmed)
+			_apply_scanned_upload_endpoint(trimmed, "")
+			return
 		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_INVALID_QR"))
 		return
 	_pending_upload_ack_payload = trimmed
@@ -1601,6 +1616,20 @@ func _start_upload_ack(payload: String) -> void:
 
 func _is_signed_ack_payload(payload: String) -> bool:
 	return payload.find("/ack") >= 0 and payload.find("exp=") >= 0 and payload.find("sig=") >= 0
+
+
+# Loose URL check used by the plain-URL fallback in _start_upload_ack.
+# We accept http/https only — the ingest endpoint must be reachable as a
+# normal HTTP request, and any other scheme (mailto:, geo:, ftp:, …) is
+# almost certainly the wrong QR.
+func _looks_like_http_url(payload: String) -> bool:
+	var lower := payload.to_lower()
+	if not (lower.begins_with("http://") or lower.begins_with("https://")):
+		return false
+	# Strip the scheme and confirm there's actually a host. Avoids accepting
+	# "https://" or "http:// trailing junk" as valid endpoints.
+	var after_scheme := payload.substr(payload.find("://") + 3).strip_edges()
+	return not after_scheme.is_empty()
 
 
 func _on_upload_ack_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:

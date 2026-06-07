@@ -1,38 +1,77 @@
 extends Control
 
-signal teleop_selected
-signal ego_capture_selected
-signal live_feed_selected
-signal vr_selected
+## Single-card UI used by the 3D launcher (scenes/mode_select.gd).
+##
+## Each launcher card is its own Viewport2DIn3D quad floating in front of the
+## user, so this Control renders exactly one card (icon + title + subtitle).
+## The 2-row grid that used to live here moved up into mode_select.gd, which
+## now positions one of these scenes per mode. `selected` fires when the
+## operator clicks the card; the launcher script maps that to the scene
+## change (or app quit for the EXIT kind).
+
+signal selected
+
+enum Kind {
+	TELEOP,
+	EGO_CAPTURE,
+	LIVE_FEED,
+	VR,
+	EXIT,
+}
 
 const COL_PANEL_BG := Color(0.055, 0.067, 0.08, 0.96)
 const COL_PANEL_BORDER := Color(0.18, 0.22, 0.26, 1.0)
 const COL_TITLE := Color(0.94, 0.96, 0.98)
 const COL_MUTED := Color(0.65, 0.70, 0.75)
 const COL_ACCENT := Color(1.0, 0.647, 0.169, 0.98)
+const COL_DANGER := Color(0.96, 0.36, 0.30, 0.98)
 const COL_CARD_BORDER := Color(0.24, 0.28, 0.32, 1.0)
 
-const CARD_SIZE := Vector2(300, 138)
 const HOVER_SCALE := Vector2(1.045, 1.045)
 const NORMAL_SCALE := Vector2.ONE
 const HOVER_Y_OFFSET := -4.0
 const HOVER_TWEEN_DURATION := 0.13
 const HOVER_MODULATE := Color(1.12, 1.08, 0.96)
-const DIM_MODULATE := Color(1.0, 1.0, 1.0, 0.62)
 const NORMAL_MODULATE := Color.WHITE
 
+var _kind: int = Kind.TELEOP
+var _accent: Color = COL_ACCENT
+var _card: Button
+var _icon: _CardIcon
+var _title_label: Label
+var _subtitle_label: Label
 var _status_label: Label
-var _cards := []
-var _card_tweens := {}
+var _card_tween: Tween
 var _feedback_input_mode := "controllers"
 var _feedback_controller: XRController3D
+var _built := false
 
 
 func _ready() -> void:
-	_build_ui()
+	_ensure_built()
+
+
+func configure(kind: int, title_text: String, subtitle_text: String) -> void:
+	_ensure_built()
+	_kind = kind
+	_accent = COL_DANGER if kind == Kind.EXIT else COL_ACCENT
+	if _icon != null:
+		_icon.kind = kind
+		_icon.accent = _accent
+		_icon.queue_redraw()
+	if _title_label != null:
+		_title_label.text = title_text
+	if _subtitle_label != null:
+		_subtitle_label.text = subtitle_text
+	if _card != null:
+		_card.add_theme_stylebox_override("normal", _card_style(false))
+		_card.add_theme_stylebox_override("hover", _card_style(true))
+		_card.add_theme_stylebox_override("pressed", _card_style(true))
+		_card.add_theme_stylebox_override("focus", _card_style(true))
 
 
 func set_status(text: String) -> void:
+	_ensure_built()
 	if _status_label:
 		_status_label.text = text
 		_status_label.visible = not text.is_empty()
@@ -41,6 +80,13 @@ func set_status(text: String) -> void:
 func set_feedback_input_mode(mode: String, controller: XRController3D = null) -> void:
 	_feedback_input_mode = mode
 	_feedback_controller = controller
+
+
+func _ensure_built() -> void:
+	if _built:
+		return
+	_built = true
+	_build_ui()
 
 
 func _build_ui() -> void:
@@ -60,205 +106,139 @@ func _build_ui() -> void:
 
 	var margin := MarginContainer.new()
 	margin.mouse_filter = Control.MOUSE_FILTER_PASS
-	margin.add_theme_constant_override("margin_left", 28)
-	margin.add_theme_constant_override("margin_right", 28)
-	margin.add_theme_constant_override("margin_top", 24)
-	margin.add_theme_constant_override("margin_bottom", 20)
+	margin.add_theme_constant_override("margin_left", 18)
+	margin.add_theme_constant_override("margin_right", 18)
+	margin.add_theme_constant_override("margin_top", 18)
+	margin.add_theme_constant_override("margin_bottom", 18)
 	panel.add_child(margin)
 
-	var content := VBoxContainer.new()
-	content.mouse_filter = Control.MOUSE_FILTER_PASS
-	content.add_theme_constant_override("separation", 16)
-	margin.add_child(content)
+	_card = Button.new()
+	_card.flat = true
+	_card.focus_mode = Control.FOCUS_NONE
+	_card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_card.clip_text = false
+	_card.text = ""
+	_card.add_theme_stylebox_override("normal", _card_style(false))
+	_card.add_theme_stylebox_override("hover", _card_style(true))
+	_card.add_theme_stylebox_override("pressed", _card_style(true))
+	_card.add_theme_stylebox_override("focus", _card_style(true))
+	_card.pressed.connect(_on_card_pressed)
+	_card.mouse_entered.connect(_on_card_hover_enter)
+	_card.mouse_exited.connect(_on_card_hover_exit)
+	_card.resized.connect(func() -> void: _card.pivot_offset = _card.size * 0.5)
+	margin.add_child(_card)
 
-	var title := Label.new()
-	title.text = tr("UI_MODE_SELECT_TITLE")
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 32)
-	title.add_theme_color_override("font_color", COL_TITLE)
-	content.add_child(title)
+	var card_margin := MarginContainer.new()
+	card_margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	card_margin.add_theme_constant_override("margin_left", 22)
+	card_margin.add_theme_constant_override("margin_right", 22)
+	card_margin.add_theme_constant_override("margin_top", 22)
+	card_margin.add_theme_constant_override("margin_bottom", 22)
+	card_margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_card.add_child(card_margin)
 
-	var card_center := CenterContainer.new()
-	card_center.mouse_filter = Control.MOUSE_FILTER_PASS
-	card_center.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	card_center.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	content.add_child(card_center)
+	var column := VBoxContainer.new()
+	column.alignment = BoxContainer.ALIGNMENT_CENTER
+	column.add_theme_constant_override("separation", 14)
+	column.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	card_margin.add_child(column)
 
-	var card_rows := VBoxContainer.new()
-	card_rows.mouse_filter = Control.MOUSE_FILTER_PASS
-	card_rows.alignment = BoxContainer.ALIGNMENT_CENTER
-	card_rows.add_theme_constant_override("separation", 16)
-	card_center.add_child(card_rows)
+	_icon = _CardIcon.new()
+	_icon.kind = _kind
+	_icon.accent = _accent
+	_icon.custom_minimum_size = Vector2(96, 96)
+	_icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(_icon)
 
-	var top_row := _build_card_row()
-	card_rows.add_child(top_row)
-	var bottom_row := _build_card_row()
-	card_rows.add_child(bottom_row)
+	_title_label = Label.new()
+	_title_label.text = ""
+	_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_title_label.add_theme_font_size_override("font_size", 32)
+	_title_label.add_theme_color_override("font_color", COL_TITLE)
+	_title_label.clip_text = false
+	_title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(_title_label)
 
-	_add_mode_card(top_row, tr("UI_TELEOP_MODE"), tr("UI_TELEOP_MODE_SUB"), _IconKind.TELEOP, func() -> void: teleop_selected.emit())
-	_add_mode_card(top_row, tr("UI_EGO_MODE"), tr("UI_EGO_MODE_SUB"), _IconKind.EGO, func() -> void: ego_capture_selected.emit())
-	_add_mode_card(bottom_row, tr("UI_LIVE_FEED_MODE"), tr("UI_LIVE_FEED_MODE_SUB"), _IconKind.LIVE_FEED, func() -> void: live_feed_selected.emit())
-	_add_mode_card(bottom_row, tr("UI_VR_MODE"), tr("UI_VR_MODE_SUB"), _IconKind.VR, func() -> void: vr_selected.emit())
+	_subtitle_label = Label.new()
+	_subtitle_label.text = ""
+	_subtitle_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_subtitle_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_subtitle_label.add_theme_font_size_override("font_size", 18)
+	_subtitle_label.add_theme_color_override("font_color", COL_MUTED)
+	_subtitle_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_subtitle_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(_subtitle_label)
 
 	_status_label = Label.new()
 	_status_label.text = ""
 	_status_label.visible = false
 	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_status_label.add_theme_font_size_override("font_size", 18)
+	_status_label.add_theme_font_size_override("font_size", 16)
 	_status_label.add_theme_color_override("font_color", COL_MUTED)
-	content.add_child(_status_label)
+	column.add_child(_status_label)
 
 
-func _build_card_row() -> HBoxContainer:
-	var row := HBoxContainer.new()
-	row.mouse_filter = Control.MOUSE_FILTER_PASS
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 18)
-	return row
+func _on_card_pressed() -> void:
+	_play_ui_sound("click")
+	emit_signal("selected")
 
 
-func _add_mode_card(parent: Container, title_text: String, subtitle_text: String, icon_kind: int, selected: Callable) -> Button:
-	var card := _build_card(title_text, subtitle_text, icon_kind)
-	card.pressed.connect(func() -> void:
-		_play_ui_sound("click")
-		selected.call()
-	)
-	card.mouse_entered.connect(func() -> void: _on_card_hover_enter(card))
-	card.mouse_exited.connect(func() -> void: _on_card_hover_exit())
-	parent.add_child(card)
-	_cards.append(card)
-	return card
-
-
-func _build_card(title_text: String, subtitle_text: String, icon_kind: int) -> Button:
-	var card := Button.new()
-	card.flat = true
-	card.focus_mode = Control.FOCUS_NONE
-	card.custom_minimum_size = CARD_SIZE
-	card.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	card.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	card.clip_text = false
-	card.text = ""
-	card.add_theme_stylebox_override("normal", _card_style(false))
-	card.add_theme_stylebox_override("hover", _card_style(true))
-	card.add_theme_stylebox_override("pressed", _card_style(true))
-	card.add_theme_stylebox_override("focus", _card_style(true))
-	card.pivot_offset = CARD_SIZE * 0.5
-	card.resized.connect(func() -> void: card.pivot_offset = card.size * 0.5)
-
-	var margin := MarginContainer.new()
-	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 14)
-	margin.add_theme_constant_override("margin_right", 14)
-	margin.add_theme_constant_override("margin_top", 14)
-	margin.add_theme_constant_override("margin_bottom", 12)
-	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	card.add_child(margin)
-
-	var row := HBoxContainer.new()
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	row.add_theme_constant_override("separation", 14)
-	row.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	margin.add_child(row)
-
-	var icon := _CardIcon.new()
-	icon.kind = icon_kind
-	icon.custom_minimum_size = Vector2(54, 54)
-	icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(icon)
-
-	var text_box := VBoxContainer.new()
-	text_box.alignment = BoxContainer.ALIGNMENT_CENTER
-	text_box.add_theme_constant_override("separation", 6)
-	text_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	text_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	row.add_child(text_box)
-
-	var title_label := Label.new()
-	title_label.text = title_text
-	title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	title_label.add_theme_font_size_override("font_size", 22)
-	title_label.add_theme_color_override("font_color", COL_TITLE)
-	title_label.clip_text = true
-	title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	text_box.add_child(title_label)
-
-	var subtitle_label := Label.new()
-	subtitle_label.text = subtitle_text
-	subtitle_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	subtitle_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	subtitle_label.add_theme_font_size_override("font_size", 13)
-	subtitle_label.add_theme_color_override("font_color", COL_MUTED)
-	subtitle_label.custom_minimum_size.y = 38
-	subtitle_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	subtitle_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	text_box.add_child(subtitle_label)
-
-	return card
-
-
-func _on_card_hover_enter(target: Button) -> void:
+func _on_card_hover_enter() -> void:
 	_play_ui_sound("hover")
-	for card in _cards:
-		if card == target:
-			_animate_card(card, true)
-			_animate_card_modulate(card, HOVER_MODULATE)
-		else:
-			_animate_card(card, false)
-			_animate_card_modulate(card, DIM_MODULATE)
+	if _card == null:
+		return
+	_animate_card(true)
+	_animate_card_modulate(HOVER_MODULATE)
 
 
 func _on_card_hover_exit() -> void:
-	for card in _cards:
-		_animate_card(card, false)
-		_animate_card_modulate(card, NORMAL_MODULATE)
+	if _card == null:
+		return
+	_animate_card(false)
+	_animate_card_modulate(NORMAL_MODULATE)
 
 
-func _animate_card(card: Button, hovered: bool) -> void:
-	_kill_card_tween(card)
-	var tween := create_tween()
-	tween.set_parallel(true)
-	tween.set_trans(Tween.TRANS_BACK)
-	tween.set_ease(Tween.EASE_OUT)
-	tween.tween_property(card, "scale", HOVER_SCALE if hovered else NORMAL_SCALE, HOVER_TWEEN_DURATION)
-	tween.tween_property(card, "position:y", HOVER_Y_OFFSET if hovered else 0.0, HOVER_TWEEN_DURATION)
-	_card_tweens[card] = tween
+func _animate_card(hovered: bool) -> void:
+	if _card == null:
+		return
+	if _card_tween != null and _card_tween.is_running():
+		_card_tween.kill()
+	_card_tween = create_tween()
+	_card_tween.set_parallel(true)
+	_card_tween.set_trans(Tween.TRANS_BACK)
+	_card_tween.set_ease(Tween.EASE_OUT)
+	_card_tween.tween_property(_card, "scale", HOVER_SCALE if hovered else NORMAL_SCALE, HOVER_TWEEN_DURATION)
+	_card_tween.tween_property(_card, "position:y", HOVER_Y_OFFSET if hovered else 0.0, HOVER_TWEEN_DURATION)
 
 
-func _animate_card_modulate(card: Button, target: Color) -> void:
+func _animate_card_modulate(target: Color) -> void:
+	if _card == null:
+		return
 	var tween := create_tween()
 	tween.set_trans(Tween.TRANS_SINE)
 	tween.set_ease(Tween.EASE_OUT)
-	tween.tween_property(card, "modulate", target, HOVER_TWEEN_DURATION)
-
-
-func _kill_card_tween(card: Button) -> void:
-	if not _card_tweens.has(card):
-		return
-	var tween: Tween = _card_tweens[card]
-	if tween != null and tween.is_running():
-		tween.kill()
+	tween.tween_property(_card, "modulate", target, HOVER_TWEEN_DURATION)
 
 
 func _play_ui_sound(action: String, volume_db: float = 0.0) -> void:
-	if _feedback_input_mode == "hands":
-		var sound_bus := _get_ui_sound_bus()
-		if sound_bus != null and sound_bus.has_method("play"):
-			sound_bus.call("play", action, volume_db)
-	elif _feedback_input_mode == "controllers":
+	# Launcher feedback policy: always play the UI tone so the operator
+	# hears the click / hover beep even when the XR pointer is being
+	# driven by a controller. If a controller is hovering, ALSO fire its
+	# haptic pulse — audio + haptic together is the right feel for a
+	# transient menu where each card press also triggers a scene swap.
+	# (The capture / teleop in-mode panels still use the haptic-vs-sound
+	# mutex via BaseSettingsPanel; that's intentional because those panels
+	# are dense with toggles and the audio chirps would get noisy.)
+	var sound_bus := _get_ui_sound_bus()
+	if sound_bus != null and sound_bus.has_method("play"):
+		sound_bus.call("play", action, volume_db)
+	if _feedback_input_mode == "controllers" and _feedback_controller != null:
 		var haptics := _get_haptics_bus()
-		var use_haptics := _feedback_controller != null
-		if haptics != null and haptics.has_method("should_use_controller_feedback"):
-			use_haptics = bool(haptics.call("should_use_controller_feedback", _feedback_controller))
-		if use_haptics and haptics != null and haptics.has_method("fire_ui_event"):
+		if haptics != null and haptics.has_method("fire_ui_event"):
 			haptics.call("fire_ui_event", action, _feedback_controller)
-		else:
-			var sound_bus := _get_ui_sound_bus()
-			if sound_bus != null and sound_bus.has_method("play"):
-				sound_bus.call("play", action, volume_db)
 
 
 func _get_ui_sound_bus() -> Node:
@@ -278,16 +258,16 @@ func _panel_style() -> StyleBoxFlat:
 	style.bg_color = COL_PANEL_BG
 	style.border_color = COL_PANEL_BORDER
 	style.set_border_width_all(2)
-	style.set_corner_radius_all(10)
+	style.set_corner_radius_all(14)
 	return style
 
 
 func _card_style(highlighted: bool) -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()
 	style.bg_color = COL_PANEL_BG
-	style.border_color = COL_ACCENT if highlighted else COL_CARD_BORDER
+	style.border_color = _accent if highlighted else COL_CARD_BORDER
 	style.set_border_width_all(2)
-	style.set_corner_radius_all(10)
+	style.set_corner_radius_all(12)
 	style.content_margin_left = 18
 	style.content_margin_right = 18
 	style.content_margin_top = 16
@@ -295,23 +275,20 @@ func _card_style(highlighted: bool) -> StyleBoxFlat:
 	return style
 
 
-enum _IconKind { TELEOP, EGO, LIVE_FEED, VR }
-
-
 class _CardIcon:
 	extends Control
 
 	var kind: int = 0
+	var accent: Color = Color(1.0, 0.647, 0.169, 0.98)
 
 	func _draw() -> void:
-		var accent := Color(1.0, 0.647, 0.169, 0.98)
 		var area := size
 		var cx := area.x * 0.5
 		var cy := area.y * 0.5
-		var left := cx - 31.0
-		var right := cx + 31.0
-		var top := cy - 31.0
-		var bottom := cy + 31.0
+		var left := cx - 38.0
+		var right := cx + 38.0
+		var top := cy - 38.0
+		var bottom := cy + 38.0
 		match kind:
 			0:
 				_draw_robot_arm(left, right, top, bottom, accent)
@@ -319,56 +296,73 @@ class _CardIcon:
 				_draw_eye_capture(cx, cy, left, right, top, bottom, accent)
 			2:
 				_draw_camera(cx, cy, left, top, accent)
-			_:
+			3:
 				_draw_vr_headset(cx, cy, left, right, top, bottom, accent)
+			_:
+				_draw_exit(cx, cy, left, right, top, bottom, accent)
 
 	func _draw_robot_arm(left: float, right: float, top: float, bottom: float, color: Color) -> void:
-		var p0 := Vector2(left + 4.0, bottom - 6.0)
-		var p1 := Vector2(right - 8.0, cy_mid(top, bottom))
-		var p2 := Vector2(left + 14.0, top + 10.0)
-		var p3 := Vector2(left + 28.0, top + 2.0)
-		draw_line(p0, p1, color, 5.5, true)
-		draw_line(p1, p2, color, 5.5, true)
-		draw_line(p2, p3, color, 5.5, true)
-		draw_circle(p0, 4.0, color)
-		draw_circle(p1, 5.5, color)
-		draw_circle(p3, 5.5, color)
+		var p0 := Vector2(left + 5.0, bottom - 8.0)
+		var p1 := Vector2(right - 10.0, _cy_mid(top, bottom))
+		var p2 := Vector2(left + 18.0, top + 12.0)
+		var p3 := Vector2(left + 34.0, top + 4.0)
+		draw_line(p0, p1, color, 6.0, true)
+		draw_line(p1, p2, color, 6.0, true)
+		draw_line(p2, p3, color, 6.0, true)
+		draw_circle(p0, 5.0, color)
+		draw_circle(p1, 6.5, color)
+		draw_circle(p3, 6.5, color)
 
 	func _draw_eye_capture(cx: float, cy: float, left: float, right: float, _top: float, _bottom: float, color: Color) -> void:
 		var points := PackedVector2Array([
 			Vector2(left + 2.0, cy),
-			Vector2(cx - 18.0, cy - 18.0),
-			Vector2(cx, cy - 22.0),
-			Vector2(cx + 18.0, cy - 18.0),
+			Vector2(cx - 22.0, cy - 22.0),
+			Vector2(cx, cy - 26.0),
+			Vector2(cx + 22.0, cy - 22.0),
 			Vector2(right - 2.0, cy),
-			Vector2(cx + 18.0, cy + 18.0),
-			Vector2(cx, cy + 22.0),
-			Vector2(cx - 18.0, cy + 18.0),
+			Vector2(cx + 22.0, cy + 22.0),
+			Vector2(cx, cy + 26.0),
+			Vector2(cx - 22.0, cy + 22.0),
 			Vector2(left + 2.0, cy)
 		])
-		draw_polyline(points, color, 4.5, true)
-		draw_arc(Vector2(cx, cy), 10.0, 0.0, TAU, 30, color, 4.0, true)
-		draw_circle(Vector2(cx, cy), 4.0, color)
+		draw_polyline(points, color, 5.0, true)
+		draw_arc(Vector2(cx, cy), 12.0, 0.0, TAU, 30, color, 4.5, true)
+		draw_circle(Vector2(cx, cy), 5.0, color)
 
 	func _draw_camera(cx: float, cy: float, left: float, top: float, color: Color) -> void:
-		var body_rect := Rect2(Vector2(left + 4.0, top + 16.0), Vector2(54.0, 38.0))
-		_draw_rounded_rect_outline(body_rect, 8.0, color, 5.0)
-		var viewfinder := Rect2(Vector2(left + 16.0, top + 7.0), Vector2(18.0, 10.0))
-		_draw_rounded_rect_outline(viewfinder, 3.0, color, 4.0)
-		var lens_center := Vector2(cx, cy + 6.0)
-		draw_arc(lens_center, 11.5, 0.0, TAU, 28, color, 4.5, true)
-		draw_circle(lens_center + Vector2(-3.0, -3.0), 2.8, color)
+		var body_rect := Rect2(Vector2(left + 5.0, top + 20.0), Vector2(66.0, 46.0))
+		_draw_rounded_rect_outline(body_rect, 9.0, color, 5.5)
+		var viewfinder := Rect2(Vector2(left + 19.0, top + 9.0), Vector2(22.0, 12.0))
+		_draw_rounded_rect_outline(viewfinder, 3.0, color, 4.5)
+		var lens_center := Vector2(cx, cy + 8.0)
+		draw_arc(lens_center, 13.5, 0.0, TAU, 28, color, 5.0, true)
+		draw_circle(lens_center + Vector2(-3.5, -3.5), 3.0, color)
 
 	func _draw_vr_headset(cx: float, cy: float, left: float, right: float, top: float, bottom: float, color: Color) -> void:
-		var visor := Rect2(Vector2(left + 4.0, top + 16.0), Vector2(54.0, 32.0))
-		_draw_rounded_rect_outline(visor, 9.0, color, 5.0)
-		draw_line(Vector2(left + 4.0, cy + 4.0), Vector2(left - 4.0, cy + 13.0), color, 4.0, true)
-		draw_line(Vector2(right - 4.0, cy + 4.0), Vector2(right + 4.0, cy + 13.0), color, 4.0, true)
-		draw_line(Vector2(cx - 9.0, bottom - 8.0), Vector2(cx + 9.0, bottom - 8.0), color, 4.0, true)
-		draw_circle(Vector2(cx - 12.0, cy), 2.5, color)
-		draw_circle(Vector2(cx + 12.0, cy), 2.5, color)
+		var visor := Rect2(Vector2(left + 5.0, top + 20.0), Vector2(66.0, 38.0))
+		_draw_rounded_rect_outline(visor, 10.0, color, 5.5)
+		draw_line(Vector2(left + 5.0, cy + 5.0), Vector2(left - 5.0, cy + 16.0), color, 4.5, true)
+		draw_line(Vector2(right - 5.0, cy + 5.0), Vector2(right + 5.0, cy + 16.0), color, 4.5, true)
+		draw_line(Vector2(cx - 11.0, bottom - 10.0), Vector2(cx + 11.0, bottom - 10.0), color, 4.5, true)
+		draw_circle(Vector2(cx - 14.0, cy), 3.0, color)
+		draw_circle(Vector2(cx + 14.0, cy), 3.0, color)
 
-	func cy_mid(top: float, bottom: float) -> float:
+	# Exit icon: a doorway + outward arrow. Uses the danger (red) accent
+	# so the operator visually distinguishes it from the mode entries.
+	func _draw_exit(cx: float, cy: float, left: float, right: float, top: float, bottom: float, color: Color) -> void:
+		var door := Rect2(Vector2(left + 4.0, top + 4.0), Vector2(36.0, bottom - top - 8.0))
+		_draw_rounded_rect_outline(door, 4.0, color, 5.0)
+		# Door handle
+		draw_circle(Vector2(left + 30.0, cy + 2.0), 3.0, color)
+		# Arrow pointing right (out of the door)
+		var arrow_start := Vector2(left + 44.0, cy)
+		var arrow_end := Vector2(right - 4.0, cy)
+		draw_line(arrow_start, arrow_end, color, 5.0, true)
+		var head := arrow_end
+		draw_line(head, head + Vector2(-12.0, -10.0), color, 5.0, true)
+		draw_line(head, head + Vector2(-12.0, 10.0), color, 5.0, true)
+
+	func _cy_mid(top: float, bottom: float) -> float:
 		return (top + bottom) * 0.5
 
 	func _draw_rounded_rect_outline(rect: Rect2, radius: float, color: Color, width: float) -> void:
@@ -405,4 +399,4 @@ class _LightBar:
 		var y := size.y * (0.12 + 0.08 * sin(_offset * TAU))
 		var x := -size.x * 0.25 + size.x * 1.5 * _offset
 		var color := Color(1.0, 0.647, 0.169, 0.06)
-		draw_line(Vector2(x - 140.0, y), Vector2(x + 220.0, y + 34.0), color, 16.0, true)
+		draw_line(Vector2(x - 100.0, y), Vector2(x + 160.0, y + 24.0), color, 12.0, true)

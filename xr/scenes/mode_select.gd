@@ -1,5 +1,10 @@
 extends Node3D
 
+## Launcher / mode-select scene. Renders the four operator modes (plus an
+## Exit card that quits the app) as individual Viewport2DIn3D quads
+## floating in front of the user. Each card is a distinct 3D entity that
+## can be hovered and clicked with the XR ray pointer.
+
 const LIVE_FEED_SCENE := "res://scenes/live_feed_app.tscn"
 const VR_SCENE := "res://scenes/vr_mode.tscn"
 const TELEOP_SCENE := "res://scenes/teleop_main.tscn"
@@ -8,12 +13,48 @@ const MODE_TELEOP := "teleop"
 const MODE_EGO_CAPTURE := "ego_capture"
 const MODE_LIVE_FEED := "live_feed"
 const MODE_VR := "vr"
+const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
 
-@onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
-@onready var _mode_panel: Node3D = $XROrigin3D/XRCamera3D/ModePanel
+const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
+const CardSceneTemplate := preload("res://scenes/ui/mode_select_ui.tscn")
+const CardUIScript := preload("res://scenes/ui/mode_select_ui.gd")
 
-var _mode_ui: Control
+const CARD_VIEWPORT_SIZE := Vector2(420, 540)
+const CARD_SCREEN_SIZE := Vector2(0.30, 0.38)
+# Cards live on a cylinder centred on the user's head. CARD_RADIUS_M is the
+# horizontal (XZ) distance from the head to each card surface. With a fixed
+# radius every card is exactly the same distance away — earlier we pinned
+# every card at z = -0.95 with different x, which left the center card
+# noticeably closer than the corner cards ("第二块卡片明显更靠近").
+const CARD_RADIUS_M := 0.95
+const TOP_ROW_Y := 0.21
+const BOTTOM_ROW_Y := -0.21
+# Yaw angles around the user (degrees). Top row spans wider because it has
+# three slots; bottom row is two slots tighter to the centre. Tweak these
+# to widen / narrow the menu; CARD_RADIUS_M is independent of the angles.
+const TOP_ROW_ANGLES_DEG := [-19.5, 0.0, 19.5]
+const BOTTOM_ROW_ANGLES_DEG := [-10.0, 10.0]
+
+@onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
+@onready var _camera: XRCamera3D = $XROrigin3D/XRCamera3D
+@onready var _origin: XROrigin3D = $XROrigin3D
+
+class CardEntry:
+	var mode: String
+	var quad: Node3D
+	var ui: Control
+	var status_pending: String = ""
+	# Offset from the launch-time camera anchor (yaw + position). Multiplied
+	# by the snapshotted anchor in _anchor_cards_to_camera() to compute the
+	# final world-locked transform under XROrigin3D.
+	var local_offset: Transform3D = Transform3D.IDENTITY
+
+# Plain Array (not Array[CardEntry]): GDScript typed arrays don't accept
+# inner classes as the element type in stable Godot 4.x. The contents are
+# always CardEntry instances; callers can use `as CardEntry` if a Variant
+# cast is needed.
+var _cards: Array = []
 var _xr_started := false
 var _changing_scene := false
 
@@ -29,7 +70,7 @@ func _ready() -> void:
 		return
 
 	_configure_passthrough()
-	_mode_panel.visible = false
+	_spawn_cards()
 
 	if _start_xr:
 		_start_xr.xr_started.connect(_on_xr_started)
@@ -39,7 +80,115 @@ func _ready() -> void:
 		call_deferred("_on_xr_started")
 
 	_arm_startup_fallback()
-	print("[Operator] Mode select initialized")
+	print("[Operator] Mode select initialized (5 cards spawned)")
+
+
+func _spawn_cards() -> void:
+	# Card data: (mode key, title text key, subtitle text key, icon kind)
+	var card_data := [
+		{
+			"mode": MODE_TELEOP,
+			"title_key": "UI_TELEOP_MODE",
+			"subtitle_key": "UI_TELEOP_MODE_SUB",
+			"kind": CardUIScript.Kind.TELEOP,
+		},
+		{
+			"mode": MODE_EGO_CAPTURE,
+			"title_key": "UI_EGO_MODE",
+			"subtitle_key": "UI_EGO_MODE_SUB",
+			"kind": CardUIScript.Kind.EGO_CAPTURE,
+		},
+		{
+			"mode": MODE_LIVE_FEED,
+			"title_key": "UI_LIVE_FEED_MODE",
+			"subtitle_key": "UI_LIVE_FEED_MODE_SUB",
+			"kind": CardUIScript.Kind.LIVE_FEED,
+		},
+		{
+			"mode": MODE_VR,
+			"title_key": "UI_VR_MODE",
+			"subtitle_key": "UI_VR_MODE_SUB",
+			"kind": CardUIScript.Kind.VR,
+		},
+		{
+			"mode": MODE_EXIT,
+			"title_key": "UI_EXIT_MODE",
+			"subtitle_key": "UI_EXIT_MODE_SUB",
+			"kind": CardUIScript.Kind.EXIT,
+		},
+	]
+
+	var positions := _compute_card_positions(card_data.size())
+	for i in range(card_data.size()):
+		var entry := card_data[i] as Dictionary
+		var card := _create_card(entry, positions[i])
+		_cards.append(card)
+
+
+# Returns 3-2 layout positions on the launcher cylinder. Each slot maps an
+# angle to (R sin θ, y, -R cos θ) — keeping every card at the same XZ
+# distance R from the user's vertical axis. The previous "all cards at
+# z=-0.95" approach left the centre card visibly closer than the corners
+# because their straight-line distance grew with the X offset.
+func _compute_card_positions(card_count: int) -> Array:
+	var positions: Array = []
+	var top_count: int = mini(3, card_count)
+	for i in range(top_count):
+		var angle_rad := deg_to_rad(float(TOP_ROW_ANGLES_DEG[i]))
+		positions.append(Vector3(
+			CARD_RADIUS_M * sin(angle_rad),
+			TOP_ROW_Y,
+			-CARD_RADIUS_M * cos(angle_rad),
+		))
+	var remaining: int = card_count - top_count
+	for i in range(remaining):
+		var angle_deg: float = float(BOTTOM_ROW_ANGLES_DEG[i]) if i < BOTTOM_ROW_ANGLES_DEG.size() else 0.0
+		var angle_rad := deg_to_rad(angle_deg)
+		positions.append(Vector3(
+			CARD_RADIUS_M * sin(angle_rad),
+			BOTTOM_ROW_Y,
+			-CARD_RADIUS_M * cos(angle_rad),
+		))
+	return positions
+
+
+func _create_card(entry: Dictionary, local_pos: Vector3) -> CardEntry:
+	var card := CardEntry.new()
+	card.mode = String(entry["mode"])
+
+	var quad: Node3D = ViewportTemplate.instantiate()
+	quad.name = "Card_%s" % card.mode
+	# `scene`, `viewport_size`, `screen_size` are properties on the
+	# godot-xr-tools Viewport2Din3D script. We set them before adding to
+	# the tree so its _ready instantiates the right child scene.
+	quad.set("scene", CardSceneTemplate)
+	quad.set("viewport_size", CARD_VIEWPORT_SIZE)
+	quad.set("screen_size", CARD_SCREEN_SIZE)
+	quad.visible = false
+	# World-locked: parent to XROrigin3D, NOT the XRCamera3D. The cards
+	# stay anchored at the user's launch pose and don't follow head motion.
+	# _anchor_cards_to_camera() (called once XR reports a tracked head pose)
+	# applies the snapshotted camera yaw + position so the layout appears
+	# centred in front of wherever the operator was standing at launch.
+	_origin.add_child(quad)
+
+	var basis := Basis.IDENTITY
+	# Yaw each off-axis card inward so its front (+Z, where the Viewport2DIn3D
+	# screen lives) points back at the anchor origin where the operator's head
+	# is. For a card at +x the inward direction is -x, hence the negated
+	# numerator in the atan2 — using +local_pos.x here would tilt the cards
+	# the wrong way (outward arc, "围绕着外侧").
+	if absf(local_pos.x) > 0.01:
+		var yaw := atan2(-local_pos.x, -local_pos.z)
+		basis = Basis(Vector3.UP, yaw)
+	card.quad = quad
+	card.local_offset = Transform3D(basis, local_pos)
+	# Park the card at the launch fallback pose for the brief window before
+	# the camera-anchored transform lands. We center it ~1.5 m above origin
+	# (typical eye height) so an early peek before _anchor_cards_to_camera
+	# isn't at the user's feet.
+	quad.transform = Transform3D(basis, local_pos + Vector3(0.0, 1.5, 0.0))
+	return card
 
 
 func _on_xr_started() -> void:
@@ -47,74 +196,140 @@ func _on_xr_started() -> void:
 		return
 	_xr_started = true
 	_configure_passthrough()
-	_mode_panel.visible = true
+	# Wait one frame so the OpenXR runtime has a chance to push its first
+	# tracked head pose into XRCamera3D — otherwise the anchor snapshot
+	# would still be the identity transform from before tracking began.
+	await get_tree().process_frame
+	_anchor_cards_to_camera()
+	for entry in _cards:
+		entry.quad.visible = true
 
-	for i in range(60):
-		await get_tree().process_frame
-		if _mode_panel.has_method("get_scene_instance") and _mode_panel.get_scene_instance() != null:
-			break
-
-	_wire_mode_ui()
-	print("[Operator] Mode select ready")
+	for entry in _cards:
+		await _wire_card_ui(entry)
+	print("[Operator] Mode select ready (cards visible)")
 
 
 func _on_xr_failed() -> void:
-	_mode_panel.visible = true
-	_wire_mode_ui()
-	if _mode_ui and _mode_ui.has_method("set_status"):
-		_mode_ui.set_status(tr("UI_OPENXR_FAILED"))
+	_anchor_cards_to_camera()
+	for entry in _cards:
+		entry.quad.visible = true
+		await _wire_card_ui(entry)
+	_set_status_for_all(tr("UI_OPENXR_FAILED"))
 
 
 func _arm_startup_fallback() -> void:
 	await get_tree().create_timer(MODE_PANEL_FALLBACK_DELAY_SEC).timeout
 	if _xr_started or _changing_scene:
 		return
-	_mode_panel.visible = true
-	for i in range(60):
-		await get_tree().process_frame
-		if _mode_panel.has_method("get_scene_instance") and _mode_panel.get_scene_instance() != null:
-			break
-	_wire_mode_ui()
+	_anchor_cards_to_camera()
+	for entry in _cards:
+		entry.quad.visible = true
+		await _wire_card_ui(entry)
 	print("[Operator] Mode select fallback ready")
 
 
-func _wire_mode_ui() -> void:
-	if _mode_ui != null:
+# Snapshot the camera's current pose and re-place every card relative to
+# that anchor. After this call the cards are world-locked — they stay
+# put while the user moves / turns. We strip pitch and roll so the card
+# layout always stands upright; only the camera's yaw is preserved.
+func _anchor_cards_to_camera() -> void:
+	var anchor := _compute_launch_anchor()
+	var origin := anchor.origin
+	var yaw_deg := rad_to_deg(anchor.basis.get_euler().y)
+	print("[Operator] Launcher anchored at world (%.2f,%.2f,%.2f) yaw=%.1f° (cards world-locked)" % [origin.x, origin.y, origin.z, yaw_deg])
+	for entry in _cards:
+		entry.quad.transform = anchor * entry.local_offset
+
+
+func _compute_launch_anchor() -> Transform3D:
+	# If XR hasn't reported a real head pose yet (origin still at floor),
+	# fall back to eye-height at origin facing -Z so the launcher is at
+	# least somewhere reasonable instead of buried in the floor.
+	const FALLBACK_EYE_HEIGHT := 1.5
+	if _camera == null:
+		return Transform3D(Basis.IDENTITY, Vector3(0.0, FALLBACK_EYE_HEIGHT, 0.0))
+	var camera_xf := _camera.transform
+	var origin := camera_xf.origin
+	if origin.y < 0.5:
+		origin.y = FALLBACK_EYE_HEIGHT
+	# Extract yaw only — pitch / roll would tilt the card row, which we
+	# don't want for a static menu standing in front of the operator.
+	# `basis.get_euler()` returns (pitch, yaw, roll); we rebuild a basis
+	# from yaw alone so the launcher always stands upright.
+	var yaw := camera_xf.basis.get_euler().y
+	return Transform3D(Basis.from_euler(Vector3(0.0, yaw, 0.0)), origin)
+
+
+func _wire_card_ui(entry: CardEntry) -> void:
+	if entry.ui != null:
 		return
-	if _mode_panel and _mode_panel.has_method("get_scene_instance"):
-		_mode_ui = _mode_panel.get_scene_instance() as Control
+	# Wait up to ~1s for the Viewport2DIn3D's SubViewport to instance the
+	# embedded mode_select_ui scene; in practice this is ready within a
+	# couple of frames but we guard a long fallback to keep startup robust.
+	for i in range(60):
+		await get_tree().process_frame
+		if entry.quad.has_method("get_scene_instance"):
+			var inst: Variant = entry.quad.call("get_scene_instance")
+			if inst is Control:
+				entry.ui = inst as Control
+				break
 
-	if _mode_ui == null:
-		push_warning("[Operator] ModeSelect UI is not ready")
+	if entry.ui == null:
+		push_warning("[Operator] Mode card '%s' UI not ready" % entry.mode)
 		return
-	if _mode_ui.has_signal("teleop_selected"):
-		_mode_ui.teleop_selected.connect(_open_teleop)
-	if _mode_ui.has_signal("ego_capture_selected"):
-		_mode_ui.ego_capture_selected.connect(_open_ego_capture)
-	if _mode_ui.has_signal("live_feed_selected"):
-		_mode_ui.live_feed_selected.connect(_open_live_feed)
-	if _mode_ui.has_signal("vr_selected"):
-		_mode_ui.vr_selected.connect(_open_vr)
+
+	var data := _card_metadata(entry.mode)
+	if entry.ui.has_method("configure"):
+		entry.ui.configure(
+			int(data.get("kind", 0)),
+			tr(String(data.get("title_key", ""))),
+			tr(String(data.get("subtitle_key", ""))),
+		)
+	if entry.ui.has_signal("selected"):
+		entry.ui.selected.connect(_on_card_selected.bind(entry.mode))
+	if not entry.status_pending.is_empty() and entry.ui.has_method("set_status"):
+		entry.ui.set_status(entry.status_pending)
+		entry.status_pending = ""
 
 
-func _open_teleop() -> void:
-	_open_mode(MODE_TELEOP)
+func _card_metadata(mode: String) -> Dictionary:
+	match mode:
+		MODE_TELEOP:
+			return {"kind": CardUIScript.Kind.TELEOP, "title_key": "UI_TELEOP_MODE", "subtitle_key": "UI_TELEOP_MODE_SUB"}
+		MODE_EGO_CAPTURE:
+			return {"kind": CardUIScript.Kind.EGO_CAPTURE, "title_key": "UI_EGO_MODE", "subtitle_key": "UI_EGO_MODE_SUB"}
+		MODE_LIVE_FEED:
+			return {"kind": CardUIScript.Kind.LIVE_FEED, "title_key": "UI_LIVE_FEED_MODE", "subtitle_key": "UI_LIVE_FEED_MODE_SUB"}
+		MODE_VR:
+			return {"kind": CardUIScript.Kind.VR, "title_key": "UI_VR_MODE", "subtitle_key": "UI_VR_MODE_SUB"}
+		MODE_EXIT:
+			return {"kind": CardUIScript.Kind.EXIT, "title_key": "UI_EXIT_MODE", "subtitle_key": "UI_EXIT_MODE_SUB"}
+		_:
+			return {"kind": CardUIScript.Kind.TELEOP, "title_key": "UI_TELEOP_MODE", "subtitle_key": "UI_TELEOP_MODE_SUB"}
 
 
-func _open_ego_capture() -> void:
-	_open_mode(MODE_EGO_CAPTURE)
+func _set_status_for_all(text: String) -> void:
+	for entry in _cards:
+		if entry.ui and entry.ui.has_method("set_status"):
+			entry.ui.set_status(text)
+		else:
+			entry.status_pending = text
 
 
-func _open_live_feed() -> void:
-	_open_mode(MODE_LIVE_FEED)
-
-
-func _open_vr() -> void:
-	_open_mode(MODE_VR)
+func _on_card_selected(mode: String) -> void:
+	_open_mode(mode)
 
 
 func _open_mode(mode: String) -> void:
-	var path := _scene_for_mode(mode)
+	if _changing_scene:
+		return
+	var normalized := _normalize_mode(mode)
+	if normalized == MODE_EXIT:
+		print("[Operator] Exit card pressed — quitting app")
+		_hide_all_cards()
+		get_tree().quit()
+		return
+	var path := _scene_for_mode(normalized)
 	if path.is_empty():
 		push_warning("[Operator] Ignoring unknown mode: %s" % mode)
 		return
@@ -126,7 +341,7 @@ func _change_scene(path: String) -> void:
 		return
 	_changing_scene = true
 	print("[Operator] Mode selected: %s" % path)
-	_mode_panel.visible = false
+	_hide_all_cards()
 	call_deferred("_change_scene_deferred", path)
 
 
@@ -135,12 +350,18 @@ func _change_scene_deferred(path: String) -> void:
 	var err := get_tree().change_scene_to_file(path)
 	if err != OK:
 		_changing_scene = false
-		_mode_panel.visible = true
+		for entry in _cards:
+			entry.quad.visible = true
 		push_error("[Operator] Failed to change scene to %s: %s" % [path, err])
 
 
+func _hide_all_cards() -> void:
+	for entry in _cards:
+		entry.quad.visible = false
+
+
 func _scene_for_mode(mode: String) -> String:
-	match _normalize_mode(mode):
+	match mode:
 		MODE_TELEOP:
 			return TELEOP_SCENE
 		MODE_EGO_CAPTURE:
@@ -199,10 +420,12 @@ func _normalize_mode(raw_mode: String) -> String:
 			return MODE_LIVE_FEED
 		MODE_VR, "pure_vr", "robot_vr":
 			return MODE_VR
+		MODE_EXIT, "quit", "shutdown", "close":
+			return MODE_EXIT
 		"":
 			return ""
 		_:
-			push_warning("[Operator] Unknown automation mode '%s' (expected teleop, ego_capture, live_feed, live_capture, or vr)" % raw_mode)
+			push_warning("[Operator] Unknown automation mode '%s' (expected teleop, ego_capture, live_feed, live_capture, vr, or exit)" % raw_mode)
 			return ""
 
 
