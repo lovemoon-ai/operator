@@ -16,6 +16,10 @@ What you get from GDScript:
   centroidal momentum.
 - `PinocchioRuntime` — version probe + smoke test, for verifying that
   the addon actually loaded on a device.
+- `PinocchioMultiTaskSolver` — V2 multi-task weighted QP IK. Drives
+  several end-effectors (pose, position-only, orientation-only) plus
+  scalar joint targets in a single LDLT solve, with posture +
+  smoothness regularization. See §5 below.
 
 Verified on Meta Quest 3 (Vulkan, Adreno 740). Targets Godot 4.5.1.stable.
 
@@ -256,6 +260,72 @@ int    probe_empty_model_nq()     # always 0; proves Eigen/Boost loaded
 Useful as the very first call from a scene's `_ready()` to verify the
 addon actually loaded.
 
+### `PinocchioMultiTaskSolver` (V2)
+
+Weighted-QP IK that solves multiple end-effector tasks simultaneously
+in one LDLT factorization per inner iteration. Replaces hand-rolled
+GDScript normal-equation assembly for callers that need more than a
+single SE(3) target (e.g. dual-arm retargeting).
+
+```gdscript
+# 1. Construct + configure (one-time)
+var solver := PinocchioMultiTaskSolver.new()
+solver.initialize(model, {
+    "damping":             3.0e-3,
+    "max_iters":           12,
+    "step":                0.6,
+    "convergence_tol_m":   1.5e-3,
+    "convergence_tol_rad": 3.0e-2,
+    "posture_weight":      0.04,
+    "smooth_weight":       0.08,
+    "clamp_to_joint_limits": true,
+})
+
+# 2. Register tasks by key (one-time)
+solver.add_pose_task("left_wrist",        left_wrist_frame_id)   # 6 rows
+solver.add_pose_task("right_wrist",       right_wrist_frame_id)  # 6 rows
+solver.add_position_task("left_elbow",    left_elbow_frame_id)   # 3 rows
+solver.add_position_task("right_elbow",   right_elbow_frame_id)  # 3 rows
+solver.add_joint_scalar_task("chest_yaw", waist_yaw_joint_index) # 1 row
+solver.set_posture(q_home)   # PackedFloat64Array of size nq
+
+# 3. Solve per frame (warm-start with q from previous call, dq_prev for smoothness)
+var sol := solver.solve(q0, {
+    "left_wrist":  { "target": lw_target_xform, "weight_pos": 1.0, "weight_rot": 0.5 },
+    "right_wrist": { "target": rw_target_xform, "weight_pos": 1.0, "weight_rot": 0.5 },
+    "left_elbow":  { "target": le_target_vec3,  "weight": 0.35 },
+    "right_elbow": { "target": re_target_vec3,  "weight": 0.35 },
+    "chest_yaw":   { "target": 0.0,             "weight": 0.4  },
+}, dq_prev)
+# sol = { "q", "dq", "residuals", "iterations", "converged",
+#         "joint_limit_saturation", "solve_us" }
+```
+
+| Task kind | Rows | Per-frame target | Weight keys |
+|---|---|---|---|
+| `add_pose_task` | 6 | `Transform3D` (dict `target`) | `weight_pos`, `weight_rot` |
+| `add_position_task` | 3 | `Vector3` (bare or dict `target`) | `weight` |
+| `add_orientation_task` | 3 | `Transform3D` / `Quaternion` / `Basis` | `weight` |
+| `add_joint_scalar_task` | 1 | `float` (bare or dict `target`) | `weight` |
+
+Notes:
+- A task whose key is **absent from the per-frame targets dict** contributes
+  zero rows that frame — lets the caller degrade gracefully when a tracking
+  source drops a joint.
+- A task whose **weight is 0** behaves the same way (skipped that frame).
+- For revolute joints the scalar task error is wrapped to `[-π, π]` via
+  `atan2`-style folding, so a 359° target against a 1° current pose is a
+  2° error rather than 358°.
+- Orientation targets are re-orthogonalised with HouseholderQR on entry —
+  cheap (3×3) protection against accumulated Godot `Basis` drift.
+- `solve()` is a pure function of `(q0, targets, dq_prev)`; warm-start is
+  the caller's responsibility (thread the previous result's `q` back in
+  as `q0`, and `q - q0` as `dq_prev` for the smoothness term).
+- The solver is stateful only in its task registration and config — there
+  is no `_q` / `_dq_prev` kept inside the C++ object.
+- Free-floating roots are explicitly rejected at `initialize()` (same V1
+  limit: `nq` must equal `nv`).
+
 ---
 
 ## 6. Usage examples
@@ -434,10 +504,12 @@ For 1-DoF scalar joints, `neutral()` is zero and `integrate(q, v)` is
 
 | Priority | Feature | Why |
 |---|---|---|
+| Done | Multi-task weighted QP solver (`PinocchioMultiTaskSolver`) | Dual-arm + elbow-hint + scalar yaw in one LDLT (issue 012) |
 | Next | Free-floating root joint + proper `integrate` | Required for full humanoids / mobile bases |
 | Next | LOCAL / WORLD Jacobian test coverage in the demo | Currently shape+finite only |
 | Soon | `pinocchio::Jlog6` correction in IK | Better convergence near singularities |
 | Soon | `computeJointJacobian` binding | Some control schemes prefer joint-frame J |
+| Soon | Hierarchical QP priorities on `PinocchioMultiTaskSolver` | Safety constraints as hard rows instead of large weights |
 | Later | Re-enable URDF parsing | Requires urdfdom on Android vcpkg |
 | Later | Re-enable Coal/collision | Requires hpp-fcl on Android vcpkg |
 | Later | CRBA-based mass matrix inverse cache | `aba()` already gives this; rarely worth re-caching |

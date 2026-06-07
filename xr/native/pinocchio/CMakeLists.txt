@@ -73,6 +73,7 @@ add_library(pinocchio_gd SHARED
     src/pinocchio_runtime.cpp
     src/pinocchio_model.cpp
     src/pinocchio_data.cpp
+    src/pinocchio_multitask_solver.cpp
 )
 
 target_include_directories(pinocchio_gd PRIVATE
