@@ -24,8 +24,15 @@
 # that `build-capture-plugins` depends on (spatialmp4_muxer's CMake
 # link step needs libavformat.a/libavcodec.a/libavutil.a to exist
 # before Gradle is invoked).
+#
+# It also `include`s makefiles/Makefile.pinocchio, which contributes the
+# `build-pinocchio` / `clean-pinocchio` targets and the PINOCCHIO_LIB
+# sentinel that `build-pinocchio-gdext` depends on (the wrapper's CMake
+# link step needs libpinocchio_default.so to exist before cmake --build is
+# invoked).
 
 include makefiles/Makefile.ffmpeg
+include makefiles/Makefile.pinocchio
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -70,6 +77,15 @@ PICO_OPENXR_DIR := native/pico_openxr
 PICO_OPENXR_SRC := $(PICO_OPENXR_DIR)/CMakeLists.txt $(PICO_OPENXR_DIR)/build.sh $(shell find $(PICO_OPENXR_DIR)/src -type f 2>/dev/null)
 PICO_OPENXR_ADDON_SO := addons/pico_openxr/libpico_openxr.so
 PICO_OPENXR_JNI_SO := android/build/libs/arm64-v8a/libpico_openxr.so
+# Pinocchio GDExtension wrapper. Same install layout as AHB / PICO OpenXR;
+# the underlying libpinocchio_default.so comes from build-pinocchio (see
+# Makefile.pinocchio) and is staged alongside the wrapper.
+PINOCCHIO_DIR := native/pinocchio
+PINOCCHIO_SRC := $(PINOCCHIO_DIR)/CMakeLists.txt $(PINOCCHIO_DIR)/build.sh $(shell find $(PINOCCHIO_DIR)/src -type f 2>/dev/null)
+PINOCCHIO_ADDON_SO := addons/pinocchio/libpinocchio_gd.so
+PINOCCHIO_ADDON_CORE_SO := addons/pinocchio/libpinocchio_default.so
+PINOCCHIO_JNI_SO := android/build/libs/arm64-v8a/libpinocchio_gd.so
+PINOCCHIO_JNI_CORE_SO := android/build/libs/arm64-v8a/libpinocchio_default.so
 PICO_OPENXR_LOADER_VERSION := 3.0.0-20250422
 PICO_OPENXR_LOADER_SHA256 := 79882748101e096550f9eccac59f4c4ea6eb99c500001975abe7736bb54d4033
 PICO_OPENXR_LOADER_SRC ?= thirdparty/pico_openxr_loader/$(PICO_OPENXR_LOADER_VERSION)/arm64-v8a/libopenxr_loader.so
@@ -90,7 +106,7 @@ GODOT_CPP_BUILD_DIR := $(DEPS_BUILD_DIR)/godot-cpp
 # Phony targets exposed to xr/Makefile
 # ---------------------------------------------------------------------------
 
-.PHONY: deps setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins clean-addons
+.PHONY: deps setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins build-pinocchio-gdext clean-addons
 
 # ---------------------------------------------------------------------------
 # Third-party vendored addons
@@ -232,6 +248,51 @@ clean-pico-openxr-loader-stage:
 		$(PICO_OPENXR_LOADER_LEGACY_JNI_SO)
 
 # ---------------------------------------------------------------------------
+# Pinocchio GDExtension wrapper (native/pinocchio)
+# ---------------------------------------------------------------------------
+# The wrapper is a thin Godot binding around stack-of-tasks/pinocchio. The
+# Pinocchio + Eigen3 + Boost build itself is owned by Makefile.pinocchio
+# (target `build-pinocchio`); this sentinel only covers the GDExtension .so.
+#
+# Two install paths (mirrors build-ahb):
+#   - addons/pinocchio/libpinocchio_gd.so        — Godot's GDExtension loader
+#   - addons/pinocchio/libpinocchio_default.so   — runtime dep declared in
+#                                                  pinocchio.gdextension
+#   - android/build/libs/arm64-v8a/lib*.so       — packaged by Gradle's
+#                                                  release.jniLibs.srcDirs
+#
+# `build-pinocchio-gdext` is opt-in: it is NOT wired into build-quest /
+# build-pico / build-androidxr by default, because Pinocchio's full
+# toolchain (NDK r26+ AND a vcpkg checkout) takes ~10-20 min to bootstrap
+# on first run. Add it as a prerequisite once the addon is actually
+# referenced by a scene.
+$(PINOCCHIO_ADDON_SO): $(PINOCCHIO_SRC) $(PINOCCHIO_LIB)
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
+	    if [ -f "$@" ]; then \
+	        echo "[pinocchio-gdext] sources newer than $@ but ANDROID_NDK not set — keeping stale .so. 'export ANDROID_NDK=…' to rebuild."; \
+	        exit 0; \
+	    fi; \
+	    echo "[pinocchio-gdext] ANDROID_NDK / ANDROID_NDK_HOME / ANDROID_NDK_ROOT must be set to build $@" >&2; \
+	    exit 1; \
+	fi; \
+	$(PINOCCHIO_DIR)/build.sh Release
+
+# Wrapper build.sh already drops the wrapper + libpinocchio_default.so into
+# android/build/libs/<abi>/ AND into addons/pinocchio/, so the JNI sentinels
+# only need to depend on the addon .so to stay in sync.
+$(PINOCCHIO_JNI_SO): $(PINOCCHIO_ADDON_SO)
+	@test -f "$@" || { echo "[pinocchio-gdext] $@ missing after build.sh ran" >&2; exit 1; }
+	@echo "[pinocchio-gdext] installed $@"
+
+$(PINOCCHIO_ADDON_CORE_SO): $(PINOCCHIO_ADDON_SO)
+	@test -f "$@" || { echo "[pinocchio-gdext] $@ missing after build.sh ran" >&2; exit 1; }
+
+$(PINOCCHIO_JNI_CORE_SO): $(PINOCCHIO_ADDON_SO)
+	@test -f "$@" || { echo "[pinocchio-gdext] $@ missing after build.sh ran" >&2; exit 1; }
+
+build-pinocchio-gdext: $(PINOCCHIO_ADDON_SO) $(PINOCCHIO_ADDON_CORE_SO) $(PINOCCHIO_JNI_SO) $(PINOCCHIO_JNI_CORE_SO)
+
+# ---------------------------------------------------------------------------
 # SpatialMP4 capture Android plugins
 # ---------------------------------------------------------------------------
 # Migrated Gradle project lives at android_plugin/. After build, copy the
@@ -348,12 +409,16 @@ clean-addons:
 		android_plugin/spatialmp4_muxer/build \
 		android_plugin/qrscanner/build \
 		native/ahb_decoder/build-* \
-		native/pico_openxr/build-*
+		native/pico_openxr/build-* \
+		native/pinocchio/build-*
 		# $(GODOT_CPP_BUILD_DIR)
 	rm -f \
 		addons/ahb_decoder/*.so \
 		addons/pico_openxr/*.so \
+		addons/pinocchio/*.so \
 		android/build/libs/arm64-v8a/libpico_openxr.so \
+		android/build/libs/arm64-v8a/libpinocchio_gd.so \
+		android/build/libs/arm64-v8a/libpinocchio_default.so \
 		$(PICO_OPENXR_LOADER_JNI_SO) \
 		$(PICO_OPENXR_LOADER_LEGACY_JNI_SO) \
 		addons/capture_common/bin/*.aar \

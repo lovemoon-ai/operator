@@ -1,0 +1,34 @@
+; Godot manifest for the Pinocchio GDExtension.
+;
+; Pico and Quest both run arm64-v8a; we only ship that ABI. The native
+; library and its libpinocchio_default.so runtime dependency are produced by
+; `make -C xr build-pinocchio build-pinocchio-gdext` and dropped into
+; addons/pinocchio/ alongside this file.
+
+[configuration]
+entry_symbol = "pinocchio_gd_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+; Godot's feature-tag system uses "arm64" here (NOT "arm64-v8a"); the
+; exporter then internally maps arm64 -> lib/arm64-v8a/ when packaging.
+; Using "arm64-v8a" silently no-matches and the .so never lands in the APK.
+android.debug.arm64   = "res://addons/pinocchio/libpinocchio_gd.so"
+android.release.arm64 = "res://addons/pinocchio/libpinocchio_gd.so"
+
+[dependencies]
+; libpinocchio_default.so is the cross-compiled stack-of-tasks/pinocchio
+; core. The Dictionary form `{ path : subfolder }` is the one Godot 4.5
+; accepts (the bare string form "res://..." triggers an empty
+; "configuration errors:" with no message, which cost us half a day to
+; diagnose earlier — see git log for the saga). Empty subfolder means
+; "alongside the main lib".
+;
+; gradle_build=true already vacuums everything under
+; android/build/libs/release/<abi>/ into the APK lib/<abi>/, so this block
+; is belt-and-suspenders today. It becomes load-bearing the moment anyone
+; flips to a prebuilt-template export or uses this addon from a project
+; whose Makefile doesn't stage the .so by hand.
+android.debug.arm64   = { "res://addons/pinocchio/libpinocchio_default.so" : "" }
+android.release.arm64 = { "res://addons/pinocchio/libpinocchio_default.so" : "" }

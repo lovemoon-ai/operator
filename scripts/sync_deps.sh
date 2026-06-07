@@ -14,10 +14,11 @@ GIT_DEPTH="${GIT_DEPTH:-1}"
 GODOT_XR_TOOLS_COMMIT="5570cc7560eece651eb6eeea47311c96535ec712"
 GODOT_CPP_COMMIT="60b5a4196de8442b43b32ba68ebe1e79cfcb762f"
 FFMPEG_TAG="n8.1.1"
+PINOCCHIO_ANDROID_COMMIT="74b44aff2fd00f66adb15d348f401b1579cc4126"
 
 usage() {
     cat <<EOF
-Usage: $0 [all|godot-xr-tools|godot-cpp|ffmpeg]...
+Usage: $0 [all|godot-xr-tools|godot-cpp|ffmpeg|pinocchio-android]...
 
 Environment:
   OPERATOR_DEPS_CACHE_ROOT  Dependency root (default: $DEFAULT_OPERATOR_DEPS_CACHE_ROOT)
@@ -215,6 +216,21 @@ sync_ffmpeg() {
         ""
 }
 
+sync_pinocchio_android() {
+    # Android build wrapper for stack-of-tasks/pinocchio. The pristine
+    # checkout lives in .deps/src/pinocchio-android. The actual build is
+    # driven by xr/makefiles/Makefile.pinocchio against a per-ABI git
+    # worktree under .deps/build/pinocchio-android/<abi>/src so that
+    # `git clean -fdx` (run by sync_repo) never wipes build artifacts.
+    sync_repo \
+        "pinocchio-android" \
+        "https://github.com/DuinoDu/pinocchio-android.git" \
+        "refs/heads/main" \
+        "refs/remotes/origin/main" \
+        "$PINOCCHIO_ANDROID_COMMIT" \
+        "main"
+}
+
 acquire_lock
 mkdir -p "$DEPS_SRC_DIR" "$DEPS_BUILD_DIR"
 
@@ -228,6 +244,7 @@ for dep in "$@"; do
             sync_godot_xr_tools
             sync_godot_cpp
             sync_ffmpeg
+            sync_pinocchio_android
             ;;
         godot-xr-tools)
             sync_godot_xr_tools
@@ -237,6 +254,9 @@ for dep in "$@"; do
             ;;
         ffmpeg)
             sync_ffmpeg
+            ;;
+        pinocchio-android)
+            sync_pinocchio_android
             ;;
         -h|--help|help)
             usage
