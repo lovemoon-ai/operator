@@ -48,8 +48,18 @@ class QuestCaptureAndroidExportPlugin:
 	func _get_android_manifest_element_contents(platform: EditorExportPlatform, debug: bool) -> String:
 		if not _include_quest:
 			return ""
+		# BOUNDARYLESS_APP opts the app into Meta's Boundaryless mode so the
+		# Quest runtime fully suppresses the guardian (not just the visual
+		# overlay) while a passthrough layer is being rendered. Combined with
+		# the XR_META_boundary_visibility call in capture_app.gd, this also
+		# stops the boundary from re-appearing when the user walks beyond the
+		# configured play space. See:
+		#   https://developers.meta.com/horizon/documentation/unity/unity-boundaryless/
+		# Requirements: 6DOF app (Quest 3 is 6DOF), passthrough actively
+		# rendered. Has no effect on Quest 2 in fully-immersive VR sessions.
 		return """
 	<uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
+	<uses-feature android:name="com.oculus.feature.BOUNDARYLESS_APP" android:required="true" />
 	<uses-feature android:name="android.hardware.camera" android:required="false" />
 	<uses-feature android:name="android.hardware.vr.headtracking" android:version="1" android:required="true" />
 	"""
