@@ -7,6 +7,7 @@
 #include "pinocchio_runtime.h"
 #include "pinocchio_model.h"
 #include "pinocchio_data.h"
+#include "pinocchio_multitask_solver.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/godot.hpp>
@@ -20,6 +21,7 @@ static void initialize(ModuleInitializationLevel level) {
     ClassDB::register_class<operator_xr::PinocchioRuntime>();
     ClassDB::register_class<operator_xr::PinocchioModel>();
     ClassDB::register_class<operator_xr::PinocchioData>();
+    ClassDB::register_class<operator_xr::PinocchioMultiTaskSolver>();
 }
 
 static void uninitialize(ModuleInitializationLevel level) {

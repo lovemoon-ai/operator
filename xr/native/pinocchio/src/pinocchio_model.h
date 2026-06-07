@@ -31,7 +31,8 @@
 
 namespace operator_xr {
 
-class PinocchioData; // friend access to native_model()
+class PinocchioData;                // friend access to native_model()
+class PinocchioMultiTaskSolver;     // ditto — V2 multi-task QP solver
 
 class PinocchioModel : public godot::RefCounted {
     GDCLASS(PinocchioModel, godot::RefCounted)
@@ -110,6 +111,7 @@ private:
     // model after a PinocchioData has been bound to it (which would
     // invalidate the Data's pre-allocated nq/nv-sized buffers).
     friend class PinocchioData;
+    friend class PinocchioMultiTaskSolver;
     pinocchio::Model &native_model();
     const pinocchio::Model &native_model() const;
 
