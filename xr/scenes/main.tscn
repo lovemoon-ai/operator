@@ -1,9 +1,7 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="PackedScene" uid="uid://clc5dre31iskm" path="res://addons/godot-xr-tools/xr/start_xr.tscn" id="1_startxr"]
 [ext_resource type="Script" path="res://scenes/mode_select.gd" id="2_mode_select"]
-[ext_resource type="PackedScene" path="res://scenes/ui/viewport_2d_in_3d_clean.tscn" id="4_vp2d3d"]
-[ext_resource type="PackedScene" path="res://scenes/ui/mode_select_ui.tscn" id="5_mode_ui"]
 [ext_resource type="PackedScene" path="res://scenes/ui/operator_function_pointer.tscn" id="7_fnptr"]
 [ext_resource type="Script" path="res://scripts/xr/function_pointer_click_bridge.gd" id="8_pointer_click"]
 
@@ -36,9 +34,3 @@ controller_path = NodePath("..")
 script = ExtResource("8_pointer_click")
 pointer_path = NodePath("../RightFunctionPointer")
 controller_path = NodePath("..")
-
-[node name="ModePanel" parent="XROrigin3D/XRCamera3D" instance=ExtResource("4_vp2d3d")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.04, -0.92)
-screen_size = Vector2(0.78, 0.48)
-scene = ExtResource("5_mode_ui")
-viewport_size = Vector2(860, 540)

@@ -344,9 +344,12 @@ func _on_settings_close_requested() -> void:
 	_hide_settings_panel()
 
 
-## Exit on the panel mirrors ego mode: close the running session and quit app.
+## Exit on the panel returns to the mode-select / launcher scene so the
+## user can pick a different mode without restarting the app. The session
+## is torn down cleanly first; the Exit *card* on the launcher itself is
+## what actually quits the process.
 func _on_settings_exit_requested() -> void:
-	print("[Operator] Settings exit requested — quitting app")
+	print("[Operator] Settings exit requested — returning to mode select")
 	_cancel_launch_window()
 	if _command_sender:
 		_command_sender.set_sending(false)
@@ -360,7 +363,7 @@ func _on_settings_exit_requested() -> void:
 		_video_tcp_handler.disconnect_from_robot()
 	if _video_udp_handler:
 		_video_udp_handler.disconnect_from_robot()
-	get_tree().quit()
+	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 
 func _show_settings_panel() -> void:

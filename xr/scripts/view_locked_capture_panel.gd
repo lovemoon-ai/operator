@@ -47,9 +47,9 @@ var _live_server_status_label: Label
 # (QR ACK challenge vs plain reachability check) don't clobber each
 # other if the user scans a code while a probe is in flight.
 var _upload_health_request: HTTPRequest
-# _cursor, _pointer_position/_pointer_pressed, _highlighted_slot,
-# _exit_indicator/_exit_holding/_exit_hold_seconds are all inherited
-# from BaseSettingsPanel — don't redeclare.
+# _cursor, _pointer_position/_pointer_pressed, _highlighted_slot are
+# inherited from BaseSettingsPanel — don't redeclare. (The hold-to-confirm
+# exit indicator/state vars are gone now that Exit is a single click.)
 var _storage_label: Label
 var _tracker_section_label: Label
 var _tracker_status_label: Label
@@ -553,8 +553,8 @@ func _configured_result_port() -> int:
 # The actual Camera2 + ZXing scanning lives in the qr_scanner Android plugin
 # (xr/android_plugin/qrscanner/). This panel only fires the signal and
 # accepts the resulting payload back. capture_app.gd brokers the overlay
-# lifecycle. (_on_save_pressed / _on_exit_button_* / _cancel_exit_hold are
-# inherited from BaseSettingsPanel — don't redeclare them.)
+# lifecycle. (_on_save_pressed / _on_exit_button_pressed are inherited
+# from BaseSettingsPanel — don't redeclare them.)
 
 func _qr_scan_supported() -> bool:
 	# Show the button on Android only — the plugin is Android-only by
@@ -644,6 +644,10 @@ func _add_live_connect_button(row: HBoxContainer) -> Button:
 
 ## Called by capture_app.gd once the QR scanner overlay returns a payload.
 ## We DO NOT close the panel here — the user still needs to review + Save.
+## However we DO persist the URL/token to disk immediately, so a successful
+## scan survives an app restart even if the user never taps Save (this used
+## to be the source of confusion: scan succeeded but the config still showed
+## the old URL the next time the panel opened). See `claw/issues/...`.
 func set_upload_url_from_scan(url: String, token: String = "", enable_auto_upload: bool = false) -> void:
 	if _upload_url == null:
 		return
@@ -654,6 +658,11 @@ func set_upload_url_from_scan(url: String, token: String = "", enable_auto_uploa
 	_upload_token = token
 	if enable_auto_upload and _stream_toggles.has("upload_on_finalize"):
 		(_stream_toggles["upload_on_finalize"] as CheckButton).button_pressed = true
+	# Persist immediately so the scanned endpoint is part of the saved config
+	# without requiring an explicit Save tap. The full options snapshot is
+	# written so we don't drop unrelated edits that were in-flight on the
+	# panel; that mirrors what `_on_confirm_requested` would have done.
+	_save_to_disk(get_options())
 
 
 ## Called by capture_app.gd when the same QR overlay is used from live feed.
