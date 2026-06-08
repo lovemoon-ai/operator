@@ -26,6 +26,9 @@ xr/native/godot_mujoco/godot-cpp
 # Local agent/session files
 crash.log
 
+# Tmp files
+tmp*
+
 # Local hidden dependency checkouts and native build output.
 .deps
 .deps/

@@ -74,11 +74,34 @@ find_spatialmp4_so() {
     find "$root" -path '*/python/spatialmp4*.so' -type f -print -quit 2>/dev/null || true
 }
 
+patch_spatialmp4_build_ffmpeg() {
+    local script="$SPATIALMP4_HOME/scripts/build_ffmpeg.sh"
+    local tmp=""
+
+    [ -f "$script" ] || die "SpatialMP4 ffmpeg build script missing: $script"
+    if grep -q -- "--pkg-config-flags=--static" "$script"; then
+        return
+    fi
+
+    tmp="$(mktemp)"
+    sed \
+        's/--enable-static --disable-shared --enable-pic --disable-x86asm --disable-asm/--enable-static --disable-shared --enable-pic --disable-x86asm --disable-asm --pkg-config-flags=--static/' \
+        "$script" > "$tmp"
+    cat "$tmp" > "$script"
+    rm -f "$tmp"
+
+    if ! grep -q -- "--pkg-config-flags=--static" "$script"; then
+        die "failed to patch $script for static pkg-config dependency resolution"
+    fi
+    log "patched SpatialMP4 ffmpeg build to use pkg-config --static"
+}
+
 log "sync source checkout"
 "$SCRIPT_DIR/sync_deps.sh" spatialmp4
 
 [ -d "$SPATIALMP4_HOME" ] || die "SpatialMP4 checkout missing: $SPATIALMP4_HOME"
 [ -f "$SPATIALMP4_HOME/CMakeLists.txt" ] || die "not a SpatialMP4 checkout: $SPATIALMP4_HOME"
+patch_spatialmp4_build_ffmpeg
 
 PYTHON_BIN="$(python_bin)"
 PY_ABI="$($PYTHON_BIN - <<'PY'
