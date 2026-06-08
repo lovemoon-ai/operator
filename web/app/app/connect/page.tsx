@@ -11,11 +11,12 @@ import { RefreshableQr } from "./RefreshableQr";
 // "Connect" tab.
 //
 // Endpoint selection priority:
-//   1. `OPERATOR_INGEST_URL` from .env — when set, we render a single
-//      QR pointing at it (typical for prod where the box sits behind
-//      a public hostname like operator.conductor-ai.top).
-//   2. Otherwise, one QR per LAN-reachable IPv4 address pointing at
-//      /api/ingest on this host (typical for local dev / on-site LAN).
+//   1. `OPERATOR_INGEST_URL` from .env — when set, render exactly one
+//      QR pointing at it (typical for prod with a fixed public origin).
+//   2. Public request host — render a same-origin QR so prod can work
+//      behind a reverse proxy without hard-coding an ingest URL.
+//   3. Local/private request host — enumerate LAN IPv4 addresses so a
+//      headset on the same network can reach a dev server.
 //
 // In both cases the QR ack endpoint trades the (signed, 5-min)
 // ticket for the current dashboard user's permanent upload token, so
@@ -37,11 +38,11 @@ export default async function ConnectPage() {
   if (!user) redirect("/login?returnTo=/connect");
 
   const h = await headers();
-  const hostHeader = h.get("host") ?? `localhost:${process.env.PORT ?? 3000}`;
-  const port = hostHeader.includes(":") ? hostHeader.split(":").pop() ?? "3000" : "3000";
+  const hostHeader = forwardedHeader(h.get("x-forwarded-host")) ?? h.get("host");
+  const port = resolveIngestPort(hostHeader);
   const proto = (h.get("x-forwarded-proto") ?? "http").split(",")[0]!.trim();
 
-  const endpoints = await collectEndpoints(proto, port, user.id);
+  const endpoints = await collectEndpoints(proto, hostHeader, port, user.id);
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -124,7 +125,12 @@ export default async function ConnectPage() {
 
 // --- helpers --------------------------------------------------------------
 
-async function collectEndpoints(proto: string, port: string, userId: string): Promise<Endpoint[]> {
+async function collectEndpoints(
+  proto: string,
+  hostHeader: string | null,
+  port: string,
+  userId: string,
+): Promise<Endpoint[]> {
   // .env override wins over auto-detection: if OPERATOR_INGEST_URL is
   // set we emit exactly one QR pointing at it and skip the NIC scan.
   const overrideUrl = (process.env.OPERATOR_INGEST_URL ?? "").trim();
@@ -133,7 +139,12 @@ async function collectEndpoints(proto: string, port: string, userId: string): Pr
     return [ep];
   }
 
+  if (hostHeader && isPublicHost(hostHeader)) {
+    return [await buildEndpoint("public", `${proto}://${hostHeader}/api/ingest`, userId)];
+  }
+
   const out: Endpoint[] = [];
+  const seen = new Set<string>();
   const nics = networkInterfaces();
   for (const [iface, addrs] of Object.entries(nics)) {
     if (!addrs) continue;
@@ -141,9 +152,14 @@ async function collectEndpoints(proto: string, port: string, userId: string): Pr
       const isV4 = addr.family === "IPv4" || (addr.family as unknown as number) === 4;
       if (!isV4 || addr.internal) continue;
       const url = `${proto}://${addr.address}:${port}/api/ingest`;
+      if (seen.has(url)) continue;
+      seen.add(url);
       const ep = await buildEndpoint(iface, url, userId);
       out.push(ep);
     }
+  }
+  if (out.length === 0 && hostHeader) {
+    out.push(await buildEndpoint("request", `${proto}://${hostHeader}/api/ingest`, userId));
   }
   out.sort((a, b) => a.iface.localeCompare(b.iface));
   return out;
@@ -167,4 +183,49 @@ function hostFromUrl(url: string): string {
   } catch {
     return url;
   }
+}
+
+function resolveIngestPort(hostHeader: string | null): string {
+  const listenPort = process.env.PORT ?? "3000";
+  if (!hostHeader) return listenPort;
+
+  const parsed = hostHeader.startsWith("[")
+    ? hostHeader.match(/^\[[^\]]+\]:(\d+)$/)?.[1]
+    : hostHeader.match(/:(\d+)$/)?.[1];
+
+  if (!parsed || parsed === "80" || parsed === "443") return listenPort;
+  return parsed;
+}
+
+function forwardedHeader(value: string | null): string | null {
+  return value?.split(",")[0]?.trim() || null;
+}
+
+function isPublicHost(hostHeader: string): boolean {
+  const hostname = hostnameFromHeader(hostHeader).toLowerCase();
+  if (!hostname || hostname === "localhost") return false;
+  if (hostname === "::1" || hostname.endsWith(".local")) return false;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) return !isPrivateIpv4(hostname);
+  return true;
+}
+
+function hostnameFromHeader(hostHeader: string): string {
+  if (hostHeader.startsWith("[")) return hostHeader.slice(1, hostHeader.indexOf("]"));
+  return hostHeader.split(":")[0] ?? "";
+}
+
+function isPrivateIpv4(hostname: string): boolean {
+  const parts = hostname.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return false;
+  }
+  const [a, b] = parts as [number, number, number, number];
+  return (
+    a === 10 ||
+    a === 127 ||
+    a === 0 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
 }
