@@ -38,9 +38,10 @@ include makefiles/Makefile.pinocchio
 # Configuration
 # ---------------------------------------------------------------------------
 
-# Gradle binary used to drive android_plugin/ (separate from the godot-android
-# build which uses android/build/gradlew). Override e.g. `make CAPTURE_GRADLE=./gradlew ...`.
-CAPTURE_GRADLE ?= gradle
+# Gradle command used to drive android_plugin/. Prefer the checked-in Godot
+# Android wrapper so machines do not need a globally installed `gradle` binary.
+# Override e.g. `make CAPTURE_GRADLE=gradle ...`.
+CAPTURE_GRADLE ?= ../android/build/gradlew
 
 # Capture-plugin artifacts that end up bundled in the APK. `prepare-capture-plugins`
 # rebuilds when any of these is missing or older than its sources.
@@ -73,6 +74,12 @@ AHB_DIR      := native/ahb_decoder
 AHB_SRC      := $(AHB_DIR)/CMakeLists.txt $(AHB_DIR)/build.sh $(shell find $(AHB_DIR)/src -type f 2>/dev/null)
 AHB_ADDON_SO := addons/ahb_decoder/libahb_decoder.so
 AHB_JNI_SO   := android/build/libs/release/arm64-v8a/libahb_decoder.so
+GODOT_MUJOCO_DIR      := native/godot_mujoco
+GODOT_MUJOCO_SRC      := $(GODOT_MUJOCO_DIR)/CMakeLists.txt $(GODOT_MUJOCO_DIR)/build.sh $(shell find $(GODOT_MUJOCO_DIR)/src -type f 2>/dev/null)
+GODOT_MUJOCO_ADDON_SO := addons/godot_mujoco/bin/libgodot_mujoco.so
+GODOT_MUJOCO_ADDON_LIB := addons/godot_mujoco/bin/libmujoco.so
+GODOT_MUJOCO_JNI_SO := android/build/libs/arm64-v8a/libgodot_mujoco.so
+GODOT_MUJOCO_JNI_LIB := android/build/libs/arm64-v8a/libmujoco.so
 PICO_OPENXR_DIR := native/pico_openxr
 PICO_OPENXR_SRC := $(PICO_OPENXR_DIR)/CMakeLists.txt $(PICO_OPENXR_DIR)/build.sh $(shell find $(PICO_OPENXR_DIR)/src -type f 2>/dev/null)
 PICO_OPENXR_ADDON_SO := addons/pico_openxr/libpico_openxr.so
@@ -106,7 +113,7 @@ GODOT_CPP_BUILD_DIR := $(DEPS_BUILD_DIR)/godot-cpp
 # Phony targets exposed to xr/Makefile
 # ---------------------------------------------------------------------------
 
-.PHONY: deps setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins build-pinocchio-gdext clean-addons
+.PHONY: deps setup-vendors prepare-android-libs build-ahb build-godot-mujoco build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins build-pinocchio-gdext clean-addons
 
 # ---------------------------------------------------------------------------
 # Third-party vendored addons
@@ -192,6 +199,35 @@ $(AHB_JNI_SO): $(AHB_ADDON_SO)
 	@echo "[ahb] installed $@"
 
 build-ahb: $(AHB_ADDON_SO) $(AHB_JNI_SO)
+
+# ---------------------------------------------------------------------------
+# Godot MuJoCo GDExtension (native/godot_mujoco)
+# ---------------------------------------------------------------------------
+$(GODOT_MUJOCO_ADDON_SO): $(GODOT_MUJOCO_SRC)
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
+	    if [ -f "$@" ]; then \
+	        echo "[godot-mujoco] sources newer than $@ but ANDROID_NDK not set — keeping stale .so. 'export ANDROID_NDK=…' to rebuild."; \
+	        exit 0; \
+	    fi; \
+	    echo "[godot-mujoco] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
+	    exit 1; \
+	fi; \
+	$(GODOT_MUJOCO_DIR)/build.sh Release
+
+$(GODOT_MUJOCO_ADDON_LIB): $(GODOT_MUJOCO_ADDON_SO)
+	@test -s $@ || { echo "[godot-mujoco] missing $@ after build" >&2; exit 1; }
+
+$(GODOT_MUJOCO_JNI_SO): $(GODOT_MUJOCO_ADDON_SO)
+	@mkdir -p $(@D)
+	@cp -f $< $@
+	@echo "[godot-mujoco] installed $@"
+
+$(GODOT_MUJOCO_JNI_LIB): $(GODOT_MUJOCO_ADDON_LIB)
+	@mkdir -p $(@D)
+	@cp -f $< $@
+	@echo "[godot-mujoco] installed $@"
+
+build-godot-mujoco: $(GODOT_MUJOCO_ADDON_SO) $(GODOT_MUJOCO_ADDON_LIB) $(GODOT_MUJOCO_JNI_SO) $(GODOT_MUJOCO_JNI_LIB)
 
 # ---------------------------------------------------------------------------
 # PICO OpenXR GDExtension (native/pico_openxr)
@@ -408,17 +444,20 @@ clean-addons:
 		android_plugin/spatialmp4_muxer/.cxx \
 		android_plugin/spatialmp4_muxer/build \
 		android_plugin/qrscanner/build \
-		native/ahb_decoder/build-* \
+		native/godot_mujoco/build-* \
 		native/pico_openxr/build-* \
 		native/pinocchio/build-*
 		# $(GODOT_CPP_BUILD_DIR)
 	rm -f \
 		addons/ahb_decoder/*.so \
+		addons/godot_mujoco/bin/*.so \
 		addons/pico_openxr/*.so \
 		addons/pinocchio/*.so \
 		android/build/libs/arm64-v8a/libpico_openxr.so \
 		android/build/libs/arm64-v8a/libpinocchio_gd.so \
 		android/build/libs/arm64-v8a/libpinocchio_default.so \
+		android/build/libs/arm64-v8a/libgodot_mujoco.so \
+		android/build/libs/arm64-v8a/libmujoco.so \
 		$(PICO_OPENXR_LOADER_JNI_SO) \
 		$(PICO_OPENXR_LOADER_LEGACY_JNI_SO) \
 		addons/capture_common/bin/*.aar \

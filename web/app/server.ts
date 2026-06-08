@@ -24,7 +24,8 @@
 // `tsx server.ts` process on the same box. (See web/deploy/README.md.)
 process.title = "operator-web";
 
-import { createServer } from "node:http";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import path from "node:path";
 
 import express from "express";
@@ -49,11 +50,15 @@ import { deleteReview, reviewsRouter } from "./lib/reviews.js";
 import { getUserById, getUserByUploadToken } from "./lib/users.js";
 import { runPostIngestWorkers } from "./lib/workers/index.js";
 
-const PORT = Number(process.env.PORT ?? 3000);
+const DEFAULT_PORT = Number(process.env.PORT ?? 3000);
+const PORT_EXPLICITLY_SET = Boolean(process.env.PORT);
 const dev = process.env.NODE_ENV !== "production";
 
 async function main() {
-  const nextApp = next({ dev, hostname: "0.0.0.0", port: PORT });
+  const port = await resolveListenPort(DEFAULT_PORT);
+  process.env.PORT = String(port);
+
+  const nextApp = next({ dev, hostname: "0.0.0.0", port });
   await nextApp.prepare();
   const handleNext = nextApp.getRequestHandler();
 
@@ -214,15 +219,48 @@ async function main() {
     browserAuthMiddleware()(req, res, () => handleNext(req, res));
   });
 
-  createServer(app).listen(PORT, () => {
+  createHttpServer(app).listen(port, () => {
     const auth = describeAuth();
     // eslint-disable-next-line no-console
-    console.log(`[ego-app] http://localhost:${PORT}/`);
-    console.log(`[ego-app] ingest at  http://localhost:${PORT}/api/ingest`);
+    console.log(`[ego-app] http://localhost:${port}/`);
+    console.log(`[ego-app] ingest at  http://localhost:${port}/api/ingest`);
     console.log(`[ego-app] files at   ${path.resolve(ingest.dataRoot)}`);
     console.log(
       `[ego-app] auth       ${auth.mode === "bypass" ? "BYPASS (dev)" : `Conductor SSO ${auth.conductor}`}`,
     );
+  });
+}
+
+async function resolveListenPort(port: number): Promise<number> {
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`Invalid PORT: ${process.env.PORT}`);
+  }
+  if (!dev || PORT_EXPLICITLY_SET) return port;
+
+  for (let candidate = port; candidate < port + 20; candidate += 1) {
+    if (await canListen(candidate)) {
+      if (candidate !== port) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ego-app] port ${port} is in use; using ${candidate} instead`,
+        );
+      }
+      return candidate;
+    }
+  }
+
+  throw new Error(`No available dev port found from ${port} to ${port + 19}.`);
+}
+
+function canListen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createNetServer();
+    probe.unref();
+    probe.once("error", () => resolve(false));
+    probe.once("listening", () => {
+      probe.close(() => resolve(true));
+    });
+    probe.listen(port);
   });
 }
 

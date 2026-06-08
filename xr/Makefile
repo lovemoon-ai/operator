@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: log build-quest build-pico build-androidxr install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: log build-quest build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 # ADB=adb -s PB321XKGL4210070B
 ADB=adb
@@ -52,6 +52,14 @@ build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-load
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
 # 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
+build-mujoco-quest: setup-vendors prepare-android-libs build-ahb build-godot-mujoco clean-pico-openxr-loader-stage
+	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
+	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
+
+build-mujoco-pico: setup-vendors prepare-android-libs build-ahb build-godot-mujoco build-pico-openxr
+	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
+	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
+
 # ---------------------------------------------------------------------------
 # Device install / run / ship
 # ---------------------------------------------------------------------------
@@ -89,6 +97,10 @@ run-teleop:
 run-ego:
 	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode ego
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+
+run-mujoco:
+	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode mujoco
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "GodotMuJoCo" -e "godot" -e "OpenXR"
 
 stop:
 	$(ADB) shell am force-stop $(package)

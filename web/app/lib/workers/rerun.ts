@@ -27,8 +27,8 @@
  *   The sidecar relies on the SpatialMP4 SDK
  *   (https://github.com/Pico-Developer/SpatialMP4) which is NOT a
  *   PyPI package — it ships as a pybind11 build. We auto-discover a
- *   local checkout via `SPATIALMP4_HOME` (env var or common dev paths
- *   under $HOME) and forward it to the sidecar; the sidecar's
+ *   local checkout via `SPATIALMP4_HOME`, Operator's shared `.deps`
+ *   cache, or common dev paths under $HOME and forward it to the sidecar; the sidecar's
  *   bootstrap then injects the right `.so` directory onto `sys.path`.
  *   If no checkout is found the worker still runs but the sidecar
  *   bails out with a clear hint.
@@ -39,11 +39,7 @@
  *
  *   # Build the SpatialMP4 SDK once for your Python ABI (uv picks
  *   # CPython 3.13 by default, see the sidecar's PEP 723 block):
- *   git clone https://github.com/Pico-Developer/SpatialMP4 \
- *       ~/ws/spatialmp4-quest/SpatialMP4
- *   (cd ~/ws/spatialmp4-quest/SpatialMP4 && \
- *       cmake -S . -B build/host_py -DPython_EXECUTABLE=$(uv python find) && \
- *       cmake --build build/host_py -j)
+ *   scripts/setup_spatialmp4.sh
  *
  * The worker degrades gracefully when uv is missing or the sidecar
  * fails — the session page just hides the Rerun panel and the
@@ -90,7 +86,8 @@ const TOPK_FRAMES = process.env.RERUN_TOPK_FRAMES ?? null;
  *
  * Order of preference:
  *   1. SPATIALMP4_HOME env var (operator override)
- *   2. Common dev checkout locations under $HOME — first one that
+ *   2. Operator shared dependency cache at `.deps/src/SpatialMP4`
+ *   3. Common dev checkout locations under $HOME — first one that
  *      actually exists wins
  *
  * Returning `null` is fine — the sidecar still bails out with an
@@ -102,7 +99,10 @@ function discoverSpatialmp4Home(): string | null {
   if (fromEnv && fromEnv.length > 0) return fromEnv;
 
   const home = os.homedir();
+  const repoRoot = path.resolve(path.dirname(SCRIPT_PATH), "../../..");
+  const depsRoot = process.env.OPERATOR_DEPS_CACHE_ROOT ?? path.join(repoRoot, ".deps");
   const candidates = [
+    path.join(depsRoot, "src", "SpatialMP4"),
     path.join(home, "ws", "spatialmp4-quest", "SpatialMP4"),
     path.join(home, "spatialmp4-quest", "SpatialMP4"),
     path.join(home, "SpatialMP4"),
@@ -195,8 +195,9 @@ export async function runRerunWorker(
     // eslint-disable-next-line no-console
     console.warn(
       "[workers] rerun: SPATIALMP4_HOME not set and no checkout found under " +
+        "OPERATOR_DEPS_CACHE_ROOT/src/SpatialMP4, .deps/src/SpatialMP4, " +
         "~/ws/spatialmp4-quest/SpatialMP4, ~/spatialmp4-quest/SpatialMP4, " +
-        "or ~/SpatialMP4 — sidecar will likely fail to import spatialmp4.",
+        "or ~/SpatialMP4. Run scripts/setup_spatialmp4.sh.",
     );
   }
 

@@ -15,15 +15,16 @@ GODOT_XR_TOOLS_COMMIT="5570cc7560eece651eb6eeea47311c96535ec712"
 GODOT_CPP_COMMIT="60b5a4196de8442b43b32ba68ebe1e79cfcb762f"
 FFMPEG_TAG="n8.1.1"
 PINOCCHIO_ANDROID_COMMIT="74b44aff2fd00f66adb15d348f401b1579cc4126"
+SPATIALMP4_COMMIT="7b2549eb6b2b0b281510b375d7e3f8967b438f49"
 
 usage() {
     cat <<EOF
-Usage: $0 [all|godot-xr-tools|godot-cpp|ffmpeg|pinocchio-android]...
+Usage: $0 [all|web|godot-xr-tools|godot-cpp|ffmpeg|pinocchio-android|spatialmp4]...
 
 Environment:
   OPERATOR_DEPS_CACHE_ROOT  Dependency root (default: $DEFAULT_OPERATOR_DEPS_CACHE_ROOT)
                             Point at e.g. ~/.cache/operator/deps to share the
-                            godot-cpp / ffmpeg source + build cache across
+                            godot-cpp / ffmpeg / SpatialMP4 source + build cache across
                             branches and worktrees.
   GIT_DEPTH                 Fetch depth for pinned refs (default: 1, use 0 for full)
 EOF
@@ -231,6 +232,16 @@ sync_pinocchio_android() {
         "main"
 }
 
+sync_spatialmp4() {
+    sync_repo \
+        "SpatialMP4" \
+        "https://github.com/Pico-Developer/SpatialMP4.git" \
+        "refs/heads/main" \
+        "refs/remotes/origin/main" \
+        "$SPATIALMP4_COMMIT" \
+        "main"
+}
+
 acquire_lock
 mkdir -p "$DEPS_SRC_DIR" "$DEPS_BUILD_DIR"
 
@@ -246,6 +257,9 @@ for dep in "$@"; do
             sync_ffmpeg
             sync_pinocchio_android
             ;;
+        web)
+            sync_spatialmp4
+            ;;
         godot-xr-tools)
             sync_godot_xr_tools
             ;;
@@ -257,6 +271,9 @@ for dep in "$@"; do
             ;;
         pinocchio-android)
             sync_pinocchio_android
+            ;;
+        spatialmp4|SpatialMP4)
+            sync_spatialmp4
             ;;
         -h|--help|help)
             usage
