@@ -45,10 +45,10 @@ Configure via env vars:
 
 | var | default | meaning |
 |-----|---------|---------|
-| `PORT` | `3000` | listen port |
+| `PORT` | `3000` | listen port; dev auto-uses the next free port when unset |
 | `DATA_ROOT` | `./data` | sessions + `operator.db` (sqlite) live here |
 | `MAX_BYTES` | `100 GB` | hard cap on Upload-Length |
-| `AUTH_BYPASS` | unset | `1` skips OIDC and logs in as a fixed dev user |
+| `AUTH_BYPASS` | auto in dev when SSO is unset | `1` skips SSO and logs in as a fixed dev user |
 | `AUTH_SESSION_SECRET` | dev fallback | iron-session cookie secret (32+ chars); REQUIRED in prod |
 | `AUTH_BASE_URL` | `http://localhost:<PORT>` | origin used to build the OIDC `redirect_uri` |
 | `OIDC_ISSUER` | — | OIDC discovery URL |
@@ -96,9 +96,12 @@ sequentially (see `app/lib/workers/`):
    the top of the script — `rerun-sdk`, `numpy`, `scipy`, and
    `opencv-python` resolve on first run, cached after. The
    SpatialMP4 SDK itself is **not** on PyPI; we expect a local
-   checkout (auto-detected via `SPATIALMP4_HOME` or these dev paths,
-   first match wins):
+   checkout (auto-detected via `SPATIALMP4_HOME`, Operator's shared
+   `.deps/src/SpatialMP4` cache, or these legacy dev paths, first
+   match wins):
 
+   * `$OPERATOR_DEPS_CACHE_ROOT/src/SpatialMP4`
+   * `<repo>/.deps/src/SpatialMP4`
    * `$HOME/ws/spatialmp4-quest/SpatialMP4`
    * `$HOME/spatialmp4-quest/SpatialMP4`
    * `$HOME/SpatialMP4`
@@ -115,13 +118,9 @@ sequentially (see `app/lib/workers/`):
    brew install ffmpeg uv             # macOS
    # or: sudo apt install ffmpeg && curl -LsSf https://astral.sh/uv/install.sh | sh
 
-   # 2. SpatialMP4 SDK — build once for the Python ABI uv will pick
-   git clone https://github.com/Pico-Developer/SpatialMP4 \
-       ~/ws/spatialmp4-quest/SpatialMP4
-   cd ~/ws/spatialmp4-quest/SpatialMP4
-   cmake -S . -B build/host_py \
-       -DPython_EXECUTABLE=$(uv python find)
-   cmake --build build/host_py -j
+   # 2. SpatialMP4 SDK — sync into .deps and build once for the
+   # Python ABI uv will pick.
+   scripts/setup_spatialmp4.sh
    ```
 
    Subsequent ingests just trigger `uv run --script …`, which is

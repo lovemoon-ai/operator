@@ -152,6 +152,12 @@ def _discover_spatialmp4_module_dir(home: Path) -> Optional[Path]:
         home / "build" / "rerun_py310" / "python",
         home / "python",
     ]
+    deps_root_env = os.environ.get("OPERATOR_DEPS_CACHE_ROOT")
+    if deps_root_env:
+        quick_candidates.append(Path(deps_root_env).expanduser() / "build" / "spatialmp4" / f"python{abi.split('-')[-1] if '-' in abi else '313'}" / "python")
+    else:
+        repo_root = Path(__file__).resolve().parents[3]
+        quick_candidates.append(repo_root / ".deps" / "build" / "spatialmp4" / f"python{abi.split('-')[-1] if '-' in abi else '313'}" / "python")
     for c in quick_candidates:
         if c.is_dir() and any(c.glob(f"spatialmp4.{abi}-*.so")):
             return c
@@ -170,7 +176,8 @@ def _bootstrap_spatialmp4():
     Order of resolution:
       1. Already importable (pip-installed, on PYTHONPATH, …): use it.
       2. ``SPATIALMP4_HOME`` env var: discover matching .so, inject.
-      3. Hardcoded common dev paths.
+      3. Operator shared dependency cache under this repo.
+      4. Hardcoded common dev paths.
       4. Fail with an actionable hint.
     """
     try:
@@ -182,6 +189,9 @@ def _bootstrap_spatialmp4():
     env_home = os.environ.get("SPATIALMP4_HOME")
     if env_home:
         candidates.append(Path(env_home).expanduser().resolve())
+    repo_root = Path(__file__).resolve().parents[3]
+    deps_root = Path(os.environ.get("OPERATOR_DEPS_CACHE_ROOT", repo_root / ".deps"))
+    candidates.append((deps_root / "src" / "SpatialMP4").expanduser().resolve())
     # Common dev checkout locations — first one that exists wins.
     candidates.extend(
         Path(p).expanduser()
@@ -213,7 +223,8 @@ def _bootstrap_spatialmp4():
         f"that has a built `spatialmp4.{abi}-<plat>.so` under "
         "`build/<variant>/python/`, or pip-install the SDK into the env "
         "uv uses. The Node worker normally exports SPATIALMP4_HOME for you — "
-        "check that the autodetect path resolved on the server."
+        "check that the autodetect path resolved on the server or run "
+        "scripts/setup_spatialmp4.sh."
     )
 
 
