@@ -1,8 +1,6 @@
 extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name TeleopSettingsPanel
 
-const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
-
 signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool)
 signal close_requested
 
@@ -73,11 +71,31 @@ func _init() -> void:
 	# 720 tall replaces the legacy 884 — there's no longer a single tall
 	# scroll list, each group fits comfortably.
 	_setup_two_column_panel(Vector2i(840, 720), Vector2(0.63, 0.54), "UI_SETTINGS_TITLE", "UI_OK", 2, false)
-	var settings := load_settings()
+	var settings := _load_settings()
 	set_options(settings)
 	set_status(tr("UI_LOADED_SETTINGS" if bool(settings.get("loaded", false)) else "UI_USING_DEFAULTS"))
 	_apply_mode_lock()
 	print("[SettingsUI] ready (manual mode; %d discovered)" % (_discovery_option.item_count - 1))
+
+
+func _settings_path() -> String:
+	return SETTINGS_PATH
+
+
+func _settings_section() -> String:
+	return SECTION
+
+
+func _settings_defaults() -> Dictionary:
+	return _default_options()
+
+
+func _settings_loaded_key() -> String:
+	return "loaded"
+
+
+func _settings_log_tag() -> String:
+	return "Settings"
 
 
 func _build_settings_content(parent: VBoxContainer) -> void:
@@ -158,7 +176,7 @@ func _on_confirm_requested() -> void:
 	_ip_input.text = ip
 
 	var options := get_options()
-	_save_to_disk(options)
+	_save_settings(options)
 	set_status(tr("UI_APPLYING"))
 	settings_applied.emit(
 			str(options.get("ip", DEFAULT_IP)),
@@ -255,10 +273,6 @@ func set_options(options: Dictionary) -> void:
 	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
 
 
-func _save_to_disk(options: Dictionary) -> void:
-	ConfigStore.save(SETTINGS_PATH, SECTION, _default_options(), options, "Settings")
-
-
 func _on_discovery_selected(idx: int) -> void:
 	if idx <= 0:
 		_apply_mode_lock()
@@ -338,7 +352,7 @@ func _add_option_item(option: OptionButton, label: String, metadata: Variant, ic
 
 
 static func load_settings() -> Dictionary:
-	return ConfigStore.load(SETTINGS_PATH, SECTION, _default_options(), "loaded")
+	return BaseSettingsPanel.load_settings_from_config(SETTINGS_PATH, SECTION, _default_options(), "loaded")
 
 
 static func _default_options() -> Dictionary:
