@@ -190,10 +190,38 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   border-bottom: 1px solid rgba(255,255,255,0.04);
 }
 .session-list li:hover { background: rgba(88,166,255,0.06); }
-.session-list .row-link { display: flex; flex-direction: column; gap: 4px; color: var(--text); }
+.session-list .session-row { display: flex; align-items: center; gap: 12px; }
+.session-list .row-link { display: flex; flex-direction: column; gap: 4px; color: var(--text); flex: 1; min-width: 0; }
 .session-list .row-link:hover { text-decoration: none; }
 .session-list .id { font-family: var(--mono); font-size: 12px; }
 .session-list .meta { font-size: 11px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
+.session-list .row-remove {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid rgba(255,90,90,0.35);
+  color: rgba(255,140,140,0.9);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease, border-color 80ms ease;
+}
+.session-list .row-remove:hover:not(:disabled) {
+  background: rgba(255,90,90,0.15);
+  color: rgb(255,170,170);
+  border-color: rgba(255,90,90,0.6);
+}
+.session-list .row-remove:disabled { opacity: 0.5; cursor: progress; }
+/* Armed state: filled red so the "click again to commit" affordance is
+ * unambiguous against the muted idle outline. Auto-reverts after 4s
+ * (see SessionList.tsx CONFIRM_WINDOW_MS). */
+.session-list .row-remove--confirming,
+.session-list .row-remove--confirming:hover:not(:disabled) {
+  background: rgba(220,60,60,0.85);
+  color: #fff;
+  border-color: rgba(220,60,60,0.95);
+  font-weight: 600;
+}
 
 .badge {
   display: inline-block;
