@@ -175,6 +175,17 @@ func _all_card_data() -> Array:
 			"subtitle_key": "UI_EXIT_MODE_SUB",
 			"kind": CardUIScript.Kind.EXIT,
 		},
+		# EXIT card was missing from _all_card_data() after main's
+		# launcher-card refactor — `_configured_card_data()` filters by
+		# this list, so without an entry here Exit fell through silently.
+		# Caught by the post-merge "2 cards spawned" symptom on a launcher
+		# preset that had MODE_EGO + MODE_TESTS + MODE_EXIT enabled.
+		{
+			"mode": MODE_EXIT,
+			"title_key": "UI_EXIT_MODE",
+			"subtitle_key": "UI_EXIT_MODE_SUB",
+			"kind": CardUIScript.Kind.EXIT,
+		},
 	]
 
 
