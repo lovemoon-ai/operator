@@ -44,13 +44,13 @@ build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-load
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
-build-pico: setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-capture-plugins
-	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
-	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
+# build-pico: setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-capture-plugins
+# 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
+# 	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 
-build-androidxr: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
-	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
-	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
+# build-androidxr: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
+# 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
+# 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
 # ---------------------------------------------------------------------------
 # Device install / run / ship
@@ -59,8 +59,8 @@ build-androidxr: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-
 install-quest:
 	$(ADB) install -r -d $(apk_quest)
 
-install-pico:
-	$(ADB) install -r -d $(apk_pico)
+# install-pico:
+# 	$(ADB) install -r -d $(apk_pico)
 
 install-androidxr:
 	$(ADB) install -r -d $(apk_androidxr)
@@ -95,7 +95,7 @@ stop:
 
 build-install-quest: build-quest install-quest
 
-build-install-pico: build-pico install-pico
+# build-install-pico: build-pico install-pico
 
 ship-fast:
 	$(ADB) shell am force-stop $(package)
@@ -107,7 +107,7 @@ ship-fast:
 	$(ADB) logcat --pid=$$PID -v brief | \
 		grep -E "godot|Operator|RobotView|TcpHandler|KotlinVideo|AhbVideo|OpenXR"
 
-ship-pico: build-install-pico ship-fast
+# ship-pico: build-install-pico ship-fast
 
 ship-quest: build-install-quest ship-fast
 
@@ -122,7 +122,13 @@ log:
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot"
 
 log2:
-	$(ADB) logcat -c | $(ADB) logcat | grep -e "OpenXR"
+	# $(ADB) logcat -c | $(ADB) logcat | grep -e "OpenXR"
+
+log3:
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "QRScannerPlugin"
+
+log999:
+	$(ADB) logcat -c && $(ADB) logcat 2>&1 | tee android.log
 
 crash:
 	$(ADB) logcat -d > crash.log
