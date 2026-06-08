@@ -11,7 +11,6 @@ const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
 const OperatorUIPointerVisualScript := preload("res://scripts/xr/operator_ui_pointer_visual.gd")
 const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_interaction_router.gd")
-const EgoSettingsStoreScript := preload("res://scripts/ego_settings_store.gd")
 const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
 const EgoQRScannerScript := preload("res://scripts/ego_qr_scanner.gd")
 const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
@@ -715,11 +714,10 @@ func _setup_xr_scene() -> void:
 	qr_scanner.payload_accepted.connect(_on_qr_payload_accepted)
 	qr_scanner.cancelled.connect(_on_qr_cancelled)
 	origin.add_child(qr_scanner)
-	# Hydrate the panel from the persisted ego settings so the user's last
-	# choices (interaction mode, stream toggles, save_root, upload URL,
-	# upload toggles) survive an app restart. See EgoSettingsStore +
-	# claw/issues/010-ego-data-upload.md PR-1.
-	var persisted := EgoSettingsStoreScript.load_options()
+	# Hydrate the panel through its own BaseSettingsPanel-backed loader so
+	# every settings surface reads and writes through the same persistence
+	# path.
+	var persisted := ViewLockedCapturePanelScript.load_settings()
 	if _is_live_feed_mode():
 		persisted["server_host"] = str(persisted.get("server_host", default_live_server_host))
 		persisted["server_port"] = int(persisted.get("server_port", default_live_server_port))
@@ -1119,9 +1117,8 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 	# too late if the dialog gets dismissed during capture.
 	if not prev_record_audio and bool(capture_options.get("record_audio", false)):
 		_audio_permission_prompt_fired = false
-	# Persist for next launch. Token is base64-obfuscated, not encrypted —
-	# see EgoSettingsStore header for the security trip-wire.
-	EgoSettingsStoreScript.save_options(capture_options)
+	# The settings panel already persisted this snapshot through
+	# BaseSettingsPanel before emitting `saved`.
 	# Redact the token in the log so it does not land in adb logcat /
 	# crash.log uploads.
 	var log_view := capture_options.duplicate(true)
@@ -1545,8 +1542,8 @@ func _update_input_mode_detection(delta: float) -> void:
 		settings_panel.call("set_interaction_mode", detected)
 	# We intentionally do NOT persist on every detection flip -- a wobbly
 	# tracking moment could otherwise spam the settings cfg. The mode is
-	# re-detected on every launch, and capture_app.gd already calls
-	# EgoSettingsStoreScript.save_options() when the operator presses Save.
+	# re-detected on every launch, and the settings panel persists through
+	# BaseSettingsPanel when the operator presses Save.
 
 
 func _detect_input_mode() -> String:
