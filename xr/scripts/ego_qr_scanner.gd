@@ -161,17 +161,31 @@ func _start_plugin_scan() -> void:
 	_connect_plugin_signals(plugin)
 	if not plugin.is_connected("qr_error", Callable(self, "_on_qr_error")):
 		plugin.connect("qr_error", Callable(self, "_on_qr_error"))
-	# Permission gate. startScan() refuses without CAMERA permission, so
-	# we ask Android to show the OS dialog and tell the user what to do
-	# next. Reachable workflow: dialog appears in front of the headset
-	# view → user grants → dialog closes → user taps Cancel on this
-	# overlay → settings panel reappears → user taps 📷 again →
-	# we land back here, hasCameraPermission() is true, startScan() runs.
-	if plugin.has_method("hasCameraPermission") and not bool(plugin.call("hasCameraPermission")):
+	# Permission gate. startScan() refuses without CAMERA + vendor
+	# (Quest HEADSET_CAMERA / Pico) permission, so we ask Android to
+	# show the OS dialog and tell the user what to do next.
+	#
+	# We deliberately do NOT guard the calls with `plugin.has_method(...)`.
+	# Godot 4 Android plugins expose @UsedByGodot methods via JNI in a
+	# way that makes them callable through `plugin.call(...)` but invisible
+	# to `Object.has_method()` — gating on has_method() short-circuits the
+	# whole gate to false and skips straight into startScan() with no
+	# permission prompt, which is exactly the failure we just fixed.
+	#
+	# The methods are guaranteed to exist (we built the AAR ourselves);
+	# if they ever disappeared at runtime, plugin.call() would push an
+	# error and startScan would still fail loudly with permission_denied,
+	# which is the same surface area.
+	#
+	# Reachable workflow: dialog appears in front of the headset view →
+	# user grants → dialog closes → user taps Cancel on this overlay →
+	# settings panel reappears → user taps 📷 again → we land back here,
+	# hasCameraPermission() returns true, startScan() runs.
+	var granted := bool(plugin.call("hasCameraPermission"))
+	if not granted:
 		_set_status("Camera permission needed. Grant it in the OS dialog, then tap Cancel and try again from the settings panel.")
 		print("[QR] camera permission missing; requesting Android permission")
-		if plugin.has_method("requestCameraPermission"):
-			plugin.call("requestCameraPermission")
+		plugin.call("requestCameraPermission")
 		return
 	var started := bool(plugin.call("startScan"))
 	print("[QR] QRScannerPlugin.startScan returned %s" % started)
@@ -255,6 +269,24 @@ func _on_qr_detections(results_json: String) -> void:
 func _on_qr_error(message: String) -> void:
 	print("[QR] scanner error: %s" % message)
 	_set_status("Scanner error: " + message)
+
+
+func _on_qr_permission_granted() -> void:
+	# OS permission dialog returned "Allow" and the Kotlin plugin
+	# verified the full vendor-aware permission set is now granted.
+	# If the user is still looking at the scanner overlay, retry the
+	# Camera2 open right away so we don't make them close + reopen.
+	# Guard against the racy cases where they already cancelled, or
+	# the scan started by some other path while the dialog was up.
+	if not visible:
+		print("[QR] permission granted but overlay closed; ignoring")
+		return
+	if _running:
+		print("[QR] permission granted but already scanning; ignoring")
+		return
+	print("[QR] permission granted; auto-restarting scan")
+	_set_status("")
+	_start_plugin_scan()
 
 
 func _on_qr_preview_frame(frame_path: String) -> void:
@@ -392,6 +424,12 @@ func _connect_plugin_signals(plugin: Object) -> void:
 	if plugin.has_signal("qr_preview_frame"):
 		if not plugin.is_connected("qr_preview_frame", Callable(self, "_on_qr_preview_frame")):
 			plugin.connect("qr_preview_frame", Callable(self, "_on_qr_preview_frame"))
+	# Auto-resume after the OS permission dialog returns "Allow", so the
+	# user doesn't have to close the overlay and re-tap 📷. New APKs only;
+	# guard with has_signal so older Kotlin plugins skip cleanly.
+	if plugin.has_signal("qr_permission_granted"):
+		if not plugin.is_connected("qr_permission_granted", Callable(self, "_on_qr_permission_granted")):
+			plugin.connect("qr_permission_granted", Callable(self, "_on_qr_permission_granted"))
 	if plugin.has_signal("qr_detections"):
 		if not plugin.is_connected("qr_detections", Callable(self, "_on_qr_detections")):
 			plugin.connect("qr_detections", Callable(self, "_on_qr_detections"))

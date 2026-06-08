@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
 import android.graphics.ImageFormat
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
@@ -130,13 +131,25 @@ internal fun computeQrBounds(
  *     thread (on startScan / stopScan).
  *
  * Permission handling:
- *   ContextCompat.checkSelfPermission() is the gate. If denied we emit
- *   qr_error("permission_denied") and bail; the GDScript overlay shows
- *   a hint and waits for the user to grant via OS dialog. We do NOT
- *   request the permission ourselves here on the assumption that the
- *   QuestCapture pipeline already prompted at app start — but if you
- *   build a Quest binary that never opens the capture panel, you'll
- *   need to call requestCameraPermission() (added here for that case).
+ *   The headset camera on Quest 3 / Pico 4 is gated by *two* runtime
+ *   permissions: standard `android.permission.CAMERA` AND a vendor
+ *   "headset/passthrough camera" permission. Just declaring the vendor
+ *   permission in the manifest is not enough — Horizon OS classifies
+ *   `horizonos.permission.HEADSET_CAMERA` as dangerous, so it has to be
+ *   requested at runtime separately. Same story on PicoOS for
+ *   `com.picovr.permission.CAMERA` on the SKUs that enforce it.
+ *
+ *   We resolve the per-device permission set dynamically: each candidate
+ *   is filtered through PackageManager.getPermissionInfo() so a Quest-only
+ *   permission isn't required on a Pico device (and vice versa) — that
+ *   would otherwise wedge `hasCameraPermission()` at false forever
+ *   because the permission can never be granted.
+ *
+ *   If any required permission is missing, hasCameraPermission() returns
+ *   false; the GDScript overlay calls requestCameraPermission() to pop
+ *   the OS dialog, then shows a "grant + retry" hint. After grant +
+ *   retry, startScan() proceeds and Camera2.openCamera() actually
+ *   succeeds against the passthrough camera ID.
  */
 class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
 
@@ -156,6 +169,18 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         private const val META_CAMERA_SOURCE_PASSTHROUGH = 0
         private const val META_CAMERA_POSITION_LEFT = 0
         private const val META_CAMERA_POSITION_RIGHT = 1
+
+        // Vendor passthrough/headset camera permissions. We probe each
+        // through PackageManager.getPermissionInfo() at request time and
+        // only require the ones the running device actually defines —
+        // so a Quest binary doesn't get permanently stuck waiting for
+        // the Pico permission to be granted, and vice versa.
+        private const val PERM_HEADSET_CAMERA = "horizonos.permission.HEADSET_CAMERA"
+        private const val PERM_PICOVR_CAMERA = "com.picovr.permission.CAMERA"
+        private val VENDOR_CAMERA_PERMISSIONS = listOf(
+            PERM_HEADSET_CAMERA,
+            PERM_PICOVR_CAMERA,
+        )
     }
 
     private data class DecodedQr(
@@ -185,6 +210,12 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
             //   "open_failed:<n>"    Camera2 errored out with code <n>
             //   "session_failed"     CameraCaptureSession.onConfigureFailed
             SignalInfo("qr_error", String::class.java),
+            // Fires when the OS permission dialog we opened from
+            // requestCameraPermission() returns with all required
+            // permissions now GRANTED. Lets the GDScript overlay
+            // auto-retry startScan() without making the user close
+            // and re-open the scanner panel after tapping Allow.
+            SignalInfo("qr_permission_granted"),
         )
     }
 
@@ -225,7 +256,15 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
             return false
         }
         if (!hasCameraPermission()) {
-            Log.w(TAG, "startScan: CAMERA permission denied")
+            // Defensive auto-request: if a GDScript caller forgot the
+            // permission gate (or the gate short-circuited because the
+            // Godot Object bridge's has_method() can't see @UsedByGodot
+            // entries), fire the OS prompt now so the user has a
+            // recovery path. This is safe — requestPermissions is a
+            // no-op when nothing's missing, and a duplicate request
+            // when the user already declined just re-shows the dialog.
+            Log.w(TAG, "startScan: permission missing; firing requestPermissions and aborting this call")
+            requestCameraPermission()
             emitError("permission_denied")
             return false
         }
@@ -276,19 +315,120 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
     @UsedByGodot
     fun hasCameraPermission(): Boolean {
         val ctx = activityRef ?: return false
-        return ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
+        return requiredRuntimePermissions(ctx).all {
+            ContextCompat.checkSelfPermission(ctx, it) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    /**
+     * Godot lifecycle hook: fires on the main thread after
+     * ActivityCompat.requestPermissions() (called from
+     * requestCameraPermission()) returns with the user's choice.
+     *
+     * If our request code matches and the user granted everything we
+     * need, emit qr_permission_granted so the GDScript overlay can
+     * auto-retry startScan() — saving the user the "tap Cancel, tap
+     * 📷 again" detour. We re-check via hasCameraPermission() rather
+     * than scanning grantResults directly so the vendor-aware policy
+     * stays in one place.
+     */
+    override fun onMainRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String?>?,
+        grantResults: IntArray?,
+    ) {
+        super.onMainRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != PERMISSION_REQUEST_CODE) return
+        val names = permissions?.joinToString(",") { it ?: "<null>" } ?: "<null>"
+        val granted = hasCameraPermission()
+        Log.i(TAG, "onMainRequestPermissionsResult: code=$requestCode allGranted=$granted permissions=[$names]")
+        if (granted) {
+            emitOnGodotThread { emitSignal("qr_permission_granted") }
+        }
     }
 
     @UsedByGodot
     fun requestCameraPermission() {
         val ctx = activityRef ?: return
-        if (hasCameraPermission()) return
+        val missing = requiredRuntimePermissions(ctx).filter {
+            ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) return
+        Log.i(TAG, "requesting runtime permissions: ${missing.joinToString(",")}")
         ActivityCompat.requestPermissions(
             ctx,
-            arrayOf(Manifest.permission.CAMERA),
+            missing.toTypedArray(),
             PERMISSION_REQUEST_CODE,
         )
+    }
+
+    /**
+     * Per-device required runtime permission set.
+     *
+     * - Standard `android.permission.CAMERA` is always required.
+     * - `horizonos.permission.HEADSET_CAMERA` (Meta Quest) and
+     *   `com.picovr.permission.CAMERA` (Pico) are vendor passthrough
+     *   permissions; we include each only when the running device
+     *   actually needs it. Adding an unsupported vendor permission to
+     *   this list is fatal — Android silently auto-denies unknown
+     *   permission names, which would wedge hasCameraPermission() at
+     *   false forever and the user could never start the scanner.
+     *
+     * Detection has two independent signals; either is enough:
+     *   1. PackageManager.getPermissionInfo() recognises the perm.
+     *   2. Build.MANUFACTURER / BRAND matches the vendor (fallback for
+     *      Horizon OS builds where the vendor perm is declared in a
+     *      system partition that getPermissionInfo() doesn't surface to
+     *      apps — we hit exactly this on Quest 3 / v68+).
+     *
+     * All three perms are declared in our merged manifest already; this
+     * function only decides which ones we treat as required at runtime.
+     */
+    private fun requiredRuntimePermissions(ctx: Activity): List<String> {
+        val out = mutableListOf(Manifest.permission.CAMERA)
+        val mfr = (Build.MANUFACTURER ?: "").lowercase()
+        val brand = (Build.BRAND ?: "").lowercase()
+        val isQuest = mfr.contains("oculus") || mfr.contains("meta") ||
+            brand.contains("oculus") || brand.contains("meta")
+        val isPico = mfr.contains("pico") || mfr.contains("bytedance") ||
+            brand.contains("pico")
+        for (vendor in VENDOR_CAMERA_PERMISSIONS) {
+            val probeKnown = isPermissionDefined(ctx, vendor)
+            val deviceMatches = when (vendor) {
+                PERM_HEADSET_CAMERA -> isQuest
+                PERM_PICOVR_CAMERA -> isPico
+                else -> false
+            }
+            if (probeKnown || deviceMatches) {
+                out.add(vendor)
+                Log.i(
+                    TAG,
+                    "requiring vendor permission $vendor (probe=$probeKnown deviceMatches=$deviceMatches mfr=$mfr brand=$brand)",
+                )
+            } else {
+                Log.i(
+                    TAG,
+                    "skipping vendor permission $vendor (probe=false deviceMatches=false mfr=$mfr brand=$brand)",
+                )
+            }
+        }
+        return out
+    }
+
+    private fun isPermissionDefined(ctx: Activity, name: String): Boolean {
+        return try {
+            ctx.packageManager.getPermissionInfo(name, 0)
+            true
+        } catch (_: PackageManager.NameNotFoundException) {
+            false
+        } catch (t: Throwable) {
+            // Defensive — some OEM stubs throw RuntimeException on unknown
+            // permission lookups instead of NameNotFoundException. Treat
+            // every failure as "probe inconclusive"; the Build.MANUFACTURER
+            // signal in requiredRuntimePermissions() is the real safety net.
+            Log.w(TAG, "getPermissionInfo($name) threw; treating as undefined", t)
+            false
+        }
     }
 
     @UsedByGodot
@@ -326,9 +466,14 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         imageReader = reader
 
         return try {
-            if (ActivityCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) !=
-                PackageManager.PERMISSION_GRANTED
-            ) {
+            // Re-check the full vendor-aware permission set immediately
+            // before openCamera() so we don't go through the throw-and-
+            // catch dance below for the simple "permission was revoked
+            // since startScan()" case. Important on Quest: granting
+            // CAMERA but not HEADSET_CAMERA passes the legacy single-
+            // permission check yet still SecurityException's from
+            // openCamera() on a passthrough camera id.
+            if (!hasCameraPermission()) {
                 emitError("permission_denied")
                 shutdownInternal()
                 return false

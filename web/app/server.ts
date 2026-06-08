@@ -134,6 +134,24 @@ async function main() {
   });
 
   app.use("/api/ingest", (req, res, next) => {
+    // TUS OPTIONS is a *discovery* endpoint — clients use it to read
+    // back capability headers (Tus-Version, Tus-Extension, Tus-Max-Size)
+    // BEFORE they have a token. Quoting the TUS spec §3:
+    //   "An OPTIONS request MAY be used to gather information about the
+    //    Server's current configuration. […] The Server MUST respond to
+    //    OPTIONS requests with a 204 No Content or 200 OK status."
+    // Auth-gating OPTIONS breaks two real flows:
+    //   1. The XR client's panel-open health probe (`OPTIONS /api/ingest`
+    //      with no token yet) goes amber-401 → user can't tell whether
+    //      the endpoint is alive.
+    //   2. CORS preflights from a browser-hosted TUS client never see the
+    //      Tus-Version reply and abort the actual PATCH/POST.
+    // We let OPTIONS through to the TUS middleware (it answers with the
+    // capability headers and a 204) and keep Bearer-token gating on the
+    // request methods that actually move bytes (POST/PATCH/HEAD/DELETE).
+    if (req.method === "OPTIONS") {
+      return tusMiddleware(req, res, next);
+    }
     const header = req.header("Authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     const user = getUserByUploadToken(token);
