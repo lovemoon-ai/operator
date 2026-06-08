@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rename, stat, unlink } from "node:fs/promises";
+import { mkdir, rename, rmdir, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough, type Writable } from "node:stream";
 
@@ -95,7 +95,18 @@ export class DiskStorage implements StorageDriver {
     try {
       await unlink(uri);
     } catch {
-      /* ignore */
+      /* ignore — file may already be gone */
+    }
+    // Best-effort: drop the per-session subdir once we've removed the
+    // last artifact in it. `rmdir` returns ENOTEMPTY if other files
+    // are still there (e.g. a sibling delete failed, or the user has
+    // a manual seed file alongside), and ENOENT if we've already
+    // removed it on a previous call. Both are fine to swallow.
+    const dir = path.dirname(uri);
+    try {
+      await rmdir(dir);
+    } catch {
+      /* ignore — dir non-empty or already gone */
     }
   }
 

@@ -126,6 +126,23 @@ const stmts = {
     SELECT substr(received_at, 1, 10) AS day, COUNT(*) AS sessions, COALESCE(SUM(total_bytes), 0) AS bytes
     FROM sessions WHERE user_id = ? GROUP BY day
   `),
+
+  // Delete plumbing for the dashboard's "Remove" button. The lookup
+  // statements above (`getSession` / `getSessionScoped`) decide whether
+  // the caller is allowed to proceed; the three deletes below run
+  // unconditionally once inside the transaction.
+  listArtifactUris: db.prepare<[string], { uri: string }>(`
+    SELECT uri FROM artifacts WHERE session_id = ?
+  `),
+  deleteArtifactsForSession: db.prepare<[string]>(`
+    DELETE FROM artifacts WHERE session_id = ?
+  `),
+  deleteResourcesForSession: db.prepare<[string]>(`
+    DELETE FROM resources WHERE session_id = ?
+  `),
+  deleteSessionRow: db.prepare<[string]>(`
+    DELETE FROM sessions WHERE id = ?
+  `),
 };
 
 // --- Helpers -------------------------------------------------------------
@@ -310,6 +327,31 @@ export class SqliteStore implements SessionStore {
     const slice = rows.slice(0, limit);
     const nextCursor = rows.length > limit ? slice[slice.length - 1]?.id ?? null : null;
     return { items: slice.map(rowToSession), nextCursor };
+  }
+
+  async deleteSession(
+    sessionId: string,
+    opts: { userId?: string } = {},
+  ): Promise<{ artifactUris: string[] } | null> {
+    // Wrap lookup + deletes in a single transaction so a concurrent
+    // GET /sessions/:id can never observe a half-deleted state (e.g.
+    // session row present, artifact rows gone). The transaction is
+    // sync (better-sqlite3 style); we hand the result back through
+    // the surrounding Promise.
+    const txn = db.transaction(() => {
+      const session = opts.userId
+        ? stmts.getSessionScoped.get(sessionId, opts.userId)
+        : stmts.getSession.get(sessionId);
+      if (!session) return null;
+      // Capture URIs BEFORE deleting artifact rows — the storage layer
+      // needs them to rm the actual bytes off disk after we commit.
+      const artifactUris = stmts.listArtifactUris.all(sessionId).map((r) => r.uri);
+      stmts.deleteArtifactsForSession.run(sessionId);
+      stmts.deleteResourcesForSession.run(sessionId);
+      stmts.deleteSessionRow.run(sessionId);
+      return { artifactUris };
+    });
+    return txn();
   }
 
   async stats(opts?: { userId?: string }): Promise<StoreStats> {

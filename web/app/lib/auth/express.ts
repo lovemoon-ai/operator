@@ -19,6 +19,7 @@ import express from "express";
 import { runAsUser } from "../auth-context.js";
 import { findOrCreateUserBySub, getUserById, type User } from "../users.js";
 import { seedDemoForUser } from "../seed.js";
+import { verifyArtifactToken } from "./artifact-token.js";
 import { loadAuthConfig, type AuthConfig } from "./config.js";
 import { buildAuthorizeUrl, exchangeCode } from "./conductor.js";
 import { readSession } from "./session.js";
@@ -155,14 +156,39 @@ export function browserAuthMiddleware(): RequestHandler {
   return async (req, res, next) => {
     const cfg = config();
     const session = await readSession(req, res, cfg.sessionSecret);
-    if (!session.userId) return failAuth(req, res);
-    const user = getUserById(session.userId);
-    if (!user) {
+    if (session.userId) {
+      const user = getUserById(session.userId);
+      if (user) {
+        req.user = user;
+        return runAsUser(user.id, () => next());
+      }
       session.destroy();
-      return failAuth(req, res);
     }
-    req.user = user;
-    runAsUser(user.id, () => next());
+    // Fallback: signed token in query for GETs on the rrd artifact —
+    // the Rerun WASM viewer's internal reqwest fetch can't carry the
+    // browser cookie, so we sign a short-lived HMAC into the URL the
+    // page hands to the viewer. Scoped to the rrd path to keep the
+    // bypass tightly narrow; everything else still requires cookie.
+    if (req.method === "GET" && /\/artifacts\/rrd\//.test(req.path)) {
+      // The token was signed against the absolute request path. Inside
+      // `app.use("/api/ingest-read", mw)` Express strips the mount, so
+      // `req.path` is `/sessions/.../rrd/...` — we need the full path
+      // including the mount, which we recover from `originalUrl`.
+      const signedPath = ((req.originalUrl || req.url || req.path).split("?")[0]) || req.path;
+      const tokUser = verifyArtifactToken(
+        cfg.sessionSecret,
+        signedPath,
+        req.query as Record<string, unknown>,
+      );
+      if (tokUser) {
+        const user = getUserById(tokUser);
+        if (user) {
+          req.user = user;
+          return runAsUser(user.id, () => next());
+        }
+      }
+    }
+    return failAuth(req, res);
   };
 }
 

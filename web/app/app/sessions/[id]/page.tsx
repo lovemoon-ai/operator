@@ -1,12 +1,11 @@
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 
+import { signArtifactToken } from "@/lib/auth/artifact-token";
 import { getServerComponentUser } from "@/lib/auth/server-component";
 import { ingest } from "@/lib/ingest";
-import { getReview } from "@/lib/reviews";
 import { fmtBytes, fmtDate } from "@/lib/format";
 
-import { ReviewForm } from "./ReviewForm";
 import { RerunViewer } from "./RerunViewer";
 import { SessionLiveRefresh } from "./SessionLiveRefresh";
 import { WorkerPendingIndicator } from "./WorkerPendingIndicator";
@@ -36,7 +35,6 @@ export default async function SessionDetailPage({ params }: PageProps) {
   if (!user) redirect(`/login?returnTo=/sessions/${encodeURIComponent(id)}`);
   const session = await ingest.store.getSession(id, { userId: user.id });
   if (!session) notFound();
-  const review = getReview(id);
   const mediaArtifact = session.artifacts["media"];
   // Corrupt media disables every downstream render path so the user
   // never looks at a half-baked preview / rrd derived from bad bytes.
@@ -70,9 +68,22 @@ export default async function SessionDetailPage({ params }: PageProps) {
   // HTTP sources whose path doesn't end in that extension. The ingest
   // read API maps the extra path segment to the same artifact byte
   // stream (see the `:filename?` route in ego-ingest/src/api.ts).
-  const rrdUrl = !mediaCorrupt && session.artifacts["rrd"]
-    ? `/api/ingest-read/sessions/${encodeURIComponent(id)}/artifacts/rrd/session.rrd`
-    : null;
+  //
+  // Sign the URL with a short-lived HMAC token. The WASM viewer's
+  // internal reqwest fetch can't carry the browser cookie, so plain
+  // cookie auth would 401. `browserAuthMiddleware` accepts a valid
+  // token-in-query as a fallback for this specific path. See
+  // `lib/auth/artifact-token.ts` for the rationale.
+  let rrdUrl: string | null = null;
+  if (!mediaCorrupt && session.artifacts["rrd"]) {
+    const rrdPath = `/api/ingest-read/sessions/${encodeURIComponent(id)}/artifacts/rrd/session.rrd`;
+    const secret =
+      process.env.AUTH_SESSION_SECRET && process.env.AUTH_SESSION_SECRET.length >= 32
+        ? process.env.AUTH_SESSION_SECRET
+        : "dev-only-insecure-iron-session-secret-replace-in-prod-XXXXXXXX";
+    const { query } = signArtifactToken(secret, rrdPath, user.id);
+    rrdUrl = `${rrdPath}?${query}`;
+  }
   const previewPending =
     !!mediaArtifact && !mediaCorrupt && !session.artifacts["preview"];
   const rrdPending = !!mediaArtifact && !mediaCorrupt && !session.artifacts["rrd"];
@@ -201,11 +212,6 @@ export default async function SessionDetailPage({ params }: PageProps) {
           )}
         </section>
       )}
-
-      <section className="panel">
-        <h2>Review</h2>
-        <ReviewForm sessionId={session.id} initial={review} />
-      </section>
 
       <section className="panel">
         <h2>Artifacts</h2>
