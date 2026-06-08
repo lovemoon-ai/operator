@@ -29,11 +29,21 @@ var _motion_file: FileAccess
 # checked bit-for-bit offline (scripts/verify_depth_ffv1.py --reference).
 var _depth_raw_dir := ""
 var _depth_raw_index := 0
+var _depth_sidecar_frame_count := 0
+var _depth_mp4_write_count := 0
+var _depth_mp4_write_failed_count := 0
+var _depth_last_mp4_write_error := ""
 
 
 func start_session(options: Dictionary = {}) -> bool:
 	close()
 	capture_options = options.duplicate(true)
+	_depth_raw_dir = ""
+	_depth_raw_index = 0
+	_depth_sidecar_frame_count = 0
+	_depth_mp4_write_count = 0
+	_depth_mp4_write_failed_count = 0
+	_depth_last_mp4_write_error = ""
 	session_start_unix_us = Time.get_unix_time_from_system() * 1000000
 	session_start_ticks_us = Time.get_ticks_usec()
 	session_id = _make_session_id()
@@ -111,6 +121,10 @@ func start_session(options: Dictionary = {}) -> bool:
 		"depth_timestamp_source_priority": ["openxr_runtime_display_time", "godot_async_callback_ticks"],
 		"capture_options": capture_options,
 		"sources": sources,
+		"depth_saved_in_mp4": false,
+		"stream_confirmations": {
+			"depth": _depth_confirmation_record(false, "")
+		},
 		"device": _resolve_device_identity()
 	})
 
@@ -165,18 +179,18 @@ func close() -> void:
 	if saved_path.is_empty() and not attempted_native_finish and not output_mp4_path.is_empty():
 		saved_path = output_mp4_path
 
-	# Compute SHA-256 of the finalized mp4 and patch it into the
-	# manifest. The ingest server uses this to detect transit corruption
-	# (proxy bug, half-PATCH on flaky Wi-Fi that somehow still satisfied
-	# Content-Length, etc.). Hashing a 100 MB mp4 takes ~200 ms on the
-	# Quest 3, well inside the post-stop UX budget — the user already
-	# sees the "Saved" toast while we run.
+	if session_dir.is_empty():
+		return
+
+	# Patch finalize-time facts back into the manifest. Unlike `sources.depth`,
+	# this confirmation records whether a depth frame was actually accepted by
+	# the mp4 muxer during this session.
+	var media_hash := ""
 	if not saved_path.is_empty():
-		var media_hash := _compute_file_sha256(saved_path)
-		if not media_hash.is_empty():
-			_rewrite_manifest_with_media_integrity(saved_path, media_hash)
-		else:
+		media_hash = _compute_file_sha256(saved_path)
+		if media_hash.is_empty():
 			push_warning("session_spool_writer: sha256 compute failed for %s" % saved_path)
+	_rewrite_manifest_after_finalize(saved_path, media_hash)
 
 
 # Stream the file in chunks so we never hold more than CHUNK bytes in
@@ -203,38 +217,83 @@ func _compute_file_sha256(path: String) -> String:
 	return ctx.finish().hex_encode()
 
 
-# Rewrite manifest.json in place to add the freshly-computed media
-# hash + size + filename under `artifacts.media`. We keep the original
-# top-level fields untouched so any v3 reader that doesn't know about
-# `artifacts` keeps working — this is purely additive.
-func _rewrite_manifest_with_media_integrity(media_path: String, media_sha256: String) -> void:
+# Rewrite manifest.json in place to add finalize-time media integrity and
+# per-stream confirmations. We keep the original top-level fields untouched
+# so any v3 reader that doesn't know these additive fields keeps working.
+func _rewrite_manifest_after_finalize(media_path: String, media_sha256: String) -> void:
 	var manifest_path := "%s/manifest.json" % session_dir
 	var reader := FileAccess.open(manifest_path, FileAccess.READ)
 	if reader == null:
-		push_warning("session_spool_writer: manifest missing at %s; skipping integrity rewrite" % manifest_path)
+		push_warning("session_spool_writer: manifest missing at %s; skipping finalize rewrite" % manifest_path)
 		return
 	var text := reader.get_as_text()
 	reader.close()
 	var parsed: Variant = JSON.parse_string(text)
 	if not (parsed is Dictionary):
-		push_warning("session_spool_writer: manifest at %s is not a JSON object; skipping integrity rewrite" % manifest_path)
+		push_warning("session_spool_writer: manifest at %s is not a JSON object; skipping finalize rewrite" % manifest_path)
 		return
 	var manifest: Dictionary = parsed
-	var media_bytes := 0
-	var size_probe := FileAccess.open(media_path, FileAccess.READ)
-	if size_probe != null:
-		media_bytes = int(size_probe.get_length())
-		size_probe.close()
-	var artifacts_field: Variant = manifest.get("artifacts", {})
-	var artifacts: Dictionary = artifacts_field if artifacts_field is Dictionary else {}
-	artifacts["media"] = {
-		"filename": media_path.get_file(),
-		"bytes": media_bytes,
-		"sha256": media_sha256,
-		"hash_algo": "sha256",
-	}
-	manifest["artifacts"] = artifacts
+	if not media_path.is_empty():
+		var media_bytes := 0
+		var size_probe := FileAccess.open(media_path, FileAccess.READ)
+		if size_probe != null:
+			media_bytes = int(size_probe.get_length())
+			size_probe.close()
+		var artifacts_field: Variant = manifest.get("artifacts", {})
+		var artifacts: Dictionary = artifacts_field if artifacts_field is Dictionary else {}
+		var media_artifact := {
+			"filename": media_path.get_file(),
+			"bytes": media_bytes
+		}
+		if not media_sha256.is_empty():
+			media_artifact["sha256"] = media_sha256
+			media_artifact["hash_algo"] = "sha256"
+		artifacts["media"] = media_artifact
+		manifest["artifacts"] = artifacts
+	var depth_confirmation := _depth_confirmation_record(true, media_path)
+	manifest["depth_saved_in_mp4"] = bool(depth_confirmation.get("saved_in_mp4", false))
+	var confirmations_field: Variant = manifest.get("stream_confirmations", {})
+	var confirmations: Dictionary = confirmations_field if confirmations_field is Dictionary else {}
+	confirmations["depth"] = depth_confirmation
+	manifest["stream_confirmations"] = confirmations
 	_write_json(manifest_path, manifest)
+
+
+func _depth_confirmation_record(finalized: bool, media_path: String) -> Dictionary:
+	var requested := _capture_enabled("record_depth")
+	var saved_in_mp4 := requested and finalized and not media_path.is_empty() and _depth_mp4_write_count > 0
+	var status := "pending"
+	var reason := ""
+	if finalized:
+		if saved_in_mp4 and _depth_mp4_write_failed_count > 0:
+			status = "partial"
+			reason = _depth_last_mp4_write_error if not _depth_last_mp4_write_error.is_empty() else "one or more depth writes failed"
+		elif saved_in_mp4:
+			status = "saved"
+		elif not requested:
+			status = "disabled"
+			reason = "record_depth disabled"
+		elif media_path.is_empty():
+			status = "missing"
+			reason = "mp4 finalize failed"
+		elif _depth_mp4_write_count <= 0:
+			status = "missing"
+			reason = "no successful depth frames accepted by mp4 muxer"
+		else:
+			status = "partial"
+			reason = _depth_last_mp4_write_error if not _depth_last_mp4_write_error.is_empty() else "one or more depth writes failed"
+	return {
+		"requested": requested,
+		"saved_in_mp4": saved_in_mp4,
+		"status": status,
+		"reason": reason,
+		"finalized": finalized,
+		"mp4_path": media_path,
+		"mp4_write_count": _depth_mp4_write_count,
+		"mp4_write_failed_count": _depth_mp4_write_failed_count,
+		"sidecar_frame_count": _depth_sidecar_frame_count,
+		"raw_dump_count": _depth_raw_index
+	}
 
 
 func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, write_jsonl: bool = true) -> void:
@@ -339,7 +398,7 @@ func write_depth_frame(
 ) -> void:
 	if muxer_plugin != null and eye == "left" and depth_u16_mm.size() > 0:
 		var fov: Dictionary = metadata.get("fov_tangent", {})
-		muxer_plugin.call(
+		var result: Variant = muxer_plugin.call(
 			"writeDepthFrame",
 			timestamp_ns,
 			width,
@@ -350,10 +409,17 @@ func write_depth_frame(
 			float(fov.get("top", 0.0)),
 			float(fov.get("bottom", 0.0))
 		)
-		# Capture the exact bytes handed to the encoder, in the same order as the
-		# mp4 depth frames, so verify_depth_ffv1.py can prove the FFV1 round-trip
-		# is bit-exact. Guarded by dump_raw_depth so production runs pay nothing.
-		if not _depth_raw_dir.is_empty():
+		var mp4_write_ok := bool(result)
+		if mp4_write_ok:
+			_depth_mp4_write_count += 1
+		else:
+			_depth_mp4_write_failed_count += 1
+			_depth_last_mp4_write_error = "writeDepthFrame returned false"
+		# Capture the exact bytes confirmed by the muxer call, in the same order
+		# as the mp4 depth frames, so verify_depth_ffv1.py can prove the FFV1
+		# round-trip is bit-exact. Guarded by dump_raw_depth so production runs
+		# pay nothing.
+		if mp4_write_ok and not _depth_raw_dir.is_empty():
 			var raw_file := FileAccess.open(
 				"%s/frame_%05d.u16" % [_depth_raw_dir, _depth_raw_index], FileAccess.WRITE)
 			if raw_file:
@@ -368,6 +434,7 @@ func write_depth_frame(
 		"height": height,
 		"metadata": metadata
 	}
+	_depth_sidecar_frame_count += 1
 	_write_jsonl(_depth_file, record)
 
 
