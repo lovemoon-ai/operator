@@ -24,7 +24,7 @@ web app rather than running a bespoke service.
 In scope:
 
 * New URL + token + toggle fields on `ViewLockedCapturePanel` plus
-  persistence to `user://ego_settings.cfg`.
+  persistence to `user://capture_settings.cfg`.
 * A background uploader on the XR side that runs **after**
   `SessionSpoolWriter::close()` finalizes the MP4 (never during
   recording — see trip-wires below).
@@ -126,11 +126,9 @@ artifact_kind)` returns `409 Conflict` with a JSON body
 
 ### New files
 
-* `xr/scripts/ego_settings_store.gd` — `ConfigFile` read/write at
-  `user://ego_settings.cfg`. Mirrors the pattern at
-  `xr/scenes/ui/settings_ui.gd:232-268` (which uses the same store for
-  teleop settings, but in a different section). One section per mode
-  keeps the two from stepping on each other.
+* `xr/scripts/ui/base_settings_panel.gd` — shared `ConfigFile` read/write
+  helper used by both teleop and capture settings panels. Capture settings
+  are stored at `user://capture_settings.cfg`.
 * `xr/scripts/ego_uploader.gd` — `Node` autoloaded by `capture_app.gd`.
   Owns:
   - A `Queue` (Array of session descriptors) persisted to
@@ -157,10 +155,12 @@ artifact_kind)` returns `409 Conflict` with a JSON body
   - In `stop_capture()` after `writer.close()` (`capture_app.gd:297`),
     if `upload_on_finalize` is true and `upload_url` is non-empty,
     call `uploader.enqueue(session_dir, output_mp4_path, capture_options)`.
-  - On `_ready()`, load persisted settings via `EgoSettingsStore`
-    and call `settings_panel.set_options(...)` so the panel reflects
-    them on first frame.
-  - On `_on_capture_settings_saved`, call `EgoSettingsStore.save(...)`.
+  - On `_ready()`, load persisted settings through
+    `ViewLockedCapturePanel.load_settings()` and call
+    `settings_panel.set_options(...)` so the panel reflects them on
+    first frame.
+  - Settings are saved by the panel through `BaseSettingsPanel` before
+    `_on_capture_settings_saved` is emitted.
 * `xr/scripts/view_locked_record_control.gd`
   - One new status line under the timer: `"Uploading 42% · ETA 1:12"`
     when an upload is active, `"Upload failed · tap to retry"` red on
@@ -181,7 +181,7 @@ artifact_kind)` returns `409 Conflict` with a JSON body
   returns the finalized file. Reading `output_mp4_path` directly
   would race the rename on slow eMMC.
 * **Token storage is base64-obfuscated, not encrypted.** The
-  `user://ego_settings.cfg` file is in the app's private data dir on
+  `user://capture_settings.cfg` file is in the app's private data dir on
   Android, but rooted Pico headsets can still read it. Document this
   in the README — for production use, fronting the ingest server
   with mTLS or per-headset short-lived tokens is the recommended
@@ -314,7 +314,7 @@ import { SessionList, SessionDetail, StatsPanel } from '@love-moon/ego-ingest/re
 
 ## Rollout / PR sequence
 
-* **PR-1 (XR, no upload yet).** `ego_settings_store.gd` +
+* **PR-1 (XR, no upload yet).** Base settings persistence +
   capture-panel UI for `upload_url` / `upload_token` /
   `upload_on_finalize` / `keep_local_after_upload`, persisted across
   app launches. Stores into `manifest.json`'s `capture_options` so

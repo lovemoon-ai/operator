@@ -1,7 +1,6 @@
 extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name ViewLockedCapturePanel
 
-const ConfigStore := preload("res://scripts/ui/settings_config_store.gd")
 const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
 
 signal saved(options: Dictionary)
@@ -92,7 +91,27 @@ func _init(live_server_mode: bool = false) -> void:
 	_setup_two_column_panel(VIEWPORT_SIZE, Vector2(0.63, 0.54), title_key, "UI_SAVE", 2, true)
 	if not _live_server_mode:
 		_setup_upload_health_request()
-	set_options(load_settings())
+	set_options(_load_settings())
+
+
+func _settings_path() -> String:
+	return SETTINGS_PATH
+
+
+func _settings_section() -> String:
+	return SECTION
+
+
+func _settings_defaults() -> Dictionary:
+	return _default_options()
+
+
+func _settings_log_tag() -> String:
+	return "CaptureSettings"
+
+
+func _settings_secret_keys() -> Dictionary:
+	return _settings_secret_key_map()
 
 
 func _setup_upload_health_request() -> void:
@@ -293,7 +312,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# on, every finalized session is queued for resumable upload (TUS
 	# 1.0.0) to the configured endpoint. See
 	# `claw/issues/010-ego-data-upload.md`. Settings persist via
-	# EgoSettingsStore across app launches.
+	# BaseSettingsPanel across app launches.
 	var upload := register_group("upload", "UI_UPLOAD", "signal")
 
 	# [LineEdit — Upload URL] [💓 health-check] [📷 scan]
@@ -416,7 +435,7 @@ func _on_confirm_requested() -> void:
 			_show_live_server_required_callout(blocker)
 			return
 	var options := get_options()
-	_save_to_disk(options)
+	_save_settings(options)
 	close()
 	saved.emit(options)
 
@@ -560,15 +579,24 @@ func _default_value_for_key(key: String) -> Variant:
 	return _default_options().get(key)
 
 
-func _save_to_disk(options: Dictionary) -> void:
-	ConfigStore.save(SETTINGS_PATH, SECTION, _default_options(), options, "CaptureSettings")
-
-
 static func load_settings() -> Dictionary:
-	var out := ConfigStore.load(SETTINGS_PATH, SECTION, _default_options())
+	var out := BaseSettingsPanel.load_settings_from_config(
+			SETTINGS_PATH,
+			SECTION,
+			_default_options(),
+			"",
+			_settings_secret_key_map()
+	)
 	var save_root := str(out.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
 	out["save_root"] = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
 	return out
+
+
+static func _settings_secret_key_map() -> Dictionary:
+	return {
+		"upload_token": "upload_token_b64",
+		"server_auth_token": "server_auth_token_b64",
+	}
 
 
 static func _default_options() -> Dictionary:
@@ -734,7 +762,7 @@ func set_upload_url_from_scan(url: String, token: String = "", enable_auto_uploa
 	# without requiring an explicit Save tap. The full options snapshot is
 	# written so we don't drop unrelated edits that were in-flight on the
 	# panel; that mirrors what `_on_confirm_requested` would have done.
-	_save_to_disk(get_options())
+	_save_settings(get_options())
 
 
 ## Called by capture_app.gd when the same QR overlay is used from live feed.

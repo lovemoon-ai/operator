@@ -157,7 +157,7 @@ In:
 - Kotlin plugin: Camera2 + ZXing
 - Multi-result arrows
 - Wire detected payload → upload URL field
-- Settings persistence (already in place via EgoSettingsStore)
+- Settings persistence (already in place via BaseSettingsPanel)
 
 Out of scope (deferred):
 - iOS / AVP support (would need AVFoundation port)
