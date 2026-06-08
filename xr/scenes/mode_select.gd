@@ -184,6 +184,8 @@ func _all_card_data() -> Array:
 # z=-0.95" approach left the centre card visibly closer than the corners
 # because their straight-line distance grew with the X offset.
 func _compute_card_positions(card_count: int) -> Array:
+	# Restored after the merge resolution dropped the array init: the
+	# match block populates ``positions`` then every branch returns it.
 	var positions: Array = []
 	match card_count:
 		0:
@@ -191,21 +193,27 @@ func _compute_card_positions(card_count: int) -> Array:
 		1:
 			positions.append(_card_position(0.0, 0.0))
 		2:
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG_2:
 				positions.append(_card_position(float(angle_deg), 0.0))
 		3:
 			for angle_deg in TOP_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), 0.0))
 		4:
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG_2:
 				positions.append(_card_position(float(angle_deg), TOP_ROW_Y))
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG_2:
 				positions.append(_card_position(float(angle_deg), BOTTOM_ROW_Y))
 		_:
+			# 5+ cards: 3 on the top row, the rest (2 or 3) on the bottom
+			# centered with the appropriate angle set. Picks ``_2`` when only
+			# two remain so they centre cleanly; falls back to ``_3``
+			# otherwise so a 5- or 6-card launcher stays symmetric.
 			for angle_deg in TOP_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), TOP_ROW_Y))
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
-				positions.append(_card_position(float(angle_deg), BOTTOM_ROW_Y))
+			var bottom_angles: Array = BOTTOM_ROW_ANGLES_DEG_2 if (card_count - 3) <= 2 else BOTTOM_ROW_ANGLES_DEG_3
+			var bottom_count: int = mini(card_count - 3, bottom_angles.size())
+			for i in range(bottom_count):
+				positions.append(_card_position(float(bottom_angles[i]), BOTTOM_ROW_Y))
 	return positions
 
 
