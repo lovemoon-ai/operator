@@ -26,7 +26,7 @@ PicoOpenXRBridge="*res://scripts/xr/pico_openxr_bridge.gd"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/godot-xr-tools/plugin.cfg", "res://addons/live_video/plugin.cfg", "res://addons/spatial_capture_contract/plugin.cfg", "res://addons/capture_common/plugin.cfg", "res://addons/spatialmp4_muxer/plugin.cfg", "res://addons/quest_capture_android/plugin.cfg", "res://addons/pico_capture_android/plugin.cfg", "res://addons/qr_scanner/plugin.cfg", "res://addons/live-push/plugin.cfg", "res://addons/live-pull/plugin.cfg")
+enabled=PackedStringArray("res://addons/godot-xr-tools/plugin.cfg", "res://addons/live_video/plugin.cfg", "res://addons/spatial_capture_contract/plugin.cfg", "res://addons/capture_common/plugin.cfg", "res://addons/spatialmp4_muxer/plugin.cfg", "res://addons/quest_capture_android/plugin.cfg", "res://addons/pico_capture_android/plugin.cfg", "res://addons/qr_scanner/plugin.cfg", "res://addons/live-push/plugin.cfg", "res://addons/live-pull/plugin.cfg", "res://addons/operator_launcher/plugin.cfg")
 
 [filesystem]
 
