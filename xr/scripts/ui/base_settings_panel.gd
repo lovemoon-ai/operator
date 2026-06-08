@@ -63,6 +63,141 @@ func _process(_delta: float) -> void:
 	pass
 
 
+func _settings_path() -> String:
+	return ""
+
+
+func _settings_section() -> String:
+	return "settings"
+
+
+func _settings_defaults() -> Dictionary:
+	return {}
+
+
+func _settings_loaded_key() -> String:
+	return ""
+
+
+func _settings_log_tag() -> String:
+	return "Settings"
+
+
+func _settings_secret_keys() -> Dictionary:
+	return {}
+
+
+func _load_settings() -> Dictionary:
+	return BaseSettingsPanel.load_settings_from_config(
+			_settings_path(),
+			_settings_section(),
+			_settings_defaults(),
+			_settings_loaded_key(),
+			_settings_secret_keys()
+	)
+
+
+func _save_settings(options: Dictionary) -> Error:
+	return BaseSettingsPanel.save_settings_to_config(
+			_settings_path(),
+			_settings_section(),
+			_settings_defaults(),
+			options,
+			_settings_log_tag(),
+			_settings_secret_keys()
+	)
+
+
+static func load_settings_from_config(
+		path: String,
+		section: String,
+		defaults: Dictionary,
+		loaded_key: String = "",
+		secret_keys: Dictionary = {}
+) -> Dictionary:
+	var out := defaults.duplicate(true)
+	var cfg := ConfigFile.new()
+	var err := cfg.load(path)
+	if not loaded_key.is_empty():
+		out[loaded_key] = err == OK
+	if err != OK:
+		return out
+
+	for key in defaults.keys():
+		var default_value: Variant = defaults[key]
+		if secret_keys.has(key):
+			var encoded_key := str(secret_keys[key])
+			if cfg.has_section_key(section, encoded_key):
+				out[key] = _decode_setting_secret(str(cfg.get_value(section, encoded_key, "")))
+			elif cfg.has_section_key(section, key):
+				# Compatibility with older builds that stored the field under
+				# its plain key before the base settings persistence handled
+				# secret obfuscation centrally.
+				out[key] = _coerce_setting_value(cfg.get_value(section, key, default_value), default_value)
+			continue
+		out[key] = _coerce_setting_value(cfg.get_value(section, key, default_value), default_value)
+	return out
+
+
+static func save_settings_to_config(
+		path: String,
+		section: String,
+		defaults: Dictionary,
+		options: Dictionary,
+		log_tag: String = "Settings",
+		secret_keys: Dictionary = {}
+) -> Error:
+	if path.is_empty():
+		push_warning("[%s] Cannot save settings: empty path" % log_tag)
+		return ERR_INVALID_PARAMETER
+	var cfg := ConfigFile.new()
+	# Preserve unknown keys so newer builds or external tooling do not lose
+	# data when an older panel saves its known fields.
+	cfg.load(path)
+	for key in defaults.keys():
+		var value: Variant = options.get(key, defaults[key])
+		if secret_keys.has(key):
+			var encoded_key := str(secret_keys[key])
+			var secret := str(value)
+			if secret.is_empty():
+				if cfg.has_section_key(section, encoded_key):
+					cfg.erase_section_key(section, encoded_key)
+			else:
+				cfg.set_value(section, encoded_key, _encode_setting_secret(secret))
+			if cfg.has_section_key(section, key):
+				cfg.erase_section_key(section, key)
+			continue
+		cfg.set_value(section, key, value)
+	var err := cfg.save(path)
+	if err != OK:
+		push_warning("[%s] Failed to save %s: error %d" % [log_tag, path, err])
+	return err
+
+
+static func _coerce_setting_value(value: Variant, default_value: Variant) -> Variant:
+	match typeof(default_value):
+		TYPE_BOOL:
+			return bool(value)
+		TYPE_INT:
+			return int(value)
+		TYPE_FLOAT:
+			return float(value)
+		TYPE_STRING:
+			return str(value)
+		_:
+			return value
+
+
+static func _encode_setting_secret(plain: String) -> String:
+	return Marshalls.utf8_to_base64(plain)
+
+
+static func _decode_setting_secret(encoded: String) -> String:
+	if encoded.is_empty():
+		return ""
+	return Marshalls.base64_to_utf8(encoded)
+
+
 func open() -> void:
 	# 开启面板：缩放 + 淡入
 	visible = true
