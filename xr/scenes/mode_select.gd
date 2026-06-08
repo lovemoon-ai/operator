@@ -15,6 +15,9 @@ const MODE_LIVE_FEED := "live_feed"
 const MODE_VR := "vr"
 const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
+const LAUNCHER_CARD_ALL_FEATURE := "operator_launcher_card_all"
+const DEFAULT_LAUNCHER_CARD_MODES := [MODE_EGO_CAPTURE]
+const REQUIRED_LAUNCHER_CARD_MODES := [MODE_EXIT]
 
 const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
 const CardSceneTemplate := preload("res://scenes/ui/mode_select_ui.tscn")
@@ -80,12 +83,76 @@ func _ready() -> void:
 		call_deferred("_on_xr_started")
 
 	_arm_startup_fallback()
-	print("[Operator] Mode select initialized (5 cards spawned)")
+	print("[Operator] Mode select initialized (%d cards spawned)" % _cards.size())
 
 
 func _spawn_cards() -> void:
-	# Card data: (mode key, title text key, subtitle text key, icon kind)
-	var card_data := [
+	var card_data := _configured_card_data()
+	var positions := _compute_card_positions(card_data.size())
+	for i in range(card_data.size()):
+		var entry := card_data[i] as Dictionary
+		var card := _create_card(entry, positions[i])
+		_cards.append(card)
+
+
+func _configured_card_data() -> Array:
+	var enabled_modes := _configured_launcher_card_modes()
+	var card_data: Array = []
+	for entry in _all_card_data():
+		var mode := String(entry["mode"])
+		if enabled_modes.has(mode):
+			card_data.append(entry)
+	return card_data
+
+
+func _configured_launcher_card_modes() -> Array:
+	var all_modes := _all_launcher_card_modes()
+	var modes: Array = []
+	if OS.has_feature(LAUNCHER_CARD_ALL_FEATURE):
+		modes = all_modes.duplicate()
+	else:
+		for mode in all_modes:
+			if _launcher_card_feature_enabled(String(mode)):
+				modes.append(mode)
+		if modes.is_empty():
+			modes = DEFAULT_LAUNCHER_CARD_MODES.duplicate()
+	return _with_required_launcher_card_modes(modes)
+
+
+func _with_required_launcher_card_modes(modes: Array) -> Array:
+	for mode in REQUIRED_LAUNCHER_CARD_MODES:
+		if not modes.has(mode):
+			modes.append(mode)
+	return modes
+
+
+func _all_launcher_card_modes() -> Array:
+	return [MODE_TELEOP, MODE_EGO_CAPTURE, MODE_LIVE_FEED, MODE_VR, MODE_EXIT]
+
+
+func _launcher_card_feature_enabled(mode: String) -> bool:
+	for feature in _launcher_card_features(mode):
+		if OS.has_feature(String(feature)):
+			return true
+	return false
+
+
+func _launcher_card_features(mode: String) -> Array:
+	match mode:
+		MODE_TELEOP:
+			return ["operator_launcher_card_teleop"]
+		MODE_EGO_CAPTURE:
+			return ["operator_launcher_card_ego", "operator_launcher_card_ego_capture"]
+		MODE_LIVE_FEED:
+			return ["operator_launcher_card_live", "operator_launcher_card_live_feed"]
+		MODE_VR:
+			return ["operator_launcher_card_vr"]
+		_:
+			return []
+
+
+func _all_card_data() -> Array:
+	return [
 		{
 			"mode": MODE_TELEOP,
 			"title_key": "UI_TELEOP_MODE",
@@ -118,38 +185,45 @@ func _spawn_cards() -> void:
 		},
 	]
 
-	var positions := _compute_card_positions(card_data.size())
-	for i in range(card_data.size()):
-		var entry := card_data[i] as Dictionary
-		var card := _create_card(entry, positions[i])
-		_cards.append(card)
 
-
-# Returns 3-2 layout positions on the launcher cylinder. Each slot maps an
+# Returns layout positions on the launcher cylinder. Each slot maps an
 # angle to (R sin θ, y, -R cos θ) — keeping every card at the same XZ
 # distance R from the user's vertical axis. The previous "all cards at
 # z=-0.95" approach left the centre card visibly closer than the corners
 # because their straight-line distance grew with the X offset.
 func _compute_card_positions(card_count: int) -> Array:
 	var positions: Array = []
-	var top_count: int = mini(3, card_count)
-	for i in range(top_count):
-		var angle_rad := deg_to_rad(float(TOP_ROW_ANGLES_DEG[i]))
-		positions.append(Vector3(
-			CARD_RADIUS_M * sin(angle_rad),
-			TOP_ROW_Y,
-			-CARD_RADIUS_M * cos(angle_rad),
-		))
-	var remaining: int = card_count - top_count
-	for i in range(remaining):
-		var angle_deg: float = float(BOTTOM_ROW_ANGLES_DEG[i]) if i < BOTTOM_ROW_ANGLES_DEG.size() else 0.0
-		var angle_rad := deg_to_rad(angle_deg)
-		positions.append(Vector3(
-			CARD_RADIUS_M * sin(angle_rad),
-			BOTTOM_ROW_Y,
-			-CARD_RADIUS_M * cos(angle_rad),
-		))
+	match card_count:
+		0:
+			return positions
+		1:
+			positions.append(_card_position(0.0, 0.0))
+		2:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
+				positions.append(_card_position(float(angle_deg), 0.0))
+		3:
+			for angle_deg in TOP_ROW_ANGLES_DEG:
+				positions.append(_card_position(float(angle_deg), 0.0))
+		4:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
+				positions.append(_card_position(float(angle_deg), TOP_ROW_Y))
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
+				positions.append(_card_position(float(angle_deg), BOTTOM_ROW_Y))
+		_:
+			for angle_deg in TOP_ROW_ANGLES_DEG:
+				positions.append(_card_position(float(angle_deg), TOP_ROW_Y))
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
+				positions.append(_card_position(float(angle_deg), BOTTOM_ROW_Y))
 	return positions
+
+
+func _card_position(angle_deg: float, y: float) -> Vector3:
+	var angle_rad := deg_to_rad(angle_deg)
+	return Vector3(
+		CARD_RADIUS_M * sin(angle_rad),
+		y,
+		-CARD_RADIUS_M * cos(angle_rad),
+	)
 
 
 func _create_card(entry: Dictionary, local_pos: Vector3) -> CardEntry:
@@ -206,7 +280,7 @@ func _on_xr_started() -> void:
 
 	for entry in _cards:
 		await _wire_card_ui(entry)
-	print("[Operator] Mode select ready (cards visible)")
+	print("[Operator] Mode select ready (%d cards visible)" % _cards.size())
 
 
 func _on_xr_failed() -> void:
@@ -225,7 +299,7 @@ func _arm_startup_fallback() -> void:
 	for entry in _cards:
 		entry.quad.visible = true
 		await _wire_card_ui(entry)
-	print("[Operator] Mode select fallback ready")
+	print("[Operator] Mode select fallback ready (%d cards visible)" % _cards.size())
 
 
 # Snapshot the camera's current pose and re-place every card relative to
