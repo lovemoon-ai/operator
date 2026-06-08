@@ -113,3 +113,6 @@ settings.local.json
 xr/addons/godot-xr-tools
 xr/native/ahb_decoder/godot-cpp
 xr/native/pico_openxr/godot-cpp
+
+# release artifacts
+xr/dist/
