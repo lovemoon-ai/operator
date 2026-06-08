@@ -150,12 +150,50 @@ func _process(_delta: float) -> void:
 			_settings_panel.transform = _camera.transform * SETTINGS_PANEL_OFFSET
 		if _settings_button:
 			_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
+	# The teleop session is controller-driven (robot mapping reads grip /
+	# trigger / buttons), and the gesture-ray code path produced regressions
+	# when the router was allowed to swap to hand-pinch mid-session, so the
+	# router stays locked to "controllers" here -- same as main. The detected
+	# mode is *only* used for the read-only title-bar indicator on the
+	# settings panel.
 	if _settings_interaction_router:
 		_settings_interaction_router.interaction_mode = "controllers"
 		_settings_interaction_router.busy = false
 		_settings_interaction_router.set_targets([_settings_panel, _settings_button])
 		_settings_interaction_router.update_pointer()
+	_apply_settings_input_indicator(_detect_input_mode())
 	_update_teleop_controller_panel()
+
+
+func _detect_input_mode() -> String:
+	if _tracking_provider:
+		if _tracking_provider.has_method("is_optical_hand_tracking_active"):
+			if bool(_tracking_provider.call("is_optical_hand_tracking_active", 0)) \
+					or bool(_tracking_provider.call("is_optical_hand_tracking_active", 1)):
+				return "hands"
+		if _tracking_provider.has_method("is_controller_mode_active"):
+			if bool(_tracking_provider.call("is_controller_mode_active", 0)) \
+					or bool(_tracking_provider.call("is_controller_mode_active", 1)):
+				return "controllers"
+	# Fallback: trust the XRController3D nodes' raw tracking state.
+	if _right_controller and _right_controller.get_is_active() and _right_controller.get_has_tracking_data():
+		return "controllers"
+	if _left_controller and _left_controller.get_is_active() and _left_controller.get_has_tracking_data():
+		return "controllers"
+	return "controllers"
+
+
+# Push the detected input source down to the teleop settings panel so the
+# title-bar indicator (defined on BaseSettingsPanel) stays in sync. Cheap
+# because the panel only repaints when the mode actually changes.
+var _last_indicator_mode := ""
+func _apply_settings_input_indicator(mode: String) -> void:
+	if _settings_ui == null or not _settings_ui.has_method("set_input_mode_indicator"):
+		return
+	if mode == _last_indicator_mode:
+		return
+	_last_indicator_mode = mode
+	_settings_ui.call("set_input_mode_indicator", mode)
 
 
 func _create_v2_nodes() -> void:

@@ -21,13 +21,17 @@ const SECTION_UPLOAD := "ego_upload"
 
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULTS := {
-	"interaction_mode": "controllers",
+	# interaction_mode is no longer surfaced through the panel UI -- it is
+	# owned by capture_app.gd's capture_options and only set by automation
+	# args. The default ("controllers") lives there now; this dict skips it
+	# so a previously persisted "hands" value cannot resurrect a broken
+	# router pointer mode on first launch after upgrade.
 	"stereo_rgb": true,
 	"record_depth": true,
 	"record_head_pose": true,
 	"record_controller_pose": true,
 	"record_hand_data": true,
-	"record_audio": false,
+	"record_audio": true,
 	"audio_channel_layout": "stereo",
 	"audio_sample_rate_hz": 48000,
 	"audio_bitrate_bps": 128000,
@@ -51,8 +55,12 @@ static func load_options() -> Dictionary:
 	if cfg.load(SETTINGS_PATH) != OK:
 		return out
 
+	# Note: `interaction_mode` is deliberately not in this list. Old configs
+	# may still have it on disk from the previous OptionButton flow, but we
+	# ignore it so a stale "hands" value cannot resurrect a broken router
+	# pointer mode in the new auto-detect design. capture_app.gd owns the
+	# router-facing value now.
 	for key in [
-		"interaction_mode",
 		"stereo_rgb",
 		"record_depth",
 		"record_head_pose",
@@ -97,8 +105,10 @@ static func save_options(options: Dictionary) -> Error:
 	# may have written.
 	cfg.load(SETTINGS_PATH)
 
+	# `interaction_mode` is also skipped on write so we don't keep refreshing
+	# a stale value on disk every time the user presses Save. capture_app.gd
+	# owns the router-facing field; the panel no longer surfaces it.
 	for key in [
-		"interaction_mode",
 		"stereo_rgb",
 		"record_depth",
 		"record_head_pose",

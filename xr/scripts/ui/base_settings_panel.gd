@@ -30,6 +30,14 @@ var _panel: PanelContainer
 var _panel_tween: Tween
 var _icon_cache: Dictionary = {}
 
+# Title-bar indicator that surfaces the auto-detected input source (hand vs
+# controller). Subclasses don't need to know it exists — capture_app /
+# scenes/main.gd drive it via `set_input_mode_indicator()`. The icon alone
+# carries the meaning; a text label proved redundant in user testing so the
+# slot is icon-only now.
+var _input_mode_indicator: TextureRect
+var _input_mode_indicator_current := ""
+
 
 func _setup_settings_panel(
 		viewport_size: Vector2i,
@@ -196,11 +204,34 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	margin.add_child(root)
 
+	# Title row: panel title on the left, auto-detected input-mode indicator
+	# pinned to the right. The indicator is hidden until a controller / hand
+	# update arrives via set_input_mode_indicator(); we don't want a blank
+	# square sitting next to the title for the brief window before XR
+	# tracking warms up.
+	var title_row := HBoxContainer.new()
+	title_row.add_theme_constant_override("separation", 14)
+	title_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.add_child(title_row)
+
 	var title := Label.new()
 	title.text = tr(title_key)
 	title.add_theme_font_size_override("font_size", 36)
 	title.add_theme_color_override("font_color", COL_TITLE)
-	root.add_child(title)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	title_row.add_child(title)
+
+	_input_mode_indicator = TextureRect.new()
+	_input_mode_indicator.custom_minimum_size = Vector2(40, 40)
+	_input_mode_indicator.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+	_input_mode_indicator.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_input_mode_indicator.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_input_mode_indicator.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_input_mode_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# The SVGs bake the orange accent (#ffaa2b) into their stroke, so no
+	# modulate tint here -- tinting orange-on-orange would darken the icon.
+	_input_mode_indicator.visible = false
+	title_row.add_child(_input_mode_indicator)
 
 	_content = VBoxContainer.new()
 	_content.add_theme_constant_override("separation", 14)
@@ -293,6 +324,40 @@ func _interactive_style(highlighted: bool) -> StyleBoxFlat:
 	style.set_border_width_all(2)
 	style.set_corner_radius_all(6)
 	return style
+
+
+## Surface the auto-detected input source at the top-right of the panel.
+## `mode` accepts:
+##   "hands"        -> hand-gesture icon
+##   "controllers"  -> VR-controller icon
+##   "head"         -> reuses the controller icon (operator is still holding one)
+##   ""             -> hide the indicator entirely
+## Icon-only; no accompanying label — the glyph carries the meaning and the
+## label proved noisy beside the panel title.
+func set_input_mode_indicator(mode: String) -> void:
+	if mode == _input_mode_indicator_current:
+		return
+	_input_mode_indicator_current = mode
+	if _input_mode_indicator == null:
+		return
+	var icon_name := ""
+	match mode:
+		"hands":
+			icon_name = "hand"
+		"controllers", "head":
+			# "head" (volume-button capture) still maps to the controller icon
+			# because the user is physically holding one.
+			icon_name = "controller"
+		_:
+			icon_name = ""
+	var has_indicator := icon_name != ""
+	_input_mode_indicator.visible = has_indicator
+	if not has_indicator:
+		_input_mode_indicator.texture = null
+		return
+	var icon := _load_icon(icon_name)
+	if icon != null:
+		_input_mode_indicator.texture = icon
 
 
 func _apply_button_icon(button: Button, icon_name: String) -> void:

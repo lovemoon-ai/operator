@@ -31,6 +31,11 @@ const AUDIO_PERMISSION_GRACE_US := 3000000
 const TRACKER_STATUS_REFRESH_SECONDS := 0.5
 const TRACKER_REQUEST_RETRY_SECONDS := 3.0
 const TRACKER_SETUP_OPENING_SECONDS := 4.0
+# Re-probe the OpenXR runtime for hand-vs-controller state at ~6 Hz. Faster
+# than this drowns logcat with mode-flip prints when the operator's hand
+# briefly leaves the optical tracker's FOV; slower than ~3 Hz feels visibly
+# laggy when the user transitions controllers <-> bare hands.
+const INPUT_MODE_DETECT_INTERVAL_S := 0.18
 
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
@@ -99,10 +104,11 @@ var capture_options := {
 	"record_body_tracking": true,
 	"record_motion_trackers": true,
 	"max_motion_trackers": 3,
-	# v3 spatial audio: off by default; flipped on by the capture settings
-	# panel ("Spatial audio (mic)" toggle). The pipeline additionally gates
-	# on the Android RECORD_AUDIO runtime permission.
-	"record_audio": false,
+	# v3 spatial audio: now on by default ("Audio" toggle in the settings
+	# panel). The pipeline still gates on the Android RECORD_AUDIO runtime
+	# permission downstream -- if the user denies the prompt, the session
+	# degrades to a video-only capture instead of failing outright.
+	"record_audio": true,
 	# Encoder shape. Mirrors AudioCapture.DEFAULT_* on the Kotlin side; the
 	# host can override either here in code or via capture_options at runtime
 	# (e.g. for an FOA-capable build that swaps "stereo" -> "foa_acn_sn3d").
@@ -152,6 +158,19 @@ var _metrics_started_ticks_us := 0
 var _tracker_status_refresh_accum := TRACKER_STATUS_REFRESH_SECONDS
 var _tracker_last_request_ticks_us := 0
 var _tracker_setup_opened_ticks_us := 0
+# Cached input-mode detection state. capture_options["interaction_mode"] is
+# updated whenever the detected source changes, and the panel + record
+# control are notified at the same time.
+var _input_mode_detected := ""
+var _input_mode_detect_accum := 0.0
+var _motion_tracker_supported_pushed := false
+var _motion_tracker_provider_known := false
+# Tracks whether we've already fired an up-front requestAudioPermission()
+# prompt for this app session. Audio defaults to ON now, so we surface the
+# system prompt as soon as the capture provider binds -- otherwise the
+# operator wouldn't see it until they tapped Start, by which point a denied
+# prompt would silently produce a video-only recording with no warning.
+var _audio_permission_prompt_fired := false
 # Per-stage main-thread budgets so we can attribute the engine_fps drop to a
 # specific subsystem (panel update vs pointer raycast vs pose loop vs metrics
 # overhead). Microsecond accumulators; pop_metrics-style reset each second.
@@ -366,6 +385,9 @@ func _process(delta: float) -> void:
 	_update_ui_pointer()
 	_stage_us_pointer += Time.get_ticks_usec() - t_pointer
 	_update_pico_tracker_setup_status(delta)
+	_update_input_mode_detection(delta)
+	_update_motion_tracker_support_flag()
+	_ensure_audio_permission_prompted()
 
 	if _recording and record_control:
 		var t_record := Time.get_ticks_usec()
@@ -1084,12 +1106,19 @@ func _unhandled_key_input(event: InputEvent) -> void:
 func _on_capture_settings_saved(options: Dictionary) -> void:
 	if _recording:
 		return
+	var prev_record_audio := bool(capture_options.get("record_audio", false))
 	_merge_capture_options(options)
 	capture_options["save_root"] = _configured_save_root()
 	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_release_ui_pointer()
 	record_control.show_for_mode(str(capture_options.get("interaction_mode", "controllers")))
 	_prepare_output_storage()
+	# If the operator just flipped Audio on, drop the once-per-session latch
+	# so the next idle tick fires the system permission prompt. Without this
+	# they'd only see the prompt the first time they tapped Start, which is
+	# too late if the dialog gets dismissed during capture.
+	if not prev_record_audio and bool(capture_options.get("record_audio", false)):
+		_audio_permission_prompt_fired = false
 	# Persist for next launch. Token is base64-obfuscated, not encrypted —
 	# see EgoSettingsStore header for the security trip-wire.
 	EgoSettingsStoreScript.save_options(capture_options)
@@ -1471,6 +1500,145 @@ func _request_pico_motion_trackers(options: Dictionary, force: bool = false) -> 
 		return false
 	_tracker_last_request_ticks_us = now_us
 	return bool(pico_openxr_bridge.call("request_motion_trackers", max_trackers))
+
+
+## Auto-detect hand-vs-controller state and surface it to the settings
+## panel + interaction router. The runtime answer flips when the operator
+## puts a controller down (or back into the optical tracker's FOV), so we
+## re-probe a few times per second instead of caching it for the lifetime
+## of the session.
+func _update_input_mode_detection(delta: float) -> void:
+	_input_mode_detect_accum += delta
+	if _input_mode_detect_accum < INPUT_MODE_DETECT_INTERVAL_S:
+		return
+	_input_mode_detect_accum = 0.0
+	# "head" is a niche volume-button capture flow opted into by automation
+	# args (see _collect_capture_automation_args). It has nothing to do with
+	# the physical input source, so detection must not stamp over it.
+	if str(capture_options.get("interaction_mode", "")) == "head":
+		if settings_panel != null and settings_panel.has_method("set_interaction_mode"):
+			settings_panel.call("set_interaction_mode", "head")
+		return
+	var detected := _detect_input_mode()
+	if detected == "":
+		return
+	if detected == _input_mode_detected:
+		return
+	_input_mode_detected = detected
+	# Auto-flip the record stream defaults so a gesture recording does not
+	# silently keep writing dead controller poses (and vice versa). Mirrors
+	# the rule the panel applies on set_interaction_mode().
+	if detected == "hands":
+		capture_options["record_hand_data"] = true
+		capture_options["record_controller_pose"] = false
+	elif detected == "controllers":
+		capture_options["record_controller_pose"] = true
+		capture_options["record_hand_data"] = false
+	# NOTE: We intentionally do NOT write capture_options["interaction_mode"]
+	# here, even though detection drives the indicator + record defaults.
+	# That key feeds the settings interaction router's pointer mode, and on
+	# main the router stayed on the controller laser; switching it to
+	# hand-pinch mid-session regressed the gesture ray, so we leave the
+	# router-facing mode at its initialized value ("controllers" by default,
+	# or whatever automation args set explicitly).
+	if settings_panel != null and settings_panel.has_method("set_interaction_mode"):
+		settings_panel.call("set_interaction_mode", detected)
+	# We intentionally do NOT persist on every detection flip -- a wobbly
+	# tracking moment could otherwise spam the settings cfg. The mode is
+	# re-detected on every launch, and capture_app.gd already calls
+	# EgoSettingsStoreScript.save_options() when the operator presses Save.
+
+
+func _detect_input_mode() -> String:
+	# Optical hand tracking wins when either hand has unobstructed data --
+	# the operator can wear controllers but if their hands are also visible
+	# we treat the session as a hand session. Falls back to the controller
+	# state, then to whatever we last saw so the indicator doesn't flicker
+	# during a brief drop-out.
+	if _hand_tracker_active(&"/user/hand_tracker/left") or _hand_tracker_active(&"/user/hand_tracker/right"):
+		return "hands"
+	if _controller_active(left_controller) or _controller_active(right_controller):
+		return "controllers"
+	return ""
+
+
+func _hand_tracker_active(tracker_path: StringName) -> bool:
+	var tracker := XRServer.get_tracker(tracker_path)
+	if not (tracker is XRHandTracker):
+		return false
+	var hand_tracker := tracker as XRHandTracker
+	return hand_tracker.has_tracking_data \
+			and hand_tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
+
+
+func _controller_active(controller: XRController3D) -> bool:
+	return controller != null and controller.get_is_active() and controller.get_has_tracking_data()
+
+
+## Push the "motion-tracker capture is available on this device?" flag down
+## into the settings panel once we know the provider. Pico is the only
+## provider that wires the PXR_BodyTracking extension today, so anywhere
+## else we hide the toggle entirely.
+func _update_motion_tracker_support_flag() -> void:
+	if settings_panel == null or not settings_panel.has_method("set_motion_tracker_supported"):
+		return
+	if camera_plugin == null:
+		_bind_android_plugin()
+	if camera_plugin == null:
+		# Provider not yet bound — try again next frame; we don't want to
+		# tell the panel "tracker capture is gone" while the singleton is
+		# still loading on cold boot.
+		return
+	var supported := CaptureProviderRegistryScript.supports_body_motion(camera_plugin)
+	if _motion_tracker_provider_known and supported == _motion_tracker_supported_pushed:
+		return
+	_motion_tracker_provider_known = true
+	_motion_tracker_supported_pushed = supported
+	settings_panel.call("set_motion_tracker_supported", supported)
+	if not supported:
+		# Force the in-memory option off so the configure path doesn't
+		# claim to record trackers that aren't there.
+		capture_options["record_motion_trackers"] = false
+
+
+## Audio defaults to ON, so we proactively request the RECORD_AUDIO runtime
+## permission as soon as the capture provider is bound -- before the user
+## ever taps Start. Without this the system prompt would only appear mid-
+## capture inside _start_camera_plugin(), and a denied/ignored prompt would
+## silently produce a video-only recording with no chance for the operator
+## to react.
+##
+## Idempotent: a single up-front prompt per app session. Re-prompting on
+## every frame would spam the Android permission dialog and is what
+## _try_start_camera_plugin's grace-window logic guards against further
+## downstream.
+func _ensure_audio_permission_prompted() -> void:
+	if _audio_permission_prompt_fired:
+		return
+	if not bool(capture_options.get("record_audio", false)):
+		return
+	if camera_plugin == null:
+		_bind_android_plugin()
+	if camera_plugin == null:
+		return
+	# Pico capture today disables the audio track regardless (see
+	# _effective_capture_options) -- skip the prompt so the operator isn't
+	# asked for a permission the session won't end up using.
+	if CaptureProviderRegistryScript.provider_name(camera_plugin) == "pico":
+		_audio_permission_prompt_fired = true
+		return
+	# Android plugin singletons sometimes do not reflect @UsedByGodot methods
+	# through has_method() (mirrors the camera-permission call elsewhere in
+	# this file), so call directly. hasAudioPermission() is part of the same
+	# Kotlin contract as hasCameraPermission().
+	var granted: bool = bool(camera_plugin.call("hasAudioPermission"))
+	if granted:
+		_audio_permission_prompt_fired = true
+		print("%s audio permission already granted" % _provider_label())
+		return
+	camera_plugin.call("requestAudioPermission")
+	_audio_permission_prompt_fired = true
+	print("%s requested audio permission up front (record_audio=on)" % _provider_label())
 
 
 func _pico_openxr_status() -> Dictionary:

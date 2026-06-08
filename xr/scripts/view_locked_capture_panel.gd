@@ -31,7 +31,18 @@ const SECTION := "capture"
 # react. Anything longer feels broken in a HMD.
 const UPLOAD_HEALTH_TIMEOUT_S := 8.0
 
-var _mode: OptionButton
+# Auto-detected input source ("hands" or "controllers") used ONLY for the
+# title-bar indicator + record-stream defaults. We deliberately do not own
+# `interaction_mode` any more -- the field that drives the settings
+# interaction router's pointer mode (controller laser vs hand pinch) is
+# stored in capture_app.gd's capture_options dict and is only set via
+# automation args or the controllers-default init. If the panel propagated
+# the detected mode back through get_options(), pressing Save while a hand
+# was briefly visible would flip the router to hand-pinch -- the bug we
+# fixed when "controller ray broken in capture mode" was reported.
+var _indicator_mode := ""
+var _motion_tracker_toggle: CheckButton
+var _motion_tracker_supported := false
 var _save_root: LineEdit
 var _server_host: LineEdit
 var _server_port: SpinBox
@@ -107,15 +118,18 @@ func _process(delta: float) -> void:
 
 
 func get_options() -> Dictionary:
+	# interaction_mode is intentionally NOT returned here. The router's
+	# pointer mode lives in capture_app.gd::capture_options and is only
+	# changed by automation args + the controllers default -- not by the
+	# panel and not by detection. See `_indicator_mode` for context.
 	var options := {
-		"interaction_mode": _mode.get_item_metadata(_mode.selected),
 		"stereo_rgb": _toggle_enabled("stereo_rgb"),
 		"record_depth": _toggle_enabled("record_depth"),
 		"record_head_pose": _toggle_enabled("record_head_pose"),
 		"record_controller_pose": _toggle_enabled("record_controller_pose"),
 		"record_hand_data": _toggle_enabled("record_hand_data"),
 		"record_body_tracking": _toggle_enabled("record_body_tracking"),
-		"record_motion_trackers": _toggle_enabled("record_motion_trackers"),
+		"record_motion_trackers": _motion_tracker_supported and _toggle_enabled("record_motion_trackers"),
 		"max_motion_trackers": 3,
 		# v3 spatial audio: opt-in for privacy. The toggle defaults off below
 		# (default_on=false in _add_stream_toggle) so a recording never opens
@@ -144,7 +158,11 @@ func get_options() -> Dictionary:
 
 
 func set_options(options: Dictionary) -> void:
-	_select_mode(str(options.get("interaction_mode", "controllers")))
+	# We deliberately do NOT read `interaction_mode` from the options dict
+	# here. The router's pointer mode is owned by capture_app.gd; the panel
+	# only knows the auto-detected indicator state (driven via
+	# set_interaction_mode() from the detection loop) and never lets the
+	# detected value escape through get_options() either.
 	for key in _stream_toggles.keys():
 		var toggle := _stream_toggles[key] as CheckButton
 		if toggle != null:
@@ -208,19 +226,11 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	if _live_server_mode:
 		_build_live_server_group()
 
-	# --- Recording group ---------------------------------------------------
-	var recording := register_group("recording", "UI_RECORD_CONTROL", "handshake")
-
-	_mode = OptionButton.new()
-	_mode.custom_minimum_size.y = 55
-	_mode.add_theme_font_size_override("font_size", 23)
-	_mode.add_item(tr("UI_CONTROLLERS"))
-	_mode.set_item_metadata(0, "controllers")
-	_mode.add_item(tr("UI_HANDS"))
-	_mode.set_item_metadata(1, "hands")
-	_mode.add_item(tr("UI_HEAD_BUTTONS"))
-	_mode.set_item_metadata(2, "head")
-	add_interactive(recording, _mode)
+	# Control-mode picker used to live here as an OptionButton (controllers /
+	# hands / head). It moved out of the UI per the auto-detect redesign --
+	# the active source is sensed at runtime and surfaced via the title-bar
+	# indicator (see set_input_mode_indicator()), so there is nothing for the
+	# operator to choose any more.
 
 	# --- Streams group -----------------------------------------------------
 	var streams := register_group("streams", "UI_CAPTURED_STREAMS", "camera")
@@ -231,6 +241,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"))
 	_add_stream_toggle(streams, "record_body_tracking", tr("UI_BODY_TRACKING"))
 	_add_stream_toggle(streams, "record_motion_trackers", tr("UI_MOTION_TRACKERS"))
+	# Motion-tracker capture is a PICO-only stream (powered by the PICO
+	# body-tracking extension). On other runtimes we hide the toggle slot
+	# entirely instead of letting the operator flip a switch that silently
+	# writes no data.
+	_motion_tracker_toggle = _stream_toggles.get("record_motion_trackers")
+	_set_motion_tracker_row_visible(_motion_tracker_supported)
 
 	_tracker_section_label = _add_section_label_to(streams, "UI_TRACKER_SETUP")
 	_tracker_status_label = _add_status_label_to(streams, "")
@@ -242,10 +258,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_tracker_connect_slot = add_interactive(streams, _tracker_connect_button)
 	set_pico_tracker_status(false, false, 0, false, false, false)
 
-	# Audio is privacy-sensitive (opens the microphone), so the toggle starts
-	# OFF -- the operator has to flip it explicitly. The capture pipeline
-	# additionally gates on RECORD_AUDIO runtime permission downstream.
-	_add_stream_toggle(streams, "record_audio", tr("UI_RECORD_AUDIO"), false)
+	# Audio opens the microphone and is renamed to a plain "Audio" toggle now
+	# that the rest of the capture flow treats it as a first-class stream
+	# rather than a niche opt-in. The runtime RECORD_AUDIO permission still
+	# gates the actual recording downstream, so a denied prompt degrades to
+	# video-only instead of failing the session.
+	_add_stream_toggle(streams, "record_audio", tr("UI_RECORD_AUDIO"), true)
 
 	if _live_server_mode:
 		return
@@ -458,6 +476,65 @@ func set_pico_tracker_status(
 	_tracker_connect_button.text = tr("UI_OPENING_TRACKER_SETUP") if opening_setup else tr("UI_CONNECT_PICO_TRACKERS")
 
 
+## Push the auto-detected input source ("hands" / "controllers" / "head")
+## into the panel. Updates ONLY the title-bar indicator and the record-
+## stream defaults; it does NOT touch the field that drives the settings
+## interaction router (so the controller ray stays put even if the operator
+## briefly waves a bare hand in front of the headset).
+##
+##   - hands       -> hand icon,        record_hand_data on,   record_controller_pose off
+##   - controllers -> controller icon,  record_controller_pose on, record_hand_data off
+## "head" (volume-button capture) reuses the controller icon and leaves the
+## record toggles alone because the operator is still physically holding a
+## controller.
+func set_interaction_mode(mode: String) -> void:
+	var normalized := mode
+	if normalized != "hands" and normalized != "controllers" and normalized != "head":
+		normalized = "controllers"
+	var changed := normalized != _indicator_mode
+	_indicator_mode = normalized
+	set_input_mode_indicator(normalized)
+	if not changed:
+		return
+	# Only auto-flip stream defaults for the gesture / controller swap. The
+	# head-buttons path is a niche capture flow that should keep whichever
+	# combination the operator picked manually.
+	if normalized == "hands":
+		_force_stream_default("record_hand_data", true)
+		_force_stream_default("record_controller_pose", false)
+	elif normalized == "controllers":
+		_force_stream_default("record_controller_pose", true)
+		_force_stream_default("record_hand_data", false)
+
+
+## Declares whether the bound capture provider can produce motion-tracker
+## data (PICO only, today). When false the UI row is hidden and the saved
+## option is forced off so a non-PICO build never claims to record trackers
+## it cannot read.
+func set_motion_tracker_supported(supported: bool) -> void:
+	_motion_tracker_supported = supported
+	_set_motion_tracker_row_visible(supported)
+	if not supported and _motion_tracker_toggle != null:
+		_motion_tracker_toggle.button_pressed = false
+
+
+func _set_motion_tracker_row_visible(visible_for_capture: bool) -> void:
+	if _motion_tracker_toggle == null:
+		return
+	var slot := _motion_tracker_toggle.get_parent()
+	if slot is Control:
+		(slot as Control).visible = visible_for_capture
+
+
+func _force_stream_default(key: String, value: bool) -> void:
+	if not _stream_toggles.has(key):
+		return
+	var toggle := _stream_toggles[key] as CheckButton
+	if toggle == null:
+		return
+	toggle.button_pressed = value
+
+
 func _add_field_label(parent: Container, text: String) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
@@ -479,14 +556,6 @@ func _configured_save_root() -> String:
 	return DEFAULT_SAVE_ROOT if configured.is_empty() else configured
 
 
-func _select_mode(mode: String) -> void:
-	for idx in range(_mode.item_count):
-		if String(_mode.get_item_metadata(idx)) == mode:
-			_mode.select(idx)
-			return
-	_mode.select(0)
-
-
 func _default_value_for_key(key: String) -> Variant:
 	return _default_options().get(key)
 
@@ -503,8 +572,11 @@ static func load_settings() -> Dictionary:
 
 
 static func _default_options() -> Dictionary:
+	# interaction_mode is intentionally absent -- the panel doesn't own that
+	# field any more; the router-facing value lives in capture_app.gd's
+	# capture_options and is only set by automation args or the "controllers"
+	# default.
 	return {
-		"interaction_mode": "controllers",
 		"stereo_rgb": true,
 		"record_depth": true,
 		"record_head_pose": true,
@@ -513,7 +585,7 @@ static func _default_options() -> Dictionary:
 		"record_body_tracking": true,
 		"record_motion_trackers": true,
 		"max_motion_trackers": 3,
-		"record_audio": false,
+		"record_audio": true,
 		"audio_channel_layout": "stereo",
 		"audio_sample_rate_hz": 48000,
 		"audio_bitrate_bps": 128000,
