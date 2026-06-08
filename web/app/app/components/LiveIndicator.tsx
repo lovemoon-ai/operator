@@ -28,12 +28,17 @@ export function LiveIndicator({ apiBase }: { apiBase: string }) {
         if (!cancelled) setTimeout(open, backoff);
         backoff = Math.min(backoff * 2, 30_000);
       };
-      es.addEventListener("session.updated", () => {
+      const refresh = () => {
         // Cheap, app-wide refresh. With many concurrent uploads this
         // would thrash — for v1 a single uploading headset, it's fine.
         // Swap for a per-route mutate() call if you scale up.
         window.dispatchEvent(new CustomEvent("ego:refresh"));
-      });
+      };
+      es.addEventListener("session.updated", refresh);
+      // Pick up cross-tab deletes too: if user A removes a session in
+      // one tab the list in tab B should drop the row immediately
+      // instead of going stale until next reload.
+      es.addEventListener("session.deleted", refresh);
     };
     open();
     return () => {

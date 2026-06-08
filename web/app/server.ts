@@ -45,7 +45,7 @@ import {
 import { runAsSystem, runAsUser } from "./lib/auth-context.js";
 import { verifyConnectTicket } from "./lib/connect-ticket.js";
 import { ingest } from "./lib/ingest.js";
-import { reviewsRouter } from "./lib/reviews.js";
+import { deleteReview, reviewsRouter } from "./lib/reviews.js";
 import { getUserById, getUserByUploadToken } from "./lib/users.js";
 import { runPostIngestWorkers } from "./lib/workers/index.js";
 
@@ -154,6 +154,21 @@ async function main() {
     createReadApi({
       ...ingest,
       userIdFromReq: (req) => req.user?.id ?? null,
+      // The reviews table lives in this app, not in ego-ingest. After
+      // ego-ingest finishes wiping the session it calls back here so
+      // we can drop the matching review row — otherwise the home
+      // dashboard would keep showing a "reviewed/flagged" badge
+      // pointing at a session that no longer exists.
+      onSessionDeleted: (sessionId) => {
+        try {
+          deleteReview(sessionId);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[server] deleteReview(${sessionId}) failed: ${(err as Error).message}`,
+          );
+        }
+      },
     }),
   );
 

@@ -63,6 +63,11 @@ export function RerunViewer({ rrdUrl, height = 720 }: Props) {
         // rejects path-only URLs like "/api/...". Absolutize against
         // the current origin — works for same-origin loads which is
         // the only case we serve.
+        //
+        // The URL we get already carries a signed `?u=&e=&t=` token
+        // (added by the server component), so the wasm-internal fetch
+        // — which CAN'T attach the browser cookie — is still able to
+        // authenticate. See `lib/auth/artifact-token.ts`.
         const absoluteUrl = rrdUrl.startsWith("http")
           ? rrdUrl
           : new URL(rrdUrl, window.location.origin).toString();

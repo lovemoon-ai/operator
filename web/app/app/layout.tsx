@@ -32,7 +32,6 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
               </a>
               <nav>
                 <a href="/">Sessions</a>
-                <a href="/stats">Stats</a>
                 <a href="/connect">Connect</a>
               </nav>
               <LiveIndicator apiBase="/api/ingest-read" />
