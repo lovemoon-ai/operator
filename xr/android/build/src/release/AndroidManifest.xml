@@ -17,6 +17,12 @@
     <uses-feature tools:node="replace" android:name="android.hardware.vulkan.version" android:required="true" android:version="0x400003" />
     <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
     <uses-feature tools:node="replace" android:name="oculus.software.handtracking" android:required="false" />
+    <!-- RFC-003 upper-body retargeting: XR_FB_body_tracking + XR_META_body_tracking_full_body
+         require the Meta-vendored BODY_TRACKING permission. Without it XRServer's
+         /user/body_tracker stays null on Quest 3 and BodyPoseProvider falls through
+         to empty frames. See claw/rfcs/003-upper-body-human-to-humanoid-retargeting.md. -->
+    <uses-permission android:name="com.oculus.permission.BODY_TRACKING" />
+    <uses-feature android:name="oculus.software.body_tracking" android:required="false" />
     <uses-feature tools:node="replace" android:name="com.oculus.feature.PASSTHROUGH" android:required="true" />
     <uses-permission android:name="com.oculus.permission.RENDER_MODEL" />
     <uses-feature tools:node="replace" android:name="com.oculus.feature.RENDER_MODEL" android:required="true" />
