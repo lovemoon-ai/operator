@@ -1500,6 +1500,264 @@ def project_depth_to_points(depth: np.ndarray, K, stride: int = 2) -> np.ndarray
 
 
 # ---------------------------------------------------------------------------
+# RFC-003 H2 robot — drive the URDF visuals from robot_solution.jsonl
+# ---------------------------------------------------------------------------
+# The on-device retargeter (xr/scripts/retargeting/h2_pinocchio_retargeter.gd)
+# writes a per-frame solution stream with ``joint_names`` + ``joint_q`` for
+# the 19-joint upper-body chain. We render the H2 URDF visuals next to the
+# capture's RGB / depth / hand tracks so the operator can verify the IK
+# result against what they were doing at capture time. Legs / fingers are
+# skipped — the retargeter doesn't drive them, so unattached meshes would
+# just sit at the world origin and look broken.
+#
+# Optional: enabled only when ``--robot-urdf`` + ``--robot-chain`` resolve
+# AND ``<session>/retargeting/robot_solution.jsonl`` exists. Missing inputs
+# log a warning and skip the section so a session without retargeting
+# still produces a viewable .rrd.
+
+
+@dataclass
+class _RobotVisualMesh:
+    link_name: str
+    mesh_path: Path
+    xyz: np.ndarray
+    rpy: np.ndarray
+
+
+@dataclass
+class _RobotJoint:
+    name: str
+    parent_link: str
+    child_link: str
+    origin_xyz: np.ndarray
+    origin_rpy: np.ndarray
+    axis: np.ndarray
+    joint_type: str
+
+
+def _robot_parse_vec3(text: Optional[str]) -> np.ndarray:
+    if text is None:
+        return np.zeros(3)
+    return np.array([float(x) for x in text.split()], dtype=float)
+
+
+def parse_urdf_visuals(urdf_path: Path) -> Dict[str, _RobotVisualMesh]:
+    """Return ``link_name -> first <visual> mesh`` from an URDF.
+
+    50-line ElementTree scan in lieu of a urdfpy / yourdfpy dep — we only
+    need the visual blocks for rendering, not the full URDF semantics.
+    Mesh ``filename`` paths are resolved against the URDF's own directory.
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(urdf_path.read_text())
+    out: Dict[str, _RobotVisualMesh] = {}
+    for link in root.findall("link"):
+        name = link.attrib.get("name", "")
+        visual = link.find("visual")
+        if visual is None:
+            continue
+        geom = visual.find("geometry")
+        if geom is None:
+            continue
+        mesh = geom.find("mesh")
+        if mesh is None:
+            continue
+        filename = mesh.attrib.get("filename", "")
+        if not filename:
+            continue
+        if filename.startswith("package://"):
+            filename = filename.split("/", 3)[-1]
+        mesh_path = (urdf_path.parent / filename).resolve()
+        origin = visual.find("origin")
+        xyz = _robot_parse_vec3(origin.attrib.get("xyz") if origin is not None else None)
+        rpy = _robot_parse_vec3(origin.attrib.get("rpy") if origin is not None else None)
+        out[name] = _RobotVisualMesh(name, mesh_path, xyz, rpy)
+    return out
+
+
+def load_robot_chain(chain_json: Path) -> List[_RobotJoint]:
+    """Parse ``upper_body.json`` (parent/child/axis/origin per joint).
+
+    The on-device builder reads the SAME file (see
+    ``xr/scripts/retargeting/h2_pinocchio_builder.gd``), so the chain
+    here stays in lockstep with the IK solver's joint ordering.
+    """
+    raw = json.loads(chain_json.read_text())
+    joints: List[_RobotJoint] = []
+    for j in raw.get("joints", []):
+        joints.append(
+            _RobotJoint(
+                name=j["name"],
+                parent_link=j["parent"],
+                child_link=j["child"],
+                origin_xyz=np.array(j["origin_xyz"], dtype=float),
+                origin_rpy=np.array(j["origin_rpy"], dtype=float),
+                axis=np.array(j["axis"], dtype=float),
+                joint_type=j.get("type", "revolute"),
+            )
+        )
+    return joints
+
+
+def _robot_se3(t: np.ndarray, R: Rotation) -> np.ndarray:
+    T = np.eye(4)
+    T[:3, :3] = R.as_matrix()
+    T[:3, 3] = t
+    return T
+
+
+def _robot_compute_link_transforms(
+    joints: List[_RobotJoint],
+    joint_q: Dict[str, float],
+    root_link: str = "pelvis",
+) -> Dict[str, np.ndarray]:
+    """Walk parent->child, return ``link_name -> 4x4 T_world_link``."""
+    transforms: Dict[str, np.ndarray] = {root_link: np.eye(4)}
+    for j in joints:
+        # Chain is pre-topo-sorted (upper_body.json's emit order). If a
+        # parent hasn't been resolved yet we skip — the FK for that child
+        # subtree stays missing rather than crash on a partial dict.
+        if j.parent_link not in transforms:
+            continue
+        T_parent = transforms[j.parent_link]
+        T_origin = _robot_se3(
+            j.origin_xyz, Rotation.from_euler("xyz", j.origin_rpy)
+        )
+        if j.joint_type == "fixed":
+            T_joint = np.eye(4)
+        else:
+            theta = float(joint_q.get(j.name, 0.0))
+            T_joint = _robot_se3(np.zeros(3), Rotation.from_rotvec(j.axis * theta))
+        transforms[j.child_link] = T_parent @ T_origin @ T_joint
+    return transforms
+
+
+# URDF (ROS REP-103) is X-forward, Y-left, Z-up. Rerun world here is
+# RUB (X-right, Y-up, Z-back-out-of-page; OpenXR Quest convention). We
+# place the robot facing the viewer (its forward axis along +Z_rerun)
+# so the on-screen pose mirrors the operator's first-person view.
+_ROBOT_ROS_TO_RUB = np.array(
+    [
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+    ]
+)
+
+
+def _robot_ros_to_rerun(T_ros: np.ndarray) -> np.ndarray:
+    R_basis = np.eye(4)
+    R_basis[:3, :3] = _ROBOT_ROS_TO_RUB
+    return R_basis @ T_ros @ R_basis.T
+
+
+def log_robot_visuals_static(
+    visuals: Dict[str, _RobotVisualMesh],
+    rendered_links: set,
+    entity_prefix: str = "world/robot",
+) -> int:
+    """One ``rr.Asset3D`` per chain link, with the link's visual offset
+    as a static transform under ``<prefix>/<link>/mesh``."""
+    logged = 0
+    for link_name, vm in visuals.items():
+        if link_name not in rendered_links:
+            continue
+        if not vm.mesh_path.exists():
+            info(f"[robot] missing mesh, skipping link: {vm.mesh_path}")
+            continue
+        path = f"{entity_prefix}/{link_name}/mesh"
+        rr.log(
+            path,
+            rr.Transform3D(
+                translation=vm.xyz.tolist(),
+                mat3x3=Rotation.from_euler("xyz", vm.rpy).as_matrix().tolist(),
+            ),
+            static=True,
+        )
+        rr.log(path, rr.Asset3D(path=str(vm.mesh_path)), static=True)
+        logged += 1
+    return logged
+
+
+def log_robot_solution_frames(
+    joints: List[_RobotJoint],
+    rendered_links: set,
+    solution_jsonl: Path,
+    entity_prefix: str = "world/robot",
+) -> int:
+    """Stream per-frame transforms onto every chain link.
+
+    Frames inherit the same ``"time"`` timeline the SpatialMP4 RGB +
+    depth + tracks log to, so scrubbing the seekbar moves the robot in
+    lockstep with everything else.
+    """
+    n = 0
+    with solution_jsonl.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            frame = json.loads(line)
+            joint_names = frame.get("joint_names") or []
+            joint_q = frame.get("joint_q") or []
+            q_dict = {name: float(q) for name, q in zip(joint_names, joint_q)}
+            transforms = _robot_compute_link_transforms(joints, q_dict)
+            ts_s = float(frame.get("timestamp_ns", 0)) / 1e9
+            set_time_seconds("time", ts_s)
+            for link_name in transforms:
+                if link_name not in rendered_links:
+                    continue
+                T_link = _robot_ros_to_rerun(transforms[link_name])
+                rr.log(
+                    f"{entity_prefix}/{link_name}",
+                    rr.Transform3D(
+                        translation=T_link[:3, 3].tolist(),
+                        mat3x3=T_link[:3, :3].tolist(),
+                    ),
+                )
+            n += 1
+    return n
+
+
+def maybe_log_robot(
+    session_dir: Path,
+    urdf_path: Optional[Path],
+    chain_json: Optional[Path],
+    solution_jsonl: Optional[Path],
+) -> bool:
+    """Best-effort robot pose visualization.
+
+    Returns True iff a robot was rendered. Logs a single info() line and
+    bails out without raising on every missing input, so a session
+    captured without the retargeting flags still produces a viewable
+    .rrd (the worker just skips the robot panel).
+    """
+    if urdf_path is None or chain_json is None:
+        info("[robot] no URDF / chain config — skipping robot visualization")
+        return False
+    if solution_jsonl is None:
+        solution_jsonl = session_dir / "retargeting" / "robot_solution.jsonl"
+    if not solution_jsonl.exists() or solution_jsonl.stat().st_size == 0:
+        info(f"[robot] no robot_solution.jsonl in {session_dir}/retargeting/ — skipping")
+        return False
+    if not urdf_path.exists():
+        info(f"[robot] urdf not found: {urdf_path} — skipping")
+        return False
+    if not chain_json.exists():
+        info(f"[robot] chain JSON not found: {chain_json} — skipping")
+        return False
+
+    visuals = parse_urdf_visuals(urdf_path)
+    joints = load_robot_chain(chain_json)
+    rendered_links = {"pelvis"} | {j.child_link for j in joints}
+    n_meshes = log_robot_visuals_static(visuals, rendered_links)
+    n_frames = log_robot_solution_frames(joints, rendered_links, solution_jsonl)
+    info(f"[robot] logged {n_meshes} chain meshes + {n_frames} solution frames")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -1749,6 +2007,25 @@ def run(args: argparse.Namespace) -> int:
     log_all_body_tracks(reader, tracks["body_joints"])
     log_all_body_tracks_head_relative(reader, tracks["body_joints"], head_lookup)
     log_all_controller_input_tracks(reader, tracks["controller_input"])
+
+    # ---- RFC-003 H2 robot ------------------------------------------------
+    if not args.no_robot:
+        # Resolve URDF + chain JSON. Defaults follow the in-repo layout
+        # (claw/assets/robots/h2_with_sharpa/) so a session captured from
+        # this checkout's APK renders without extra flags. Deploys that
+        # ship the worker without that tree can override via
+        # ROBOT_URDF_PATH / ROBOT_CHAIN_JSON_PATH env vars.
+        urdf_path = args.robot_urdf
+        chain_json = args.robot_chain
+        solution_path = args.robot_solution or (
+            input_path.parent / "retargeting" / "robot_solution.jsonl"
+        )
+        maybe_log_robot(
+            session_dir=input_path.parent,
+            urdf_path=urdf_path,
+            chain_json=chain_json,
+            solution_jsonl=solution_path,
+        )
 
     # Head-relative view origin + axes (head at origin, looks down -Z).
     rr.log("head_relative", rr.ViewCoordinates.RUB, static=True)
@@ -2067,6 +2344,44 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Path to the session's manifest.json (defaults to <input dir>/manifest.json). Used to auto-detect device_type and other capture options.",
+    )
+    # RFC-003 robot visualization. Default URDF / chain paths follow the
+    # in-repo layout (claw/assets/robots/h2_with_sharpa/), resolved
+    # relative to THIS script's location so the worker invocation
+    # ``uv run scripts/spatialmp4_to_rrd.py --input ... --output ...``
+    # picks them up without extra flags. Override via env vars or CLI
+    # for deploys that don't ship the claw/ tree.
+    _script_dir = Path(__file__).resolve().parent
+    _default_urdf = (
+        _script_dir / ".." / ".." / ".." / "claw" / "assets" / "robots" /
+        "h2_with_sharpa" / "h2_with_sharpa_wave.urdf"
+    ).resolve()
+    _default_chain = (
+        _script_dir / ".." / ".." / ".." / "claw" / "assets" / "robots" /
+        "h2_with_sharpa" / "upper_body.json"
+    ).resolve()
+    parser.add_argument(
+        "--robot-urdf",
+        type=Path,
+        default=Path(os.environ.get("ROBOT_URDF_PATH", str(_default_urdf))),
+        help="URDF describing the robot's visual + kinematic tree (default: claw/assets/robots/h2_with_sharpa/h2_with_sharpa_wave.urdf).",
+    )
+    parser.add_argument(
+        "--robot-chain",
+        type=Path,
+        default=Path(os.environ.get("ROBOT_CHAIN_JSON_PATH", str(_default_chain))),
+        help="upper_body.json describing the per-joint axis/origin (must match the on-device retargeter's chain).",
+    )
+    parser.add_argument(
+        "--robot-solution",
+        type=Path,
+        default=None,
+        help="robot_solution.jsonl path (defaults to <input dir>/retargeting/robot_solution.jsonl).",
+    )
+    parser.add_argument(
+        "--no-robot",
+        action="store_true",
+        help="Skip the H2 robot visualization even when the URDF + solution stream are available.",
     )
     # Older callers passed `--sample-fps` which we now ignore — kept for
     # CLI compatibility so the Node worker can flip between versions
