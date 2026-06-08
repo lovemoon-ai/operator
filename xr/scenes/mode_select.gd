@@ -9,10 +9,12 @@ const LIVE_FEED_SCENE := "res://scenes/live_feed_app.tscn"
 const VR_SCENE := "res://scenes/vr_mode.tscn"
 const TELEOP_SCENE := "res://scenes/teleop_main.tscn"
 const EGO_CAPTURE_SCENE := "res://scenes/capture_app.tscn"
+const MUJOCO_SCENE := "res://scenes/mujoco/mujoco_device_test.tscn"
 const MODE_TELEOP := "teleop"
 const MODE_EGO_CAPTURE := "ego_capture"
 const MODE_LIVE_FEED := "live_feed"
 const MODE_VR := "vr"
+const MODE_MUJOCO := "mujoco"
 const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
 const LAUNCHER_CARDS_CONFIGURED_FEATURE := "operator_launcher_cards_configured"
@@ -434,6 +436,8 @@ func _scene_for_mode(mode: String) -> String:
 			return LIVE_FEED_SCENE
 		MODE_VR:
 			return VR_SCENE
+		MODE_MUJOCO:
+			return MUJOCO_SCENE
 		_:
 			return ""
 
@@ -484,12 +488,14 @@ func _normalize_mode(raw_mode: String) -> String:
 			return MODE_LIVE_FEED
 		MODE_VR, "pure_vr", "robot_vr":
 			return MODE_VR
+		MODE_MUJOCO, "mj", "godot_mujoco", "simulation", "sim":
+			return MODE_MUJOCO
 		MODE_EXIT, "quit", "shutdown", "close":
 			return MODE_EXIT
 		"":
 			return ""
 		_:
-			push_warning("[Operator] Unknown automation mode '%s' (expected teleop, ego_capture, live_feed, live_capture, vr, or exit)" % raw_mode)
+			push_warning("[Operator] Unknown automation mode '%s' (expected teleop, ego_capture, live_feed, live_capture, vr, mujoco, or exit)" % raw_mode)
 			return ""
 
 

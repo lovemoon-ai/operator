@@ -13,7 +13,7 @@
  *                              e.g. https://operator.conductor-ai.top
  *                              (default http://localhost:<PORT>)
  *   - AUTH_BYPASS=1            skip SSO entirely, use a fixed dev user
- *                              (intended for local dev only)
+ *                              (default in local dev when SSO is unset)
  *   - DEV_USER_SUB             override the fixed dev user's sub
  *                              (default "dev@localhost")
  *
@@ -39,9 +39,16 @@ export interface AuthConfig {
 }
 
 export function loadAuthConfig(): AuthConfig {
-  const bypass = process.env.AUTH_BYPASS === "1";
+  const explicitBypass = process.env.AUTH_BYPASS === "1";
   const port = process.env.PORT ?? "3000";
   const baseUrl = process.env.AUTH_BASE_URL ?? `http://localhost:${port}`;
+  const conductorBase = process.env.CONDUCTOR_BASE_URL ?? "";
+  const clientId = process.env.CONDUCTOR_CLIENT_ID ?? "";
+  const clientSecret = process.env.CONDUCTOR_CLIENT_SECRET ?? "";
+  const hasConductorConfig = Boolean(conductorBase || clientId || clientSecret);
+  const bypass =
+    explicitBypass ||
+    (process.env.NODE_ENV !== "production" && !hasConductorConfig);
 
   // iron-session requires >= 32 chars. Fall back to an obviously-fake
   // dev value so the app boots zero-config, but warn so prod misuse is
@@ -75,9 +82,6 @@ export function loadAuthConfig(): AuthConfig {
     return { bypass, sessionSecret, baseUrl, conductor: null, devUser };
   }
 
-  const conductorBase = process.env.CONDUCTOR_BASE_URL ?? "";
-  const clientId = process.env.CONDUCTOR_CLIENT_ID ?? "";
-  const clientSecret = process.env.CONDUCTOR_CLIENT_SECRET ?? "";
   if (!conductorBase || !clientId || !clientSecret) {
     throw new Error(
       "Conductor SSO config missing. Set CONDUCTOR_BASE_URL + " +

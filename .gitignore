@@ -17,11 +17,17 @@ xr/android/build/local.properties
 xr/build/
 xr/addons/ahb_decoder/*.so
 xr/native/ahb_decoder/build-*/
+xr/addons/godot_mujoco/bin/*.so
+xr/native/godot_mujoco/build-*/
+xr/native/godot_mujoco/godot-cpp
 *.import
 *.uid
 
 # Local agent/session files
 crash.log
+
+# Tmp files
+tmp*
 
 # Local hidden dependency checkouts and native build output.
 .deps

@@ -1,0 +1,72 @@
+<mujoco model="operator_mobile_manipulator_smoke">
+  <compiler angle="degree"/>
+  <option timestep="0.008333333" gravity="0 0 -9.81"/>
+  <default>
+    <joint damping="0.6" armature="0.01"/>
+    <geom friction="1.0 0.01 0.001"/>
+    <position kp="35"/>
+  </default>
+  <worldbody>
+    <geom name="floor" type="plane" size="2 2 0.02" rgba="0.16 0.18 0.20 1"/>
+    <body name="inclined_ramp" pos="-0.38 0 0.065" euler="0 18 0">
+      <geom name="inclined_ramp_geom" type="box" size="0.32 0.18 0.025" friction="0.72 0.01 0.001" rgba="0.38 0.42 0.48 1"/>
+    </body>
+    <body name="stop_block" pos="-0.72 0 0.085">
+      <geom name="stop_block_geom" type="box" size="0.025 0.20 0.085" friction="1.2 0.02 0.002" rgba="0.22 0.26 0.30 1"/>
+    </body>
+    <body name="falling_box" pos="0.14 -0.22 0.78">
+      <freejoint name="falling_box_freejoint"/>
+      <geom name="falling_box_geom" type="box" size="0.04 0.04 0.04" mass="0.16" friction="0.9 0.02 0.001" rgba="0.1 0.85 0.25 1"/>
+    </body>
+    <body name="ramp_ball" pos="-0.20 0 0.22">
+      <freejoint name="ramp_ball_freejoint"/>
+      <geom name="ramp_ball_geom" type="sphere" size="0.035" mass="0.08" friction="0.55 0.015 0.001" rgba="0.95 0.75 0.10 1"/>
+    </body>
+    <body name="mobile_base" pos="0 0 0.08">
+      <joint name="base_x" type="slide" axis="1 0 0" limited="true" range="-1 1"/>
+      <joint name="base_yaw" type="hinge" axis="0 0 1" limited="true" range="-3.14 3.14"/>
+      <geom name="base_geom" type="box" size="0.18 0.12 0.05" rgba="0.15 0.25 0.75 1"/>
+      <body name="shoulder" pos="0.08 0 0.07">
+        <joint name="shoulder_pan" type="hinge" axis="0 0 1" limited="true" range="-1.57 1.57"/>
+        <geom name="shoulder_geom" type="capsule" fromto="0 0 0 0.0 0 0.18" size="0.025" rgba="0.8 0.6 0.2 1"/>
+        <body name="upper_arm" pos="0 0 0.18">
+          <joint name="shoulder_lift" type="hinge" axis="0 1 0" limited="true" range="-1.2 1.2"/>
+          <geom name="upper_arm_geom" type="capsule" fromto="0 0 0 0.22 0 0" size="0.022" rgba="0.8 0.45 0.2 1"/>
+          <body name="forearm" pos="0.22 0 0">
+            <joint name="elbow" type="hinge" axis="0 1 0" limited="true" range="-1.8 1.8"/>
+            <geom name="forearm_geom" type="capsule" fromto="0 0 0 0.18 0 0" size="0.018" rgba="0.8 0.35 0.2 1"/>
+            <body name="wrist" pos="0.18 0 0">
+              <joint name="wrist_pitch" type="hinge" axis="0 1 0" limited="true" range="-1.57 1.57"/>
+              <geom name="wrist_geom" type="sphere" size="0.028" rgba="0.2 0.8 0.7 1"/>
+              <body name="gripper" pos="0.05 0 0">
+                <joint name="gripper_open" type="slide" axis="0 1 0" limited="true" range="0 0.04"/>
+                <geom name="gripper_palm" type="box" size="0.025 0.012 0.018" rgba="0.2 0.7 0.35 1"/>
+                <site name="gripper_contact" pos="0.035 0 0" size="0.012"/>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="red_cube" pos="0.42 0.03 0.035">
+      <freejoint name="red_cube_freejoint"/>
+      <geom name="red_cube_geom" type="box" size="0.035 0.035 0.035" rgba="0.9 0.05 0.05 1"/>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="base_x_position" joint="base_x" ctrlrange="-1 1"/>
+    <position name="base_yaw_position" joint="base_yaw" ctrlrange="-3.14 3.14"/>
+    <position name="shoulder_pan_position" joint="shoulder_pan" ctrlrange="-1.57 1.57"/>
+    <position name="shoulder_lift_position" joint="shoulder_lift" ctrlrange="-1.2 1.2"/>
+    <position name="elbow_position" joint="elbow" ctrlrange="-1.8 1.8"/>
+    <position name="wrist_pitch_position" joint="wrist_pitch" ctrlrange="-1.57 1.57"/>
+    <position name="gripper_position" joint="gripper_open" ctrlrange="0 0.04"/>
+  </actuator>
+  <sensor>
+    <jointpos name="base_x_pos" joint="base_x"/>
+    <jointpos name="shoulder_pan_pos" joint="shoulder_pan"/>
+    <jointpos name="elbow_pos" joint="elbow"/>
+    <jointpos name="gripper_pos" joint="gripper_open"/>
+    <touch name="gripper_touch" site="gripper_contact"/>
+  </sensor>
+</mujoco>
