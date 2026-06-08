@@ -58,6 +58,31 @@ export interface SessionStore {
 
   /** Lifetime-aggregated stats. Cheap implementations can recompute on call. */
   stats(opts?: { userId?: string }): Promise<StoreStats>;
+
+  /**
+   * Hard-delete a session and every artifact row pointing at it. Also
+   * sweeps any in-flight TUS resources whose `sessionId` matches —
+   * those would otherwise resurrect the session as soon as they
+   * finalize.
+   *
+   * `opts.userId`, when set, scopes the operation: returns `null`
+   * (no-op) if the session exists but belongs to a different user, so
+   * a dashboard call from user A can never delete user B's data.
+   * Returns `null` if the session simply doesn't exist.
+   *
+   * On success returns the list of `uri`s the caller should pass to
+   * `StorageDriver.deleteFinalized` so the byte files can be removed.
+   * We don't do that here — store ↔ storage stay decoupled, and the
+   * caller already holds the storage handle.
+   *
+   * Implementations MUST run the row deletes inside one transaction
+   * (or equivalent) so a concurrent read can't observe a session row
+   * whose artifacts have already been cleared.
+   */
+  deleteSession(
+    sessionId: string,
+    opts?: { userId?: string },
+  ): Promise<{ artifactUris: string[] } | null>;
 }
 
 export interface StoreStats {

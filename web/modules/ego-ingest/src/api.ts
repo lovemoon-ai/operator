@@ -21,6 +21,14 @@ export interface ReadApiOptions {
    * upstream auth middleware is missing.
    */
   userIdFromReq?: (req: Request) => string | null | undefined;
+  /**
+   * Optional callback fired after a session's metadata + bytes have
+   * been removed. The app uses this to clear satellite tables that
+   * ego-ingest doesn't know about (per-session reviews, audit logs,
+   * …). Errors are caught + logged so a satellite failure can't
+   * prevent the DELETE from returning 204.
+   */
+  onSessionDeleted?: (sessionId: string) => void | Promise<void>;
 }
 
 /**
@@ -120,6 +128,50 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
     stream.pipe(res);
   });
 
+  // Hard-delete a session. Powers the "Remove" button in the dashboard.
+  //
+  // Ordering matters: store first, storage second. If we deleted the
+  // bytes first and then the store row delete failed, we'd be left with
+  // a metadata row pointing at vapor — every subsequent GET would 410.
+  // The other way around just leaves orphaned byte files, which a
+  // future cleanup pass can sweep by diffing disk against the
+  // artifacts table.
+  router.delete("/sessions/:id", async (req, res) => {
+    const userId = opts.userIdFromReq?.(req);
+    if (userId === null) return res.status(404).end();
+    const sessionId = req.params.id!;
+    const result = await opts.store.deleteSession(sessionId, {
+      userId: userId ?? undefined,
+    });
+    if (!result) return res.status(404).end();
+    for (const uri of result.artifactUris) {
+      try {
+        await opts.storage.deleteFinalized(uri);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest] deleteFinalized(${uri}) failed: ${(err as Error).message}`,
+        );
+      }
+    }
+    if (opts.onSessionDeleted) {
+      try {
+        await opts.onSessionDeleted(sessionId);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest] onSessionDeleted(${sessionId}) hook threw: ${(err as Error).message}`,
+        );
+      }
+    }
+    opts.events.emit({
+      type: "session.deleted",
+      sessionId,
+      userId: userId ?? null,
+    });
+    res.status(204).end();
+  });
+
   router.get("/stats", async (req, res) => {
     const userId = opts.userIdFromReq?.(req);
     if (userId === null) return res.json({ sessionCount: 0, totalBytes: 0, perDay: {} });
@@ -152,21 +204,29 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
           // look the session up against the store with the same userId
           // filter; a miss means "not ours, drop".
           if (userId) {
-            const sid =
-              event.type === "session.updated"
-                ? event.session.id
-                : event.type === "session.expired"
-                ? event.sessionId
-                : event.type === "resource.finalized"
-                ? event.sessionId
-                : null;
-            if (sid) {
-              const s = await opts.store.getSession(sid, { userId });
-              if (!s) return;
+            // session.deleted is special: the row is gone by the time
+            // this fires, so we can't getSession-check ownership. The
+            // event itself carries the userId recorded at delete-time;
+            // a mismatch means "another user's deletion", drop.
+            if (event.type === "session.deleted") {
+              if (event.userId !== userId) return;
+            } else {
+              const sid =
+                event.type === "session.updated"
+                  ? event.session.id
+                  : event.type === "session.expired"
+                  ? event.sessionId
+                  : event.type === "resource.finalized"
+                  ? event.sessionId
+                  : null;
+              if (sid) {
+                const s = await opts.store.getSession(sid, { userId });
+                if (!s) return;
+              }
+              // resource.created / resource.progress carry no sessionId
+              // visible to other users — they're scoped by upload token
+              // upstream, so it's fine to forward as-is to the owner.
             }
-            // resource.created / resource.progress carry no sessionId
-            // visible to other users — they're scoped by upload token
-            // upstream, so it's fine to forward as-is to the owner.
           }
           res.write(`event: ${event.type}\n`);
           res.write(`data: ${JSON.stringify(event)}\n\n`);

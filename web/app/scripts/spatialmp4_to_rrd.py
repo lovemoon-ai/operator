@@ -1055,9 +1055,16 @@ def project_depth_to_points(depth: np.ndarray, K, stride: int = 2) -> np.ndarray
 
 
 def build_blueprint(has_depth_panel: bool) -> "rrb.ContainerLike":
-    """Same layout as the reference's primary view minus the
-    rgb_depth_overlay tab (which needs sidecar Camera2 calibration we
-    don't have in the ingest payload)."""
+    """Reference layout minus the spool-only rgb_depth_overlay tab.
+
+    Originally we restricted the RGB tab to `world/camera/image/rgb`
+    because the only other child was the always-empty pinhole gizmo.
+    Now we ship two image-plane overlays as additional children
+    (`world/camera/image/hands/*` from the RGB pass, and
+    `world/camera/image/depth_overlay` from the depth pass), so the
+    tab's contents have to be an inclusive glob — `"**"` matches the
+    image itself plus every child entity.
+    """
     left = rrb.Vertical(
         rrb.Spatial3DView(name="3D World", origin="world"),
         rrb.TextLogView(name="Controller Input", origin="controller_input"),
@@ -1067,7 +1074,7 @@ def build_blueprint(has_depth_panel: bool) -> "rrb.ContainerLike":
         rrb.Spatial2DView(
             name="RGB",
             origin="world/camera/image",
-            contents="world/camera/image/rgb",
+            contents=["world/camera/image/**"],
         ),
     ]
     if has_depth_panel:
@@ -1334,7 +1341,13 @@ def run(args: argparse.Namespace) -> int:
             # For Quest this is the same matrix; for Pico keeping them
             # separated prevents the cloud from rotating off the
             # camera.
-            pts_cam = project_depth_to_points(depth_raw, K_d, stride=args.depth_pc_stride)
+            #
+            # Use K_d_raw, NOT K_d: depth_raw is the un-flipped sensor
+            # buffer, and K_d's cy was inverted to match the (flipped)
+            # 2D depth image we hand to Rerun. Pairing one with the
+            # other mirrors Y in the unprojection, which then puts the
+            # 3D point cloud upside-down in the world view.
+            pts_cam = project_depth_to_points(depth_raw, K_d_raw, stride=args.depth_pc_stride)
             if pts_cam.size:
                 R_native = T_W_Sd_native[:3, :3]
                 t_native = T_W_Sd_native[:3, 3]
@@ -1350,6 +1363,59 @@ def run(args: argparse.Namespace) -> int:
                     "world/depth_pointcloud",
                     rr.Points3D(positions=pts_world, colors=colors, radii=0.012),
                 )
+
+                # ---- depth → RGB overlay ----------------------------
+                # Re-project the same world-frame points into the RGB
+                # camera plane and log as Points2D under the RGB image
+                # entity so they overlay on the live video. We use the
+                # head pose interpolated to THIS depth timestamp (same
+                # T_W_I we already computed) to build the rgb
+                # extrinsic — depth + rgb cameras share the IMU root,
+                # so a stale rgb pose would shear the overlay during
+                # head motion.
+                if has_rgb and args.depth_overlay_stride > 0:
+                    if args.depth_overlay_stride > 1:
+                        pts_world_ov = pts_world[::args.depth_overlay_stride]
+                    else:
+                        pts_world_ov = pts_world
+                    T_W_Srgb_native_at_depth_ts = T_W_I @ T_I_Srgb
+                    uv_rgb, mask_rgb = project_world_points_to_image(
+                        pts_world_ov,
+                        T_W_Srgb_native_at_depth_ts,
+                        K_rgb,
+                        rgb_w,
+                        rgb_h,
+                        camera_view_coord=profile.camera_view_coord,
+                    )
+                    visible_rgb = int(mask_rgb.sum())
+                    if visible_rgb > 0:
+                        # Colour by distance in the RGB camera's frame
+                        # (not the depth camera's) so blue-near /
+                        # red-far reads relative to what the viewer is
+                        # actually looking at.
+                        T_Srgb_W = np.linalg.inv(T_W_Srgb_native_at_depth_ts)
+                        z_rgb = (T_Srgb_W[:3, :3] @ pts_world_ov.T).T[:, 2] + T_Srgb_W[2, 3]
+                        ov_colors = depth_colormap_jet(
+                            np.abs(z_rgb[mask_rgb]),
+                            args.depth_min,
+                            args.depth_max,
+                        )
+                        rr.log(
+                            "world/camera/image/depth_overlay",
+                            rr.Points2D(
+                                positions=uv_rgb[mask_rgb].astype(np.float32),
+                                colors=ov_colors,
+                                radii=float(args.depth_overlay_radius),
+                            ),
+                        )
+                    else:
+                        # Clear stale splats so a brief tracking gap
+                        # doesn't leave the last frame's overlay
+                        # frozen on screen.
+                        rr.log(
+                            "world/camera/image/depth_overlay",
+                            rr.Points2D(positions=np.zeros((0, 2), dtype=np.float32)),
+                        )
 
             processed += 1
             if args.topk is not None and processed >= args.topk:
@@ -1450,6 +1516,22 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--depth-min", type=float, default=0.1)
     parser.add_argument("--depth-max", type=float, default=15.0)
     parser.add_argument("--depth-pc-stride", type=int, default=2)
+    parser.add_argument(
+        "--depth-overlay-stride",
+        type=int,
+        default=int(os.environ.get("RERUN_DEPTH_OVERLAY_STRIDE", "4")),
+        help=(
+            "Stride over the 3D depth point cloud when splatting onto the RGB "
+            "image (>=1; 4 ≈ 100k splats per 1280x1280 frame). Set to 0 to "
+            "disable the overlay entirely."
+        ),
+    )
+    parser.add_argument(
+        "--depth-overlay-radius",
+        type=float,
+        default=float(os.environ.get("RERUN_DEPTH_OVERLAY_RADIUS", "1.5")),
+        help="Radius (in pixels) of each splat in the depth-on-RGB overlay.",
+    )
     parser.add_argument(
         "--world-coord",
         default="RUB",

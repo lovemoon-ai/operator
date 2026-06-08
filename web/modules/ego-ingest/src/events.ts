@@ -17,6 +17,19 @@ export type IngestEvent =
       type: "session.expired";
       sessionId: string;
       reason: string;
+    }
+  | {
+      /**
+       * Fired after the DELETE /sessions/:id route has removed the
+       * session row, its artifacts, and the on-disk bytes. The SSE
+       * filter uses `userId` to deliver only to subscribers who
+       * previously had access — the session is gone from the store by
+       * the time the event fires, so we can't re-check ownership
+       * against it.
+       */
+      type: "session.deleted";
+      sessionId: string;
+      userId: string | null;
     };
 
 /**

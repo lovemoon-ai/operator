@@ -114,6 +114,28 @@ export class MemoryStore implements SessionStore {
     return { items, nextCursor };
   }
 
+  async deleteSession(
+    sessionId: string,
+    _opts?: { userId?: string },
+  ): Promise<{ artifactUris: string[] } | null> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    // MemoryStore is single-tenant; we ignore opts.userId and rely on
+    // the caller (the read API) to gate by ownership before getting
+    // here. SqliteStore enforces scoping itself because it carries the
+    // user_id column.
+    const artifactUris = Object.values(s.artifacts).map((a) => a.uri);
+    this.sessions.delete(sessionId);
+    // Sweep any in-flight upload that targets this session — without
+    // this, a TUS PATCH still mid-flight would resurrect the row on
+    // finalize and leave us with the old artifacts dangling.
+    for (const [rid, r] of this.resources) {
+      if (r.sessionId === sessionId) this.resources.delete(rid);
+    }
+    this.schedulePersist();
+    return { artifactUris };
+  }
+
   async stats(_opts?: { userId?: string }): Promise<StoreStats> {
     const perDay: StoreStats["perDay"] = {};
     let totalBytes = 0;
