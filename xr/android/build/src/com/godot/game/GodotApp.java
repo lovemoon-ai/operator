@@ -60,6 +60,8 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_CAPTURE_AUTO_STOP_SECONDS = "operator.capture.auto_stop_seconds";
 	private static final String EXTRA_OPERATOR_AUTO_START = "operator.auto_start";
 	private static final String EXTRA_OPERATOR_AUTO_START_LEGACY = "operator_auto_start";
+	private static final String EXTRA_MUJOCO_DURATION = "mujoco.duration";
+	private static final String EXTRA_MUJOCO_MIN_FRAMES = "mujoco.min.frames";
 
 	static {
 		// .NET libraries.
@@ -122,6 +124,8 @@ public class GodotApp extends GodotActivity {
 			args.add("--operator-auto-start");
 			Log.i("Operator", "Automation auto-start requested");
 		}
+		appendIntentExtraArg(args, EXTRA_MUJOCO_DURATION, "--mujoco-duration");
+		appendIntentExtraArg(args, EXTRA_MUJOCO_MIN_FRAMES, "--mujoco-min-frames");
 		return args;
 	}
 

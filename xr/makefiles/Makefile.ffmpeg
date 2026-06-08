@@ -58,23 +58,13 @@ FFMPEG_WORKTREE := $(FFMPEG_BUILD_DIR)/$(ANDROID_ABI)/src
 # setup). Make stays out of its way and just decides when to invoke it.
 FFMPEG_BUILD_SCRIPT := android_plugin/scripts/build_android_ffmpeg.sh
 
-# SpatialMP4 sibling repo holds the two ffmpeg patches we apply on top of
-# vanilla n8.1.1. Try a handful of conventional locations; if none match we
-# bail out with a clear error pointing at the override knob.
-SPATIALMP4_CANDIDATES := \
-	$(HOME)/ws/spatialmp4-quest/SpatialMP4 \
-	$(HOME)/ws/SpatialMP4 \
-	../spatialmp4-quest/SpatialMP4 \
-	../SpatialMP4 \
-	../../spatialmp4-quest/SpatialMP4 \
-	../../SpatialMP4
-
-# Resolve SPATIALMP4_ROOT at parse time if not pre-set. We look specifically
-# for the `read` patch as the canary — both patches always ship together.
-ifeq ($(strip $(SPATIALMP4_ROOT)),)
-SPATIALMP4_ROOT := $(firstword $(foreach p,$(SPATIALMP4_CANDIDATES), \
-	$(if $(wildcard $(p)/scripts/ffmpeg_8_1_1_read.patch),$(p),)))
-endif
+# SpatialMP4 holds the two ffmpeg patches we apply on top of vanilla n8.1.1.
+# Keep it in Operator's shared dependency cache, matching ffmpeg/godot-cpp.
+# Override SPATIALMP4_ROOT only for temporary local experiments.
+SPATIALMP4_ROOT ?= $(abspath $(OPERATOR_DEPS_CACHE_ROOT)/src/SpatialMP4)
+SPATIALMP4_CANDIDATES := $(SPATIALMP4_ROOT)
+SPATIALMP4_PATCH_DEPS := $(wildcard $(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch) \
+                         $(wildcard $(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_enc.patch)
 
 .PHONY: build-ffmpeg clean-ffmpeg ffmpeg-info
 
@@ -92,12 +82,14 @@ build-ffmpeg: $(FFMPEG_LIB)
 #                    (warning: nukes the cache for EVERY worktree using it)
 #   - private cache: unset OPERATOR_DEPS_CACHE_ROOT first, or point it at a
 #                    throwaway dir, to keep the shared cache intact.
-$(FFMPEG_LIB): | $(FFMPEG_BUILD_SCRIPT) \
-                 $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch) \
-                 $(if $(SPATIALMP4_ROOT),$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_enc.patch)
-	@if [ -z "$(SPATIALMP4_ROOT)" ]; then \
+$(FFMPEG_LIB): | $(FFMPEG_BUILD_SCRIPT) $(SPATIALMP4_PATCH_DEPS)
+	@if [ ! -f "$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch" ] && [ "$(SPATIALMP4_ROOT)" = "$(abspath $(OPERATOR_DEPS_CACHE_ROOT)/src/SpatialMP4)" ]; then \
+		$(DEPS_SCRIPT) spatialmp4; \
+	fi
+	@if [ ! -f "$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_read.patch" ] || [ ! -f "$(SPATIALMP4_ROOT)/scripts/ffmpeg_8_1_1_enc.patch" ]; then \
 		echo "[ffmpeg] SpatialMP4 patches not found. Searched:" >&2; \
 		for p in $(SPATIALMP4_CANDIDATES); do echo "  $$p" >&2; done; \
+		echo "Try: ../scripts/sync_deps.sh spatialmp4" >&2; \
 		echo "Override with: make build-ffmpeg SPATIALMP4_ROOT=/path/to/SpatialMP4" >&2; \
 		exit 1; \
 	fi
