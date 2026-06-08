@@ -15,9 +15,8 @@ const MODE_LIVE_FEED := "live_feed"
 const MODE_VR := "vr"
 const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
-const LAUNCHER_CARD_ALL_FEATURE := "operator_launcher_card_all"
-const DEFAULT_LAUNCHER_CARD_MODES := [MODE_EGO_CAPTURE]
-const REQUIRED_LAUNCHER_CARD_MODES := [MODE_EXIT]
+const LAUNCHER_CARDS_CONFIGURED_FEATURE := "operator_launcher_cards_configured"
+const DEFAULT_LAUNCHER_CARD_MODES := [MODE_EGO_CAPTURE, MODE_EXIT]
 
 const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
 const CardSceneTemplate := preload("res://scenes/ui/mode_select_ui.tscn")
@@ -106,23 +105,12 @@ func _configured_card_data() -> Array:
 
 
 func _configured_launcher_card_modes() -> Array:
-	var all_modes := _all_launcher_card_modes()
 	var modes: Array = []
-	if OS.has_feature(LAUNCHER_CARD_ALL_FEATURE):
-		modes = all_modes.duplicate()
-	else:
-		for mode in all_modes:
-			if _launcher_card_feature_enabled(String(mode)):
-				modes.append(mode)
-		if modes.is_empty():
-			modes = DEFAULT_LAUNCHER_CARD_MODES.duplicate()
-	return _with_required_launcher_card_modes(modes)
-
-
-func _with_required_launcher_card_modes(modes: Array) -> Array:
-	for mode in REQUIRED_LAUNCHER_CARD_MODES:
-		if not modes.has(mode):
+	for mode in _all_launcher_card_modes():
+		if _launcher_card_feature_enabled(String(mode)):
 			modes.append(mode)
+	if modes.is_empty() and not OS.has_feature(LAUNCHER_CARDS_CONFIGURED_FEATURE):
+		return DEFAULT_LAUNCHER_CARD_MODES.duplicate()
 	return modes
 
 
@@ -147,6 +135,8 @@ func _launcher_card_features(mode: String) -> Array:
 			return ["operator_launcher_card_live", "operator_launcher_card_live_feed"]
 		MODE_VR:
 			return ["operator_launcher_card_vr"]
+		MODE_EXIT:
+			return ["operator_launcher_card_exit"]
 		_:
 			return []
 
