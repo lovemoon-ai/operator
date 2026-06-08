@@ -99,7 +99,7 @@ import sys
 import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +400,25 @@ class DeviceProfile:
     camera_view_coord: str
 
 
+@dataclass(frozen=True)
+class Camera2ProjectionCalibration:
+    """Quest Camera2 sidecar calibration for accurate 2D RGB overlays.
+
+    The mp4 `ecam` descriptor is suitable for the 3D Rerun camera pose, but
+    Quest's Camera2 `lens_pose_*` sidecar needs the OpenQuest conversion used by
+    SpatialMP4's reference alignment tools before projecting world points into
+    the RGB image plane.
+    """
+    head_from_camera_unity: np.ndarray
+    K_rgb: np.ndarray
+    width: int
+    height: int
+
+
+UNITY_FROM_GODOT_3 = np.diag([1.0, 1.0, -1.0])
+UNITY_FROM_GODOT_4 = np.diag([1.0, 1.0, -1.0, 1.0])
+
+
 _PICO_PERM = np.array(
     [
         [0.0, 0.0, 1.0, 0.0],
@@ -467,6 +486,79 @@ def head_pose_matrix(pose, profile: DeviceProfile) -> np.ndarray:
     if profile.head_is_imu:
         return mat
     return sm.head_to_imu(mat, sm.HEAD_MODEL_OFFSET)
+
+
+def godot_transform_to_unity(transform_godot: np.ndarray) -> np.ndarray:
+    """Convert Godot/OpenXR RUB transform to Unity-style X-right/Y-up/Z-forward."""
+    return UNITY_FROM_GODOT_4 @ transform_godot @ UNITY_FROM_GODOT_4
+
+
+def load_camera2_projection_calibration(
+    input_path: Path,
+    profile: DeviceProfile,
+    eye: str = "left",
+) -> Optional[Camera2ProjectionCalibration]:
+    """Load Quest sidecar Camera2 calibration for accurate RGB image projection.
+
+    Mirrors SpatialMP4's `godot_depth_rgb_align._openquest_head_from_camera`.
+    This is intentionally Quest-only; Pico has different axis conventions and
+    currently no validated sidecar path in this web converter.
+    """
+    if profile.name != "quest":
+        return None
+    sidecar_path = input_path.with_suffix("") / f"{eye}_camera_characteristics.json"
+    if not sidecar_path.exists():
+        return None
+    try:
+        char: Dict[str, Any] = json.loads(sidecar_path.read_text())
+        translation = char.get("lens_pose_translation") or [0.0, 0.0, 0.0]
+        raw_rotation = char.get("lens_pose_rotation") or [0.0, 0.0, 0.0, 1.0]
+        intrinsics = char.get("lens_intrinsic_calibration") or []
+        if len(intrinsics) < 4:
+            info(f"Camera2 sidecar missing intrinsics: {sidecar_path}")
+            return None
+        fx, fy, cx, cy = (float(v) for v in intrinsics[:4])
+        size = char.get("sensor_active_array_size") or char.get("sensor_pixel_array_size") or {}
+        width = int(size.get("width") or (int(size["right"]) - int(size.get("left", 0))))
+        height = int(size.get("height") or (int(size["bottom"]) - int(size.get("top", 0))))
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError) as exc:
+        info(f"Camera2 sidecar read failed ({sidecar_path}): {exc}; falling back to mp4 ecam projection")
+        return None
+
+    raw_quat = np.asarray(raw_rotation, dtype=np.float64)
+    raw_norm = np.linalg.norm(raw_quat)
+    if not np.isfinite(raw_norm) or raw_norm <= 0.0:
+        info(f"Camera2 sidecar has invalid rotation: {sidecar_path}; falling back to mp4 ecam projection")
+        return None
+    converted_quat = np.array(
+        [-raw_quat[0], -raw_quat[1], raw_quat[2], raw_quat[3]],
+        dtype=np.float64,
+    )
+    converted_quat /= max(np.linalg.norm(converted_quat), 1e-12)
+    rotation_unity = (
+        Rotation.from_quat(converted_quat).as_matrix().T @ np.diag([1.0, -1.0, -1.0])
+    )
+    head_from_camera_unity = np.eye(4, dtype=np.float64)
+    head_from_camera_unity[:3, :3] = rotation_unity
+    head_from_camera_unity[:3, 3] = [
+        float(translation[0]),
+        float(translation[1]),
+        -float(translation[2]),
+    ]
+    K_rgb = np.array(
+        [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    info(
+        f"loaded Quest Camera2 sidecar projection calibration: {sidecar_path} "
+        "(RGB hand overlay uses OpenQuest Camera2 conversion)"
+    )
+    return Camera2ProjectionCalibration(
+        head_from_camera_unity=head_from_camera_unity,
+        K_rgb=K_rgb,
+        width=width,
+        height=height,
+    )
 
 
 def device_logged_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.ndarray:
@@ -967,6 +1059,44 @@ def project_world_points_to_image(
     return uv, mask
 
 
+def project_world_points_to_camera2_image(
+    world_pts_godot: np.ndarray,
+    T_W_H_godot: np.ndarray,
+    calibration: Camera2ProjectionCalibration,
+    z_near: float = 0.05,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Project Godot/OpenXR world points into Quest Camera2 RGB pixels."""
+    n = world_pts_godot.shape[0]
+    nan = np.full((n, 2), np.nan, dtype=np.float64)
+    if n == 0:
+        return nan, np.zeros((0,), dtype=bool)
+
+    T_W_H_unity = godot_transform_to_unity(T_W_H_godot)
+    T_W_C_unity = T_W_H_unity @ calibration.head_from_camera_unity
+    T_C_W_unity = np.linalg.inv(T_W_C_unity)
+    pts_unity = (UNITY_FROM_GODOT_3 @ world_pts_godot.T).T
+    camera = (T_C_W_unity[:3, :3] @ pts_unity.T).T + T_C_W_unity[:3, 3]
+
+    z = camera[:, 2]
+    valid_z = z > z_near
+    with np.errstate(divide="ignore", invalid="ignore"):
+        u = calibration.K_rgb[0, 0] * camera[:, 0] / z + calibration.K_rgb[0, 2]
+        # Unity RGB camera uses Y-up; image coordinates increase downward.
+        v = calibration.K_rgb[1, 2] - calibration.K_rgb[1, 1] * camera[:, 1] / z
+    inside = (
+        (u >= 0)
+        & (u < calibration.width)
+        & (v >= 0)
+        & (v < calibration.height)
+    )
+    mask = valid_z & inside & np.isfinite(u) & np.isfinite(v)
+
+    uv = nan.copy()
+    uv[mask, 0] = u[mask]
+    uv[mask, 1] = v[mask]
+    return uv, mask
+
+
 def log_hand_joints_on_image(
     rgb_entity_prefix: str,
     track_id: str,
@@ -976,6 +1106,8 @@ def log_hand_joints_on_image(
     rgb_w: int,
     rgb_h: int,
     camera_view_coord: str,
+    T_W_H_godot: Optional[np.ndarray] = None,
+    camera2_projection: Optional[Camera2ProjectionCalibration] = None,
 ) -> int:
     """Project hand joints + bones into the RGB image and log as
     ``Points2D`` / ``LineStrips2D`` children of the Pinhole entity so
@@ -989,9 +1121,14 @@ def log_hand_joints_on_image(
         return 0
     positions = np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64)
     joint_ids = np.array([int(j.joint_id) for j in joints], dtype=np.int32)
-    uv, mask = project_world_points_to_image(
-        positions, T_W_Srgb_native, K_rgb, rgb_w, rgb_h, camera_view_coord
-    )
+    if camera2_projection is not None and T_W_H_godot is not None:
+        uv, mask = project_world_points_to_camera2_image(
+            positions, T_W_H_godot, camera2_projection
+        )
+    else:
+        uv, mask = project_world_points_to_image(
+            positions, T_W_Srgb_native, K_rgb, rgb_w, rgb_h, camera_view_coord
+        )
     visible = int(mask.sum())
     color = HAND_COLORS.get(track_id, (200, 200, 200))
 
@@ -1132,6 +1269,24 @@ def run(args: argparse.Namespace) -> int:
 
     has_rgb = reader.has_rgb()
     has_depth = reader.has_depth() and not args.no_depth
+    if not has_depth and not args.no_depth:
+        depth_sidecar = input_path.with_suffix("") / "depth" / "frames.jsonl"
+        if manifest_path is not None and manifest_path.exists():
+            try:
+                mf = json.loads(manifest_path.read_text())
+                wants_depth = bool(mf.get("capture_options", {}).get("record_depth"))
+            except (json.JSONDecodeError, OSError):
+                wants_depth = False
+            if wants_depth:
+                sidecar_note = (
+                    f"; sidecar exists but is empty: {depth_sidecar}"
+                    if depth_sidecar.exists() and depth_sidecar.stat().st_size == 0
+                    else f"; sidecar not found: {depth_sidecar}"
+                )
+                info(
+                    "depth requested in manifest, but this mp4 has no readable "
+                    f"depth stream{sidecar_note}. Rerun output will be RGB/pose only."
+                )
 
     if not has_rgb and not has_depth:
         fatal("input has neither RGB nor depth — nothing to visualize")
@@ -1199,6 +1354,9 @@ def run(args: argparse.Namespace) -> int:
     rgb_h = reader.get_rgb_height() if has_rgb else 0
     K_rgb = reader.get_rgb_intrinsics_left() if has_rgb else None
     T_I_Srgb = reader.get_rgb_extrinsics_left().as_se3() if has_rgb else None
+    camera2_projection = (
+        load_camera2_projection_calibration(input_path, profile, "left") if has_rgb else None
+    )
 
     depth_w = reader.get_depth_width() if has_depth else 0
     depth_h = reader.get_depth_height() if has_depth else 0
@@ -1498,6 +1656,8 @@ def run(args: argparse.Namespace) -> int:
                     rgb_w=rgb_w,
                     rgb_h=rgb_h,
                     camera_view_coord=profile.camera_view_coord,
+                    T_W_H_godot=T_W_I,
+                    camera2_projection=camera2_projection,
                 )
 
             processed += 1
