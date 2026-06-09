@@ -3,9 +3,10 @@
  *
  * Two kinds of identity:
  *
- *   - Browser identity comes from OIDC (`oidc_sub` is the issuer's
- *     subject claim). Server.ts looks the user up by `oidc_sub` on
- *     each request, mints a new row on first sight.
+ *   - Browser identity is stamped by the local bypass-mode login
+ *     handler. `oidc_sub` is the historical column name kept for schema
+ *     compat — in bypass mode it stores the fixed dev user's sub
+ *     (`DEV_USER_SUB`, default `dev@localhost`).
  *
  *   - Headset identity comes from `upload_token` (a long random
  *     string). The TUS middleware's auth predicate looks the user up
@@ -73,9 +74,10 @@ export function newUploadToken(): string {
 }
 
 /**
- * Look up a user by their OIDC `sub`, creating a fresh row (with a new
- * upload token) on first sight. Email + name are refreshed on every
- * call so a renamed account stays in sync.
+ * Look up a user by their `sub` (stored in the historically-named
+ * `oidc_sub` column), creating a fresh row (with a new upload token)
+ * on first sight. Email + name are refreshed on every call so a
+ * renamed account stays in sync.
  */
 export function findOrCreateUserBySub(
   sub: string,

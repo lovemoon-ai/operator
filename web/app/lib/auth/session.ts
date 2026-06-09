@@ -20,10 +20,6 @@ const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export interface SessionData {
   userId?: string;
-  /** CSRF state token kept around between /auth/start and /callback. */
-  oauthState?: string;
-  /** Optional post-login redirect, captured before /auth/start. */
-  returnTo?: string;
 }
 
 export function sessionOptions(secret: string): SessionOptions {
