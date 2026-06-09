@@ -48,14 +48,9 @@ Configure via env vars:
 | `PORT` | `3000` | listen port; dev auto-uses the next free port when unset |
 | `DATA_ROOT` | `./data` | sessions + `operator.db` (sqlite) live here |
 | `MAX_BYTES` | `100 GB` | hard cap on Upload-Length |
-| `AUTH_BYPASS` | auto in dev when SSO is unset | `1` skips SSO and logs in as a fixed dev user |
-| `AUTH_SESSION_SECRET` | dev fallback | iron-session cookie secret (32+ chars); REQUIRED in prod |
-| `AUTH_BASE_URL` | `http://localhost:<PORT>` | origin used to build the OIDC `redirect_uri` |
-| `OIDC_ISSUER` | — | OIDC discovery URL |
-| `OIDC_CLIENT_ID` | — | OIDC client id |
-| `OIDC_CLIENT_SECRET` | — | OIDC client secret |
-| `OIDC_SCOPES` | `openid profile email` | scopes requested |
-| `DEV_USER_SUB` | `dev@localhost` | bypass-mode dev user's `sub` |
+| `AUTH_SESSION_SECRET` | dev fallback | iron-session cookie secret (32+ chars) |
+| `AUTH_BASE_URL` | `http://localhost:<PORT>` | origin the app advertises in cookies / redirects |
+| `DEV_USER_SUB` | `dev@localhost` | dev user's `sub` (web tier is local-only / single-user) |
 | `FFMPEG_BIN` | `ffmpeg` | binary used by the preview worker |
 | `PREVIEW_TRANSCODE` | unset | when `1`, re-encode preview to H.264 instead of stream-copy |
 | `UV_BIN` | `uv` | uv binary used to run the rerun sidecar |
@@ -129,17 +124,20 @@ sequentially (see `app/lib/workers/`):
    itself, the `<video>` preview still works. Check the dev-server
    log for the `[workers] rerun …` line.
 
-## Identity & multi-user
+## Identity
 
-- Browsers sign in via OIDC (Authorization Code + PKCE) and get an
-  iron-session cookie. Set `AUTH_BYPASS=1` for local dev to skip OIDC
-  and auto-login as a fixed dev user.
-- Headsets authenticate via a **per-user upload token**. Each signed-in
-  user has exactly one token, displayed on `/connect`. The QR ack
-  endpoint hands the token to the device after verifying the 5-minute
-  signed ticket — the device never has to type it.
-- All reads and writes are scoped to the requesting user. The same
-  database can host many users without leakage between them.
+The web tier is **local-only**. Every install runs a single fixed dev
+user (`DEV_USER_SUB`, default `dev@localhost`); the browser flow stamps
+an iron-session cookie for that user via `/auth/start` and skips any
+remote SSO.
+
+- Headsets authenticate via a **per-user upload token**. The dev user
+  has exactly one token, displayed on `/connect`. The QR ack endpoint
+  hands the token to the device after verifying the 5-minute signed
+  ticket — the device never has to type it.
+- Reads and writes are still scoped to `req.user`, so if you ever
+  re-introduce multi-user auth the rest of the stack already respects
+  it.
 
 ## Demo seeding (optional)
 
@@ -171,11 +169,13 @@ SSE stream is open — pages refresh automatically.
 
 ## Smoke test without a headset
 
-In bypass mode the dev user's upload token is in the sqlite DB:
+The dev user's upload token sits in the sqlite DB:
 
 ```bash
-AUTH_BYPASS=1 npm run dev &
+npm run dev &
 sleep 4
+# log in once so the users row exists, then pull the token
+curl -s http://localhost:3000/auth/start >/dev/null
 TOKEN=$(sqlite3 ./data/operator.db "SELECT upload_token FROM users LIMIT 1;")
 
 META="session_id $(printf 'demo-1' | base64),artifact_kind $(printf 'manifest' | base64),filename $(printf 'manifest.json' | base64)"
@@ -192,6 +192,6 @@ printf '{"schema":"v2","note":"yo"}' | curl -X PATCH "http://localhost:3000$LOC"
   -H 'Upload-Offset: 0' -H 'Content-Length: 27' --data-binary @-
 ```
 
-Visit `http://localhost:3000/` — you'll be auto-logged-in (bypass) and
-the `demo-1` session shows up under "Sessions". Click in to mark it
-reviewed, add notes, etc.
+Visit `http://localhost:3000/` — you'll be auto-logged-in as the dev
+user and the `demo-1` session shows up under "Sessions". Click in to
+mark it reviewed, add notes, etc.

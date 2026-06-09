@@ -1,10 +1,10 @@
 import { AnimatedGraphBackground } from "./AnimatedGraphBackground";
 
 // Static, unauthenticated landing. Visual language deliberately
-// stripped down — a single SSO action sitting on a calm animated
+// stripped down — a single sign-in action sitting on a calm animated
 // graph background, in the spirit of arxiv-radar's login. The
 // "Continue" link points at the Express `/auth/start` route which
-// decides OIDC vs dev-bypass.
+// stamps the dev-bypass session.
 export const dynamic = "force-dynamic";
 
 export default async function LoginPage({
@@ -26,8 +26,8 @@ export default async function LoginPage({
         <a
           className="login-cta"
           href={`/auth/start?returnTo=${encodeURIComponent(returnTo)}`}
-          aria-label="SSO 登录"
-          title="SSO 登录"
+          aria-label="登录"
+          title="登录"
         >
           {/* Lucide `log-in` — inlined so we don't pull in lucide-react
               for a single 24×24 SVG. */}
@@ -47,7 +47,7 @@ export default async function LoginPage({
             <path d="M15 12H3" />
             <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
           </svg>
-          <span>SSO 登录</span>
+          <span>登录</span>
         </a>
       </div>
     </div>
