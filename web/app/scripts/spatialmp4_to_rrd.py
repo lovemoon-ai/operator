@@ -1504,19 +1504,33 @@ def run(args: argparse.Namespace) -> int:
             # because that lives in the spool sidecar
             # (``depth/frames.jsonl``) which the ingest doesn't upload.
             #
-            # Use the **native** extrinsic for the math (pts_cam are
-            # OpenCV-style; the permuted matrix above is only for
-            # logging the camera Transform3D in Rerun's world frame).
-            # For Quest this is the same matrix; for Pico keeping them
-            # separated prevents the cloud from rotating off the
-            # camera.
+            # Use the **native** extrinsic for the math (T_W_Sd_native
+            # expects OpenCV / Y-down camera-frame input; the permuted
+            # matrix above is only for logging the camera Transform3D
+            # in Rerun's world frame). For Quest the two matrices are
+            # identical; for Pico keeping them separated prevents the
+            # cloud from rotating off the camera. For captures whose
+            # live writer didn't record depth_extrinsics we substituted
+            # T_I_Sd = T_I_Srgb above, which is unambiguously
+            # OpenCV→IMU — so pts_cam MUST be in Y-down OpenCV for the
+            # world points to come out the right way up.
             #
-            # Use K_d_raw, NOT K_d: depth_raw is the un-flipped sensor
-            # buffer, and K_d's cy was inverted to match the (flipped)
-            # 2D depth image we hand to Rerun. Pairing one with the
-            # other mirrors Y in the unprojection, which then puts the
-            # 3D point cloud upside-down in the world view.
-            pts_cam = project_depth_to_points(depth_raw, K_d_raw, stride=args.depth_pc_stride)
+            # Pair {depth_for_2d, K_d_raw}: depth_for_2d is the row-
+            # flipped buffer (row 0 at top, OpenCV row order — the
+            # same buffer the 2D Depth tab gets), and K_d_raw.cy is the
+            # SDK calibration in OpenCV convention (cy measured from
+            # the top). Naively unprojecting depth_raw (row 0 at the
+            # PHYSICAL BOTTOM, OpenGL convention from Quest's
+            # Environment Depth) with a cy-from-the-top intrinsic puts
+            # the row=0 / physical-bottom pixels at negative y_cam,
+            # which an OpenCV-Y-down extrinsic then sends "up" in the
+            # world — i.e. the vertically-mirrored point cloud users
+            # report. The previous workaround (swap K_d↔K_d_raw) only
+            # nudges the principal point by a fraction of a pixel since
+            # cy_raw ≈ h/2 ≈ h-1-cy_raw, so it never actually fixed the
+            # flip; you have to align the buffer's row order with the
+            # intrinsics' cy convention.
+            pts_cam = project_depth_to_points(depth_for_2d, K_d_raw, stride=args.depth_pc_stride)
             if pts_cam.size:
                 R_native = T_W_Sd_native[:3, :3]
                 t_native = T_W_Sd_native[:3, 3]
@@ -1690,7 +1704,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument(
         "--depth-overlay-stride",
         type=int,
-        default=int(os.environ.get("RERUN_DEPTH_OVERLAY_STRIDE", "4")),
+        default=int(os.environ.get("RERUN_DEPTH_OVERLAY_STRIDE", "1")),
         help=(
             "Stride over the 3D depth point cloud when splatting onto the RGB "
             "image (>=1; 4 ≈ 100k splats per 1280x1280 frame). Set to 0 to "
@@ -1700,7 +1714,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument(
         "--depth-overlay-radius",
         type=float,
-        default=float(os.environ.get("RERUN_DEPTH_OVERLAY_RADIUS", "1.5")),
+        default=float(os.environ.get("RERUN_DEPTH_OVERLAY_RADIUS", "2.0")),
         help="Radius (in pixels) of each splat in the depth-on-RGB overlay.",
     )
     parser.add_argument(
