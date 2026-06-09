@@ -14,14 +14,14 @@
  *                                          carries its own HMAC signature)
  *   GET             /api/ingest-read/*  ← browser cookie auth
  *   /api/reviews/*                       ← browser cookie auth
- *   /login, /api/auth/callback, /logout ← auth flow
+ *   /login, /logout                      ← auth flow (bypass-only)
  *   everything else                      ← Next.js (cookie auth except
  *                                          /login itself)
  */
 
-// Set the process title BEFORE any other code runs so `ps`, `pgrep`,
-// and pkill-by-title see a name distinct from conductor's sibling
-// `tsx server.ts` process on the same box. (See web/deploy/README.md.)
+// Keep the process title distinct from any other `tsx server.ts`
+// instance that might be running on the same machine — useful for
+// `ps`, `pgrep`, and `pkill -f operator-web` in local ops.
 process.title = "operator-web";
 
 import { createServer as createHttpServer } from "node:http";
@@ -211,7 +211,6 @@ async function main() {
       p === "/login" ||
       p.startsWith("/_next/") ||
       p === "/favicon.ico" ||
-      p === "/api/auth/callback" ||
       PUBLIC_STATIC_RE.test(p)
     ) {
       return handleNext(req, res);
@@ -225,9 +224,7 @@ async function main() {
     console.log(`[ego-app] http://localhost:${port}/`);
     console.log(`[ego-app] ingest at  http://localhost:${port}/api/ingest`);
     console.log(`[ego-app] files at   ${path.resolve(ingest.dataRoot)}`);
-    console.log(
-      `[ego-app] auth       ${auth.mode === "bypass" ? "BYPASS (dev)" : `Conductor SSO ${auth.conductor}`}`,
-    );
+    console.log(`[ego-app] auth       BYPASS (dev) at ${auth.baseUrl}`);
   });
 }
 
