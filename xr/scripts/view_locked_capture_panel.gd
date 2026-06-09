@@ -24,6 +24,20 @@ const DEFAULT_LIVE_RESULT_PORT := 63912
 const STORAGE_REFRESH_SECONDS := 3.0
 const SETTINGS_PATH := "user://capture_settings.cfg"
 const SECTION := "capture"
+# Hand-joint capture (record_hand_data) and controller-pose capture
+# (record_controller_pose) describe two physically incompatible input
+# regimes -- the operator is either driving with bare hands or with the
+# Touch / PICO controllers, never both at once. Recording both at the
+# same time produces sidecar data that downstream consumers can't make
+# sense of (which transform "owns" the wrist at frame T?), so the
+# toggles are wired as a mutex: enabling one auto-disables the other
+# and we never let set_options leave both enabled. The pair is declared
+# as a constant so the mutex logic stays declarative -- adding another
+# pair later is just another entry.
+const INPUT_SOURCE_MUTEX := {
+	"record_hand_data": "record_controller_pose",
+	"record_controller_pose": "record_hand_data",
+}
 # Health check timeout: keep short so the user is not stuck staring at
 # "Checking..." if the endpoint is firewalled/dead. 8 s is enough for a
 # TLS handshake on slow Wi-Fi but short enough that the operator can
@@ -184,8 +198,19 @@ func set_options(options: Dictionary) -> void:
 	# detected value escape through get_options() either.
 	for key in _stream_toggles.keys():
 		var toggle := _stream_toggles[key] as CheckButton
-		if toggle != null:
-			toggle.button_pressed = bool(options.get(key, _default_value_for_key(key)))
+		if toggle == null:
+			continue
+		var value := bool(options.get(key, _default_value_for_key(key)))
+		# For the input-source mutex pair, bypass the `toggled` signal so
+		# bulk-load doesn't fire the mutex callback (which would otherwise
+		# silently flip whichever key arrived second based on Dictionary
+		# iteration order). We resolve any "both true" config explicitly
+		# below via _enforce_input_source_mutex_from_loaded_state().
+		if INPUT_SOURCE_MUTEX.has(key):
+			toggle.set_pressed_no_signal(value)
+		else:
+			toggle.button_pressed = value
+	_enforce_input_source_mutex_from_loaded_state()
 	if _save_root != null:
 		var save_root := str(options.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
 		_save_root.text = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
@@ -257,7 +282,11 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_add_stream_toggle(streams, "record_depth", tr("UI_DEPTH"))
 	_add_stream_toggle(streams, "record_head_pose", tr("UI_HEAD_POSE"))
 	_add_stream_toggle(streams, "record_controller_pose", tr("UI_CONTROLLER_POSES"))
-	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"))
+	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"), false)
+	# Hand vs. controller capture is one-or-the-other -- wire the mutex
+	# before any other state is loaded so set_options (which fires below
+	# via _load_settings()) still goes through the same enforcement.
+	_wire_input_source_mutex()
 	_add_stream_toggle(streams, "record_body_tracking", tr("UI_BODY_TRACKING"))
 	_add_stream_toggle(streams, "record_motion_trackers", tr("UI_MOTION_TRACKERS"))
 	# Motion-tracker capture is a PICO-only stream (powered by the PICO
@@ -554,6 +583,56 @@ func _force_stream_default(key: String, value: bool) -> void:
 	toggle.button_pressed = value
 
 
+# Hook the mutex pair so the user clicking either toggle disables its
+# partner. We connect once after both toggles have been registered. The
+# callback only acts when the toggle was just enabled -- a disable never
+# implies the partner should flip back on -- so the partner's own
+# `toggled` signal fires with `enabled=false`, hits this same callback,
+# and short-circuits. No recursion guard needed.
+func _wire_input_source_mutex() -> void:
+	for primary in INPUT_SOURCE_MUTEX.keys():
+		var toggle := _stream_toggles.get(primary) as CheckButton
+		if toggle == null:
+			continue
+		toggle.toggled.connect(_on_input_source_toggled.bind(primary))
+
+
+func _on_input_source_toggled(enabled: bool, key: String) -> void:
+	if not enabled:
+		return
+	var partner_key := String(INPUT_SOURCE_MUTEX.get(key, ""))
+	if partner_key.is_empty():
+		return
+	var partner := _stream_toggles.get(partner_key) as CheckButton
+	if partner == null or not partner.button_pressed:
+		return
+	# set_pressed_no_signal so we don't bounce back through this handler
+	# (and don't trigger the toggle_off click sound from add_interactive,
+	# which would feel like a phantom UI click to the operator).
+	partner.set_pressed_no_signal(false)
+
+
+# After bulk-loading toggle state from disk we may still have a config
+# where both mutex partners are recorded as true (e.g. an install that
+# pre-dates this rule, or a hand-edited cfg). Resolve it deterministically
+# so the panel never displays a contradictory state: prefer the value the
+# operator most recently confirmed via `_indicator_mode`, otherwise fall
+# back to keeping `record_controller_pose` enabled because the runtime
+# also defaults to the controllers interaction mode.
+func _enforce_input_source_mutex_from_loaded_state() -> void:
+	var hand_toggle := _stream_toggles.get("record_hand_data") as CheckButton
+	var controller_toggle := _stream_toggles.get("record_controller_pose") as CheckButton
+	if hand_toggle == null or controller_toggle == null:
+		return
+	if not (hand_toggle.button_pressed and controller_toggle.button_pressed):
+		return
+	var keep_hands := _indicator_mode == "hands"
+	if keep_hands:
+		controller_toggle.set_pressed_no_signal(false)
+	else:
+		hand_toggle.set_pressed_no_signal(false)
+
+
 func _add_field_label(parent: Container, text: String) -> Label:
 	var lbl := Label.new()
 	lbl.text = text
@@ -608,8 +687,13 @@ static func _default_options() -> Dictionary:
 		"stereo_rgb": true,
 		"record_depth": true,
 		"record_head_pose": true,
+		# Hand vs. controller capture is mutually exclusive (see
+		# INPUT_SOURCE_MUTEX). The runtime defaults to the controllers
+		# interaction mode, so we ship with controllers on and hands off;
+		# selecting hands in the panel auto-disables controllers and
+		# persists that choice.
 		"record_controller_pose": true,
-		"record_hand_data": true,
+		"record_hand_data": false,
 		"record_body_tracking": true,
 		"record_motion_trackers": true,
 		"max_motion_trackers": 3,
