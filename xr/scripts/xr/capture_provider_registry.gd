@@ -50,6 +50,19 @@ static func supports_body_motion(plugin: Object) -> bool:
 	return provider_name(plugin) == "pico"
 
 
+# External motion trackers (waist / feet pucks) are PICO-only — the OpenXR
+# extension that drives them is XR_PICO_motion_tracking, with no counterpart
+# on Quest. We deliberately key off provider_name rather than a per-provider
+# capability call: even if a future provider adds tracker support, the panel
+# wiring (PICO connect button, request flow, battery status) is hard-tied to
+# the Pico bridge, so flipping this on for another provider would surface a
+# broken UI. Quest, GlassXR, etc. just hide the toggle entirely.
+static func supports_motion_trackers(plugin: Object) -> bool:
+	if plugin == null:
+		return false
+	return provider_name(plugin) == "pico"
+
+
 static func _provider_score(plugin: Object, singleton_name: String) -> int:
 	var raw: Variant = _call_or_null(plugin, "getCaptureProviderDeviceScore")
 	if raw != null:

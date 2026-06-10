@@ -674,6 +674,102 @@ BODY_COLOR: Tuple[int, int, int] = (110, 235, 130)
 # scale.
 BODY_JOINT_RADIUS_M = 0.02
 
+
+# ---------------------------------------------------------------------------
+# Godot XRBodyTracker body-skeleton metadata (87 joints, the superset every
+# OpenXR humanoid body extension feeds into Godot's XRBodyTracker). Quest
+# captures land here when the Meta vendor AAR negotiates either
+# XR_FB_body_tracking (~70 upper-body joints active, lower body flagged out)
+# or XR_META_body_tracking_full_body (~84 joints active with IK-inferred legs).
+# Joint ids mirror the C++ enum at
+#   godot/servers/xr/xr_body_tracker.h::XRBodyTracker::Joint
+# Names match Godot's enum verbatim — losing the `JOINT_` prefix only.
+# ---------------------------------------------------------------------------
+
+
+GODOT_XR_BODY_JOINT_NAMES: Tuple[str, ...] = (
+    "ROOT",                                                    # 0
+    # Upper body
+    "HIPS", "SPINE", "CHEST", "UPPER_CHEST", "NECK", "HEAD",   # 1..6
+    "HEAD_TIP",                                                # 7
+    "LEFT_SHOULDER", "LEFT_UPPER_ARM", "LEFT_LOWER_ARM",       # 8..10
+    "RIGHT_SHOULDER", "RIGHT_UPPER_ARM", "RIGHT_LOWER_ARM",    # 11..13
+    # Lower body
+    "LEFT_UPPER_LEG", "LEFT_LOWER_LEG", "LEFT_FOOT", "LEFT_TOES",       # 14..17
+    "RIGHT_UPPER_LEG", "RIGHT_LOWER_LEG", "RIGHT_FOOT", "RIGHT_TOES",   # 18..21
+    # Left hand
+    "LEFT_HAND", "LEFT_PALM", "LEFT_WRIST",                                              # 22..24
+    "LEFT_THUMB_METACARPAL", "LEFT_THUMB_PHALANX_PROXIMAL",
+    "LEFT_THUMB_PHALANX_DISTAL", "LEFT_THUMB_TIP",                                       # 25..28
+    "LEFT_INDEX_METACARPAL", "LEFT_INDEX_PROXIMAL",
+    "LEFT_INDEX_INTERMEDIATE", "LEFT_INDEX_DISTAL", "LEFT_INDEX_TIP",                    # 29..33
+    "LEFT_MIDDLE_METACARPAL", "LEFT_MIDDLE_PROXIMAL",
+    "LEFT_MIDDLE_INTERMEDIATE", "LEFT_MIDDLE_DISTAL", "LEFT_MIDDLE_TIP",                 # 34..38
+    "LEFT_RING_METACARPAL", "LEFT_RING_PROXIMAL",
+    "LEFT_RING_INTERMEDIATE", "LEFT_RING_DISTAL", "LEFT_RING_TIP",                       # 39..43
+    "LEFT_PINKY_METACARPAL", "LEFT_PINKY_PROXIMAL",
+    "LEFT_PINKY_INTERMEDIATE", "LEFT_PINKY_DISTAL", "LEFT_PINKY_TIP",                    # 44..48
+    # Right hand
+    "RIGHT_HAND", "RIGHT_PALM", "RIGHT_WRIST",                                           # 49..51
+    "RIGHT_THUMB_METACARPAL", "RIGHT_THUMB_PHALANX_PROXIMAL",
+    "RIGHT_THUMB_PHALANX_DISTAL", "RIGHT_THUMB_TIP",                                     # 52..55
+    "RIGHT_INDEX_METACARPAL", "RIGHT_INDEX_PROXIMAL",
+    "RIGHT_INDEX_INTERMEDIATE", "RIGHT_INDEX_DISTAL", "RIGHT_INDEX_TIP",                 # 56..60
+    "RIGHT_MIDDLE_METACARPAL", "RIGHT_MIDDLE_PROXIMAL",
+    "RIGHT_MIDDLE_INTERMEDIATE", "RIGHT_MIDDLE_DISTAL", "RIGHT_MIDDLE_TIP",              # 61..65
+    "RIGHT_RING_METACARPAL", "RIGHT_RING_PROXIMAL",
+    "RIGHT_RING_INTERMEDIATE", "RIGHT_RING_DISTAL", "RIGHT_RING_TIP",                    # 66..70
+    "RIGHT_PINKY_METACARPAL", "RIGHT_PINKY_PROXIMAL",
+    "RIGHT_PINKY_INTERMEDIATE", "RIGHT_PINKY_DISTAL", "RIGHT_PINKY_TIP",                 # 71..75
+    # Extra precision joints (Godot 4.5 added them late so they sit at the tail)
+    "LOWER_CHEST",                                                                       # 76
+    "LEFT_SCAPULA", "LEFT_WRIST_TWIST",                                                   # 77..78
+    "RIGHT_SCAPULA", "RIGHT_WRIST_TWIST",                                                 # 79..80
+    "LEFT_FOOT_TWIST", "LEFT_HEEL", "LEFT_MIDDLE_FOOT",                                   # 81..83
+    "RIGHT_FOOT_TWIST", "RIGHT_HEEL", "RIGHT_MIDDLE_FOOT",                                # 84..86
+)
+assert len(GODOT_XR_BODY_JOINT_NAMES) == 87, "Godot XRBodyTracker has 87 joints (id 0..86)"
+
+
+# Body bone chain for Godot XRBodyTracker — kinematic parent → child pairs.
+# Hand fingers are intentionally omitted: the hand pose stream renders them
+# separately in much higher fidelity, and overlaying both produces visual
+# noise. We still draw the wrist + palm so the body and hand skeletons
+# visibly meet at the right place.
+GODOT_XR_BODY_BONES: Tuple[Tuple[int, int], ...] = (
+    # Spine
+    (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7),
+    # Left arm
+    (4, 8), (8, 9), (9, 10), (10, 24),
+    # Right arm
+    (4, 11), (11, 12), (12, 13), (13, 51),
+    # Left leg
+    (1, 14), (14, 15), (15, 16), (16, 17),
+    # Right leg
+    (1, 18), (18, 19), (19, 20), (20, 21),
+    # Wrist → palm so each hand skeleton anchors visibly to the body
+    (24, 23),
+    (51, 50),
+)
+
+
+def _body_skeleton_for_manifest(manifest_data: Optional[dict]) -> Tuple[Tuple[str, ...], Tuple[Tuple[int, int], ...]]:
+    """Pick the (joint_names, bones) pair that matches the body track's joint
+    set as declared in the manifest. Falls back to BD-24 only when the manifest
+    explicitly says so — anything else (Quest, unknown) defaults to the broader
+    Godot/Meta 87-joint set, which is what the body_motion_sampler writes when
+    the Meta vendor AAR is the runtime."""
+    joint_set = ""
+    device_type = ""
+    if manifest_data:
+        sources = manifest_data.get("sources", {}) if isinstance(manifest_data.get("sources"), dict) else {}
+        body = sources.get("body_tracking", {}) if isinstance(sources.get("body_tracking"), dict) else {}
+        joint_set = str(body.get("joint_set", "")).strip()
+        device_type = str(manifest_data.get("device", {}).get("device_type", "")).strip().lower()
+    if joint_set == "pico_bd_24" or (joint_set == "" and device_type.startswith("pico")):
+        return BD_BODY_JOINT_NAMES, BD_BODY_BONES
+    return GODOT_XR_BODY_JOINT_NAMES, GODOT_XR_BODY_BONES
+
 CONTROLLER_COLORS: Dict[str, Tuple[int, int, int]] = {
     "left_controller": (120, 220, 255),
     "right_controller": (255, 200, 120),
@@ -799,16 +895,30 @@ def log_hand_frame_head_relative(track_id: str, hand_frame, head_lookup: PoseLoo
 
 
 _body_unknown_joint_warned = False
+# The skeleton table is selected once per run from the manifest (see
+# _body_skeleton_for_manifest), then read by the per-frame loggers below.
+# Defaults to the Godot/Meta superset so a missing/short manifest still draws
+# the broader Quest skeleton instead of silently truncating bones.
+_BODY_JOINT_NAMES: Tuple[str, ...] = GODOT_XR_BODY_JOINT_NAMES
+_BODY_BONES: Tuple[Tuple[int, int], ...] = GODOT_XR_BODY_BONES
+
+
+def _set_body_skeleton(joint_names: Tuple[str, ...], bones: Tuple[Tuple[int, int], ...]) -> None:
+    global _BODY_JOINT_NAMES, _BODY_BONES, _body_unknown_joint_warned
+    _BODY_JOINT_NAMES = joint_names
+    _BODY_BONES = bones
+    _body_unknown_joint_warned = False
 
 
 def _body_positions_and_ids(joints) -> Tuple[np.ndarray, np.ndarray]:
     positions = np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64)
     joint_ids = np.array([int(j.joint_id) for j in joints], dtype=np.int32)
     global _body_unknown_joint_warned
-    if not _body_unknown_joint_warned and joint_ids.size and joint_ids.max() >= len(BD_BODY_JOINT_NAMES):
+    if not _body_unknown_joint_warned and joint_ids.size and joint_ids.max() >= len(_BODY_JOINT_NAMES):
         _body_unknown_joint_warned = True
         info(
-            f"body track has joint ids up to {int(joint_ids.max())} (> BD 24-joint set); "
+            f"body track has joint ids up to {int(joint_ids.max())} "
+            f"(> active skeleton size {len(_BODY_JOINT_NAMES)}); "
             "unknown joints are drawn as points without bones"
         )
     return positions, joint_ids
@@ -816,7 +926,7 @@ def _body_positions_and_ids(joints) -> Tuple[np.ndarray, np.ndarray]:
 
 def _log_body_points_and_bones(entity_prefix: str, positions: np.ndarray, joint_ids: np.ndarray) -> None:
     labels = [
-        BD_BODY_JOINT_NAMES[i] if 0 <= i < len(BD_BODY_JOINT_NAMES) else f"J{i}"
+        _BODY_JOINT_NAMES[i] if 0 <= i < len(_BODY_JOINT_NAMES) else f"J{i}"
         for i in joint_ids
     ]
     rr.log(
@@ -832,7 +942,7 @@ def _log_body_points_and_bones(entity_prefix: str, positions: np.ndarray, joint_
     id_to_idx = {int(jid): i for i, jid in enumerate(joint_ids)}
     strips = [
         np.stack([positions[id_to_idx[p]], positions[id_to_idx[c]]], axis=0)
-        for p, c in BD_BODY_BONES
+        for p, c in _BODY_BONES
         if p in id_to_idx and c in id_to_idx
     ]
     if strips:
@@ -1418,6 +1528,19 @@ def run(args: argparse.Namespace) -> int:
     # CLI flag still wins over profile.
     if args.camera_coord.upper() == "RDF":  # the parser's default
         args.camera_coord = profile.camera_view_coord
+
+    # Pick the body skeleton table (PICO BD-24 vs Godot/Meta 87) from the
+    # manifest's sources.body_tracking.joint_set, falling back to the device
+    # type so older recordings without the field still render correctly.
+    manifest_data: Optional[dict] = None
+    if manifest_path is not None and manifest_path.exists():
+        try:
+            manifest_data = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError) as exc:
+            info(f"manifest read failed ({manifest_path}): {exc}; body skeleton defaulting to Godot/Meta superset")
+    body_joint_names, body_bones = _body_skeleton_for_manifest(manifest_data)
+    _set_body_skeleton(body_joint_names, body_bones)
+    info(f"body skeleton: {len(body_joint_names)} joints, {len(body_bones)} bones")
 
     info(f"opening {input_path}")
     reader = sm.Reader(str(input_path))

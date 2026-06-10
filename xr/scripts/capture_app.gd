@@ -575,6 +575,13 @@ func stop_capture() -> void:
 
 	var is_live_feed := _is_live_feed_mode()
 	_stop_camera_plugin()
+	# Snapshot the body-tracking runtime BEFORE stop()/close() so the
+	# manifest rewrite at close() time can record which extension actually
+	# fed the samples (PICO BD vs Meta XR_FB / full_body). The sampler keeps
+	# its observed_body_runtime across stop(), but reading it pre-close keeps
+	# the data flow obvious — sample → record → manifest.
+	if body_motion_sampler and body_motion_sampler.has_method("get_runtime_info") and writer and writer.has_method("set_body_tracking_runtime_info"):
+		writer.set_body_tracking_runtime_info(body_motion_sampler.get_runtime_info())
 	body_motion_sampler.stop()
 	if not is_live_feed:
 		_stop_live_pull()
@@ -948,12 +955,6 @@ func _start_camera_plugin() -> void:
 			int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
 			int(_capture_option("rgb_fps", DEFAULT_RGB_FPS))
 		)
-		camera_plugin.call(
-			"setBodyMotionCaptureOptions",
-			_stream_enabled("record_body_tracking"),
-			_stream_enabled("record_motion_trackers"),
-			int(_capture_option("max_motion_trackers", 3))
-		)
 	else:
 		var session_config := {
 			"final_path": output_mp4_absolute,
@@ -978,6 +979,21 @@ func _start_camera_plugin() -> void:
 		configured_result = camera_plugin.call(
 			"configureSpatialMp4SessionFromJson",
 			JSON.stringify(session_config)
+		)
+	# Body-motion options are configured the same way on every provider so the
+	# settings panel's "Body tracking" toggle reaches the active provider. PICO
+	# wires it to XR_BD_body_tracking + motion-tracker pucks; Quest wires it to
+	# Meta XR body tracking (XR_FB_body_tracking / XR_META_body_tracking_full_body).
+	# Pre-fix the call only fired in the PICO branch, so Quest's recordBodyTracking
+	# stayed at its compile-time default and SessionConfig.bodyJointsExpected
+	# never actually reflected the host's choice — the mp4 mett body track was
+	# never allocated and the manifest's body_tracking source stayed empty.
+	if camera_plugin.has_method("setBodyMotionCaptureOptions"):
+		camera_plugin.call(
+			"setBodyMotionCaptureOptions",
+			_stream_enabled("record_body_tracking"),
+			_stream_enabled("record_motion_trackers"),
+			int(_capture_option("max_motion_trackers", 3))
 		)
 	_camera_configured = bool(configured_result)
 	print("%s configureSession returned: %s (audio=%s)" % [_provider_label(), configured_result, want_audio])
@@ -1241,7 +1257,11 @@ func _update_ui_pointer() -> void:
 	# interaction_mode — picking a small floating arrow with a hand pinch
 	# is too fiddly. When the scanner isn't visible the router's
 	# `_active_target()` skips past it to the settings/record panel.
-	settings_interaction_router.set_targets([qr_scanner, settings_panel, record_control])
+	# status_popup must stay in this per-frame list (matching _setup_ui):
+	# during an upload it is the only visible target, and dropping it here
+	# leaves _active_target() empty — the cancel button never receives the
+	# ray and the whole pointer (hands included) goes dark.
+	settings_interaction_router.set_targets([qr_scanner, settings_panel, status_popup, record_control])
 	settings_interaction_router.update_pointer()
 
 
@@ -1309,6 +1329,12 @@ func _effective_capture_options(options: Dictionary) -> Dictionary:
 			effective["record_depth"] = false
 		if not CaptureProviderRegistryScript.supports_body_motion(camera_plugin):
 			effective["record_body_tracking"] = false
+			effective["record_motion_trackers"] = false
+		# Motion trackers (PICO XR_PICO_motion_tracking) are PICO-only even
+		# when the provider reports body-motion support — Quest's body data
+		# comes purely from the Meta vendor AAR's XR_FB_body_tracking +
+		# XR_META_body_tracking_full_body extensions, no external trackers.
+		if CaptureProviderRegistryScript.provider_name(camera_plugin) != "pico":
 			effective["record_motion_trackers"] = false
 		if CaptureProviderRegistryScript.provider_name(camera_plugin) == "pico":
 			effective["record_audio"] = false
@@ -1593,10 +1619,12 @@ func _controller_active(controller: XRController3D) -> bool:
 	return controller != null and controller.get_is_active() and controller.get_has_tracking_data()
 
 
-## Push the "motion-tracker capture is available on this device?" flag down
-## into the settings panel once we know the provider. Pico is the only
-## provider that wires the PXR_BodyTracking extension today, so anywhere
-## else we hide the toggle entirely.
+## Push the "external motion-tracker capture is available on this device?"
+## flag into the settings panel once we know the provider. Motion trackers
+## (waist / feet pucks via XR_PICO_motion_tracking) are PICO-only — Quest
+## body tracking goes through XR_FB_body_tracking / XR_META_body_tracking_full_body
+## instead and has no external tracker concept — so anywhere else we hide
+## the toggle entirely.
 func _update_motion_tracker_support_flag() -> void:
 	if settings_panel == null or not settings_panel.has_method("set_motion_tracker_supported"):
 		return
@@ -1607,7 +1635,11 @@ func _update_motion_tracker_support_flag() -> void:
 		# tell the panel "tracker capture is gone" while the singleton is
 		# still loading on cold boot.
 		return
-	var supported := CaptureProviderRegistryScript.supports_body_motion(camera_plugin)
+	# IMPORTANT: this is supports_motion_trackers, NOT supports_body_motion.
+	# Quest reports supports_body_motion=true (via Meta XR body tracking)
+	# but has no external tracker hardware — using the body-motion flag
+	# here would surface a non-functional PICO tracker UI on Quest.
+	var supported := CaptureProviderRegistryScript.supports_motion_trackers(camera_plugin)
 	if _motion_tracker_provider_known and supported == _motion_tracker_supported_pushed:
 		return
 	_motion_tracker_provider_known = true
