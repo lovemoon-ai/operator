@@ -58,7 +58,8 @@ constexpr int kTrackLeftHandJoints = 3;
 constexpr int kTrackRightHandJoints = 4;
 constexpr int kTrackLeftControllerInput = 5;
 constexpr int kTrackRightControllerInput = 6;
-constexpr int kTimedTrackCount = 7;
+constexpr int kTrackBodyJoints = 7;
+constexpr int kTimedTrackCount = 8;
 
 std::string AvError(int errnum) {
   char buffer[AV_ERROR_MAX_STRING_SIZE] = {0};
@@ -150,6 +151,7 @@ class LiveSpatialMp4Writer {
                        bool controller_pose_expected,
                        bool hand_joints_expected,
                        bool controller_input_expected,
+                       bool body_joints_expected,
                        SideDataBundle rgb_side_data,
                        std::string device_type,
                        std::string device_model,
@@ -169,6 +171,7 @@ class LiveSpatialMp4Writer {
         controller_pose_expected_(controller_pose_expected),
         hand_joints_expected_(hand_joints_expected),
         controller_input_expected_(controller_input_expected),
+        body_joints_expected_(body_joints_expected),
         audio_expected_(audio_expected),
         // The hint is what the host believed the layout would be at session
         // start; the actual layout is whatever ConfigureAudio receives once
@@ -188,13 +191,14 @@ class LiveSpatialMp4Writer {
         ANDROID_LOG_INFO,
         kTag,
         "writer start: rgb=%dx%d@%d cams=%d depth=%d head=%d ctrl=%d hand=%d "
-        "input=%d audio=%d audio_layout_hint=%d -> %s",
+        "input=%d body=%d audio=%d audio_layout_hint=%d -> %s",
         rgb_width_, rgb_height_, rgb_fps_, rgb_camera_count_,
         static_cast<int>(depth_expected_),
         static_cast<int>(head_pose_expected_),
         static_cast<int>(controller_pose_expected_),
         static_cast<int>(hand_joints_expected_),
         static_cast<int>(controller_input_expected_),
+        static_cast<int>(body_joints_expected_),
         static_cast<int>(audio_expected_),
         audio_channel_layout_code_hint_,
         partial_path_.c_str());
@@ -829,6 +833,14 @@ class LiveSpatialMp4Writer {
                              "spatialmp4.controller_input.v1", "application/x-spatialmp4-controller-input",
                              "rcin");
     }
+    if (body_joints_expected_) {
+      // Body joints reuse the HJNT (hand-joints) binary payload layout: the
+      // format is count-driven so the 24 BD body joints pack the same way the
+      // 26 XR hand joints do. The kind is its own "body_joints" so readers can
+      // tell the streams apart without sniffing payload contents.
+      AddTimedMetadataStream(kTrackBodyJoints, "body", "body_joints",
+                             "spatialmp4.body_joints.v1", "application/x-spatialmp4-body-joints", "body");
+    }
     // Create head last so simple stream-order readers still have the best
     // chance of picking head when they only support one pose stream.
     if (head_pose_expected_) {
@@ -873,7 +885,8 @@ class LiveSpatialMp4Writer {
     av_dict_set(&stream->metadata, "pose_position", pose_position, 0);
     av_dict_set(&stream->metadata, "mime_type", mime_type, 0);
     av_dict_set_int(&stream->metadata, "data_accuracy", 2, 0);
-    if (std::strcmp(metadata_kind, "rigid_pose") == 0 || std::strcmp(metadata_kind, "hand_joints") == 0) {
+    if (std::strcmp(metadata_kind, "rigid_pose") == 0 || std::strcmp(metadata_kind, "hand_joints") == 0 ||
+        std::strcmp(metadata_kind, "body_joints") == 0) {
       av_dict_set_int(&stream->metadata, "pose_coordinate", 1, 0);
     }
     if (std::strcmp(metadata_kind, "controller_input") == 0) {
@@ -1131,6 +1144,7 @@ class LiveSpatialMp4Writer {
   bool controller_pose_expected_ = false;
   bool hand_joints_expected_ = false;
   bool controller_input_expected_ = false;
+  bool body_joints_expected_ = false;
   bool hevc_configured_ = false;
   bool depth_configured_ = false;
   bool audio_expected_ = false;
@@ -1196,6 +1210,7 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeStart(
     jboolean controller_pose_expected,
     jboolean hand_joints_expected,
     jboolean controller_input_expected,
+    jboolean body_joints_expected,
     jbyteArray rgb_icam,
     jbyteArray rgb_ecam,
     jbyteArray rgb_dstr,
@@ -1223,6 +1238,7 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeStart(
       controller_pose_expected == JNI_TRUE,
       hand_joints_expected == JNI_TRUE,
       controller_input_expected == JNI_TRUE,
+      body_joints_expected == JNI_TRUE,
       std::move(side_data),
       JStringToString(env, device_type),
       JStringToString(env, device_model),

@@ -52,7 +52,8 @@ func start_session(options: Dictionary = {}) -> bool:
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		if _make_dir("%s/poses" % session_dir) != OK:
 			return false
-	if _capture_enabled("record_body_tracking") or _capture_enabled("record_motion_trackers"):
+	var save_body_sidecar := bool(capture_options.get("save_body_sidecar", false))
+	if (save_body_sidecar and _capture_enabled("record_body_tracking")) or _capture_enabled("record_motion_trackers"):
 		if _make_dir("%s/body_motion" % session_dir) != OK:
 			return false
 	if _capture_enabled("record_depth"):
@@ -72,7 +73,7 @@ func start_session(options: Dictionary = {}) -> bool:
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		sources["pose"] = "Godot OpenXR nodes and XRHandTracker; PTS from OpenXRMetaEnvironmentDepthExtensionWrapper.get_predicted_display_time_ns() when available, else Time.get_ticks_usec()"
 	if _capture_enabled("record_body_tracking"):
-		sources["body_tracking"] = "PICO OpenXR XR_BD_body_tracking plus XR_PICO_body_tracking2 state/velocity/acceleration when available; stored as body_motion/body_joints.jsonl sidecar"
+		sources["body_tracking"] = "PICO OpenXR XR_BD_body_tracking joints in the mp4 mett track `spatialmp4:body_joints:body` (HJNT v1 layout; per-joint flags are XrSpaceLocationFlags low bits); XR_PICO_body_tracking2 state/velocity/acceleration plus frame-level body_flags are kept only in the optional body_motion/body_joints.jsonl sidecar (capture option save_body_sidecar)"
 	if _capture_enabled("record_motion_trackers"):
 		sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored as body_motion/motion_trackers.jsonl sidecar"
 	# v3 spatial audio. The audio path is provider-driven (AudioRecord ->
@@ -129,7 +130,7 @@ func start_session(options: Dictionary = {}) -> bool:
 		_controller_file = FileAccess.open("%s/poses/controllers.jsonl" % session_dir, FileAccess.WRITE)
 	if save_controller_hand_sidecar and _capture_enabled("record_hand_data"):
 		_hand_file = FileAccess.open("%s/poses/hands.jsonl" % session_dir, FileAccess.WRITE)
-	if _capture_enabled("record_body_tracking"):
+	if save_body_sidecar and _capture_enabled("record_body_tracking"):
 		_body_file = FileAccess.open("%s/body_motion/body_joints.jsonl" % session_dir, FileAccess.WRITE)
 	if _capture_enabled("record_motion_trackers"):
 		_motion_file = FileAccess.open("%s/body_motion/motion_trackers.jsonl" % session_dir, FileAccess.WRITE)
@@ -372,24 +373,35 @@ func write_depth_frame(
 
 
 func write_body_joints(timestamp_ns: int, body_flags: int, joints: Array, metadata: Dictionary = {}) -> bool:
-	if _body_file == null or joints.is_empty():
+	if joints.is_empty():
 		return false
-	var json_joints: Array = []
-	for joint in joints:
-		if typeof(joint) == TYPE_DICTIONARY:
-			json_joints.append(_json_safe_joint_record(joint))
-	var record := {
-		"timestamp_ns": timestamp_ns,
-		"body_flags": body_flags,
-		"joint_count": json_joints.size(),
-		"joints": json_joints
-	}
-	for key in metadata.keys():
-		if key == "joints" or key == "transform":
-			continue
-		record[key] = _json_safe_value(metadata[key])
-	_write_jsonl(_body_file, record)
-	return true
+	# The mp4 `mett:body_joints` track is the primary store: the joint dicts
+	# share the {joint, flags, radius_m, position, rotation} shape with hand
+	# joints, so the HJNT packer is reused verbatim. The JSONL sidecar is
+	# opt-in (capture option save_body_sidecar) and is the only place the
+	# frame-level body_flags + PICO velocity/acceleration extras survive.
+	var wrote := false
+	if muxer_plugin != null:
+		muxer_plugin.call("writeBodyJointsPayload", timestamp_ns, _pack_hand_joints_payload(joints))
+		wrote = true
+	if _body_file != null:
+		var json_joints: Array = []
+		for joint in joints:
+			if typeof(joint) == TYPE_DICTIONARY:
+				json_joints.append(_json_safe_joint_record(joint))
+		var record := {
+			"timestamp_ns": timestamp_ns,
+			"body_flags": body_flags,
+			"joint_count": json_joints.size(),
+			"joints": json_joints
+		}
+		for key in metadata.keys():
+			if key == "joints" or key == "transform":
+				continue
+			record[key] = _json_safe_value(metadata[key])
+		_write_jsonl(_body_file, record)
+		wrote = true
+	return wrote
 
 
 func write_motion_tracker_pose(

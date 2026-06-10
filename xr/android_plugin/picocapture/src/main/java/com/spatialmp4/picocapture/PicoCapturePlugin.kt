@@ -772,7 +772,10 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             rgbDstr = rgbSideData.dstr,
             deviceType = deviceIdentity.type,
             deviceModel = deviceIdentity.model,
-            deviceManufacturer = deviceIdentity.manufacturer
+            deviceManufacturer = deviceIdentity.manufacturer,
+            // v4: pre-allocate the mp4 body-joints mett track whenever the host
+            // asked for body tracking; payloads flow from GDScript at ~30 Hz.
+            bodyJointsExpected = recordBodyTracking
         )
         if (!sink.startSession(sessionConfig)) {
             return false

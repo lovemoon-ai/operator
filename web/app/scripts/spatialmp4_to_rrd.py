@@ -626,6 +626,54 @@ HAND_COLORS: Dict[str, Tuple[int, int, int]] = {
     "right_hand": (255, 160, 80),
 }
 
+
+# ---------------------------------------------------------------------------
+# BD body-skeleton metadata (PICO XR_BD_body_tracking, 24 joints)
+#   Joint ids mirror xr/native/pico_openxr/src/pico_openxr_defs.h
+#   (XR_BODY_JOINT_*_BD). The mp4 `mett` track kind is "body_joints" and the
+#   payload shares the count-driven HJNT layout with hand joints, so the SDK
+#   returns the same HandJointsFrame objects.
+# ---------------------------------------------------------------------------
+
+
+BD_BODY_JOINT_NAMES: Tuple[str, ...] = (
+    "PELVIS",
+    "LEFT_HIP", "RIGHT_HIP",
+    "SPINE1",
+    "LEFT_KNEE", "RIGHT_KNEE",
+    "SPINE2",
+    "LEFT_ANKLE", "RIGHT_ANKLE",
+    "SPINE3",
+    "LEFT_FOOT", "RIGHT_FOOT",
+    "NECK",
+    "LEFT_COLLAR", "RIGHT_COLLAR",
+    "HEAD",
+    "LEFT_SHOULDER", "RIGHT_SHOULDER",
+    "LEFT_ELBOW", "RIGHT_ELBOW",
+    "LEFT_WRIST", "RIGHT_WRIST",
+    "LEFT_HAND", "RIGHT_HAND",
+)
+
+
+# (parent_id, child_id) pairs, SMPL-style topology rooted at PELVIS(0).
+BD_BODY_BONES: Tuple[Tuple[int, int], ...] = (
+    # Spine chain
+    (0, 3), (3, 6), (6, 9), (9, 12), (12, 15),
+    # Legs
+    (0, 1), (1, 4), (4, 7), (7, 10),
+    (0, 2), (2, 5), (5, 8), (8, 11),
+    # Arms (collar -> shoulder -> elbow -> wrist -> hand)
+    (9, 13), (13, 16), (16, 18), (18, 20), (20, 22),
+    (9, 14), (14, 17), (17, 19), (19, 21), (21, 23),
+)
+
+
+BODY_COLOR: Tuple[int, int, int] = (110, 235, 130)
+# Body joints carry radius_m=0 (no per-joint radius from the runtime); use a
+# larger default than the 4 mm hand fallback so the skeleton reads at room
+# scale.
+BODY_JOINT_RADIUS_M = 0.02
+
 CONTROLLER_COLORS: Dict[str, Tuple[int, int, int]] = {
     "left_controller": (120, 220, 255),
     "right_controller": (255, 200, 120),
@@ -750,6 +798,81 @@ def log_hand_frame_head_relative(track_id: str, hand_frame, head_lookup: PoseLoo
         )
 
 
+_body_unknown_joint_warned = False
+
+
+def _body_positions_and_ids(joints) -> Tuple[np.ndarray, np.ndarray]:
+    positions = np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64)
+    joint_ids = np.array([int(j.joint_id) for j in joints], dtype=np.int32)
+    global _body_unknown_joint_warned
+    if not _body_unknown_joint_warned and joint_ids.size and joint_ids.max() >= len(BD_BODY_JOINT_NAMES):
+        _body_unknown_joint_warned = True
+        info(
+            f"body track has joint ids up to {int(joint_ids.max())} (> BD 24-joint set); "
+            "unknown joints are drawn as points without bones"
+        )
+    return positions, joint_ids
+
+
+def _log_body_points_and_bones(entity_prefix: str, positions: np.ndarray, joint_ids: np.ndarray) -> None:
+    labels = [
+        BD_BODY_JOINT_NAMES[i] if 0 <= i < len(BD_BODY_JOINT_NAMES) else f"J{i}"
+        for i in joint_ids
+    ]
+    rr.log(
+        f"{entity_prefix}/joints",
+        rr.Points3D(
+            positions=positions,
+            radii=BODY_JOINT_RADIUS_M,
+            colors=[BODY_COLOR] * len(joint_ids),
+            labels=labels,
+            show_labels=False,
+        ),
+    )
+    id_to_idx = {int(jid): i for i, jid in enumerate(joint_ids)}
+    strips = [
+        np.stack([positions[id_to_idx[p]], positions[id_to_idx[c]]], axis=0)
+        for p, c in BD_BODY_BONES
+        if p in id_to_idx and c in id_to_idx
+    ]
+    if strips:
+        rr.log(
+            f"{entity_prefix}/bones",
+            rr.LineStrips3D(
+                strips=strips, colors=[BODY_COLOR] * len(strips), radii=0.008
+            ),
+        )
+
+
+def log_body_frame(body_frame) -> None:
+    """Log body joints + bones directly in world coordinates."""
+    joints = body_frame.joints
+    if not joints:
+        return
+    positions, joint_ids = _body_positions_and_ids(joints)
+    _log_body_points_and_bones("world/body", positions, joint_ids)
+
+
+def log_body_frame_head_relative(body_frame, head_lookup: PoseLookup) -> None:
+    """Log body joints in the head's local frame, sharing the view (and the
+    exact same transform) with the head-relative hand joints so body + hands
+    read as one rig."""
+    joints = body_frame.joints
+    if not joints:
+        return
+    head = head_lookup.nearest(body_frame.timestamp)
+    if head is None:
+        return
+
+    T_W_H = pose_frame_to_matrix(head)
+    R = T_W_H[:3, :3]
+    t = T_W_H[:3, 3]
+    positions_world, joint_ids = _body_positions_and_ids(joints)
+    # (p - t) @ R is the per-row equivalent of R^T @ (p - t).
+    positions_head = (positions_world - t) @ R
+    _log_body_points_and_bones("head_relative/body", positions_head, joint_ids)
+
+
 def log_rigid_pose(track_id: str, pose, axis_len: float = 0.08) -> None:
     mat = pose_frame_to_matrix(pose)
     mat[:3, :3] = ensure_right_handed_rotation(mat[:3, :3])
@@ -791,7 +914,11 @@ def format_controller_input(frame) -> str:
 def collect_tracks(reader) -> Dict[str, List[str]]:
     rigid: List[str] = []
     hands: List[str] = []
+    bodies: List[str] = []
     inputs: List[str] = []
+    # SDK builds older than the body_joints kind don't expose the getter;
+    # degrade to "no body track" instead of crashing on old .so files.
+    has_body_api = hasattr(reader, "get_body_joint_frames")
     for tid in reader.list_timed_metadata_tracks():
         if reader.get_rigid_pose_frames(tid):
             rigid.append(tid)
@@ -799,9 +926,17 @@ def collect_tracks(reader) -> Dict[str, List[str]]:
         if reader.get_hand_joint_frames(tid):
             hands.append(tid)
             continue
+        if has_body_api and reader.get_body_joint_frames(tid):
+            bodies.append(tid)
+            continue
         if reader.get_controller_input_frames(tid):
             inputs.append(tid)
-    return {"rigid_pose": rigid, "hand_joints": hands, "controller_input": inputs}
+    return {
+        "rigid_pose": rigid,
+        "hand_joints": hands,
+        "body_joints": bodies,
+        "controller_input": inputs,
+    }
 
 
 def log_all_rigid_pose_tracks(reader, track_ids: Sequence[str]) -> None:
@@ -834,6 +969,26 @@ def log_all_hand_tracks_head_relative(
                 continue
             set_time_seconds("time", frame.timestamp)
             log_hand_frame_head_relative(tid, frame, head_lookup)
+
+
+def log_all_body_tracks(reader, track_ids: Sequence[str]) -> None:
+    for tid in track_ids:
+        for frame in reader.get_body_joint_frames(tid):
+            if frame.timestamp <= 0:
+                continue
+            set_time_seconds("time", frame.timestamp)
+            log_body_frame(frame)
+
+
+def log_all_body_tracks_head_relative(
+    reader, track_ids: Sequence[str], head_lookup: PoseLookup
+) -> None:
+    for tid in track_ids:
+        for frame in reader.get_body_joint_frames(tid):
+            if frame.timestamp <= 0:
+                continue
+            set_time_seconds("time", frame.timestamp)
+            log_body_frame_head_relative(frame, head_lookup)
 
 
 def log_all_controller_input_tracks(reader, track_ids: Sequence[str]) -> None:
@@ -1235,7 +1390,7 @@ def build_blueprint(has_depth_panel: bool) -> "rrb.ContainerLike":
         )
     right = rrb.Vertical(
         rrb.Tabs(*tabs_children),
-        rrb.Spatial3DView(name="3D Hand (head-relative)", origin="head_relative"),
+        rrb.Spatial3DView(name="3D Body+Hands (head-relative)", origin="head_relative"),
         rrb.TimeSeriesView(name="Inputs", origin="plots"),
         name="2D + head-relative",
         row_shares=[3, 3, 2],
@@ -1428,6 +1583,8 @@ def run(args: argparse.Namespace) -> int:
     log_all_rigid_pose_tracks(reader, tracks["rigid_pose"])
     log_all_hand_tracks(reader, tracks["hand_joints"])
     log_all_hand_tracks_head_relative(reader, tracks["hand_joints"], head_lookup)
+    log_all_body_tracks(reader, tracks["body_joints"])
+    log_all_body_tracks_head_relative(reader, tracks["body_joints"], head_lookup)
     log_all_controller_input_tracks(reader, tracks["controller_input"])
 
     # Head-relative view origin + axes (head at origin, looks down -Z).

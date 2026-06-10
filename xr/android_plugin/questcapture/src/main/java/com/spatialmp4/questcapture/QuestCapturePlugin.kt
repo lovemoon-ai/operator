@@ -952,7 +952,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             deviceModel = deviceIdentity.model,
             deviceManufacturer = deviceIdentity.manufacturer,
             audioExpected = audioGate,
-            audioChannelLayoutCode = audioChannelLayout.code
+            audioChannelLayoutCode = audioChannelLayout.code,
+            // v4: Quest has no BD body tracking; capture_app force-disables
+            // record_body_tracking on this provider, so never allocate the track.
+            bodyJointsExpected = false
         )
         if (!sink.startSession(sessionConfig)) {
             // sink already logged + emitted; nothing more to do.

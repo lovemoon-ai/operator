@@ -118,6 +118,10 @@ var capture_options := {
 	"server_port": 63910,
 	"server_result_port": 63912,
 	"save_controller_hand_sidecar": false,
+	# Body joints always go into the MP4 mett body_joints track; the sidecar
+	# JSONL (frame-level body_flags + PICO velocity/acceleration extras) is
+	# opt-in via the settings panel.
+	"save_body_sidecar": false,
 	"save_root": DEFAULT_SAVE_ROOT
 }
 
