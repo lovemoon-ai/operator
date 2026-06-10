@@ -61,6 +61,11 @@ interface ArtifactRow {
   expected_sha256: string | null;
 }
 
+interface SessionDeletionTargets {
+  artifactUris: string[];
+  resourceIds: string[];
+}
+
 // --- Prepared statements -------------------------------------------------
 
 const stmts = {
@@ -139,6 +144,15 @@ const stmts = {
   `),
   deleteResourcesForSession: db.prepare<[string]>(`
     DELETE FROM resources WHERE session_id = ?
+  `),
+  deleteResourcesForSessionScoped: db.prepare<[string, string]>(`
+    DELETE FROM resources WHERE session_id = ? AND user_id = ?
+  `),
+  listResourceIdsForSession: db.prepare<[string], { id: string }>(`
+    SELECT id FROM resources WHERE session_id = ?
+  `),
+  listResourceIdsForSessionScoped: db.prepare<[string, string], { id: string }>(`
+    SELECT id FROM resources WHERE session_id = ? AND user_id = ?
   `),
   deleteSessionRow: db.prepare<[string]>(`
     DELETE FROM sessions WHERE id = ?
@@ -329,27 +343,57 @@ export class SqliteStore implements SessionStore {
     return { items: slice.map(rowToSession), nextCursor };
   }
 
+  async getSessionDeletionTargets(
+    sessionId: string,
+    opts: { userId?: string } = {},
+  ): Promise<SessionDeletionTargets | null> {
+    const scopedUserId = opts.userId ?? currentUserId() ?? undefined;
+    const session = scopedUserId
+      ? stmts.getSessionScoped.get(sessionId, scopedUserId)
+      : stmts.getSession.get(sessionId);
+    const artifactUris = session
+      ? stmts.listArtifactUris.all(sessionId).map((r) => r.uri)
+      : [];
+    const resourceIds = scopedUserId
+      ? stmts.listResourceIdsForSessionScoped.all(sessionId, scopedUserId).map((r) => r.id)
+      : stmts.listResourceIdsForSession.all(sessionId).map((r) => r.id);
+    if (!session && resourceIds.length === 0) return null;
+    return { artifactUris, resourceIds };
+  }
+
   async deleteSession(
     sessionId: string,
     opts: { userId?: string } = {},
-  ): Promise<{ artifactUris: string[] } | null> {
+  ): Promise<SessionDeletionTargets | null> {
     // Wrap lookup + deletes in a single transaction so a concurrent
     // GET /sessions/:id can never observe a half-deleted state (e.g.
     // session row present, artifact rows gone). The transaction is
     // sync (better-sqlite3 style); we hand the result back through
     // the surrounding Promise.
     const txn = db.transaction(() => {
-      const session = opts.userId
-        ? stmts.getSessionScoped.get(sessionId, opts.userId)
+      const scopedUserId = opts.userId ?? currentUserId() ?? undefined;
+      const session = scopedUserId
+        ? stmts.getSessionScoped.get(sessionId, scopedUserId)
         : stmts.getSession.get(sessionId);
-      if (!session) return null;
       // Capture URIs BEFORE deleting artifact rows — the storage layer
       // needs them to rm the actual bytes off disk after we commit.
-      const artifactUris = stmts.listArtifactUris.all(sessionId).map((r) => r.uri);
-      stmts.deleteArtifactsForSession.run(sessionId);
-      stmts.deleteResourcesForSession.run(sessionId);
-      stmts.deleteSessionRow.run(sessionId);
-      return { artifactUris };
+      const artifactUris = session
+        ? stmts.listArtifactUris.all(sessionId).map((r) => r.uri)
+        : [];
+      const resourceIds = scopedUserId
+        ? stmts.listResourceIdsForSessionScoped.all(sessionId, scopedUserId).map((r) => r.id)
+        : stmts.listResourceIdsForSession.all(sessionId).map((r) => r.id);
+      if (!session && resourceIds.length === 0) return null;
+      if (session) {
+        stmts.deleteArtifactsForSession.run(sessionId);
+        stmts.deleteSessionRow.run(sessionId);
+      }
+      if (scopedUserId) {
+        stmts.deleteResourcesForSessionScoped.run(sessionId, scopedUserId);
+      } else {
+        stmts.deleteResourcesForSession.run(sessionId);
+      }
+      return { artifactUris, resourceIds };
     });
     return txn();
   }

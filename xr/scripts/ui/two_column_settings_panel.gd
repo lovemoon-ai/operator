@@ -29,6 +29,7 @@ const COL_SIDEBAR_FONT := Color(0.88, 0.91, 0.94)
 const COL_SIDEBAR_FONT_SELECTED := Color(1.0, 0.78, 0.40)
 
 var _sidebar: VBoxContainer
+var _two_column_split: HBoxContainer
 var _detail_stack: VBoxContainer        # holds all group containers as siblings
 var _detail_scroll: ScrollContainer
 var _group_containers: Dictionary = {}  # key -> VBoxContainer
@@ -62,6 +63,7 @@ func _setup_two_column_panel(
 func build_two_column(parent: VBoxContainer) -> void:
 	# Outer split: sidebar | detail
 	var split := HBoxContainer.new()
+	_two_column_split = split
 	split.add_theme_constant_override("separation", 14)
 	split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -125,6 +127,20 @@ func select_group(key: String) -> void:
 		group_changed.emit(key)
 	else:
 		call_deferred("emit_signal", "group_changed", key)
+
+
+func scroll_by_pixels(delta_pixels: float) -> bool:
+	return _scroll_container_by_pixels(_detail_scroll, delta_pixels)
+
+
+func reset_detail_scroll() -> void:
+	if _detail_scroll:
+		_detail_scroll.scroll_vertical = 0
+
+
+func _set_two_column_visible(visible_value: bool) -> void:
+	if _two_column_split:
+		_two_column_split.visible = visible_value
 
 
 # --- Internal builders -----------------------------------------------------

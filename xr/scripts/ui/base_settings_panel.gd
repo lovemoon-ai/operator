@@ -29,6 +29,8 @@ var _panel: PanelContainer
 # 当前激活的开/关补间，避免并发冲突
 var _panel_tween: Tween
 var _icon_cache: Dictionary = {}
+var _title_row: HBoxContainer
+var _actions_row: HBoxContainer
 
 # Title-bar indicator that surfaces the auto-detected input source (hand vs
 # controller). Subclasses don't need to know it exists — capture_app /
@@ -313,6 +315,24 @@ func _on_pointer_cleared() -> void:
 	_set_highlighted_slot(null)
 
 
+func scroll_by_pixels(delta_pixels: float) -> bool:
+	return _scroll_container_by_pixels(_scroll_container, delta_pixels)
+
+
+func _scroll_container_by_pixels(scroll: ScrollContainer, delta_pixels: float) -> bool:
+	if scroll == null or absf(delta_pixels) < 0.01:
+		return false
+	var vbar := scroll.get_v_scroll_bar()
+	if vbar == null:
+		return false
+	var max_scroll := maxi(0, int(round(vbar.max_value - vbar.page)))
+	if max_scroll <= 0:
+		return false
+	var before := scroll.scroll_vertical
+	scroll.scroll_vertical = clampi(before + int(round(delta_pixels)), 0, max_scroll)
+	return scroll.scroll_vertical != before
+
+
 func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String, use_outer_scroll: bool = true) -> void:
 	var panel := PanelContainer.new()
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -345,6 +365,7 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 	# square sitting next to the title for the brief window before XR
 	# tracking warms up.
 	var title_row := HBoxContainer.new()
+	_title_row = title_row
 	title_row.add_theme_constant_override("separation", 14)
 	title_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	root.add_child(title_row)
@@ -386,6 +407,7 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 	_build_settings_content(_content)
 
 	var actions := HBoxContainer.new()
+	_actions_row = actions
 	actions.add_theme_constant_override("separation", 14)
 	actions.custom_minimum_size.y = ACTION_BUTTON_HEIGHT
 	actions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -414,6 +436,13 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 	exit_button.pressed.connect(_on_exit_button_pressed)
 	var exit_slot := add_interactive(actions, exit_button)
 	_configure_action_slot(exit_slot)
+
+
+func _set_panel_chrome_visible(visible_value: bool) -> void:
+	if _title_row:
+		_title_row.visible = visible_value
+	if _actions_row:
+		_actions_row.visible = visible_value
 
 
 func _configure_action_slot(slot: PanelContainer) -> void:

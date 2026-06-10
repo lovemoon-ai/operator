@@ -4,6 +4,7 @@ import type { Request, RequestHandler, Response } from "express";
 import express from "express";
 
 import { IngestEvents } from "../events.js";
+import type { SessionDeletionTargets } from "../store/index.js";
 import type {
   AuthFn,
   IngestOptions,
@@ -469,13 +470,37 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
     res.status(204).end();
   });
 
+  router.delete("/sessions/:sessionId", async (req, res) => {
+    if (!(await runAuth(auth, req, res))) return;
+    const sessionId = req.params.sessionId!;
+    clearOrphanTimer(sessionId);
+    const targets = await opts.store.getSessionDeletionTargets(sessionId);
+    if (!targets) return res.status(404).end();
+    try {
+      await cleanupSessionStorage(opts, targets);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[ego-ingest] cleanupSessionStorage(${sessionId}) failed: ${(err as Error).message}`);
+      return tusError(res, 500, "storage cleanup failed");
+    }
+    await opts.store.deleteSession(sessionId);
+    events.emit({ type: "session.deleted", sessionId, userId: null });
+    res.status(204).end();
+  });
+
   router.delete("/:resourceId", async (req, res) => {
     if (!(await runAuth(auth, req, res))) return;
     const id = req.params.resourceId!;
     const record = await opts.store.getResource(id);
     if (!record) return res.status(404).end();
     const handle = await opts.storage.reopenResource(id);
-    if (handle) await handle.dispose();
+    try {
+      if (handle) await handle.dispose();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[ego-ingest] disposeResource(${id}) failed: ${(err as Error).message}`);
+      return tusError(res, 500, "storage cleanup failed");
+    }
     await opts.store.deleteResource(id);
     res.status(204).end();
   });
@@ -496,6 +521,31 @@ async function runAuth(auth: AuthFn, req: Request, res: Response): Promise<boole
     return false;
   }
   return true;
+}
+
+async function cleanupSessionStorage(
+  opts: IngestOptions,
+  targets: SessionDeletionTargets,
+): Promise<void> {
+  const failures: string[] = [];
+  for (const resourceId of targets.resourceIds) {
+    try {
+      const handle = await opts.storage.reopenResource(resourceId);
+      if (handle) await handle.dispose();
+    } catch (err) {
+      failures.push(`disposeResource(${resourceId}): ${(err as Error).message}`);
+    }
+  }
+  for (const uri of targets.artifactUris) {
+    try {
+      await opts.storage.deleteFinalized(uri);
+    } catch (err) {
+      failures.push(`deleteFinalized(${uri}): ${(err as Error).message}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(failures.join("; "));
+  }
 }
 
 function tusError(res: Response, status: number, message: string): void {

@@ -32,6 +32,7 @@ signal upload_started(session_id: String, artifact_kind: String)
 signal upload_progress(session_id: String, artifact_kind: String, sent_bytes: int, total_bytes: int)
 signal upload_finished(session_id: String, artifact_kind: String, response: Dictionary)
 signal upload_failed(session_id: String, artifact_kind: String, error: String)
+signal upload_cancelled(session_id: String, reason: String)
 signal session_uploaded(session_id: String)
 signal queue_changed(pending_count: int)
 
@@ -55,6 +56,7 @@ var _wake: Semaphore
 var _exit_requested := false
 var _paused := false
 var _queue: Array = []                          # Array[Dictionary]
+var _cancel_requested: Dictionary = {}           # session_id -> true
 
 
 func _ready() -> void:
@@ -170,22 +172,23 @@ func prioritize(session_id: String) -> bool:
 	return found
 
 
-## Drop a job by session_id. Returns true if a job was removed.
+## Cancel a job by session_id. The job stays queued until the worker deletes
+## any remote TUS resources it already created, then the worker removes it.
 func cancel(session_id: String) -> bool:
-	var removed := false
+	var found := false
 	_mutex.lock()
 	for i in range(_queue.size() - 1, -1, -1):
 		if str(_queue[i].get("session_id", "")) == session_id:
-			_queue.remove_at(i)
-			removed = true
+			found = true
 			break
-	if removed:
-		_save_queue_locked()
+	if found:
+		_cancel_requested[session_id] = true
 	var pending: int = _queue.size()
 	_mutex.unlock()
-	if removed:
+	if found:
 		call_deferred("emit_signal", "queue_changed", pending)
-	return removed
+		_wake.post()
+	return found
 
 
 # --- Worker thread -----------------------------------------------------------
@@ -215,6 +218,15 @@ func _worker_loop() -> void:
 		var head_matches := not _queue.is_empty() and str(_queue[0].get("session_id", "")) == str(job.get("session_id", ""))
 		if head_matches:
 			_queue[0] = job
+		var cancelled := bool(job.get("_cancelled", false))
+		if cancelled and head_matches:
+			_queue.pop_front()
+			_save_queue_locked()
+			var cancelled_sid := str(job.get("session_id", ""))
+			_mutex.unlock()
+			call_deferred("emit_signal", "queue_changed", _queue_size())
+			call_deferred("emit_signal", "upload_cancelled", cancelled_sid, "cancelled")
+			continue
 		if ok and head_matches:
 			var finished_job: Dictionary = _queue.pop_front()
 			_save_queue_locked()
@@ -243,6 +255,8 @@ func _worker_loop() -> void:
 			_mutex.unlock()
 			if bail:
 				return
+			if _is_cancel_requested(str(job.get("session_id", ""))) and not bool(job.get("_cancel_cleanup_failed", false)):
+				break
 			OS.delay_msec(200)
 
 
@@ -259,6 +273,9 @@ func _queue_size() -> int:
 func _process_job(job: Dictionary) -> bool:
 	job["attempt"] = int(job.get("attempt", 0)) + 1
 	var session_id := str(job.get("session_id", ""))
+	if _is_cancel_requested(session_id):
+		_cleanup_cancelled_job(job)
+		return false
 	var artifacts: Dictionary = job.get("artifacts", {})
 	# Manifest first so the server can allocate the session record before
 	# the (much larger) mp4 arrives.
@@ -272,6 +289,8 @@ func _process_job(job: Dictionary) -> bool:
 		var ok := _upload_artifact(job, kind, artifact)
 		artifacts[kind] = artifact
 		if not ok:
+			if _is_cancel_requested(session_id):
+				_cleanup_cancelled_job(job)
 			return false
 		artifact["done"] = true
 		artifacts[kind] = artifact
@@ -281,6 +300,9 @@ func _process_job(job: Dictionary) -> bool:
 
 
 func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bool:
+	var session_id := str(job.get("session_id", ""))
+	if _is_cancel_requested(session_id):
+		return false
 	var path := str(artifact.get("path", ""))
 	if not FileAccess.file_exists(path):
 		_fail(job, kind, "local file missing: %s" % path)
@@ -307,6 +329,8 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 			return false
 		tus_location = creation
 		artifact["tus_location"] = tus_location
+		if _is_cancel_requested(session_id):
+			return false
 	else:
 		# Resume path: HEAD the existing resource so we believe the server
 		# about how many bytes it actually persisted.
@@ -321,11 +345,13 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 			tus_location = creation2
 			artifact["tus_location"] = tus_location
 			offset = 0
+			if _is_cancel_requested(session_id):
+				return false
 		else:
 			offset = server_offset
 			artifact["offset"] = offset
 
-	call_deferred("emit_signal", "upload_progress", str(job["session_id"]), kind, offset, total)
+	call_deferred("emit_signal", "upload_progress", session_id, kind, offset, total)
 
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
@@ -334,7 +360,7 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 	file.seek(offset)
 	while offset < total:
 		_mutex.lock()
-		var should_stop := _exit_requested or _paused
+		var should_stop := _exit_requested or _paused or _cancel_requested.has(session_id)
 		_mutex.unlock()
 		if should_stop:
 			file.close()
@@ -353,7 +379,7 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 			return false
 		offset = new_offset
 		artifact["offset"] = offset
-		call_deferred("emit_signal", "upload_progress", str(job["session_id"]), kind, offset, total)
+		call_deferred("emit_signal", "upload_progress", session_id, kind, offset, total)
 
 	file.close()
 	return true
@@ -427,10 +453,77 @@ func _tus_patch(http: HTTPClient, tus_location: String, offset: int, chunk: Pack
 	return int(new_off)
 
 
+func _cleanup_cancelled_job(job: Dictionary) -> bool:
+	var session_id := str(job.get("session_id", ""))
+	if session_id.is_empty():
+		return false
+	if bool(job.get("_cancelled", false)):
+		return true
+	job["_cancel_cleanup_failed"] = false
+	var cleaned := true
+	var artifacts: Dictionary = job.get("artifacts", {})
+	for kind in artifacts.keys():
+		var artifact: Dictionary = artifacts[kind]
+		var location := str(artifact.get("tus_location", ""))
+		if not location.is_empty():
+			cleaned = _tus_delete_location(job, location) and cleaned
+	cleaned = _delete_remote_session(job) and cleaned
+	if not cleaned:
+		job["_cancel_cleanup_failed"] = true
+		_fail(job, "cancel", "remote cleanup failed; will retry")
+		return false
+	_clear_cancel_requested(session_id)
+	job["_cancelled"] = true
+	return true
+
+
+func _tus_delete_location(job: Dictionary, tus_location: String) -> bool:
+	var base_url := str(job.get("upload_url", ""))
+	var target_url := _normalize_tus_location(base_url, tus_location)
+	return _delete_url(job, target_url)
+
+
+func _delete_remote_session(job: Dictionary) -> bool:
+	var session_id := str(job.get("session_id", ""))
+	var upload_url := str(job.get("upload_url", ""))
+	var target_url := _session_cleanup_url(upload_url, session_id)
+	if target_url.is_empty():
+		return false
+	return _delete_url(job, target_url)
+
+
+func _delete_url(job: Dictionary, url: String) -> bool:
+	var http := _connect_to_url(url)
+	if http == null:
+		return false
+	var err := http.request(HTTPClient.METHOD_DELETE, _path_of_url(url), _common_headers(job))
+	if err != OK:
+		return false
+	var status := _drive_http(http)
+	_drain_body(http)
+	return status == 204 or status == 404 or status == 410
+
+
+func _is_cancel_requested(session_id: String) -> bool:
+	_mutex.lock()
+	var requested := _cancel_requested.has(session_id)
+	_mutex.unlock()
+	return requested
+
+
+func _clear_cancel_requested(session_id: String) -> void:
+	_mutex.lock()
+	_cancel_requested.erase(session_id)
+	_mutex.unlock()
+
+
 # --- HTTP helpers ------------------------------------------------------------
 
 func _connect_to(job: Dictionary) -> HTTPClient:
-	var url := str(job.get("upload_url", ""))
+	return _connect_to_url(str(job.get("upload_url", "")))
+
+
+func _connect_to_url(url: String) -> HTTPClient:
 	var parsed := _parse_url(url)
 	if parsed.is_empty():
 		return null
@@ -584,6 +677,21 @@ func _normalize_tus_location(base_url: String, location: String) -> String:
 	if not location.begins_with("/"):
 		location = "/" + location
 	return authority + location
+
+
+func _session_cleanup_url(upload_url: String, session_id: String) -> String:
+	var parsed := _parse_url(upload_url)
+	if parsed.is_empty() or session_id.is_empty():
+		return ""
+	var authority := "%s://%s" % [parsed["scheme"], parsed["host"]]
+	var port := int(parsed["port"])
+	var default_port := 443 if parsed["scheme"] == "https" else 80
+	if port != default_port:
+		authority += ":%d" % port
+	var path := str(parsed.get("path", "/"))
+	while path.ends_with("/") and path.length() > 1:
+		path = path.substr(0, path.length() - 1)
+	return "%s%s/sessions/%s" % [authority, path, session_id]
 
 
 # --- Queue persistence -------------------------------------------------------
