@@ -988,13 +988,21 @@ func _start_camera_plugin() -> void:
 	# stayed at its compile-time default and SessionConfig.bodyJointsExpected
 	# never actually reflected the host's choice — the mp4 mett body track was
 	# never allocated and the manifest's body_tracking source stayed empty.
-	if camera_plugin.has_method("setBodyMotionCaptureOptions"):
-		camera_plugin.call(
-			"setBodyMotionCaptureOptions",
-			_stream_enabled("record_body_tracking"),
-			_stream_enabled("record_motion_trackers"),
-			int(_capture_option("max_motion_trackers", 3))
-		)
+	#
+	# Both Pico and Quest implement setBodyMotionCaptureOptions, so we always
+	# call it unconditionally. has_method() is unreliable for Godot Android
+	# plugin singletons: @UsedByGodot reflection does not always surface via
+	# Object.has_method() (see _resolve_device_identity in session_spool_writer
+	# for the same caveat), and a false negative here silently disables body
+	# tracking for the whole session. Any future provider that does not
+	# implement the call will see a plain "method not found" GDScript error
+	# at startup, which is the loud failure mode we want.
+	camera_plugin.call(
+		"setBodyMotionCaptureOptions",
+		_stream_enabled("record_body_tracking"),
+		_stream_enabled("record_motion_trackers"),
+		int(_capture_option("max_motion_trackers", 3))
+	)
 	_camera_configured = bool(configured_result)
 	print("%s configureSession returned: %s (audio=%s)" % [_provider_label(), configured_result, want_audio])
 	if not _camera_configured:

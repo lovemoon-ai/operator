@@ -276,18 +276,27 @@ func _worker_loop() -> void:
 		# drop it from the queue (permanent, or transient-with-budget-exhausted)
 		# so that a poison job does not block every later session forever.
 		var permanent := head_matches and bool(job.get("_permanent_failure", false))
-		var attempt: int = int(job.get("attempt", 1))
+		var attempt: int = int(job.get("attempt", 0))
 		var exhausted := head_matches and attempt >= MAX_TRANSIENT_ATTEMPTS_PER_JOB
 		if permanent or exhausted:
+			# Pop FIRST, release the mutex, THEN do the best-effort remote
+			# TUS DELETE. Earlier revisions kept the cleanup inside the lock,
+			# which meant a wedged server blocked main-thread enqueue() /
+			# cancel() / clear_failed() / pending_jobs() / get_options() polls
+			# for up to MAX_DELETE_TIME_S × N artifacts — i.e. the same
+			# "cancel button frozen" symptom the popup-routing fix was
+			# supposed to kill. The job is already poison; if cleanup also
+			# fails we just leak the TUS resource at the server and log it.
+			var dropped_job: Dictionary = {}
 			var dropped_sid := str(job.get("session_id", ""))
 			var drop_reason := str(job.get("_failure_message", "transient failure budget exhausted")) if permanent else ("transient failure budget exhausted after %d attempts" % attempt)
-			# Best-effort remote cleanup so we don't leave orphaned TUS
-			# resources sitting around at the server (mirrors cancel()).
-			_cleanup_cancelled_job(job)
 			if head_matches:
-				_queue.pop_front()
+				dropped_job = _queue.pop_front()
 			_save_queue_locked()
 			_mutex.unlock()
+			if not dropped_job.is_empty():
+				if not _cleanup_cancelled_job(dropped_job):
+					push_warning("[EgoUploader] dropping job %s but remote TUS cleanup failed; resources may linger at the server until GC" % dropped_sid)
 			push_warning("[EgoUploader] dropping job %s after permanent/exhausted failure: %s" % [dropped_sid, drop_reason])
 			call_deferred("emit_signal", "queue_changed", _queue_size())
 			# upload_failed was already emitted from _fail(); add a terminal
