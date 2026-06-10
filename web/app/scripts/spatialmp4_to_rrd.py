@@ -732,33 +732,43 @@ assert len(GODOT_XR_BODY_JOINT_NAMES) == 87, "Godot XRBodyTracker has 87 joints 
 
 
 # Body bone chain for Godot XRBodyTracker — kinematic parent → child pairs.
-# Hand fingers are intentionally omitted: the hand pose stream renders them
-# separately in much higher fidelity, and overlaying both produces visual
-# noise. We still draw the wrist + palm so the body and hand skeletons
-# visibly meet at the right place.
+# Arms terminate at LOWER_ARM (10 / 13). Everything from WRIST onwards
+# (HAND / PALM / WRIST + all 26 finger joints per side) belongs to the
+# dedicated hand-joint stream and is filtered out of the body render below;
+# drawing both at once produced two overlapping skeletons.
 GODOT_XR_BODY_BONES: Tuple[Tuple[int, int], ...] = (
     # Spine
     (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7),
     # Left arm
-    (4, 8), (8, 9), (9, 10), (10, 24),
+    (4, 8), (8, 9), (9, 10),
     # Right arm
-    (4, 11), (11, 12), (12, 13), (13, 51),
+    (4, 11), (11, 12), (12, 13),
     # Left leg
     (1, 14), (14, 15), (15, 16), (16, 17),
     # Right leg
     (1, 18), (18, 19), (19, 20), (20, 21),
-    # Wrist → palm so each hand skeleton anchors visibly to the body
-    (24, 23),
-    (51, 50),
 )
 
+# Joint ids that the body track shares with the dedicated hand-joint streams
+# (Godot XRBodyTracker enum: LEFT_HAND..RIGHT_PINKY_FINGER_TIP, ids 22..75).
+# We drop them from the body Points3D + bone strips so the body skeleton ends
+# at the lower arm and the hand stream owns everything past the wrist.
+GODOT_XR_BODY_HAND_JOINT_IDS: frozenset[int] = frozenset(range(22, 76))
 
-def _body_skeleton_for_manifest(manifest_data: Optional[dict]) -> Tuple[Tuple[str, ...], Tuple[Tuple[int, int], ...]]:
-    """Pick the (joint_names, bones) pair that matches the body track's joint
-    set as declared in the manifest. Falls back to BD-24 only when the manifest
-    explicitly says so — anything else (Quest, unknown) defaults to the broader
-    Godot/Meta 87-joint set, which is what the body_motion_sampler writes when
-    the Meta vendor AAR is the runtime."""
+
+def _body_skeleton_for_manifest(
+    manifest_data: Optional[dict],
+) -> Tuple[Tuple[str, ...], Tuple[Tuple[int, int], ...], frozenset[int]]:
+    """Pick the (joint_names, bones, hand_joint_ids) triple that matches the
+    body track's joint set as declared in the manifest. Falls back to BD-24
+    only when the manifest explicitly says so — anything else (Quest,
+    unknown) defaults to the broader Godot/Meta 87-joint set, which is what
+    the body_motion_sampler writes when the Meta vendor AAR is the runtime.
+
+    `hand_joint_ids` is the set of body-track joints that overlap the
+    dedicated hand_joints stream; the per-frame logger drops them so the
+    two skeletons never render on top of each other.
+    """
     joint_set = ""
     device_type = ""
     if manifest_data:
@@ -767,8 +777,10 @@ def _body_skeleton_for_manifest(manifest_data: Optional[dict]) -> Tuple[Tuple[st
         joint_set = str(body.get("joint_set", "")).strip()
         device_type = str(manifest_data.get("device", {}).get("device_type", "")).strip().lower()
     if joint_set == "pico_bd_24" or (joint_set == "" and device_type.startswith("pico")):
-        return BD_BODY_JOINT_NAMES, BD_BODY_BONES
-    return GODOT_XR_BODY_JOINT_NAMES, GODOT_XR_BODY_BONES
+        # BD's LEFT_HAND (22) and RIGHT_HAND (23) are coarse end-of-arm
+        # markers already covered by the hand stream's wrist/palm — hide them.
+        return BD_BODY_JOINT_NAMES, BD_BODY_BONES, frozenset({22, 23})
+    return GODOT_XR_BODY_JOINT_NAMES, GODOT_XR_BODY_BONES, GODOT_XR_BODY_HAND_JOINT_IDS
 
 CONTROLLER_COLORS: Dict[str, Tuple[int, int, int]] = {
     "left_controller": (120, 220, 255),
@@ -901,18 +913,38 @@ _body_unknown_joint_warned = False
 # the broader Quest skeleton instead of silently truncating bones.
 _BODY_JOINT_NAMES: Tuple[str, ...] = GODOT_XR_BODY_JOINT_NAMES
 _BODY_BONES: Tuple[Tuple[int, int], ...] = GODOT_XR_BODY_BONES
+# Joint ids the body render should hide because the dedicated hand_joints
+# stream already draws them at higher fidelity. PICO BD has only the two
+# coarse LEFT_HAND/RIGHT_HAND endpoints (ids 22, 23) — also redundant with
+# the hand stream — so it gets its own set.
+_BODY_HAND_JOINT_IDS: frozenset[int] = GODOT_XR_BODY_HAND_JOINT_IDS
 
 
-def _set_body_skeleton(joint_names: Tuple[str, ...], bones: Tuple[Tuple[int, int], ...]) -> None:
-    global _BODY_JOINT_NAMES, _BODY_BONES, _body_unknown_joint_warned
+def _set_body_skeleton(
+    joint_names: Tuple[str, ...],
+    bones: Tuple[Tuple[int, int], ...],
+    hand_joint_ids: frozenset[int],
+) -> None:
+    global _BODY_JOINT_NAMES, _BODY_BONES, _BODY_HAND_JOINT_IDS, _body_unknown_joint_warned
     _BODY_JOINT_NAMES = joint_names
     _BODY_BONES = bones
+    _BODY_HAND_JOINT_IDS = hand_joint_ids
     _body_unknown_joint_warned = False
 
 
 def _body_positions_and_ids(joints) -> Tuple[np.ndarray, np.ndarray]:
-    positions = np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64)
-    joint_ids = np.array([int(j.joint_id) for j in joints], dtype=np.int32)
+    # Drop hand-region joints up front so neither Points3D nor the bone
+    # strips below pick them up. The hand_joints stream owns this region.
+    raw_positions: List[List[float]] = []
+    raw_ids: List[int] = []
+    for j in joints:
+        jid = int(j.joint_id)
+        if jid in _BODY_HAND_JOINT_IDS:
+            continue
+        raw_positions.append([j.x, j.y, j.z])
+        raw_ids.append(jid)
+    positions = np.array(raw_positions, dtype=np.float64) if raw_positions else np.zeros((0, 3), dtype=np.float64)
+    joint_ids = np.array(raw_ids, dtype=np.int32)
     global _body_unknown_joint_warned
     if not _body_unknown_joint_warned and joint_ids.size and joint_ids.max() >= len(_BODY_JOINT_NAMES):
         _body_unknown_joint_warned = True
@@ -925,6 +957,11 @@ def _body_positions_and_ids(joints) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _log_body_points_and_bones(entity_prefix: str, positions: np.ndarray, joint_ids: np.ndarray) -> None:
+    if joint_ids.size == 0:
+        # Every joint in this frame was filtered out (e.g. PICO BD frame
+        # that only carried hand endpoints). Skip the rr.log so we don't
+        # blank out the entity that an earlier frame already populated.
+        return
     labels = [
         _BODY_JOINT_NAMES[i] if 0 <= i < len(_BODY_JOINT_NAMES) else f"J{i}"
         for i in joint_ids
@@ -1538,9 +1575,12 @@ def run(args: argparse.Namespace) -> int:
             manifest_data = json.loads(manifest_path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
             info(f"manifest read failed ({manifest_path}): {exc}; body skeleton defaulting to Godot/Meta superset")
-    body_joint_names, body_bones = _body_skeleton_for_manifest(manifest_data)
-    _set_body_skeleton(body_joint_names, body_bones)
-    info(f"body skeleton: {len(body_joint_names)} joints, {len(body_bones)} bones")
+    body_joint_names, body_bones, body_hand_joint_ids = _body_skeleton_for_manifest(manifest_data)
+    _set_body_skeleton(body_joint_names, body_bones, body_hand_joint_ids)
+    info(
+        f"body skeleton: {len(body_joint_names)} joints, {len(body_bones)} bones, "
+        f"hiding {len(body_hand_joint_ids)} hand-region joint id(s) (rendered by hand stream)"
+    )
 
     info(f"opening {input_path}")
     reader = sm.Reader(str(input_path))
