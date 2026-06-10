@@ -24,6 +24,12 @@ var _hand_file: FileAccess
 var _depth_file: FileAccess
 var _body_file: FileAccess
 var _motion_file: FileAccess
+# Body-tracking runtime info captured at close() time so the manifest reflects
+# which extension actually fed samples (PICO BD vs Meta XR_FB / full_body).
+# capture_app.gd::stop_capture() queries body_motion_sampler.get_runtime_info()
+# and forwards the dict here via set_body_tracking_runtime_info() before
+# calling close().
+var _body_tracking_runtime_info: Dictionary = {}
 # Debug-only: when capture option `dump_raw_depth` is true, every pre-encode
 # depth payload is written here in capture order so the FFV1 mp4 track can be
 # checked bit-for-bit offline (scripts/verify_depth_ffv1.py --reference).
@@ -34,6 +40,10 @@ var _depth_raw_index := 0
 func start_session(options: Dictionary = {}) -> bool:
 	close()
 	capture_options = options.duplicate(true)
+	# Wipe any body-runtime info left over from a prior session; the new
+	# session's sampler will report fresh values via
+	# set_body_tracking_runtime_info() before the next close().
+	_body_tracking_runtime_info = {}
 	session_start_unix_us = Time.get_unix_time_from_system() * 1000000
 	session_start_ticks_us = Time.get_ticks_usec()
 	session_id = _make_session_id()
@@ -73,7 +83,16 @@ func start_session(options: Dictionary = {}) -> bool:
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		sources["pose"] = "Godot OpenXR nodes and XRHandTracker; PTS from OpenXRMetaEnvironmentDepthExtensionWrapper.get_predicted_display_time_ns() when available, else Time.get_ticks_usec()"
 	if _capture_enabled("record_body_tracking"):
-		sources["body_tracking"] = "PICO OpenXR XR_BD_body_tracking joints in the mp4 mett track `spatialmp4:body_joints:body` (HJNT v1 layout; per-joint flags are XrSpaceLocationFlags low bits); XR_PICO_body_tracking2 state/velocity/acceleration plus frame-level body_flags are kept only in the optional body_motion/body_joints.jsonl sidecar (capture option save_body_sidecar)"
+		# Placeholder — close() patches in the actual runtime info once the
+		# sampler has observed at least one frame, so the manifest stores the
+		# specific extension / joint set instead of a vague "either-or" blurb.
+		sources["body_tracking"] = {
+			"description": "Body joints in the mp4 mett track `spatialmp4:body_joints:body` (HJNT v1 layout). The runtime (PICO BD vs Meta XR_FB / XR_META_full_body) is patched in at session close based on the samples actually observed.",
+			"observed_runtime": "",
+			"extension": "",
+			"joint_set": "",
+			"joint_count": 0
+		}
 	if _capture_enabled("record_motion_trackers"):
 		sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored as body_motion/motion_trackers.jsonl sidecar"
 	# v3 spatial audio. The audio path is provider-driven (AudioRecord ->
@@ -235,6 +254,22 @@ func _rewrite_manifest_with_media_integrity(media_path: String, media_sha256: St
 		"hash_algo": "sha256",
 	}
 	manifest["artifacts"] = artifacts
+	# Patch in the body-tracking runtime info collected at close() so the
+	# offline viewer can pick the right skeleton table for the joint ids it
+	# finds in `spatialmp4:body_joints:body`. If the sampler never observed a
+	# frame (no body tracking permission, runtime did not support it, …) we
+	# still leave the original "observed_runtime: ''" placeholder so the
+	# downstream tooling can distinguish "tried but got nothing" from "never
+	# asked".
+	if not _body_tracking_runtime_info.is_empty():
+		var sources_field: Variant = manifest.get("sources", {})
+		var sources_dict: Dictionary = sources_field if sources_field is Dictionary else {}
+		var body_field: Variant = sources_dict.get("body_tracking", {})
+		var body_entry: Dictionary = body_field if body_field is Dictionary else {"description": str(body_field)}
+		for key in _body_tracking_runtime_info.keys():
+			body_entry[key] = _body_tracking_runtime_info[key]
+		sources_dict["body_tracking"] = body_entry
+		manifest["sources"] = sources_dict
 	_write_json(manifest_path, manifest)
 
 
@@ -465,6 +500,14 @@ func set_android_plugin(plugin: Object) -> void:
 
 func set_muxer_plugin(plugin: Object) -> void:
 	muxer_plugin = plugin
+
+
+# Capture the body-tracking sampler's runtime snapshot just before close() so
+# `_rewrite_manifest_with_media_integrity` can patch it into the on-disk
+# manifest alongside the mp4 hash + bytes. Cleared by start_session() so a
+# stale value from a prior session can't leak into the next.
+func set_body_tracking_runtime_info(info: Dictionary) -> void:
+	_body_tracking_runtime_info = info.duplicate(true) if info != null else {}
 
 
 func get_session_start_unix_us() -> int:
