@@ -7,8 +7,11 @@ const HAND_PINCH_DISTANCE_M := 0.028
 
 var click_actions: PackedStringArray = PackedStringArray(["trigger_click", "primary_click", "select_button"])
 var analog_trigger_action: StringName = &"trigger"
+var scroll_vector_action: StringName = &"primary"
 var trigger_press_threshold := 0.55
 var trigger_release_threshold := 0.35
+var scroll_dead_zone := 0.28
+var scroll_speed_pixels_per_second := 760.0
 var interaction_mode := "controllers"
 var busy := false
 
@@ -23,6 +26,12 @@ var _pressed_target: Object
 var _controller_pointer_down: XRController3D
 var _hand_pointer_down := false
 var _trigger_down: Dictionary = {}
+var _last_scroll_ticks_usec := 0
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_RESUMED:
+		reset_input_state()
 
 
 func configure(
@@ -54,8 +63,11 @@ func update_pointer() -> void:
 
 	var target := _active_target()
 	if target == null:
+		_last_scroll_ticks_usec = 0
 		release_pointer()
 		return
+
+	_update_joystick_scroll(target)
 
 	if _should_use_controller_pointer(target):
 		_update_controller_pointer(target)
@@ -75,6 +87,12 @@ func release_pointer() -> void:
 	_hide_ui_pointer_visual()
 
 
+func reset_input_state() -> void:
+	_trigger_down.clear()
+	_last_scroll_ticks_usec = 0
+	release_pointer()
+
+
 func _connect_controller(pointer: XRController3D) -> void:
 	if pointer == null:
 		return
@@ -90,6 +108,8 @@ func _active_target() -> Object:
 			continue
 		var visible_value: Variant = target.get("visible")
 		if typeof(visible_value) != TYPE_NIL and bool(visible_value):
+			if target.has_method("accepts_pointer") and not bool(target.call("accepts_pointer")):
+				continue
 			return target
 	return null
 
@@ -202,6 +222,33 @@ func _update_analog_trigger(pointer: XRController3D) -> void:
 	elif pointer == _controller_pointer_down:
 		_release_pressed_target()
 		_controller_pointer_down = null
+
+
+func _update_joystick_scroll(target: Object) -> void:
+	if target == null or not target.has_method("scroll_by_pixels"):
+		_last_scroll_ticks_usec = 0
+		return
+	var now := Time.get_ticks_usec()
+	if _last_scroll_ticks_usec <= 0:
+		_last_scroll_ticks_usec = now
+		return
+	var delta_seconds := clampf(float(now - _last_scroll_ticks_usec) / 1000000.0, 0.0, 0.05)
+	_last_scroll_ticks_usec = now
+	var axis_y := _scroll_axis(_controller_pointer_down)
+	if absf(axis_y) < scroll_dead_zone:
+		var right_y := _scroll_axis(right_pointer)
+		var left_y := _scroll_axis(left_pointer)
+		axis_y = right_y if absf(right_y) >= absf(left_y) else left_y
+	if absf(axis_y) < scroll_dead_zone:
+		return
+	target.call("scroll_by_pixels", -axis_y * scroll_speed_pixels_per_second * delta_seconds)
+
+
+func _scroll_axis(pointer: XRController3D) -> float:
+	if pointer == null or scroll_vector_action == &"" or not _has_tracking(pointer):
+		return 0.0
+	var value := pointer.get_vector2(scroll_vector_action)
+	return value.y
 
 
 func _press_from_controller(pointer: XRController3D) -> void:

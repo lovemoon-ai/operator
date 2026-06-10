@@ -223,6 +223,7 @@ func _ready() -> void:
 		ego_uploader.upload_progress.connect(_on_upload_progress)
 		ego_uploader.upload_finished.connect(_on_upload_finished)
 		ego_uploader.upload_failed.connect(_on_upload_failed)
+		ego_uploader.upload_cancelled.connect(_on_upload_cancelled)
 		ego_uploader.session_uploaded.connect(_on_session_uploaded)
 		ego_uploader.queue_changed.connect(_on_upload_queue_changed)
 
@@ -498,6 +499,9 @@ func _exit_tree() -> void:
 
 
 func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_RESUMED:
+		_reset_ui_input_state()
+
 	# Device-test only: when the VR shell pauses the app (e.g. the headset is
 	# doffed during a host-driven adb smoke run), the auto-stop Timer freezes and
 	# the recording would otherwise be abandoned as a .partial.mp4. Finalize
@@ -508,6 +512,15 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_PAUSED and _recording:
 		print("AUTO_STOP_FOR_DEVICE_TEST: paused, finalizing recording")
 		stop_capture()
+
+
+func _reset_ui_input_state() -> void:
+	if settings_interaction_router == null:
+		return
+	if settings_interaction_router.has_method("reset_input_state"):
+		settings_interaction_router.call("reset_input_state")
+	else:
+		settings_interaction_router.release_pointer()
 
 
 func start_capture() -> void:
@@ -703,6 +716,8 @@ func _setup_xr_scene() -> void:
 		settings_panel.scan_live_server_requested.connect(_on_scan_live_server_requested)
 	if settings_panel.has_signal("connect_live_server_requested"):
 		settings_panel.connect_live_server_requested.connect(_on_connect_live_server_requested)
+	if settings_panel.has_signal("manual_upload_requested"):
+		settings_panel.manual_upload_requested.connect(_on_manual_upload_requested)
 	origin.add_child(settings_panel)
 
 	# QR scanner overlay (Camera2 + ZXing). Sits in the same scene tree as
@@ -733,11 +748,13 @@ func _setup_xr_scene() -> void:
 	record_control.stop_requested.connect(stop_capture)
 	record_control.settings_requested.connect(_on_settings_requested)
 	origin.add_child(record_control)
-	settings_interaction_router.set_targets([qr_scanner, settings_panel, record_control])
 
 	status_popup = ViewLockedStatusPopupScript.new()
 	status_popup.name = "ViewLockedStatusPopup"
+	if status_popup.has_signal("cancel_requested"):
+		status_popup.cancel_requested.connect(_on_upload_cancel_requested)
 	origin.add_child(status_popup)
+	settings_interaction_router.set_targets([qr_scanner, settings_panel, status_popup, record_control])
 
 
 func _setup_pico_openxr_bridge() -> void:
@@ -1758,7 +1775,7 @@ func _start_upload_ack(payload: String) -> void:
 	if not _is_signed_ack_payload(trimmed):
 		if _looks_like_http_url(trimmed):
 			print("[UploadAck] applying plain URL from QR %s" % trimmed)
-			_apply_scanned_upload_endpoint(trimmed, "")
+			_apply_scanned_upload_endpoint(trimmed, "", false)
 			return
 		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_INVALID_QR"))
 		return
@@ -1817,15 +1834,18 @@ func _on_upload_ack_completed(result: int, response_code: int, _headers: PackedS
 		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_BAD_RESPONSE"))
 		return
 	var upload_token := str(parsed.get("uploadToken", parsed.get("upload_token", "")))
-	_apply_scanned_upload_endpoint(upload_url, upload_token)
+	_apply_scanned_upload_endpoint(upload_url, upload_token, true)
 	print("[UploadAck] ready upload_url=%s auth=%s" % [upload_url, "yes" if not upload_token.is_empty() else "no"])
 
 
-func _apply_scanned_upload_endpoint(upload_url: String, upload_token: String) -> void:
+func _apply_scanned_upload_endpoint(upload_url: String, upload_token: String, verified: bool = true) -> void:
 	if settings_panel and settings_panel.has_method("set_upload_url_from_scan"):
-		settings_panel.set_upload_url_from_scan(upload_url, upload_token, true)
+		settings_panel.set_upload_url_from_scan(upload_url, upload_token, verified, verified)
 	if settings_panel and settings_panel.has_method("set_upload_connectivity_status"):
-		settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_READY"), "success")
+		if verified:
+			settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_READY"), "success")
+		else:
+			settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_AUTO_REQUIRES_READY"), "warning")
 
 
 func _on_upload_ack_failed(message: String) -> void:
@@ -1838,10 +1858,48 @@ func _on_upload_ack_failed(message: String) -> void:
 # Upload attempts are retried in the background, so the visible UI follows only
 # the just-finalized session and uses a single popup progress surface.
 
+func _on_manual_upload_requested(sessions: Array, options: Dictionary) -> void:
+	if _recording or ego_uploader == null:
+		return
+	var upload_options := options.duplicate(true)
+	upload_options["upload_on_finalize"] = true
+	var queued_count := 0
+	var first_session_id := ""
+	for item in sessions:
+		if typeof(item) != TYPE_DICTIONARY:
+			continue
+		var session_dir := str(item.get("session_dir", ""))
+		var mp4_path := str(item.get("mp4_path", ""))
+		var session_id := str(item.get("session_id", mp4_path.get_file().get_basename()))
+		if session_dir.is_empty() or mp4_path.is_empty():
+			continue
+		if bool(ego_uploader.enqueue(session_dir, mp4_path, upload_options)):
+			queued_count += 1
+			if first_session_id.is_empty():
+				first_session_id = session_id
+	if queued_count <= 0:
+		_queue_upload_ui(tr("UI_UPLOAD_NOT_QUEUED"), "", -1.0, "warning", 3.0)
+		return
+	if _active_upload_session_id.is_empty():
+		_active_upload_session_id = first_session_id
+		if ego_uploader.has_method("prioritize"):
+			ego_uploader.prioritize(first_session_id)
+	ego_uploader.resume()
+	_queue_upload_ui(tr("UI_UPLOAD_QUEUE_PENDING") % queued_count, "", -1.0, "normal", 2.5, true)
+
+
+func _on_upload_cancel_requested() -> void:
+	if _active_upload_session_id.is_empty() or ego_uploader == null:
+		return
+	var session_id := _active_upload_session_id
+	if ego_uploader.has_method("cancel") and bool(ego_uploader.cancel(session_id)):
+		_queue_upload_ui(tr("UI_UPLOAD_CANCELING"), "", -1.0, "warning", 0.0, false)
+
+
 func _on_upload_started(_session_id: String, kind: String) -> void:
 	if not _is_visible_upload_session(_session_id):
 		return
-	_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), 0.0, "normal")
+	_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), 0.0, "normal", 0.0, true)
 	print("[Upload] %s/%s started" % [_session_id, kind])
 
 
@@ -1849,11 +1907,11 @@ func _on_upload_progress(_session_id: String, kind: String, sent_bytes: int, tot
 	if not _is_visible_upload_session(_session_id):
 		return
 	if total_bytes <= 0:
-		_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), -1.0, "normal")
+		_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_STARTED_DETAIL"), -1.0, "normal", 0.0, true)
 		return
 	var pct: int = int(round((float(sent_bytes) / float(total_bytes)) * 100.0))
 	var progress := clampf(float(sent_bytes) / float(total_bytes), 0.0, 1.0)
-	_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_PROGRESS_DETAIL") % pct, progress, "normal")
+	_queue_upload_ui(tr("UI_UPLOAD_PROGRESS_TITLE") % _upload_kind_label(kind), tr("UI_UPLOAD_PROGRESS_DETAIL") % pct, progress, "normal", 0.0, true)
 
 
 func _on_upload_finished(session_id: String, kind: String, _response: Dictionary) -> void:
@@ -1864,7 +1922,17 @@ func _on_upload_finished(session_id: String, kind: String, _response: Dictionary
 
 
 func _on_upload_failed(session_id: String, kind: String, error: String) -> void:
+	if _is_visible_upload_session(session_id):
+		_queue_upload_ui(tr("UI_UPLOAD_FAILED_TITLE"), "%s: %s" % [_upload_kind_label(kind), error.substr(0, 90)], -1.0, "warning", 0.0, true)
 	push_warning("[Upload] %s/%s failed: %s" % [session_id, kind, error])
+
+
+func _on_upload_cancelled(session_id: String, _reason: String) -> void:
+	if not _is_visible_upload_session(session_id):
+		return
+	_queue_upload_ui(tr("UI_UPLOAD_CANCELLED"), "", -1.0, "warning", 2.5, false)
+	_active_upload_session_id = ""
+	print("[Upload] session %s cancelled" % session_id)
 
 
 func _on_session_uploaded(session_id: String) -> void:
@@ -1889,13 +1957,14 @@ func _is_visible_upload_session(session_id: String) -> bool:
 	return not _active_upload_session_id.is_empty() and session_id == _active_upload_session_id
 
 
-func _queue_upload_ui(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0) -> void:
+func _queue_upload_ui(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0, cancelable: bool = false) -> void:
 	var update := {
 		"title": title,
 		"detail": detail,
 		"progress": progress,
 		"level": level,
 		"duration_seconds": duration_seconds,
+		"cancelable": cancelable,
 	}
 	var now := Time.get_ticks_msec()
 	if now < _upload_popup_hold_until_msec:
@@ -1923,9 +1992,10 @@ func _apply_upload_ui(update: Dictionary) -> void:
 	var progress := float(update.get("progress", -1.0))
 	var level := str(update.get("level", "normal"))
 	var duration_seconds := float(update.get("duration_seconds", 0.0))
+	var cancelable := bool(update.get("cancelable", false))
 	var used_popup := false
 	if status_popup and status_popup.has_method("show_upload_progress"):
-		status_popup.show_upload_progress(title, detail, progress, level, duration_seconds)
+		status_popup.show_upload_progress(title, detail, progress, level, duration_seconds, cancelable)
 		used_popup = true
 	if record_control:
 		if used_popup and record_control.has_method("clear_upload_status"):

@@ -94,8 +94,8 @@ export class DiskStorage implements StorageDriver {
   async deleteFinalized(uri: string): Promise<void> {
     try {
       await unlink(uri);
-    } catch {
-      /* ignore — file may already be gone */
+    } catch (err) {
+      if (!isMissingError(err)) throw err;
     }
     // Best-effort: drop the per-session subdir once we've removed the
     // last artifact in it. `rmdir` returns ENOTEMPTY if other files
@@ -105,8 +105,8 @@ export class DiskStorage implements StorageDriver {
     const dir = path.dirname(uri);
     try {
       await rmdir(dir);
-    } catch {
-      /* ignore — dir non-empty or already gone */
+    } catch (err) {
+      if (!isMissingError(err) && errorCode(err) !== "ENOTEMPTY") throw err;
     }
   }
 
@@ -189,8 +189,8 @@ export class DiskStorage implements StorageDriver {
         this.hashers.delete(resourceId);
         try {
           await unlink(partial);
-        } catch {
-          /* ignore */
+        } catch (err) {
+          if (!isMissingError(err)) throw err;
         }
       },
     };
@@ -215,6 +215,16 @@ function inferExtension(filename: string, kind: string): string {
   if (kind === "manifest") return ".json";
   if (kind === "media") return ".mp4";
   return "";
+}
+
+function errorCode(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null || !("code" in err)) return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function isMissingError(err: unknown): boolean {
+  return errorCode(err) === "ENOENT";
 }
 
 async function createEmptyIfMissing(p: string): Promise<void> {

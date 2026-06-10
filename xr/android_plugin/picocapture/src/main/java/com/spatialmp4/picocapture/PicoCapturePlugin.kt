@@ -26,6 +26,7 @@ import android.util.Log
 import android.util.Size
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.spatialmp4.capturecommon.CapturedYuvFrame
 import com.spatialmp4.capturecommon.ChromaLayout
 import com.spatialmp4.capturecommon.DeviceIdentity
@@ -354,6 +355,34 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
                 .toString()
         } catch (error: Exception) {
             JSONObject().put("error", error.message ?: "unknown").toString()
+        }
+    }
+
+    @UsedByGodot
+    fun openVideoInSystemPlayer(path: String): Boolean {
+        val activity = mainActivity ?: return false
+        if (path.isBlank()) {
+            emitSignal("camera_error", "Video preview path is empty")
+            return false
+        }
+        val file = File(path)
+        if (!file.isFile) {
+            emitSignal("camera_error", "Video preview file does not exist: $path")
+            return false
+        }
+        return try {
+            val authority = "${activity.packageName}.fileprovider"
+            val uri = FileProvider.getUriForFile(activity, authority, file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "video/mp4")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(intent)
+            true
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to open video preview: $path", error)
+            emitSignal("camera_error", "Failed to open video preview: ${error.message}")
+            false
         }
     }
 

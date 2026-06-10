@@ -3,7 +3,7 @@ import express from "express";
 
 import type { IngestEvents } from "./events.js";
 import type { StorageDriver } from "./storage/index.js";
-import type { SessionStore } from "./store/index.js";
+import type { SessionDeletionTargets, SessionStore } from "./store/index.js";
 
 export interface ReadApiOptions {
   store: SessionStore;
@@ -130,30 +130,27 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
 
   // Hard-delete a session. Powers the "Remove" button in the dashboard.
   //
-  // Ordering matters: store first, storage second. If we deleted the
-  // bytes first and then the store row delete failed, we'd be left with
-  // a metadata row pointing at vapor — every subsequent GET would 410.
-  // The other way around just leaves orphaned byte files, which a
-  // future cleanup pass can sweep by diffing disk against the
-  // artifacts table.
+  // Ordering matters: storage first, metadata second. If the bytes layer
+  // refuses to delete, keep the metadata so a retry still knows exactly
+  // which finalized files and partial TUS resources must be cleaned.
   router.delete("/sessions/:id", async (req, res) => {
     const userId = opts.userIdFromReq?.(req);
     if (userId === null) return res.status(404).end();
     const sessionId = req.params.id!;
-    const result = await opts.store.deleteSession(sessionId, {
+    const targets = await opts.store.getSessionDeletionTargets(sessionId, {
       userId: userId ?? undefined,
     });
-    if (!result) return res.status(404).end();
-    for (const uri of result.artifactUris) {
-      try {
-        await opts.storage.deleteFinalized(uri);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[ingest] deleteFinalized(${uri}) failed: ${(err as Error).message}`,
-        );
-      }
+    if (!targets) return res.status(404).end();
+    try {
+      await cleanupSessionStorage(opts.storage, targets);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[ingest] cleanupSessionStorage(${sessionId}) failed: ${(err as Error).message}`);
+      return res.status(500).json({ error: "storage cleanup failed" });
     }
+    await opts.store.deleteSession(sessionId, {
+      userId: userId ?? undefined,
+    });
     if (opts.onSessionDeleted) {
       try {
         await opts.onSessionDeleted(sessionId);
@@ -268,6 +265,31 @@ function contentTypeFor(kind: string, filename: string): string {
   if (ext === "tar") return "application/x-tar";
   if (ext === "zip") return "application/zip";
   return "application/octet-stream";
+}
+
+async function cleanupSessionStorage(
+  storage: StorageDriver,
+  targets: SessionDeletionTargets,
+): Promise<void> {
+  const failures: string[] = [];
+  for (const resourceId of targets.resourceIds) {
+    try {
+      const handle = await storage.reopenResource(resourceId);
+      if (handle) await handle.dispose();
+    } catch (err) {
+      failures.push(`disposeResource(${resourceId}): ${(err as Error).message}`);
+    }
+  }
+  for (const uri of targets.artifactUris) {
+    try {
+      await storage.deleteFinalized(uri);
+    } catch (err) {
+      failures.push(`deleteFinalized(${uri}): ${(err as Error).message}`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(failures.join("; "));
+  }
 }
 
 // Anything we expect a browser to render in place. Everything else is
