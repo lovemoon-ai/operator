@@ -44,14 +44,22 @@ import java.nio.ByteBuffer
 // SessionConfig is still a Kotlin data class: provider and muxer AARs should
 // be built against the same contract.jar.
 //
+// Bumped to 4 alongside body tracking in the mp4: SessionConfig gains
+// `bodyJointsExpected` so the muxer can pre-allocate the `mett` body-joints
+// track (handler `spatialmp4:body_joints:body`, HJNT-layout payload). The
+// per-frame payload still flows through GDScript (low rate, ~30 Hz) -- only
+// the session flag crosses this contract.
+//
 // Compatibility matrix:
 //   * v2 provider <-> v2 muxer: audio absent on both sides, unchanged.
 //   * v3 provider <-> v3 muxer: audio packets flow over onAudioCsd /
 //     onAudioPacket when SessionConfig.audioExpected is true.
+//   * v4 provider <-> v4 muxer: a body-joints mett track is created when
+//     SessionConfig.bodyJointsExpected is true.
 //   * Mixed AARs with different embedded contract.jar revisions are unsupported;
 //     rebuild the plugins together instead of relying on Kotlin data-class
 //     constructor compatibility.
-const val CONTRACT_VERSION: Int = 3
+const val CONTRACT_VERSION: Int = 4
 
 /**
  * Per-camera intrinsics + extrinsics + lens distortion, used both for RGB
@@ -134,7 +142,13 @@ data class SessionConfig(
     // uses it to tag the audio track's stream metadata so a downstream
     // player can distinguish e.g. true FOA from generic 4-channel PCM.
     val audioExpected: Boolean = false,
-    val audioChannelLayoutCode: Int = AudioChannelLayout.STEREO.code
+    val audioChannelLayoutCode: Int = AudioChannelLayout.STEREO.code,
+    // ---- v4 body tracking field (see CONTRACT_VERSION above) ------------
+    // When true the muxer creates the `mett` body-joints track up front so
+    // GDScript-side writeBodyJointsPayload calls have somewhere to land.
+    // Defaults to false so Quest providers (no BD body tracking) stay
+    // source-compatible without touching their SessionConfig call sites.
+    val bodyJointsExpected: Boolean = false
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -159,7 +173,8 @@ data class SessionConfig(
             deviceModel == other.deviceModel &&
             deviceManufacturer == other.deviceManufacturer &&
             audioExpected == other.audioExpected &&
-            audioChannelLayoutCode == other.audioChannelLayoutCode
+            audioChannelLayoutCode == other.audioChannelLayoutCode &&
+            bodyJointsExpected == other.bodyJointsExpected
     }
 
     override fun hashCode(): Int {
@@ -184,6 +199,7 @@ data class SessionConfig(
         result = 31 * result + deviceManufacturer.hashCode()
         result = 31 * result + audioExpected.hashCode()
         result = 31 * result + audioChannelLayoutCode
+        result = 31 * result + bodyJointsExpected.hashCode()
         return result
     }
 }

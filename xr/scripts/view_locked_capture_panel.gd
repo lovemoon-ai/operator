@@ -196,6 +196,7 @@ func get_options() -> Dictionary:
 		options["server_result_port"] = _configured_result_port()
 		options["server_auth_token"] = _server_token.text.strip_edges() if _server_token != null else ""
 		options["save_controller_hand_sidecar"] = false
+		options["save_body_sidecar"] = false
 		options["save_root"] = ""
 		options["upload_url"] = ""
 		options["upload_token"] = ""
@@ -203,6 +204,7 @@ func get_options() -> Dictionary:
 		options["keep_local_after_upload"] = true
 	else:
 		options["save_controller_hand_sidecar"] = _toggle_enabled("save_controller_hand_sidecar")
+		options["save_body_sidecar"] = _toggle_enabled("save_body_sidecar")
 		options["save_root"] = _configured_save_root()
 		options["upload_url"] = _upload_url.text.strip_edges() if _upload_url else ""
 		options["upload_token"] = _upload_token
@@ -346,6 +348,10 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# controls whether they are ALSO written as separate JSONL sidecar files for
 	# debugging. Default off to avoid the extra main-thread JSON cost.
 	_add_stream_toggle(outputs, "save_controller_hand_sidecar", tr("UI_CONTROLLER_HAND_SIDECAR"), false)
+	# Body joints likewise always land in the MP4 mett body_joints track; this
+	# toggle only adds the JSONL sidecar (the one place the frame-level
+	# body_flags + PICO velocity/acceleration extras are preserved).
+	_add_stream_toggle(outputs, "save_body_sidecar", tr("UI_BODY_SIDECAR"), false)
 
 	# --- Storage group -----------------------------------------------------
 	var storage := register_group("storage", "UI_GROUP_STORAGE", "plug")
@@ -1233,6 +1239,7 @@ static func _default_options() -> Dictionary:
 		"server_result_port": DEFAULT_LIVE_RESULT_PORT,
 		"server_auth_token": "",
 		"save_controller_hand_sidecar": false,
+		"save_body_sidecar": false,
 		"save_root": DEFAULT_SAVE_ROOT,
 		"upload_url": "",
 		"upload_token": "",
