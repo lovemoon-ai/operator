@@ -131,6 +131,7 @@ openxr/extensions/meta/render_model=true
 openxr/extensions/meta/passthrough=true
 openxr/extensions/meta/environment_depth=true
 openxr/extensions/meta/body_tracking=true
+openxr/extensions/automatically_request_runtime_permissions=true
 openxr/extensions/androidxr/environment_depth=true
 openxr/extensions/meta/boundary_visibility=true
 openxr/extensions/meta/color_space/starting_color_space=3

@@ -71,11 +71,15 @@ var _last_body_diag_message := ""
 var _last_body_diag_ticks_us := 0
 
 
-func _log_body_diag_once(message: String) -> void:
+# Rate-limit a diagnostic line by a stable `key` rather than the full message
+# text — body_flags / joint counts in the message change frame-to-frame, so
+# matching on the rendered string would let "same situation, different stats"
+# spam logcat at 30 Hz.
+func _log_body_diag_once(key: String, message: String) -> void:
 	var now := Time.get_ticks_usec()
-	if message == _last_body_diag_message and now - _last_body_diag_ticks_us < int(BODY_DIAG_REPRINT_SECONDS * 1_000_000):
+	if key == _last_body_diag_message and now - _last_body_diag_ticks_us < int(BODY_DIAG_REPRINT_SECONDS * 1_000_000):
 		return
-	_last_body_diag_message = message
+	_last_body_diag_message = key
 	_last_body_diag_ticks_us = now
 	push_warning("[BodyMotionSampler] %s" % message)
 
@@ -88,6 +92,12 @@ func configure(p_writer: Object, p_pose_sampler: Object, p_pico_openxr_bridge: O
 
 
 func set_capture_options(options: Dictionary) -> void:
+	# Reset runtime tracking state at the start of each session so a previous
+	# session's observed runtime cannot leak into the manifest of a session
+	# that ended up producing zero body samples (the previous "observed:
+	# godot_xr_body_tracker" would otherwise survive into the new manifest).
+	_observed_body_runtime = ""
+	_last_fallback_body_flags = 0
 	_record_body_tracking = bool(options.get("record_body_tracking", false))
 	_record_motion_trackers = bool(options.get("record_motion_trackers", false))
 	_max_motion_trackers = clampi(int(options.get("max_motion_trackers", MAX_MOTION_TRACKERS)), 0, MAX_MOTION_TRACKERS)
@@ -157,14 +167,17 @@ func _sample_body(timestamp_ns: int) -> void:
 	# We rate-limit so a sustained "no tracker" doesn't flood logcat.
 	var tracker := XRServer.get_tracker(BODY_TRACKER_NAME)
 	if tracker == null:
-		_log_body_diag_once("no XRBodyTracker registered at %s — Meta runtime did not initialize XR_FB_body_tracking (check BODY_TRACKING permission + meta_xr_features/body_tracking export flag)" % str(BODY_TRACKER_NAME))
+		_log_body_diag_once("no_tracker",
+			"no XRBodyTracker registered at %s — Meta runtime did not initialize XR_FB_body_tracking (check BODY_TRACKING permission + meta_xr_features/body_tracking export flag)" % str(BODY_TRACKER_NAME))
 		return
 	if not (tracker is XRBodyTracker):
-		_log_body_diag_once("tracker at %s is %s, not XRBodyTracker" % [str(BODY_TRACKER_NAME), tracker.get_class()])
+		_log_body_diag_once("wrong_tracker_class",
+			"tracker at %s is %s, not XRBodyTracker" % [str(BODY_TRACKER_NAME), tracker.get_class()])
 		return
 	var body_tracker := tracker as XRBodyTracker
 	if not body_tracker.has_tracking_data:
-		_log_body_diag_once("XRBodyTracker present at %s but has_tracking_data=false; runtime body_flags=%d (UPPER/LOWER/HANDS support bits)" % [str(BODY_TRACKER_NAME), int(body_tracker.body_flags)])
+		_log_body_diag_once("no_tracking_data",
+			"XRBodyTracker present at %s but has_tracking_data=false; runtime body_flags=%d (UPPER/LOWER/HANDS support bits)" % [str(BODY_TRACKER_NAME), int(body_tracker.body_flags)])
 		return
 	var joints: Array = []
 	for joint in range(BODY_JOINT_COUNT):

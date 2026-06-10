@@ -65,9 +65,11 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
     @Volatile private var recordControllerPose: Boolean = true
     @Volatile private var recordHandData: Boolean = true
     @Volatile private var recordControllerInput: Boolean = true
-    // v4: body joints gating. Only PICO providers request this today; the
-    // flag keeps a stray writeBodyJointsPayload from poking the native
-    // writer when the session never allocated the body track.
+    // v4: body joints gating. Both PICO (XR_BD_body_tracking) and Quest
+    // (Meta XR_FB_body_tracking / XR_META_body_tracking_full_body) populate
+    // the same `mett:body_joints:body` track via writeBodyJointsPayload;
+    // the flag keeps a stray write from poking the native writer when the
+    // session never allocated the body track.
     @Volatile private var recordBodyJoints: Boolean = false
     // v3: audio gating mirrors the depth/pose flags. recordAudio is the
     // host's "is the audio sink expected to run at all" bit; audioConfigured
