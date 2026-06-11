@@ -865,6 +865,22 @@ def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         passed("capture option record_depth=true")
     else:
         failed("capture option record_depth=true", repr(options.get("record_depth")))
+    # Body tracking defaults: ON for both providers in the current code base
+    # (Quest goes through the godot-openxr-meta vendor AAR + XR_FB_body_tracking,
+    # Pico goes through pico_openxr + XR_BD_body_tracking). save_body_sidecar
+    # defaults OFF — the sidecar JSONL is only useful when the operator wants
+    # the frame-level body_flags + PICO velocity/acceleration extras that the
+    # mp4 mett payload does not carry.
+    if options.get("record_body_tracking") is True:
+        passed("capture option record_body_tracking=true")
+    else:
+        failed("capture option record_body_tracking=true", repr(options.get("record_body_tracking")))
+    if "save_body_sidecar" in options:
+        if options.get("save_body_sidecar") is False:
+            passed("capture option save_body_sidecar=false (default)")
+        else:
+            warned("capture option save_body_sidecar=true",
+                   "sidecar JSONL will be written next to the mp4")
     if expect_audio:
         if options.get("record_audio") is True:
             passed("capture option record_audio=true")
@@ -980,6 +996,104 @@ def check_depth(session_dir: Path) -> list[dict[str, Any]]:
     else:
         failed("depth frame index non-empty")
     return rows
+
+
+def check_body_tracking_source(manifest: dict[str, Any], options: dict[str, Any]) -> None:
+    # session_spool_writer patches manifest.sources.body_tracking at close()
+    # with the runtime info collected by body_motion_sampler.get_runtime_info():
+    #   observed_runtime ∈ {"", "pico_bd", "godot_xr_body_tracker"}
+    #   extension        : "pico_bd_body_tracking" | "meta_fb_body_tracking" | ""
+    #   joint_set        : "pico_bd_24" | "godot_xr_body_tracker_v1" | ""
+    #   joint_count      : 24 / 87 / 0
+    #   runtime_body_flags (godot path only) : XRBodyTracker.body_flags bitfield
+    # When record_body_tracking is off, sources.body_tracking is absent —
+    # both states are valid and tested below.
+    sources = manifest.get("sources") or {}
+    body = sources.get("body_tracking")
+    if options.get("record_body_tracking") is not True:
+        if body is None:
+            passed("manifest.sources.body_tracking absent when tracking off")
+        else:
+            warned("manifest.sources.body_tracking present despite tracking off", repr(body))
+        return
+    if not isinstance(body, dict):
+        failed("manifest.sources.body_tracking present", repr(body))
+        return
+    passed("manifest.sources.body_tracking present")
+
+    observed = str(body.get("observed_runtime", "")).strip()
+    if expected_device_prefix == "pico":
+        expected_runtime = "pico_bd"
+        expected_joint_set = "pico_bd_24"
+        expected_extension = "pico_bd_body_tracking"
+        expected_joint_count = 24
+    elif expected_device_prefix == "quest":
+        expected_runtime = "godot_xr_body_tracker"
+        expected_joint_set = "godot_xr_body_tracker_v1"
+        expected_extension = "meta_fb_body_tracking"
+        expected_joint_count = 87
+    else:
+        expected_runtime = ""
+        expected_joint_set = ""
+        expected_extension = ""
+        expected_joint_count = 0
+
+    if observed == "":
+        # No body sample reached the writer this session — could be transient
+        # (HMT off-head briefly), runtime quirk, or a real regression in the
+        # sampler / vendor AAR. We can't disambiguate from artefacts alone,
+        # so flag as a WARN rather than FAIL.
+        warned(
+            "body_tracking.observed_runtime is non-empty",
+            "sampler observed zero body frames this session; check head-mount + permission",
+        )
+        return
+
+    if observed == expected_runtime:
+        passed("body_tracking.observed_runtime", observed)
+    else:
+        failed(
+            "body_tracking.observed_runtime",
+            f"got {observed!r}, expected {expected_runtime!r} for --device {expected_device_prefix}",
+        )
+    if str(body.get("joint_set", "")) == expected_joint_set:
+        passed("body_tracking.joint_set", expected_joint_set)
+    else:
+        failed("body_tracking.joint_set", f"got {body.get('joint_set')!r}, expected {expected_joint_set!r}")
+    if str(body.get("extension", "")) == expected_extension:
+        passed("body_tracking.extension", expected_extension)
+    else:
+        failed("body_tracking.extension", f"got {body.get('extension')!r}, expected {expected_extension!r}")
+    try:
+        joint_count = int(body.get("joint_count") or 0)
+    except (TypeError, ValueError):
+        joint_count = 0
+    if joint_count == expected_joint_count:
+        passed("body_tracking.joint_count", str(joint_count))
+    else:
+        failed("body_tracking.joint_count", f"got {joint_count}, expected {expected_joint_count}")
+
+    if expected_device_prefix == "quest":
+        # runtime_body_flags is XRBodyTracker.body_flags — at minimum we
+        # require UPPER_BODY_SUPPORTED (bit 0, value 1). LOWER (2) and HANDS (4)
+        # are nice-to-have and reported as WARN so a Quest 3 without IK-inferred
+        # lower body (e.g. older firmware) doesn't fail CI.
+        try:
+            body_flags = int(body.get("runtime_body_flags") or 0)
+        except (TypeError, ValueError):
+            body_flags = 0
+        if body_flags & 1:
+            passed("body_tracking.runtime_body_flags has UPPER", f"flags={body_flags}")
+        else:
+            failed("body_tracking.runtime_body_flags has UPPER", f"flags={body_flags}")
+        for name, bit in (("LOWER", 2), ("HANDS", 4)):
+            if body_flags & bit:
+                passed(f"body_tracking.runtime_body_flags has {name}", f"flags={body_flags}")
+            else:
+                warned(
+                    f"body_tracking.runtime_body_flags has {name}",
+                    f"flags={body_flags} — full-body extension may be unavailable",
+                )
 
 
 def check_device_block(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1163,6 +1277,26 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
             passed("MP4 contains depth stream", f"{depth.get('codec_name')}/{depth.get('codec_tag_string')}")
         else:
             failed("MP4 contains depth stream")
+    # Body joints mett track: the muxer pre-creates `spatialmp4:body_joints:body`
+    # whenever SessionConfig.bodyJointsExpected=true (i.e. record_body_tracking
+    # is on). We check the handler_name because mov muxer drops timed-metadata
+    # streams that received zero packets at av_write_trailer time — so when the
+    # OpenXR body runtime never produces a frame (no permission, runtime not
+    # initialised, …) the track disappears even though it was allocated. That
+    # is a real, user-visible regression we want to catch here.
+    if options.get("record_body_tracking") is True:
+        body_mett = [
+            s for s in mett
+            if (s.get("tags") or {}).get("handler_name") == "spatialmp4:body_joints:body"
+        ]
+        if body_mett:
+            passed("MP4 contains body_joints mett track")
+        else:
+            handlers = [str((s.get("tags") or {}).get("handler_name", "?")) for s in mett]
+            failed(
+                "MP4 contains body_joints mett track",
+                f"handler_name list={handlers}",
+            )
     if wants_head_pose(options):
         if mett:
             passed("MP4 contains timed metadata stream", f"{len(mett)} mett stream(s)")
@@ -1264,6 +1398,7 @@ if not manifest_path.exists() or not timebase_path.exists():
 manifest = safe_json(manifest_path)
 timebase = safe_json(timebase_path)
 options = check_manifest(manifest)
+check_body_tracking_source(manifest, options)
 device = check_device_block(manifest)
 check_timebase(timebase)
 check_required_files(session_dir, mp4, options)
