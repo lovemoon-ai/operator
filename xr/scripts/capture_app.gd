@@ -6,9 +6,13 @@ const LivePullDenseMapViewScript := preload("res://addons/live-pull/live_pull_de
 const PoseSamplerScript := preload("res://scripts/pose_sampler.gd")
 const DepthSamplerScript := preload("res://scripts/depth_sampler.gd")
 const BodyMotionSamplerScript := preload("res://scripts/body_motion_sampler.gd")
+const BodyPoseProviderScript := preload("res://scripts/robot_constraint/body_pose_provider.gd")
+const BodyPoseDebugOverlayScript := preload("res://scripts/robot_constraint/body_pose_debug_overlay.gd")
+const H2OverlayScript := preload("res://scripts/robot_constraint/robot/h2_overlay.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
+const SettingsLauncherButtonScript := preload("res://scripts/ui/settings_launcher_button.gd")
 const OperatorUIPointerVisualScript := preload("res://scripts/xr/operator_ui_pointer_visual.gd")
 const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_interaction_router.gd")
 const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
@@ -22,6 +26,7 @@ const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
 const DEFAULT_RGB_FPS := 30
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
+const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -0.86))
 const STATUS_POPUP_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.92))
 const CUE_SAMPLE_RATE := 32000
@@ -68,12 +73,17 @@ var right_controller: XRController3D
 var left_pointer: XRController3D
 var right_pointer: XRController3D
 var settings_panel
+var settings_button
 var record_control
 var status_popup
 var ui_pointer_visual
 var settings_interaction_router
 var writer: Object
 var pose_sampler: Node
+var _body_pose_debug_provider: Node = null
+var _body_pose_debug_overlay: Node3D = null
+var _h2_debug_provider: Node = null
+var _h2_debug_overlay: Node3D = null
 var depth_sampler: Node
 var body_motion_sampler: Node
 var ego_uploader: Node
@@ -729,6 +739,10 @@ func _setup_xr_scene() -> void:
 		settings_panel.connect_live_server_requested.connect(_on_connect_live_server_requested)
 	if settings_panel.has_signal("manual_upload_requested"):
 		settings_panel.manual_upload_requested.connect(_on_manual_upload_requested)
+	if settings_panel.has_signal("body_pose_debug_toggled"):
+		settings_panel.body_pose_debug_toggled.connect(_on_body_pose_debug_toggled)
+	if settings_panel.has_signal("h2_debug_toggled"):
+		settings_panel.h2_debug_toggled.connect(_on_h2_debug_toggled)
 	origin.add_child(settings_panel)
 
 	# QR scanner overlay (Camera2 + ZXing). Sits in the same scene tree as
@@ -760,12 +774,149 @@ func _setup_xr_scene() -> void:
 	record_control.settings_requested.connect(_on_settings_requested)
 	origin.add_child(record_control)
 
+	settings_button = SettingsLauncherButtonScript.new()
+	settings_button.name = "CaptureSettingsButton"
+	settings_button.pressed.connect(_on_debug_settings_button_pressed)
+	origin.add_child(settings_button)
+
 	status_popup = ViewLockedStatusPopupScript.new()
 	status_popup.name = "ViewLockedStatusPopup"
 	if status_popup.has_signal("cancel_requested"):
 		status_popup.cancel_requested.connect(_on_upload_cancel_requested)
 	origin.add_child(status_popup)
-	settings_interaction_router.set_targets([qr_scanner, settings_panel, status_popup, record_control])
+	settings_interaction_router.set_targets([qr_scanner, settings_panel, settings_button, status_popup, record_control])
+
+
+func _on_body_pose_debug_toggled() -> void:
+	if _body_pose_debug_overlay != null:
+		_stop_body_pose_debug_overlay()
+	else:
+		_start_body_pose_debug_overlay()
+		_hide_settings_for_debug_overlay()
+	_set_debug_panel_state()
+
+
+func _start_body_pose_debug_overlay() -> void:
+	if _body_pose_debug_overlay != null:
+		return
+	var provider: Node = BodyPoseProviderScript.new()
+	provider.name = "DebugBodyPoseProvider"
+	provider.call("configure", null, pico_openxr_bridge)
+	provider.set("source_mode", BodyPoseProviderScript.SourceMode.AUTO)
+	provider.set("sample_rate_hz", 60.0)
+	add_child(provider)
+	provider.call("set_enabled", true)
+
+	var overlay: Node3D = BodyPoseDebugOverlayScript.new()
+	overlay.name = "GodotBodyPoseDebugOverlay"
+	overlay.call("set_head_camera", hmd_camera)
+	add_child(overlay)
+	overlay.call("configure", provider)
+
+	_body_pose_debug_provider = provider
+	_body_pose_debug_overlay = overlay
+	print("[CaptureApp] Godot body pose debug overlay on")
+
+
+func _stop_body_pose_debug_overlay() -> void:
+	var had_overlay := _body_pose_debug_overlay != null or _body_pose_debug_provider != null
+	if _body_pose_debug_overlay != null:
+		_body_pose_debug_overlay.queue_free()
+		_body_pose_debug_overlay = null
+	if _body_pose_debug_provider != null:
+		_body_pose_debug_provider.call("set_enabled", false)
+		_body_pose_debug_provider.queue_free()
+		_body_pose_debug_provider = null
+	if had_overlay:
+		print("[CaptureApp] Godot body pose debug overlay off")
+	_set_debug_panel_state()
+
+
+func _on_h2_debug_toggled() -> void:
+	if _h2_debug_overlay != null:
+		_stop_h2_debug_overlay()
+	else:
+		_start_h2_debug_overlay()
+		_hide_settings_for_debug_overlay()
+	_set_debug_panel_state()
+
+
+func _start_h2_debug_overlay() -> void:
+	if _h2_debug_overlay != null:
+		return
+
+	var overlay: Node3D = H2OverlayScript.new()
+	overlay.name = "DebugH2RestOverlay"
+	overlay.set("debug_place_in_front_of_view", true)
+	overlay.call("set_head_camera", hmd_camera)
+	add_child(overlay)
+
+	_h2_debug_provider = null
+	_h2_debug_overlay = overlay
+	print("[CaptureApp] H2 debug rest overlay on")
+
+
+func _stop_h2_debug_overlay() -> void:
+	var had_overlay := _h2_debug_overlay != null or _h2_debug_provider != null
+	if _h2_debug_overlay != null:
+		_h2_debug_overlay.queue_free()
+		_h2_debug_overlay = null
+	if _h2_debug_provider != null:
+		_h2_debug_provider.call("set_enabled", false)
+		_h2_debug_provider.queue_free()
+		_h2_debug_provider = null
+	if had_overlay:
+		print("[CaptureApp] H2 debug overlay off")
+	_set_debug_panel_state()
+
+
+func _any_debug_overlay_visible() -> bool:
+	return _body_pose_debug_overlay != null or _h2_debug_overlay != null
+
+
+func _hide_settings_for_debug_overlay() -> void:
+	_release_ui_pointer()
+	if settings_panel != null:
+		if settings_panel.has_method("close"):
+			settings_panel.close()
+		else:
+			settings_panel.visible = false
+	if record_control != null:
+		record_control.hide_control()
+	_show_debug_settings_button()
+
+
+func _show_debug_settings_button() -> void:
+	if settings_button == null:
+		return
+	if settings_button.has_method("clear_pointer"):
+		settings_button.clear_pointer()
+	var mode := str(capture_options.get("interaction_mode", "controllers"))
+	if settings_button.has_method("set_feedback_input_mode"):
+		settings_button.set_feedback_input_mode(mode, right_pointer if mode == "controllers" else null)
+	settings_button.visible = true
+
+
+func _hide_debug_settings_button() -> void:
+	if settings_button == null:
+		return
+	if settings_button.has_method("clear_pointer"):
+		settings_button.clear_pointer()
+	settings_button.visible = false
+
+
+func _on_debug_settings_button_pressed() -> void:
+	_stop_body_pose_debug_overlay()
+	_stop_h2_debug_overlay()
+	_hide_debug_settings_button()
+	_on_settings_requested()
+
+
+func _set_debug_panel_state() -> void:
+	if settings_panel != null and settings_panel.has_method("set_body_pose_debug_visible"):
+		settings_panel.call("set_body_pose_debug_visible", _body_pose_debug_overlay != null)
+	if settings_panel != null and settings_panel.has_method("set_h2_debug_visible"):
+		settings_panel.call("set_h2_debug_visible", _h2_debug_overlay != null)
 
 
 func _setup_pico_openxr_bridge() -> void:
@@ -1247,6 +1398,8 @@ func _update_view_locked_panel() -> void:
 		return
 	if settings_panel:
 		settings_panel.transform = hmd_camera.transform * SETTINGS_PANEL_OFFSET
+	if settings_button:
+		settings_button.transform = hmd_camera.transform * SETTINGS_BUTTON_OFFSET
 	if record_control:
 		record_control.transform = hmd_camera.transform * RECORD_CONTROL_OFFSET
 	if status_popup:
@@ -1269,7 +1422,7 @@ func _update_ui_pointer() -> void:
 	# during an upload it is the only visible target, and dropping it here
 	# leaves _active_target() empty — the cancel button never receives the
 	# ray and the whole pointer (hands included) goes dark.
-	settings_interaction_router.set_targets([qr_scanner, settings_panel, status_popup, record_control])
+	settings_interaction_router.set_targets([qr_scanner, settings_panel, settings_button, status_popup, record_control])
 	settings_interaction_router.update_pointer()
 
 
@@ -1281,6 +1434,7 @@ func _release_ui_pointer() -> void:
 func _on_settings_requested() -> void:
 	if _recording:
 		return
+	_hide_debug_settings_button()
 	_release_ui_pointer()
 	record_control.hide_control()
 	var mode := str(capture_options.get("interaction_mode", "controllers"))
