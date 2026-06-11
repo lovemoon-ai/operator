@@ -76,7 +76,17 @@ func start_session(options: Dictionary = {}) -> bool:
 				_depth_raw_dir = ""
 
 	var sources := {}
-	sources["rgb"] = "Android Camera2 stereo side-by-side + HEVC MediaCodec" if _capture_enabled("stereo_rgb") else "Android Camera2 left camera + HEVC MediaCodec"
+	var capture_provider := str(capture_options.get("capture_provider", ""))
+	if capture_provider == "pico":
+		if _capture_enabled("stereo_rgb"):
+			sources["rgb"] = "PICO OpenXR XR_PICO_camera_image stereo side-by-side raw RGBA + HEVC MediaCodec"
+		else:
+			sources["rgb"] = "PICO OpenXR XR_PICO_camera_image left camera raw RGBA + HEVC MediaCodec"
+	else:
+		if _capture_enabled("stereo_rgb"):
+			sources["rgb"] = "Android Camera2 stereo side-by-side + HEVC MediaCodec"
+		else:
+			sources["rgb"] = "Android Camera2 left camera + HEVC MediaCodec"
 	if _capture_enabled("record_depth"):
 		sources["depth"] = "OpenXRMetaEnvironmentDepthExtension converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):

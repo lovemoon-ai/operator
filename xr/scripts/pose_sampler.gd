@@ -38,6 +38,7 @@ const INPUT_TRACKPAD_TOUCH := 1 << 17
 
 var writer: Object
 var hmd_camera: XRCamera3D
+var xr_origin: XROrigin3D
 var left_controller: XRController3D
 var right_controller: XRController3D
 var _record_head_pose := true
@@ -90,6 +91,9 @@ func configure(
 ) -> void:
 	writer = p_writer
 	hmd_camera = p_hmd_camera
+	xr_origin = null
+	if hmd_camera != null and hmd_camera.get_parent() is XROrigin3D:
+		xr_origin = hmd_camera.get_parent() as XROrigin3D
 	left_controller = p_left_controller
 	right_controller = p_right_controller
 	_capture_provider = p_capture_provider
@@ -216,6 +220,8 @@ func _sample_hand(hand: String, tracker_name: StringName, timestamp_ns: int) -> 
 	var joints: Array = []
 	for joint in range(XRHandTracker.HAND_JOINT_MAX):
 		var transform := hand_tracker.get_hand_joint_transform(joint)
+		if xr_origin != null:
+			transform = xr_origin.global_transform * transform
 		var q := transform.basis.get_rotation_quaternion()
 		var p := transform.origin
 		joints.append({
