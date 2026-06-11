@@ -175,17 +175,6 @@ func _all_card_data() -> Array:
 			"subtitle_key": "UI_EXIT_MODE_SUB",
 			"kind": CardUIScript.Kind.EXIT,
 		},
-		# EXIT card was missing from _all_card_data() after main's
-		# launcher-card refactor — `_configured_card_data()` filters by
-		# this list, so without an entry here Exit fell through silently.
-		# Caught by the post-merge "2 cards spawned" symptom on a launcher
-		# preset that had MODE_EGO + MODE_TESTS + MODE_EXIT enabled.
-		{
-			"mode": MODE_EXIT,
-			"title_key": "UI_EXIT_MODE",
-			"subtitle_key": "UI_EXIT_MODE_SUB",
-			"kind": CardUIScript.Kind.EXIT,
-		},
 	]
 
 
@@ -204,24 +193,23 @@ func _compute_card_positions(card_count: int) -> Array:
 		1:
 			positions.append(_card_position(0.0, 0.0))
 		2:
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG_2:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), 0.0))
 		3:
 			for angle_deg in TOP_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), 0.0))
 		4:
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG_2:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), TOP_ROW_Y))
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG_2:
+			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), BOTTOM_ROW_Y))
 		_:
-			# 5+ cards: 3 on the top row, the rest (2 or 3) on the bottom
-			# centered with the appropriate angle set. Picks ``_2`` when only
-			# two remain so they centre cleanly; falls back to ``_3``
-			# otherwise so a 5- or 6-card launcher stays symmetric.
+			# 5+ cards: 3 on the top row, the rest on the bottom.
+			# Two bottom cards use the tighter pair; three use the same
+			# three-slot spread as the top row.
 			for angle_deg in TOP_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), TOP_ROW_Y))
-			var bottom_angles: Array = BOTTOM_ROW_ANGLES_DEG_2 if (card_count - 3) <= 2 else BOTTOM_ROW_ANGLES_DEG_3
+			var bottom_angles: Array = BOTTOM_ROW_ANGLES_DEG if (card_count - 3) <= 2 else TOP_ROW_ANGLES_DEG
 			var bottom_count: int = mini(card_count - 3, bottom_angles.size())
 			for i in range(bottom_count):
 				positions.append(_card_position(float(bottom_angles[i]), BOTTOM_ROW_Y))

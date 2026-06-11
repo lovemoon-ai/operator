@@ -54,3 +54,9 @@ See `claw/architecture/overview.md`..
 
 DON'T try to create any fixture for these tests. ONLY run the tests on target
 device.
+
+## About lessons
+
+If you spend much time on a bugfix and fix it in the end, remember to create 
+a lesson document in claw/lessons/ to record the bug and how you fix it.
+Keep lesson simple, short but with important details.

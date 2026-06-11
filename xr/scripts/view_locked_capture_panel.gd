@@ -13,6 +13,8 @@ signal tracker_connect_requested
 signal scan_live_server_requested
 signal connect_live_server_requested(options: Dictionary)
 signal manual_upload_requested(sessions: Array, options: Dictionary)
+signal body_pose_debug_toggled
+signal h2_debug_toggled
 
 # 840 wide gives ~430px of detail column after sidebar + margins. The 1180-tall
 # legacy viewport went away once the form was split into groups — every group
@@ -61,6 +63,8 @@ const LOCAL_FILE_MODE_DELETE := "delete"
 # fixed when "controller ray broken in capture mode" was reported.
 var _indicator_mode := ""
 var _motion_tracker_toggle: CheckButton
+var _body_pose_debug_button: Button
+var _h2_debug_button: Button
 var _motion_tracker_supported := false
 var _save_root: LineEdit
 var _server_host: LineEdit
@@ -339,6 +343,22 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# video-only instead of failing the session.
 	_add_stream_toggle(streams, "record_audio", tr("UI_RECORD_AUDIO"), true)
 
+	# --- Robot constraint group -------------------------------------------
+	var robot_constraint := register_group("robot_constraint", "UI_ROBOT_CONSTRAINT_GROUP", "robot-arm")
+	_body_pose_debug_button = Button.new()
+	_body_pose_debug_button.text = tr("UI_SHOW_BODY_POSE_DEBUG")
+	_body_pose_debug_button.custom_minimum_size.y = 55
+	_body_pose_debug_button.add_theme_font_size_override("font_size", 21)
+	_body_pose_debug_button.pressed.connect(_on_body_pose_debug_pressed)
+	add_interactive(robot_constraint, _body_pose_debug_button)
+
+	_h2_debug_button = Button.new()
+	_h2_debug_button.text = tr("UI_SHOW_H2_DEBUG")
+	_h2_debug_button.custom_minimum_size.y = 55
+	_h2_debug_button.add_theme_font_size_override("font_size", 21)
+	_h2_debug_button.pressed.connect(_on_h2_debug_pressed)
+	add_interactive(robot_constraint, _h2_debug_button)
+
 	if _live_server_mode:
 		return
 
@@ -550,6 +570,26 @@ func _add_status_label_to(parent: Container, initial_text: String) -> Label:
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	parent.add_child(lbl)
 	return lbl
+
+
+func _on_body_pose_debug_pressed() -> void:
+	emit_signal("body_pose_debug_toggled")
+
+
+func _on_h2_debug_pressed() -> void:
+	emit_signal("h2_debug_toggled")
+
+
+func set_body_pose_debug_visible(visible_for_debug: bool) -> void:
+	if _body_pose_debug_button == null:
+		return
+	_body_pose_debug_button.text = tr("UI_HIDE_BODY_POSE_DEBUG") if visible_for_debug else tr("UI_SHOW_BODY_POSE_DEBUG")
+
+
+func set_h2_debug_visible(visible_for_debug: bool) -> void:
+	if _h2_debug_button == null:
+		return
+	_h2_debug_button.text = tr("UI_HIDE_H2_DEBUG") if visible_for_debug else tr("UI_SHOW_H2_DEBUG")
 
 
 func set_pico_tracker_status(
