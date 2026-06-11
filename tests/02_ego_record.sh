@@ -365,6 +365,104 @@ injected = (
 if needle not in text:
     raise SystemExit("AUTO_START_FOR_DEVICE_TEST capture_options hook not found")
 text = text.replace(needle, injected, 1)
+
+# CI-only: defer start_capture() until Quest head-pose tracking is stable.
+# In the AUTO_START_FOR_DEVICE_TEST branch _ready() fires call_deferred(
+# "start_capture") within ~4s of process launch, but Quest's TrackingLostMgr
+# may still be reporting "tracking lost" at that point (it typically only
+# resumes ~5s post-launch). Opening the RGB camera + audio + body tracker
+# while tracking is still lost causes vrshell to steal focus to show the
+# guardianless-app NUX, which triggers APPLICATION_PAUSED, which the existing
+# _notification PAUSE handler treats as "headset doffed -> finalize". Real
+# users never hit this race because they click Record manually well after
+# tracking has settled. Wait for tracking-confidence != NONE for 0.75s of
+# stable readings (15s timeout fallback so the test cannot hang forever).
+start_capture_needle = (
+    '\t\tcall_deferred("start_capture")\n'
+    '\t\t_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)\n'
+)
+start_capture_replacement = (
+    '\t\t_ci_start_when_tracking_stable()\n'
+    '\t\t_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)\n'
+)
+if start_capture_needle not in text:
+    raise SystemExit(
+        "AUTO_START_FOR_DEVICE_TEST start_capture hook not found"
+    )
+text = text.replace(start_capture_needle, start_capture_replacement, 1)
+
+# CI-only: do not finalize on the first APPLICATION_PAUSED. Quest sends
+# transient PAUSEs whenever vrshell steals focus (guardian NUX, system
+# toasts, focus loss). Production code never enters this branch because
+# AUTO_START_FOR_DEVICE_TEST defaults to false. We record the pause
+# timestamp instead and only finalize on RESUMED if the pause persisted
+# longer than 30s (the "headset actually doffed" case the original handler
+# was guarding against).
+pause_needle = (
+    '\tif what == NOTIFICATION_APPLICATION_PAUSED and _recording:\n'
+    '\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: paused, finalizing recording")\n'
+    '\t\tstop_capture()\n'
+)
+pause_replacement = (
+    '\tif what == NOTIFICATION_APPLICATION_PAUSED and _recording:\n'
+    '\t\t_ci_paused_at_unix_us = int(Time.get_unix_time_from_system() * 1000000.0)\n'
+    '\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: paused (deferring finalize, awaiting RESUMED)")\n'
+    '\telif what == NOTIFICATION_APPLICATION_RESUMED and _recording and _ci_paused_at_unix_us > 0:\n'
+    '\t\tvar paused_s := float(int(Time.get_unix_time_from_system() * 1000000.0) - _ci_paused_at_unix_us) / 1000000.0\n'
+    '\t\t_ci_paused_at_unix_us = 0\n'
+    '\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: resumed after %.2fs pause" % paused_s)\n'
+    '\t\tif paused_s > 30.0:\n'
+    '\t\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: pause exceeded 30s, finalizing")\n'
+    '\t\t\tstop_capture()\n'
+)
+if pause_needle not in text:
+    raise SystemExit("AUTO_STOP_FOR_DEVICE_TEST pause hook not found")
+text = text.replace(pause_needle, pause_replacement, 1)
+
+# CI-only: helper functions + state variable used by the two patches above.
+# Appended at file scope so GDScript parses them as part of the class.
+text += '''
+
+# --- CI test scaffolding injected by tests/02_ego_record.sh ---
+
+var _ci_paused_at_unix_us: int = 0
+
+
+func _ci_start_when_tracking_stable() -> void:
+\tprint("AUTO_START_FOR_DEVICE_TEST: waiting for XR head pose to stabilize")
+\tvar wait_start_us := Time.get_ticks_usec()
+\tvar stable_start_us := 0
+\tvar timeout_us := 15 * 1000000
+\tvar stable_us := 750 * 1000
+\twhile is_inside_tree() and Time.get_ticks_usec() - wait_start_us < timeout_us:
+\t\tif _ci_xr_head_pose_confident():
+\t\t\tif stable_start_us <= 0:
+\t\t\t\tstable_start_us = Time.get_ticks_usec()
+\t\t\telif Time.get_ticks_usec() - stable_start_us >= stable_us:
+\t\t\t\tvar waited_s := float(Time.get_ticks_usec() - wait_start_us) / 1000000.0
+\t\t\t\tprint("AUTO_START_FOR_DEVICE_TEST: XR tracking stable after %.2fs" % waited_s)
+\t\t\t\tstart_capture()
+\t\t\t\treturn
+\t\telse:
+\t\t\tstable_start_us = 0
+\t\tawait get_tree().create_timer(0.1).timeout
+\tpush_warning("AUTO_START_FOR_DEVICE_TEST: tracking stability wait timed out; starting capture anyway")
+\tstart_capture()
+
+
+func _ci_xr_head_pose_confident() -> bool:
+\tvar tracker := XRServer.get_tracker(&"head")
+\tif not (tracker is XRPositionalTracker):
+\t\treturn false
+\tvar positional := tracker as XRPositionalTracker
+\tif not positional.has_pose(&"default"):
+\t\treturn false
+\tvar pose := positional.get_pose(&"default")
+\tif pose == null:
+\t\treturn false
+\treturn int(pose.get_tracking_confidence()) != XRPose.XR_TRACKING_CONFIDENCE_NONE
+'''
+
 path.write_text(text)
 PY
   if [ "$EXPECT_AUDIO" = "1" ]; then
