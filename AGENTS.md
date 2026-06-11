@@ -11,10 +11,6 @@ Operator is an unified toolkit for teleoperation and egocentric data collection.
 
 ## Common commands
 
-### Robot side (Rust)
-
-TBD
-
 ### XR side (Godot + Android)
 
 It costs much time ( > 10 minites )to build godot apk for the first time. Please
@@ -37,11 +33,14 @@ make ship-pico          # build + install + adb-reverse + relaunch + filtered lo
 make ship-quest         # build + install + adb-reverse + relaunch + filtered logcat tail
 make log                # adb logcat filtered for Operator/godot
 make crash              # dump full logcat to crash.log
-make godot              # open the project in the Godot editor
 ```
 
 NEVER try to run "godot --headless" mode on desktop to test xr project.
 Android XR device is required to run xr project.
+
+### Robot side (Rust)
+
+TBD
 
 ## Architecture
 See `claw/architecture/overview.md`..
@@ -49,3 +48,9 @@ See `claw/architecture/overview.md`..
 ## Run test
 
 - Run video e2e test: bash tests/01_rtsp_test.sh
+- Run ego recording e2e test: bash tests/02_ego_record.sh
+- Run mujoco test: bash tests/03_godot_mujoco_device.sh
+- Run live feed e2e test: bash tests/04_live_feed_e2e.sh
+
+DON'T try to create any fixture for these tests. ONLY run the tests on target
+device.
