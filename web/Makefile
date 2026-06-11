@@ -10,12 +10,15 @@ RERUN_BIND ?= 127.0.0.1
 RERUN_SETUP_SPATIALMP4 ?= auto
 OPERATOR_DEPS_CACHE_ROOT ?= $(abspath ../.deps)
 SPATIALMP4_HOME ?= $(OPERATOR_DEPS_CACHE_ROOT)/src/SpatialMP4
+# RERUN_SCRIPT ?= app/scripts/spatialmp4_to_rrd.py
+RERUN_SCRIPT ?= app/scripts/spatialmp4_to_rrd_pico.py
 
 RRD ?= $(basename $(MP4)).rrd
 
 export OPERATOR_DEPS_CACHE_ROOT
 export RERUN_PYTHON_VERSION
 export SPATIALMP4_HOME
+export RERUN_SCRIPT
 
 .PHONY: run-dev vis-rerun spatialmp4-deps
 
@@ -57,7 +60,7 @@ endif
 	if [ "$${FORCE:-0}" = "1" ] || [ ! -s "$$rrd" ] || [ "$$mp4" -nt "$$rrd" ]; then \
 		echo "Converting $$mp4 -> $$rrd"; \
 		"$(UV)" run --script --no-project --python "$(RERUN_PYTHON_VERSION)" \
-			app/scripts/spatialmp4_to_rrd.py \
+		    "$(RERUN_SCRIPT)" \
 			--input "$$mp4" \
 			--output "$$rrd" \
 			"$${manifest_args[@]}" \

@@ -62,35 +62,12 @@ func _emit_pico_head_probe() -> void:
 			return
 	if _camera == null:
 		return
-	var godot_t: Transform3D = _camera.global_transform
-	var godot_pos := godot_t.origin
-	var godot_quat := godot_t.basis.get_rotation_quaternion()
 	_pico_head_probe_count += 1
-	print("[PROBE %d] godot.XRCamera3D.global_transform pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)" % [
-		_pico_head_probe_count,
-		godot_pos.x, godot_pos.y, godot_pos.z,
-		godot_quat.x, godot_quat.y, godot_quat.z, godot_quat.w,
-	])
-	if _pico_head_probe_bridge.has_method("probe_view_space_pose"):
-		var probe: Dictionary = _pico_head_probe_bridge.call("probe_view_space_pose")
-		if bool(probe.get("available", false)):
-			var t: Transform3D = probe.get("transform", Transform3D())
-			var p := t.origin
-			var q := t.basis.get_rotation_quaternion()
-			var dp := godot_pos - p
-			print("[PROBE %d] xrLocateSpace(VIEW, play)    pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)  delta_pos_from_godot=(%.4f, %.4f, %.4f) |delta|=%.4f" % [
-				_pico_head_probe_count,
-				p.x, p.y, p.z,
-				q.x, q.y, q.z, q.w,
-				dp.x, dp.y, dp.z, dp.length(),
-			])
-		else:
-			print("[PROBE %d] xrLocateSpace probe unavailable: reason=%s xr_result=%s flags=%s" % [
-				_pico_head_probe_count,
-				probe.get("reason", "?"),
-				probe.get("xr_result", "?"),
-				probe.get("location_flags", "?"),
-			])
+	# Hand off to native; output goes to logcat via __android_log_print under
+	# the "Operator-PROBE" tag, which `make log` picks up regardless of whether
+	# Godot's stdout is captured by the Android runtime (on Pico, it isn't).
+	if _pico_head_probe_bridge.has_method("log_head_pose_comparison"):
+		_pico_head_probe_bridge.call("log_head_pose_comparison", _camera.global_transform)
 
 
 func set_mode_override(mode: String) -> void:
