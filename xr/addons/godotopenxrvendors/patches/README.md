@@ -8,6 +8,7 @@ Apply order:
 
 1. `0001-meta-depth-callback-metadata.patch`
 2. `0002-meta-vulkan-depth-readback.patch`
+3. `0003-fb-body-tracking-vformat-fix.patch`
 
 The first patch exposes Meta environment-depth timing, FOV, near/far, and
 depth-eye pose metadata through `get_environment_depth_map_async()` and adds
@@ -18,6 +19,15 @@ OpenXR swapchain images imported through `texture_create_from_extension()` do
 not have enough Vulkan image metadata for direct `texture_2d_layer_get()`.
 The patch creates a Godot-owned D16 readback texture, copies each acquired
 swapchain layer into it, and reads that texture instead.
+
+The third patch fixes a `vformat()` call in
+`openxr_fb_body_tracking_extension_wrapper.cpp` whose format string was
+missing the `%s` placeholder for its second argument. Every time
+`xrLocateBodyJointsFB()` returned a failure the wrapper raised a
+`String::format` error ("not all arguments converted during string
+formatting") instead of the intended log message, spamming the per-frame
+process callback on Quest 3 during OpenXR session start-up and any
+transient body-tracking outage.
 
 Build patched binaries with:
 

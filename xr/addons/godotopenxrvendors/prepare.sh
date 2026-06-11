@@ -42,6 +42,7 @@ UPSTREAM_URL="https://github.com/GodotVR/godot_openxr_vendors/releases/download/
 PATCH_FILES=(
   patches/0001-meta-depth-callback-metadata.patch
   patches/0002-meta-vulkan-depth-readback.patch
+  patches/0003-fb-body-tracking-vformat-fix.patch
 )
 
 # Files we keep locally, relative to .bin/.
