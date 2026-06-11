@@ -26,7 +26,8 @@
 #                      legacy override when ADB_SERIAL/PICO_SERIAL are unset.
 #   CAPTURE_SECONDS     recording duration baked into the CI APK (default 12).
 #   OUTPUT_DIR          artifact directory (default tests/logs/ego-record-<stamp>).
-#   SKIP_BUILD=1        use the existing xr/build/<kind>/Operator.apk.
+#   SKIP_BUILD=1        use the existing xr/build/<kind>/Operator-ci.apk
+#                       (clean APK at .../Operator.apk is also reused if present).
 #   SKIP_INSTALL=1      assume the correct APK is already installed.
 #   SKIP_DEVICE=1       validate existing OUTPUT_DIR/session/SpatialMP4 only.
 #   KEEP_CI_APK=1       do not reinstall the clean APK after the run.
@@ -83,7 +84,8 @@ REMOTE_CAPTURE_ROOT="${DEVICE_ROOT:-/sdcard/Movies/SpatialMP4}"
 REMOTE_SESSION_DIR=""
 REMOTE_FINAL_MP4=""
 
-APK_PATH=""           # filled in by configure_device_kind
+APK_PATH=""           # clean (production) APK; filled in by configure_device_kind
+CI_APK_PATH=""        # CI auto-record APK; filled in by configure_device_kind
 MAKE_TARGET=""        # build-quest / build-pico
 EXPECTED_DEVICE_PREFIX=""  # quest / pico — used by validator
 CLEAN_APK_PATH="$OUTPUT_DIR/Operator-clean.apk"
@@ -94,11 +96,13 @@ configure_device_kind() {
   case "$DEVICE_KIND" in
     quest)
       APK_PATH="$XR_DIR/build/quest/Operator.apk"
+      CI_APK_PATH="$XR_DIR/build/quest/Operator-ci.apk"
       MAKE_TARGET="build-quest"
       EXPECTED_DEVICE_PREFIX="quest"
       ;;
     pico)
       APK_PATH="$XR_DIR/build/pico/Operator.apk"
+      CI_APK_PATH="$XR_DIR/build/pico/Operator-ci.apk"
       MAKE_TARGET="build-pico"
       EXPECTED_DEVICE_PREFIX="pico"
       ;;
@@ -473,6 +477,18 @@ PY
 }
 
 build_clean_apk() {
+  # Reuse the cached production APK if it already exists. APK_PATH is set per
+  # platform by configure_device_kind (quest: xr/build/quest/Operator.apk,
+  # pico: xr/build/pico/Operator.apk), so the same check covers both. Saves
+  # ~3-6 min per test run; the CI-patched build that follows always rebuilds
+  # via flip_auto_start_on, so the source state on disk remains clean.
+  if [ -f "$APK_PATH" ]; then
+    step "Reuse existing clean ${DEVICE_KIND} APK ($APK_PATH)"
+    cp -f "$APK_PATH" "$CLEAN_APK_PATH"
+    CLEAN_APK_READY=1
+    ok "clean APK reused from $APK_PATH"
+    return 0
+  fi
   step "Build clean ${DEVICE_KIND} APK ($MAKE_TARGET)"
   (cd "$XR_DIR" && "$MAKE" "$MAKE_TARGET" 2>&1 | tee "$OUTPUT_DIR/build-clean.log")
   if [ ! -f "$APK_PATH" ]; then
@@ -493,14 +509,21 @@ build_ci_apk() {
     err "APK export did not produce $APK_PATH"
     exit 2
   fi
-  ok "CI APK ready: $APK_PATH"
+  # Move the CI-patched output to its own path so the clean APK at
+  # $APK_PATH is never overwritten across runs. The next call to
+  # build_clean_apk can then safely fast-path on $APK_PATH existence.
+  mv -f "$APK_PATH" "$CI_APK_PATH"
+  if [ "$CLEAN_APK_READY" = "1" ] && [ -f "$CLEAN_APK_PATH" ]; then
+    cp -f "$CLEAN_APK_PATH" "$APK_PATH"
+  fi
+  ok "CI APK ready: $CI_APK_PATH"
 }
 
 install_ci_apk() {
   step "Install CI APK"
-  run_adb install -r -d "$APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-install.log"
+  run_adb install -r -d "$CI_APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-install.log"
   DEVICE_NEEDS_CLEAN=1
-  ok "installed $PKG on $SERIAL"
+  ok "installed $PKG (CI) on $SERIAL"
 }
 
 reinstall_clean_apk() {
@@ -1539,9 +1562,9 @@ main() {
     build_clean_apk
     build_ci_apk
   else
-    warn "SKIP_BUILD=1; using existing $APK_PATH (must already be a CI auto-record APK)"
-    if [ ! -f "$APK_PATH" ]; then
-      err "missing APK: $APK_PATH"
+    warn "SKIP_BUILD=1; using existing $CI_APK_PATH (must already be a CI auto-record APK)"
+    if [ ! -f "$CI_APK_PATH" ]; then
+      err "missing CI APK: $CI_APK_PATH (run without SKIP_BUILD=1 first)"
       exit 2
     fi
   fi
