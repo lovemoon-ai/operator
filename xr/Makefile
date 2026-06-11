@@ -44,9 +44,9 @@ build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-load
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
-# build-pico: setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-capture-plugins
-# 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
-# 	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
+build-pico: setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-capture-plugins
+	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
+	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 
 # build-androidxr: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
@@ -67,8 +67,8 @@ build-mujoco-pico: setup-vendors prepare-android-libs build-ahb build-godot-mujo
 install-quest:
 	$(ADB) install -r -d $(apk_quest)
 
-# install-pico:
-# 	$(ADB) install -r -d $(apk_pico)
+install-pico:
+	$(ADB) install -r -d $(apk_pico)
 
 install-androidxr:
 	$(ADB) install -r -d $(apk_androidxr)
@@ -107,7 +107,7 @@ stop:
 
 build-install-quest: build-quest install-quest
 
-# build-install-pico: build-pico install-pico
+build-install-pico: build-pico install-pico
 
 ship-fast:
 	$(ADB) shell am force-stop $(package)
@@ -119,7 +119,7 @@ ship-fast:
 	$(ADB) logcat --pid=$$PID -v brief | \
 		grep -E "godot|Operator|RobotView|TcpHandler|KotlinVideo|AhbVideo|OpenXR"
 
-# ship-pico: build-install-pico ship-fast
+ship-pico: build-install-pico ship-fast
 
 ship-quest: build-install-quest ship-fast
 

@@ -11,6 +11,7 @@ const LONG_HOLD_SECONDS := 2.0
 const PRIMARY_DIAMETER := 122.0
 const SETTINGS_DIAMETER := 76.0
 const NO_POINTER := Vector2(-1.0, -1.0)
+const TARGET_GROUP := "operator_interaction_target"
 const COL_ACCENT := Color(1.0, 0.647, 0.169, 0.98)
 const COL_ACCENT_MUTED := Color(1.0, 0.647, 0.169, 0.78)
 
@@ -59,8 +60,10 @@ var _pointer_position := NO_POINTER
 var _pointer_pressed := false
 var _feedback_input_mode := "controllers"
 var _feedback_controller: XRController3D
+var interaction_priority := 40
 
 func _init() -> void:
+	add_to_group(TARGET_GROUP)
 	# Aspect kept ~ viewport ratio (370/250 ≈ 1.48). Bumped from
 	# 0.238 → 0.266 to make room for the upload status row.
 	quad_size = Vector2(0.18, 0.266)
@@ -187,6 +190,27 @@ func clear_pointer() -> void:
 		set_pointer_pressed(false)
 	_pointer_position = NO_POINTER
 	_cursor.visible = false
+
+
+func get_interaction_priority() -> int:
+	return interaction_priority
+
+
+func is_interaction_target_visible() -> bool:
+	return is_inside_tree() and visible
+
+
+func get_ray_hit_point(ray_origin: Vector3, ray_direction: Vector3) -> Vector3:
+	var direction := ray_direction.normalized()
+	if direction.length_squared() < 0.000001:
+		return ray_origin
+	var normal := global_transform.basis.z.normalized()
+	var denominator := normal.dot(direction)
+	if absf(denominator) < 0.0001:
+		return ray_origin + direction * 0.25
+	var distance_m := normal.dot(global_transform.origin - ray_origin) / denominator
+	return ray_origin + direction * maxf(distance_m, 0.001)
+
 
 func _build_viewport() -> void:
 	_viewport = SubViewport.new()

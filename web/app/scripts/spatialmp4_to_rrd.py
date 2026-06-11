@@ -48,24 +48,26 @@ Per-device branches (Quest vs Pico):
   next to the input):
     1. **head mett track meaning** — Quest's ``head`` IS the IMU pose
        already; Pico's per-frame ``pose`` is the mid-eye position and
-       must be passed through ``sm.head_to_imu(pose, HEAD_MODEL_OFFSET)``
-       before composing with the RGB extrinsic.
+       must be passed through the SDK's ``head_to_imu`` axis/quaternion
+       conversion before composing with the RGB extrinsic.
     2. **Extrinsic axis convention** — Pico's native axes need a
        cyclic permutation ``[[0,0,1,0],[1,0,0,0],[0,1,0,0],[0,0,0,1]]``
        on the composed ``T_W_S`` before logging.
-    3. **Pinhole camera_xyz** — Quest = ``RDF`` (OpenCV); Pico = ``UBR``.
-  World coordinate system is ``RUB`` for both — no permutation there.
+    3. **Pinhole camera_xyz** — Quest = ``RDF`` (OpenCV); Pico = ``UBR``
+       (the reference viewer's camera frame).
+  World coordinate system is ``RUB`` for both. Pico raw Godot/OpenXR
+  world samples (hands/controllers/head trajectory) are converted through
+  the same basis changes that the Pico camera path uses before logging.
 
 Coordinate conventions (mirrored from reference):
   * **world**: ``rr.ViewCoordinates.RUB``
       Quest / OpenXR — X-right, Y-up, Z-back-out-of-page. Head pose
       and all mett rigid_pose tracks live here in absolute world
       coordinates.
-  * **camera (RGB + depth)**: ``rr.ViewCoordinates.RDF`` on the
-      Pinhole — OpenCV image axes, X-right, Y-down, Z-forward. The
-      mp4 RGB extrinsics encode IMU → OpenCV camera, so feeding the
-      composed ``T_W_S = T_W_H @ T_I_S`` matrix straight into Rerun's
-      ``Transform3D`` is correct.
+  * **camera (RGB + depth)**: Quest uses ``rr.ViewCoordinates.RDF``
+      (OpenCV image axes, X-right, Y-down, Z-forward). Pico follows the
+      SpatialMP4 reference and logs Pinhole axes as ``UBR`` after composing
+      ``T_W_S = T_W_I @ T_I_S`` in Pico-native coordinates.
   * **head gaze**: OpenXR head looks down its local -Z axis, so the
       world-frame gaze direction is ``-R[:, 2]`` of the head rotation
       matrix.
@@ -379,25 +381,50 @@ class DeviceProfile:
       * ``head_is_imu``        — does the ``head`` mett track / per-frame
                                  ``pose`` already represent the IMU pose
                                  (Quest) or the mid-eye head pose (Pico)?
-                                 Pico's needs ``sm.head_to_imu(pose,
-                                 HEAD_MODEL_OFFSET)`` to get an IMU pose
-                                 before composing with the RGB / depth
-                                 extrinsics.
+                                 Pico's needs the SDK ``head_to_imu``
+                                 convention conversion before composing
+                                 with RGB / depth extrinsics.
+      * ``head_model_offset``  — translation offset supplied to the SDK
+                                 conversion above. Pico follows the
+                                 SpatialMP4 reference path and uses
+                                 ``HEAD_MODEL_OFFSET`` unless the caller
+                                 explicitly supplies another offset.
       * ``extrinsic_perm``     — 4×4 axis swap applied to the composed
                                  ``T_W_S`` for both RGB and depth cameras
                                  before handing it to Rerun. Quest = None
                                  (identity); Pico maps native (X,Y,Z) →
                                  (Z,X,Y) so the device-local axes line
                                  up with Rerun's world.
+      * ``native_from_capture`` — 3×3 basis change from the raw capture
+                                 world used by Godot hand/controller joints
+                                 into the native world expected by Pico's
+                                 ``head_to_imu`` / camera extrinsics path.
+                                 Quest = None (identity).
       * ``camera_view_coord``  — Pinhole's ``camera_xyz``. Quest = RDF
                                  (OpenCV image axes); Pico = UBR (X-up,
-                                 Y-back, Z-right). World coord system
-                                 is RUB for both.
+                                 Y-back, Z-right).
+      * ``camera_from_sensor`` — 3×3 local-frame rotation from the MP4
+                                 RGB/depth extrinsic's sensor axes to the
+                                 logical camera axes described by
+                                 ``camera_view_coord``. Quest's Camera2
+                                 writer already uses RDF. Our Pico
+                                 XR_PICO_camera_image writer stores the raw
+                                 SDK frame (URF), so we normalize it to the
+                                 reference viewer's UBR frame here without
+                                 moving the optical center.
+      * ``image_rdf_from_camera`` — optional 3×3 local-frame mapping used
+                                 only by our manual 2D overlay projection.
+                                 It must not be applied to the Rerun
+                                 Transform3D / Pinhole coordinate chain.
     """
     name: str
     head_is_imu: bool
+    head_model_offset: Optional[np.ndarray]
     extrinsic_perm: Optional[np.ndarray]
+    native_from_capture: Optional[np.ndarray]
     camera_view_coord: str
+    camera_from_sensor: Optional[np.ndarray]
+    image_rdf_from_camera: Optional[np.ndarray]
 
 
 @dataclass(frozen=True)
@@ -429,19 +456,58 @@ _PICO_PERM = np.array(
     dtype=np.float64,
 )
 
+_PICO_NATIVE_FROM_CAPTURE = np.array(
+    [
+        [0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ],
+    dtype=np.float64,
+)
+
+# Our XR_PICO_camera_image side data stores the raw SDK camera local frame:
+# X=up, Y=right, Z=forward (URF). The SpatialMP4 Pico reference viewer logs
+# the camera as UBR (X=up, Y=back, Z=right). Convert the local basis by
+# right-multiplying the raw sensor pose with sensor_from_camera:
+#   raw_sensor_from_ubr = [[1, 0, 0], [0, 0, 1], [0, -1, 0]]
+# ``camera_from_sensor`` stores the inverse direction for the profile API.
+_PICO_UBR_FROM_RAW_SENSOR = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 1.0, 0.0],
+    ],
+    dtype=np.float64,
+)
 
 PROFILE_QUEST = DeviceProfile(
     name="quest",
     head_is_imu=True,
+    head_model_offset=None,
     extrinsic_perm=None,
+    native_from_capture=None,
     camera_view_coord="RDF",
+    camera_from_sensor=None,
+    image_rdf_from_camera=None,
 )
 
 PROFILE_PICO = DeviceProfile(
     name="pico",
-    head_is_imu=False,
-    extrinsic_perm=_PICO_PERM,
-    camera_view_coord="UBR",
+    # Per Pico OpenXR XR_PICO_camera_image semantics confirmed for this
+    # project: the lens_pose returned by xrGetCameraExtrinsicsPICO is in
+    # XR_REFERENCE_SPACE_TYPE_VIEW with OpenXR right-handed convention.
+    # That is the same space `XRCamera3D.global_transform` tracks, so the
+    # chain collapses to T_W_S = T_W_H @ T_I_S directly with T_H_I = identity.
+    # No SDK head_to_imu axis swap is appropriate for this recording.
+    head_is_imu=True,
+    head_model_offset=None,
+    extrinsic_perm=None,
+    native_from_capture=None,
+    # Pico's T_I_S rotation is R_x(180°), so the sensor's local frame is
+    # already RDF (X right, Y down, Z forward) in the head's RUB frame.
+    camera_view_coord="RDF",
+    camera_from_sensor=None,
+    image_rdf_from_camera=None,
 )
 
 
@@ -464,7 +530,7 @@ def detect_device_profile(
             candidate = ""
 
     if candidate.startswith("pico"):
-        info("device profile: PICO (head→IMU offset, UBR camera, axis perm)")
+        info("device profile: PICO (T_W_S = T_W_H @ T_I_S, sensor RDF, view-space extrinsic)")
         return PROFILE_PICO
     if candidate.startswith("quest"):
         info("device profile: QUEST (head==IMU, RDF camera, no axis perm)")
@@ -474,18 +540,23 @@ def detect_device_profile(
 
 
 def head_pose_matrix(pose, profile: DeviceProfile) -> np.ndarray:
-    """4×4 IMU pose for a head sample, per device profile.
+    """4×4 camera-root pose for a head sample, per device profile.
 
     Quest: the head mett track already stores the IMU pose, so return
-    pose verbatim. Pico: the per-frame pose is mid-eye, so we lift it
-    to the IMU origin via the SDK's ``head_to_imu`` helper which
-    applies the published ``HEAD_MODEL_OFFSET`` translation under the
-    Pico-specific quaternion convention.
+    pose verbatim. Pico: the per-frame pose is mid-eye in the raw
+    capture convention, so we apply the SDK's ``head_to_imu`` helper to
+    match Pico's axis/quaternion convention. The profile controls the
+    translation offset: official SpatialMP4 Pico reference captures use
+    ``HEAD_MODEL_OFFSET``; a non-None profile value overrides that for
+    explicitly device-relative inputs.
     """
     mat = pose_frame_to_matrix(pose)
     if profile.head_is_imu:
         return mat
-    return sm.head_to_imu(mat, sm.HEAD_MODEL_OFFSET)
+    offset = profile.head_model_offset
+    if offset is None:
+        offset = sm.HEAD_MODEL_OFFSET
+    return sm.head_to_imu(mat, offset)
 
 
 def godot_transform_to_unity(transform_godot: np.ndarray) -> np.ndarray:
@@ -561,6 +632,54 @@ def load_camera2_projection_calibration(
     )
 
 
+def device_native_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.ndarray:
+    """Convert a device-native sensor pose to the logical camera pose.
+
+    ``T_W_S`` comes straight from MP4 extrinsics composed with the device
+    camera-root pose. Some providers store a sensor-local frame whose X/Y axes
+    are rolled relative to the encoded image. Right-multiplying by
+    ``sensor_from_camera`` changes only the camera's local basis; the optical
+    center and forward axis stay fixed.
+    """
+    if profile.camera_from_sensor is None:
+        return T_W_S
+    sensor_from_camera = profile.camera_from_sensor.T
+    T_W_C = np.array(T_W_S, dtype=np.float64, copy=True)
+    T_W_C[:3, :3] = T_W_C[:3, :3] @ sensor_from_camera
+    return T_W_C
+
+
+def compose_world_sensor_pose(
+    head_pose,
+    T_I_S: np.ndarray,
+    profile: DeviceProfile,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compose the projection chain in one place.
+
+    Symbolically this is the chain the RGB hand overlay relies on:
+
+      ``T_W_I = T_W_H @ T_H_I``
+      ``T_W_S = T_W_I @ T_I_S``
+      ``T_S_hand = inverse(T_W_S) @ T_W_hand``
+
+    For Quest, ``head_pose_matrix`` is the identity interpretation:
+    the ``head`` track already stores ``T_W_I``. For Pico, the SpatialMP4
+    SDK reference represents the ``T_W_H @ T_H_I`` step with
+    ``sm.head_to_imu(T_W_H, HEAD_MODEL_OFFSET)``; that helper also moves
+    the pose into the Pico-native axis convention, so Pico hand points must
+    be converted into the same native world before projection.
+
+    Returns ``(T_W_I, T_W_S_sensor, T_W_S_camera)``. The ``sensor`` matrix is
+    the raw MP4 extrinsic composition. The ``camera`` matrix has only the
+    sensor-local axes normalized for the profile's Pinhole/projection
+    convention; the optical center is unchanged.
+    """
+    T_W_I = head_pose_matrix(head_pose, profile)
+    T_W_S_sensor = T_W_I @ T_I_S
+    T_W_S_camera = device_native_camera_pose(T_W_S_sensor, profile)
+    return T_W_I, T_W_S_sensor, T_W_S_camera
+
+
 def device_logged_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.ndarray:
     """The matrix we hand to Rerun for ``world/camera`` Transform3D.
 
@@ -568,21 +687,96 @@ def device_logged_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.n
     world axes; apply the published cyclic permutation before logging
     (see ``pico_pose_to_open3d`` in the reference). Quest is a no-op.
 
-    NOTE on Pico hand / head / point-cloud positions: the same
-    world-axis permutation logically applies to any 3-vector we log
-    under ``world/*``, not just camera transforms. We haven't wired
-    that path yet because the reference Pico viewer doesn't expose
-    hand/controller tracks, and we have no Pico capture in CI to
-    validate against. If you point this script at a real Pico mp4 and
-    the camera frustum sits in the right place but the hands/floor
-    grid don't, that's the missing per-point permutation talking —
-    fix is to multiply every 3-vector by ``profile.extrinsic_perm[:3, :3]``
-    before passing to ``rr.log`` (positions only; rotations need the
-    similarity ``perm @ R @ perm.T``).
+    The camera's local sensor axes are first converted into the profile's
+    ``camera_view_coord`` convention. Then Pico's world-axis permutation is a
+    left multiply only. Generic capture poses use a full similarity transform
+    instead.
     """
+    T_W_C = device_native_camera_pose(T_W_S, profile)
     if profile.extrinsic_perm is None:
-        return T_W_S
-    return profile.extrinsic_perm @ T_W_S
+        return T_W_C
+    return profile.extrinsic_perm @ T_W_C
+
+
+def _matrix4_from_rotation3(rotation: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    if rotation is None:
+        return None
+    mat = np.eye(4, dtype=np.float64)
+    mat[:3, :3] = rotation
+    return mat
+
+
+def device_native_capture_points(points: np.ndarray, profile: DeviceProfile) -> np.ndarray:
+    """Convert raw capture-world points to the device-native world frame.
+
+    Pico's ``head_to_imu`` changes the raw Godot/OpenXR world basis before
+    composing camera extrinsics. Hand joints are still recorded in raw
+    capture world, so RGB projection must apply the same basis change first.
+    """
+    if profile.native_from_capture is None:
+        return points
+    return points @ profile.native_from_capture.T
+
+
+def device_logged_native_points(points: np.ndarray, profile: DeviceProfile) -> np.ndarray:
+    """Convert device-native world points to the Rerun logged world frame."""
+    if profile.extrinsic_perm is None:
+        return points
+    return points @ profile.extrinsic_perm[:3, :3].T
+
+
+def device_logged_capture_points(points: np.ndarray, profile: DeviceProfile) -> np.ndarray:
+    """Convert raw capture-world points to the Rerun logged world frame."""
+    return device_logged_native_points(device_native_capture_points(points, profile), profile)
+
+
+def project_capture_points_to_image(
+    capture_world_pts: np.ndarray,
+    T_W_S_camera: np.ndarray,
+    K,
+    width: int,
+    height: int,
+    profile: DeviceProfile,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Project raw capture-world points through the profile's RGB camera.
+
+    ``capture_world_pts`` are the SDK hand joints (``T_W_hand`` points). Pico
+    captures store them in the raw Godot/OpenXR world basis, while
+    ``compose_world_sensor_pose`` has already moved the head/camera path into
+    Pico-native world through ``sm.head_to_imu``. Applying
+    ``device_native_capture_points`` here makes both sides of
+    ``T_S_hand = inverse(T_W_S) @ T_W_hand`` live in the same world frame.
+    """
+    world_pts = device_native_capture_points(capture_world_pts, profile)
+    return project_world_points_to_image(
+        world_pts,
+        T_W_S_camera,
+        K,
+        width,
+        height,
+        profile.camera_view_coord,
+        image_rdf_from_camera=profile.image_rdf_from_camera,
+    )
+
+
+def device_logged_capture_pose(T_W_A: np.ndarray, profile: DeviceProfile) -> np.ndarray:
+    """Convert a raw capture-world pose to the logged Rerun world frame.
+
+    Unlike cameras, generic poses (head marker, controllers) keep their local
+    axes in the same named coordinate basis as the world, so they need a basis
+    similarity ``M @ T @ M.T``.
+    """
+    native_from_capture = _matrix4_from_rotation3(profile.native_from_capture)
+    logged_from_native = profile.extrinsic_perm
+    if native_from_capture is None and logged_from_native is None:
+        return T_W_A
+
+    logged_from_capture = np.eye(4, dtype=np.float64)
+    if native_from_capture is not None:
+        logged_from_capture = native_from_capture @ logged_from_capture
+    if logged_from_native is not None:
+        logged_from_capture = logged_from_native @ logged_from_capture
+    return logged_from_capture @ T_W_A @ logged_from_capture.T
 
 
 # ---------------------------------------------------------------------------
@@ -650,13 +844,16 @@ CONTROLLER_INPUT_BITS: Tuple[Tuple[str, int], ...] = (
 # ---------------------------------------------------------------------------
 
 
-def log_hand_frame(track_id: str, hand_frame) -> None:
+def log_hand_frame(track_id: str, hand_frame, profile: DeviceProfile) -> None:
     """Log hand joints + bones directly in world coordinates."""
     joints = hand_frame.joints
     if not joints:
         return
 
-    positions = np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64)
+    positions = device_logged_capture_points(
+        np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64),
+        profile,
+    )
     joint_ids = np.array([int(j.joint_id) for j in joints], dtype=np.int32)
     radii = np.array(
         [max(float(j.radius_m), 0.004) for j in joints], dtype=np.float32
@@ -750,8 +947,13 @@ def log_hand_frame_head_relative(track_id: str, hand_frame, head_lookup: PoseLoo
         )
 
 
-def log_rigid_pose(track_id: str, pose, axis_len: float = 0.08) -> None:
-    mat = pose_frame_to_matrix(pose)
+def log_rigid_pose(
+    track_id: str,
+    pose,
+    profile: DeviceProfile,
+    axis_len: float = 0.08,
+) -> None:
+    mat = device_logged_capture_pose(pose_frame_to_matrix(pose), profile)
     mat[:3, :3] = ensure_right_handed_rotation(mat[:3, :3])
     translation = mat[:3, 3]
     quat = Rotation.from_matrix(mat[:3, :3]).as_quat()
@@ -804,7 +1006,11 @@ def collect_tracks(reader) -> Dict[str, List[str]]:
     return {"rigid_pose": rigid, "hand_joints": hands, "controller_input": inputs}
 
 
-def log_all_rigid_pose_tracks(reader, track_ids: Sequence[str]) -> None:
+def log_all_rigid_pose_tracks(
+    reader,
+    track_ids: Sequence[str],
+    profile: DeviceProfile,
+) -> None:
     for tid in track_ids:
         if tid == "head":
             # head is rendered as world/camera + world/trajectory below.
@@ -813,16 +1019,20 @@ def log_all_rigid_pose_tracks(reader, track_ids: Sequence[str]) -> None:
             if pose.timestamp <= 0:
                 continue
             set_time_seconds("time", pose.timestamp)
-            log_rigid_pose(tid, pose)
+            log_rigid_pose(tid, pose, profile)
 
 
-def log_all_hand_tracks(reader, track_ids: Sequence[str]) -> None:
+def log_all_hand_tracks(
+    reader,
+    track_ids: Sequence[str],
+    profile: DeviceProfile,
+) -> None:
     for tid in track_ids:
         for frame in reader.get_hand_joint_frames(tid):
             if frame.timestamp <= 0:
                 continue
             set_time_seconds("time", frame.timestamp)
-            log_hand_frame(tid, frame)
+            log_hand_frame(tid, frame, profile)
 
 
 def log_all_hand_tracks_head_relative(
@@ -857,11 +1067,11 @@ def log_all_controller_input_tracks(reader, track_ids: Sequence[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def log_head_pose_track(head_lookup: PoseLookup) -> None:
+def log_head_pose_track(head_lookup: PoseLookup, profile: DeviceProfile) -> None:
     if head_lookup.empty():
         return
 
-    traj = head_lookup.trajectory_xyz()
+    traj = device_logged_capture_points(head_lookup.trajectory_xyz(), profile)
     rr.log(
         "world/trajectory/head",
         rr.LineStrips3D(strips=[traj], colors=[[255, 215, 0]], radii=0.02),
@@ -895,11 +1105,11 @@ def log_head_pose_track(head_lookup: PoseLookup) -> None:
 
     for f in head_lookup.frames:
         set_time_seconds("time", f.timestamp)
-        log_rigid_pose("head", f, axis_len=0.1)
+        log_rigid_pose("head", f, profile, axis_len=0.1)
         mat = pose_frame_to_matrix(f)
         # OpenXR head looks down its local -Z axis (RUB convention).
-        forward = -mat[:3, 2]
-        origin = mat[:3, 3]
+        forward = device_logged_capture_points((-mat[:3, 2]).reshape(1, 3), profile)[0]
+        origin = device_logged_capture_points(mat[:3, 3].reshape(1, 3), profile)[0]
         rr.log(
             "world/rigid/head/gaze",
             rr.Arrows3D(
@@ -1008,6 +1218,7 @@ def project_world_points_to_image(
     width: int,
     height: int,
     camera_view_coord: str,
+    image_rdf_from_camera: Optional[np.ndarray] = None,
     z_near: float = 0.05,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Project world-frame points into a 2D image given the camera
@@ -1018,13 +1229,10 @@ def project_world_points_to_image(
     ``mask`` is (N,) True for joints in front of the camera AND inside
     the image rectangle.
 
-    Why pass ``camera_view_coord``: Quest's mp4 extrinsic puts world
-    points into an RDF-style frame so the standard OpenCV pinhole
-    formula applies directly. Pico's puts them into UBR; we permute
-    UBR→RDF first so the same formula keeps working. This way the
-    Pinhole entity stays in the device's native convention (matching
-    what the reference scripts log) while the projection math stays
-    in one canonical place.
+    ``camera_view_coord`` is the Rerun Pinhole coordinate convention. When a
+    provider's MP4 camera-local frame needs a different mapping to image pixels
+    than Rerun's declared camera frame, ``image_rdf_from_camera`` overrides the
+    fallback view-coordinate mapping for this 2D projection only.
     """
     n = world_pts.shape[0]
     nan = np.full((n, 2), np.nan, dtype=np.float64)
@@ -1034,14 +1242,17 @@ def project_world_points_to_image(
     T_S_W = np.linalg.inv(T_W_S_native)
     p_native = (T_S_W[:3, :3] @ world_pts.T).T + T_S_W[:3, 3]
 
-    coord = camera_view_coord.upper()
-    if coord == "RDF":
-        p_rdf = p_native
-    elif coord == "UBR":
-        p_rdf = p_native @ _RDF_FROM_UBR.T
+    if image_rdf_from_camera is not None:
+        p_rdf = p_native @ image_rdf_from_camera.T
     else:
-        info(f"unsupported camera_xyz={coord} for 2D projection; skipping joints")
-        return nan, np.zeros((n,), dtype=bool)
+        coord = camera_view_coord.upper()
+        if coord == "RDF":
+            p_rdf = p_native
+        elif coord == "UBR":
+            p_rdf = p_native @ _RDF_FROM_UBR.T
+        else:
+            info(f"unsupported camera_xyz={coord} for 2D projection; skipping joints")
+            return nan, np.zeros((n,), dtype=bool)
 
     z = p_rdf[:, 2]
     valid_z = z > z_near
@@ -1101,11 +1312,11 @@ def log_hand_joints_on_image(
     rgb_entity_prefix: str,
     track_id: str,
     hand_frame,
-    T_W_Srgb_native: np.ndarray,
+    profile: DeviceProfile,
+    T_W_Srgb_camera: np.ndarray,
     K_rgb,
     rgb_w: int,
     rgb_h: int,
-    camera_view_coord: str,
     T_W_H_godot: Optional[np.ndarray] = None,
     camera2_projection: Optional[Camera2ProjectionCalibration] = None,
 ) -> int:
@@ -1126,8 +1337,13 @@ def log_hand_joints_on_image(
             positions, T_W_H_godot, camera2_projection
         )
     else:
-        uv, mask = project_world_points_to_image(
-            positions, T_W_Srgb_native, K_rgb, rgb_w, rgb_h, camera_view_coord
+        uv, mask = project_capture_points_to_image(
+            positions,
+            T_W_Srgb_camera,
+            K_rgb,
+            rgb_w,
+            rgb_h,
+            profile,
         )
     visible = int(mask.sum())
     color = HAND_COLORS.get(track_id, (200, 200, 200))
@@ -1249,7 +1465,7 @@ def run(args: argparse.Namespace) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Resolve device profile early so it can override CLI defaults for
-    # camera_xyz (Quest=RDF, Pico=UBR). `--manifest` may be explicit, or
+    # camera_xyz. `--manifest` may be explicit, or
     # we look next to the input for the standard ingest layout
     # (data/sessions/<id>/{media.mp4,manifest.json}).
     manifest_path: Optional[Path] = args.manifest.resolve() if args.manifest else None
@@ -1315,11 +1531,10 @@ def run(args: argparse.Namespace) -> int:
     rr.send_blueprint(build_blueprint(has_depth_panel=has_depth))
 
     # ---- world coord system ----------------------------------------------
-    # Captures follow OpenXR Quest convention: world is RUB
-    # (X-right, Y-up, Z-back-out-of-page); camera local frame is RDF
-    # (X-right, Y-down, Z-forward, OpenCV image axes). Feeding the mp4
-    # extrinsics directly to Rerun lines everything up because the
-    # extrinsics were authored against the same convention.
+    # Device profile selects the camera local frame: Quest uses RDF/OpenCV,
+    # while Pico follows the reference viewer's UBR camera and applies
+    # pico_pose_to_open3d's left-multiply world-axis permutation before
+    # logging camera transforms to Rerun.
     world_view = getattr(rr.ViewCoordinates, args.world_coord.upper())
     camera_xyz = getattr(rr.ViewCoordinates, args.camera_coord.upper())
 
@@ -1340,7 +1555,7 @@ def run(args: argparse.Namespace) -> int:
     # reference uses (works for standing capture; for floor-level
     # capture the grid sinks correspondingly).
     if not args.no_floor:
-        traj = head_lookup.trajectory_xyz()
+        traj = device_logged_capture_points(head_lookup.trajectory_xyz(), profile)
         max_xz = float(np.max(np.abs(np.concatenate([traj[:, 0], traj[:, 2]]))))
         log_floor_grid(
             half_extent_x=max(max_xz, 2.0),
@@ -1424,9 +1639,9 @@ def run(args: argparse.Namespace) -> int:
         )
 
     # ---- timed-metadata tracks -------------------------------------------
-    log_head_pose_track(head_lookup)
-    log_all_rigid_pose_tracks(reader, tracks["rigid_pose"])
-    log_all_hand_tracks(reader, tracks["hand_joints"])
+    log_head_pose_track(head_lookup, profile)
+    log_all_rigid_pose_tracks(reader, tracks["rigid_pose"], profile)
+    log_all_hand_tracks(reader, tracks["hand_joints"], profile)
     log_all_hand_tracks_head_relative(reader, tracks["hand_joints"], head_lookup)
     log_all_controller_input_tracks(reader, tracks["controller_input"])
 
@@ -1467,11 +1682,14 @@ def run(args: argparse.Namespace) -> int:
             head_pose = head_lookup.nearest(ts)
             if head_pose is None:
                 continue
-            # Quest: head_pose IS the IMU pose. Pico: convert mid-eye →
-            # IMU via the SDK helper before composing.
-            T_W_I = head_pose_matrix(head_pose, profile)
-            T_W_Sd_native = T_W_I @ T_I_Sd
-            T_W_Sd = device_logged_camera_pose(T_W_Sd_native, profile)
+            # Compose T_W_I, T_W_S, and the logical camera-frame pose through
+            # the same explicit chain used for RGB hand projection.
+            T_W_root, T_W_Sd_sensor, T_W_Sd_camera = compose_world_sensor_pose(
+                head_pose,
+                T_I_Sd,
+                profile,
+            )
+            T_W_Sd = device_logged_camera_pose(T_W_Sd_sensor, profile)
             T_W_Sd[:3, :3] = ensure_right_handed_rotation(T_W_Sd[:3, :3])
 
             # Range filter — drop pixels outside [depth_min, depth_max].
@@ -1504,16 +1722,13 @@ def run(args: argparse.Namespace) -> int:
             # because that lives in the spool sidecar
             # (``depth/frames.jsonl``) which the ingest doesn't upload.
             #
-            # Use the **native** extrinsic for the math (T_W_Sd_native
-            # expects OpenCV / Y-down camera-frame input; the permuted
-            # matrix above is only for logging the camera Transform3D
-            # in Rerun's world frame). For Quest the two matrices are
-            # identical; for Pico keeping them separated prevents the
-            # cloud from rotating off the camera. For captures whose
-            # live writer didn't record depth_extrinsics we substituted
-            # T_I_Sd = T_I_Srgb above, which is unambiguously
-            # OpenCV→IMU — so pts_cam MUST be in Y-down OpenCV for the
-            # world points to come out the right way up.
+            # Use the device-native logical camera pose for the math
+            # (T_W_Sd_camera expects profile camera-frame input;
+            # the permuted matrix above is only for logging the camera
+            # Transform3D in Rerun's world frame). For Quest the sensor
+            # and logical camera poses are identical. The helper is retained
+            # for providers that need a local sensor-frame correction; the
+            # Pico reference path leaves it as identity and uses UBR.
             #
             # Pair {depth_for_2d, K_d_raw}: depth_for_2d is the row-
             # flipped buffer (row 0 at top, OpenCV row order — the
@@ -1532,19 +1747,20 @@ def run(args: argparse.Namespace) -> int:
             # intrinsics' cy convention.
             pts_cam = project_depth_to_points(depth_for_2d, K_d_raw, stride=args.depth_pc_stride)
             if pts_cam.size:
-                R_native = T_W_Sd_native[:3, :3]
-                t_native = T_W_Sd_native[:3, 3]
+                R_native = T_W_Sd_camera[:3, :3]
+                t_native = T_W_Sd_camera[:3, 3]
                 pts_world = (R_native @ pts_cam.T).T + t_native
                 if args.depth_pc_stride > 1:
                     pts_world = pts_world[::args.depth_pc_stride]
-                T_Sd_W_native = np.linalg.inv(T_W_Sd_native)
+                T_Sd_W_native = np.linalg.inv(T_W_Sd_camera)
                 z_local = (T_Sd_W_native[:3, :3] @ pts_world.T).T[:, 2] + T_Sd_W_native[2, 3]
                 colors = depth_colormap_jet(
                     np.abs(z_local), args.depth_min, args.depth_max
                 )
+                pts_world_logged = device_logged_native_points(pts_world, profile)
                 rr.log(
                     "world/depth_pointcloud",
-                    rr.Points3D(positions=pts_world, colors=colors, radii=0.012),
+                    rr.Points3D(positions=pts_world_logged, colors=colors, radii=0.012),
                 )
 
                 # ---- depth → RGB overlay ----------------------------
@@ -1552,8 +1768,8 @@ def run(args: argparse.Namespace) -> int:
                 # camera plane and log as Points2D under the RGB image
                 # entity so they overlay on the live video. We use the
                 # head pose interpolated to THIS depth timestamp (same
-                # T_W_I we already computed) to build the rgb
-                # extrinsic — depth + rgb cameras share the IMU root,
+                # T_W_root we already computed) to build the rgb
+                # extrinsic — depth + rgb cameras share the camera root,
                 # so a stale rgb pose would shear the overlay during
                 # head motion.
                 if has_rgb and args.depth_overlay_stride > 0:
@@ -1561,14 +1777,19 @@ def run(args: argparse.Namespace) -> int:
                         pts_world_ov = pts_world[::args.depth_overlay_stride]
                     else:
                         pts_world_ov = pts_world
-                    T_W_Srgb_native_at_depth_ts = T_W_I @ T_I_Srgb
+                    _, _, T_W_Srgb_camera_at_depth_ts = compose_world_sensor_pose(
+                        head_pose,
+                        T_I_Srgb,
+                        profile,
+                    )
                     uv_rgb, mask_rgb = project_world_points_to_image(
                         pts_world_ov,
-                        T_W_Srgb_native_at_depth_ts,
+                        T_W_Srgb_camera_at_depth_ts,
                         K_rgb,
                         rgb_w,
                         rgb_h,
                         camera_view_coord=profile.camera_view_coord,
+                        image_rdf_from_camera=profile.image_rdf_from_camera,
                     )
                     visible_rgb = int(mask_rgb.sum())
                     if visible_rgb > 0:
@@ -1576,7 +1797,7 @@ def run(args: argparse.Namespace) -> int:
                         # (not the depth camera's) so blue-near /
                         # red-far reads relative to what the viewer is
                         # actually looking at.
-                        T_Srgb_W = np.linalg.inv(T_W_Srgb_native_at_depth_ts)
+                        T_Srgb_W = np.linalg.inv(T_W_Srgb_camera_at_depth_ts)
                         z_rgb = (T_Srgb_W[:3, :3] @ pts_world_ov.T).T[:, 2] + T_Srgb_W[2, 3]
                         ov_colors = depth_colormap_jet(
                             np.abs(z_rgb[mask_rgb]),
@@ -1634,9 +1855,12 @@ def run(args: argparse.Namespace) -> int:
             head_pose = head_lookup.nearest(ts)
             if head_pose is None:
                 continue
-            T_W_I = head_pose_matrix(head_pose, profile)
-            T_W_Srgb_native = T_W_I @ T_I_Srgb
-            T_W_Srgb = device_logged_camera_pose(T_W_Srgb_native, profile)
+            T_W_root, T_W_Srgb_sensor, T_W_Srgb_camera = compose_world_sensor_pose(
+                head_pose,
+                T_I_Srgb,
+                profile,
+            )
+            T_W_Srgb = device_logged_camera_pose(T_W_Srgb_sensor, profile)
             T_W_Srgb[:3, :3] = ensure_right_handed_rotation(T_W_Srgb[:3, :3])
 
             set_time_seconds("time", ts)
@@ -1652,11 +1876,10 @@ def run(args: argparse.Namespace) -> int:
                 rr.Image(rgb_bgr, color_model="BGR").compress(jpeg_quality=args.jpeg_quality),
             )
 
-            # Hand-joint overlay onto the left RGB image. We project
-            # in the **native** (un-permuted) camera frame because the
-            # extrinsic K K_rgb encodes IMU → native sensor; the
-            # projection helper handles the UBR→RDF axis swap when the
-            # device requires it.
+            # Hand-joint overlay onto the left RGB image. Hand joints
+            # arrive in capture/raw world; log_hand_joints_on_image
+            # converts them into the device-native world before using
+            # the native RGB camera extrinsic for projection.
             for tid, hl in hand_lookups.items():
                 hand_frame = hl.nearest_within(ts, HAND_MATCH_MAX_DT)
                 if hand_frame is None:
@@ -1665,12 +1888,12 @@ def run(args: argparse.Namespace) -> int:
                     rgb_entity_prefix="world/camera/image",
                     track_id=tid,
                     hand_frame=hand_frame,
-                    T_W_Srgb_native=T_W_Srgb_native,
+                    profile=profile,
+                    T_W_Srgb_camera=T_W_Srgb_camera,
                     K_rgb=K_rgb,
                     rgb_w=rgb_w,
                     rgb_h=rgb_h,
-                    camera_view_coord=profile.camera_view_coord,
-                    T_W_H_godot=T_W_I,
+                    T_W_H_godot=T_W_root,
                     camera2_projection=camera2_projection,
                 )
 

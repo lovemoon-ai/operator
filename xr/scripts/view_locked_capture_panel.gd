@@ -44,18 +44,14 @@ const INPUT_SOURCE_MUTEX := {
 # react. Anything longer feels broken in a HMD.
 const UPLOAD_HEALTH_TIMEOUT_S := 8.0
 
-# Auto-detected input source ("hands" or "controllers") used ONLY for the
-# title-bar indicator + record-stream defaults. We deliberately do not own
-# `interaction_mode` any more -- the field that drives the settings
-# interaction router's pointer mode (controller laser vs hand pinch) is
-# stored in capture_app.gd's capture_options dict and is only set via
-# automation args or the controllers-default init. If the panel propagated
-# the detected mode back through get_options(), pressing Save while a hand
-# was briefly visible would flip the router to hand-pinch -- the bug we
-# fixed when "controller ray broken in capture mode" was reported.
+# Auto-detected input source ("hands" or "controllers") used for the title-bar
+# indicator + record-stream defaults. The current pointer mode is still owned
+# by capture_app.gd so the panel never persists a transient detection flip.
 var _indicator_mode := ""
 var _motion_tracker_toggle: CheckButton
 var _motion_tracker_supported := false
+var _depth_toggle: CheckButton
+var _depth_supported := false
 var _save_root: LineEdit
 var _server_host: LineEdit
 var _server_port: SpinBox
@@ -152,12 +148,11 @@ func _process(delta: float) -> void:
 
 func get_options() -> Dictionary:
 	# interaction_mode is intentionally NOT returned here. The router's
-	# pointer mode lives in capture_app.gd::capture_options and is only
-	# changed by automation args + the controllers default -- not by the
-	# panel and not by detection. See `_indicator_mode` for context.
+	# persisted/automation override lives in capture_app.gd::capture_options;
+	# runtime hand/controller detection is kept out of saved settings.
 	var options := {
 		"stereo_rgb": _toggle_enabled("stereo_rgb"),
-		"record_depth": _toggle_enabled("record_depth"),
+		"record_depth": _depth_supported and _toggle_enabled("record_depth"),
 		"record_head_pose": _toggle_enabled("record_head_pose"),
 		"record_controller_pose": _toggle_enabled("record_controller_pose"),
 		"record_hand_data": _toggle_enabled("record_hand_data"),
@@ -192,10 +187,9 @@ func get_options() -> Dictionary:
 
 func set_options(options: Dictionary) -> void:
 	# We deliberately do NOT read `interaction_mode` from the options dict
-	# here. The router's pointer mode is owned by capture_app.gd; the panel
-	# only knows the auto-detected indicator state (driven via
-	# set_interaction_mode() from the detection loop) and never lets the
-	# detected value escape through get_options() either.
+	# here. capture_app.gd owns both the persisted override and the runtime
+	# detection state; the panel only mirrors the detected indicator and
+	# stream defaults.
 	for key in _stream_toggles.keys():
 		var toggle := _stream_toggles[key] as CheckButton
 		if toggle == null:
@@ -280,6 +274,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	var streams := register_group("streams", "UI_CAPTURED_STREAMS", "camera")
 	_add_stream_toggle(streams, "stereo_rgb", tr("UI_STEREO_RGB"))
 	_add_stream_toggle(streams, "record_depth", tr("UI_DEPTH"))
+	# Depth capture is Quest-only today (XR_META_environment_depth). Like the
+	# motion-tracker row below, hide the slot until capture_app confirms the
+	# provider supports it so a Pico operator never flips a switch that
+	# silently records nothing.
+	_depth_toggle = _stream_toggles.get("record_depth")
+	_set_depth_row_visible(_depth_supported)
 	_add_stream_toggle(streams, "record_head_pose", tr("UI_HEAD_POSE"))
 	_add_stream_toggle(streams, "record_controller_pose", tr("UI_CONTROLLER_POSES"))
 	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"), false)
@@ -526,9 +526,7 @@ func set_pico_tracker_status(
 
 ## Push the auto-detected input source ("hands" / "controllers" / "head")
 ## into the panel. Updates ONLY the title-bar indicator and the record-
-## stream defaults; it does NOT touch the field that drives the settings
-## interaction router (so the controller ray stays put even if the operator
-## briefly waves a bare hand in front of the headset).
+## stream defaults; the panel never persists or owns the active pointer mode.
 ##
 ##   - hands       -> hand icon,        record_hand_data on,   record_controller_pose off
 ##   - controllers -> controller icon,  record_controller_pose on, record_hand_data off
@@ -570,6 +568,25 @@ func _set_motion_tracker_row_visible(visible_for_capture: bool) -> void:
 	if _motion_tracker_toggle == null:
 		return
 	var slot := _motion_tracker_toggle.get_parent()
+	if slot is Control:
+		(slot as Control).visible = visible_for_capture
+
+
+## Declares whether the bound capture provider can produce environment-depth
+## data (Quest only, today). When false the UI row is hidden and the saved
+## option is forced off so the recording manifest never advertises a depth
+## stream the device cannot read.
+func set_depth_supported(supported: bool) -> void:
+	_depth_supported = supported
+	_set_depth_row_visible(supported)
+	if not supported and _depth_toggle != null:
+		_depth_toggle.button_pressed = false
+
+
+func _set_depth_row_visible(visible_for_capture: bool) -> void:
+	if _depth_toggle == null:
+		return
+	var slot := _depth_toggle.get_parent()
 	if slot is Control:
 		(slot as Control).visible = visible_for_capture
 
