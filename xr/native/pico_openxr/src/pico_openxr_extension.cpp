@@ -93,6 +93,7 @@ void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("start_body_tracking_calibration_app"), &PicoOpenXRExtension::start_body_tracking_calibration_app);
 	ClassDB::bind_method(D_METHOD("sample_body_joints"), &PicoOpenXRExtension::sample_body_joints);
 	ClassDB::bind_method(D_METHOD("probe_view_space_pose"), &PicoOpenXRExtension::probe_view_space_pose);
+	ClassDB::bind_method(D_METHOD("log_head_pose_comparison", "godot_head_transform"), &PicoOpenXRExtension::log_head_pose_comparison);
 }
 
 Dictionary PicoOpenXRExtension::_get_requested_extensions() {
