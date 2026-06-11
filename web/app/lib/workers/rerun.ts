@@ -56,10 +56,14 @@ import type { SessionRecord } from "@love-moon/ego-ingest";
 
 import { ingest } from "../ingest.js";
 
-const SCRIPT_PATH = fileURLToPath(
+const DEFAULT_SCRIPT_PATH = fileURLToPath(
   // Resolve from this compiled-or-tsx module to the repo-relative script.
   // `app/lib/workers/rerun.ts` → `app/scripts/spatialmp4_to_rrd.py`
   new URL("../../scripts/spatialmp4_to_rrd.py", import.meta.url),
+);
+const PICO_SCRIPT_PATH = fileURLToPath(
+  // Pico captures use the SDK's Pico coordinate profile.
+  new URL("../../scripts/spatialmp4_to_rrd_pico.py", import.meta.url),
 );
 const UV_BIN = process.env.UV_BIN ?? "uv";
 // Escape hatch: if someone really wants to bypass uv and run with a
@@ -99,7 +103,7 @@ function discoverSpatialmp4Home(): string | null {
   if (fromEnv && fromEnv.length > 0) return fromEnv;
 
   const home = os.homedir();
-  const repoRoot = path.resolve(path.dirname(SCRIPT_PATH), "../../..");
+  const repoRoot = path.resolve(path.dirname(DEFAULT_SCRIPT_PATH), "../../..");
   const depsRoot = process.env.OPERATOR_DEPS_CACHE_ROOT ?? path.join(repoRoot, ".deps");
   const candidates = [
     path.join(depsRoot, "src", "SpatialMP4"),
@@ -149,10 +153,11 @@ export async function runRerunWorker(
   } catch {
     return { status: "error", reason: `media file missing on disk: ${media.uri}` };
   }
+  const scriptPath = selectRerunScript(session);
   try {
-    await stat(SCRIPT_PATH);
+    await stat(scriptPath);
   } catch {
-    return { status: "error", reason: `sidecar missing: ${SCRIPT_PATH}` };
+    return { status: "error", reason: `sidecar missing: ${scriptPath}` };
   }
 
   const sessionDir = path.dirname(media.uri);
@@ -165,7 +170,7 @@ export async function runRerunWorker(
   if (TOPK_FRAMES) scriptArgs.push("--topk", TOPK_FRAMES);
 
   const { bin, args } = PYTHON_BIN
-    ? { bin: PYTHON_BIN, args: [SCRIPT_PATH, ...scriptArgs] }
+    ? { bin: PYTHON_BIN, args: [scriptPath, ...scriptArgs] }
     : {
         bin: UV_BIN,
         // `--script` tells uv to treat the target as a PEP 723 script
@@ -178,7 +183,7 @@ export async function runRerunWorker(
           "--script",
           "--no-project",
           "--python", PYTHON_VERSION,
-          SCRIPT_PATH,
+          scriptPath,
           ...scriptArgs,
         ],
       };
@@ -238,6 +243,31 @@ export async function runRerunWorker(
   });
 
   return { status: "ok", artifactPath: rrdPath, durationMs };
+}
+
+function selectRerunScript(session: SessionRecord): string {
+  return isPicoSession(session) ? PICO_SCRIPT_PATH : DEFAULT_SCRIPT_PATH;
+}
+
+function isPicoSession(session: SessionRecord): boolean {
+  const manifest = session.manifest;
+  if (!isRecord(manifest)) return false;
+  const device = manifest["device"];
+  if (!isRecord(device)) return false;
+  const fields = [
+    "device_type",
+    "device_model",
+    "device_manufacturer",
+    "device_build_device",
+  ];
+  return fields.some((key) => {
+    const value = String(device[key] ?? "").toLowerCase();
+    return value.includes("pico") || value.includes("picovr");
+  });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function runChild(

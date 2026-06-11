@@ -196,15 +196,19 @@ sync_godot_cpp() {
         "$GODOT_CPP_COMMIT" \
         "4.5"
 
+    local link_target=""
     if [ "$OPERATOR_DEPS_CACHE_ROOT" = "$DEFAULT_OPERATOR_DEPS_CACHE_ROOT" ]; then
-        ensure_symlink \
-            "$REPO_ROOT/xr/native/ahb_decoder/godot-cpp" \
-            "../../../.deps/src/godot-cpp"
+        link_target="../../../.deps/src/godot-cpp"
     else
-        ensure_symlink \
-            "$REPO_ROOT/xr/native/ahb_decoder/godot-cpp" \
-            "$DEPS_SRC_DIR/godot-cpp"
+        link_target="$DEPS_SRC_DIR/godot-cpp"
     fi
+
+    local addon=""
+    for addon in ahb_decoder pico_openxr godot_mujoco pinocchio; do
+        ensure_symlink \
+            "$REPO_ROOT/xr/native/$addon/godot-cpp" \
+            "$link_target"
+    done
 }
 
 sync_ffmpeg() {
