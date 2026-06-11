@@ -13,8 +13,6 @@ const ViewLockedCapturePanelScript := preload("res://scripts/view_locked_capture
 const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
 const SettingsLauncherButtonScript := preload("res://scripts/ui/settings_launcher_button.gd")
-const OperatorUIPointerVisualScript := preload("res://scripts/xr/operator_ui_pointer_visual.gd")
-const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_interaction_router.gd")
 const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
 const EgoQRScannerScript := preload("res://scripts/ego_qr_scanner.gd")
 const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
@@ -35,12 +33,6 @@ const AUDIO_PERMISSION_GRACE_US := 3000000
 const TRACKER_STATUS_REFRESH_SECONDS := 0.5
 const TRACKER_REQUEST_RETRY_SECONDS := 3.0
 const TRACKER_SETUP_OPENING_SECONDS := 4.0
-# Re-probe the OpenXR runtime for hand-vs-controller state at ~6 Hz. Faster
-# than this drowns logcat with mode-flip prints when the operator's hand
-# briefly leaves the optical tracker's FOV; slower than ~3 Hz feels visibly
-# laggy when the user transitions controllers <-> bare hands.
-const INPUT_MODE_DETECT_INTERVAL_S := 0.18
-
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
 @export var keep_passthrough_visible := true
@@ -76,8 +68,6 @@ var settings_panel
 var settings_button
 var record_control
 var status_popup
-var ui_pointer_visual
-var settings_interaction_router
 var writer: Object
 var pose_sampler: Node
 var _body_pose_debug_provider: Node = null
@@ -150,9 +140,28 @@ var _audio_permission_degraded_logged := false
 var _audio_permission_wait_started_ticks_us := 0
 var _active_capture_options := {}
 var _pico_camera_image_started := false
-var _pico_camera_frame_interval_s := 1.0 / DEFAULT_RGB_FPS
+# How often the pump polls the native bridge for new camera frames. We poll at
+# twice the camera fps so the runtime-side queue never holds more than ~one
+# frame of latency even when _process and the camera clock drift apart.
+var _pico_camera_poll_interval_s := 0.5 / DEFAULT_RGB_FPS
 var _pico_camera_frame_accum_s := 0.0
-var _pico_camera_submit_warned := false
+# Per-metrics-window pump counters (reset by _emit_metrics via
+# _pop_pico_pump_metrics) plus a session-lifetime failure total used to
+# rate-limit the submit-failure warning below.
+var _pico_camera_submit_ok_left := 0
+var _pico_camera_submit_ok_right := 0
+var _pico_camera_submit_fail_left := 0
+var _pico_camera_submit_fail_right := 0
+var _pico_camera_frames_skipped := 0
+var _pico_camera_submit_fail_session := 0
+var _pico_camera_fail_count_at_last_warn := 0
+var _pico_camera_fail_warn_ticks_us := 0
+# Warn on the first submit failure, then again at most every
+# PICO_CAMERA_FAIL_WARN_EVERY failures or PICO_CAMERA_FAIL_WARN_INTERVAL_US,
+# whichever comes first -- enough to stay visible in logcat without spamming
+# one line per dropped frame.
+const PICO_CAMERA_FAIL_WARN_EVERY := 100
+const PICO_CAMERA_FAIL_WARN_INTERVAL_US := 5_000_000
 var _passthrough_active := false
 var _previous_transparent_bg := false
 var _previous_environment_blend_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
@@ -166,18 +175,19 @@ var _previous_background_color := Color.BLACK
 const METRICS_INTERVAL_S := 1.0
 var _metrics_accum_s := 0.0
 var _metrics_process_ticks := 0
+# Ad-hoc head-pose source probe (see _emit_pico_view_pose_probe).
+var _pico_view_pose_log_accum_s := 0.0
+var _pico_view_pose_log_count := 0
 var _metrics_pose_loop_iters := 0
 var _metrics_started_ticks_us := 0
 var _tracker_status_refresh_accum := TRACKER_STATUS_REFRESH_SECONDS
 var _tracker_last_request_ticks_us := 0
 var _tracker_setup_opened_ticks_us := 0
-# Cached input-mode detection state. capture_options["interaction_mode"] is
-# updated whenever the detected source changes, and the panel + record
-# control are notified at the same time.
-var _input_mode_detected := ""
-var _input_mode_detect_accum := 0.0
+var _last_capture_interaction_mode := ""
 var _motion_tracker_supported_pushed := false
 var _motion_tracker_provider_known := false
+var _depth_supported_pushed := false
+var _depth_provider_known := false
 # Tracks whether we've already fired an up-front requestAudioPermission()
 # prompt for this app session. Audio defaults to ON now, so we surface the
 # system prompt as soon as the capture provider binds -- otherwise the
@@ -198,7 +208,17 @@ var _stage_us_emit_metrics := 0
 func _ready() -> void:
 	_setup_xr_scene()
 	_setup_pico_openxr_bridge()
+	_bind_operator_interaction()
+	# The QR scanner is created inside _setup_xr_scene() — before the Pico
+	# bridge resolves — so hand it over here. On Pico the scanner sources
+	# frames from XR_PICO_camera_image (PicoOS has no Camera2 passthrough
+	# id for the Kotlin plugin to open); the bridge may legitimately be
+	# null off-Pico, in which case the scanner keeps its Camera2 path.
+	if qr_scanner != null and qr_scanner.has_method("set_pico_bridge"):
+		qr_scanner.set_pico_bridge(pico_openxr_bridge)
 	_apply_automation_args()
+	_sync_operator_interaction_override()
+	_apply_capture_interaction_mode(_current_ui_interaction_mode())
 	_initialize_openxr()
 	_bind_android_plugin()
 	_setup_audio_cues()
@@ -391,16 +411,30 @@ func _process(delta: float) -> void:
 		_metrics_accum_s = 0.0
 		_stage_us_emit_metrics += Time.get_ticks_usec() - t_metrics
 
+	# Ad-hoc head-pose source probe (1 Hz). Logs three things side by side:
+	#   1) Godot XRCamera3D.global_transform — what pose_sampler.gd records as
+	#      "head pose" into the MP4.
+	#   2) xrLocateSpace(VIEW, play) via the Pico OpenXR extension — what the
+	#      runtime authoritatively considers the OpenXR VIEW space pose.
+	#   3) The Pico RGB lens_pose (constant per session) we store as T_I_S.
+	# If (1) and (2) match, then "hmd_camera" == OpenXR VIEW, and any residual
+	# 2D-projection error must come from the T_I_S side. If they differ, the
+	# delta IS the head→view rigid offset that the visualizer currently lacks.
+	_pico_view_pose_log_accum_s += delta
+	if _pico_view_pose_log_accum_s >= 1.0:
+		_pico_view_pose_log_accum_s = 0.0
+		_emit_pico_view_pose_probe()
+
 	var t_panel := Time.get_ticks_usec()
 	_update_view_locked_panel()
 	_stage_us_panel += Time.get_ticks_usec() - t_panel
 
 	var t_pointer := Time.get_ticks_usec()
-	_update_ui_pointer()
+	_update_operator_interaction_state()
 	_stage_us_pointer += Time.get_ticks_usec() - t_pointer
 	_update_pico_tracker_setup_status(delta)
-	_update_input_mode_detection(delta)
 	_update_motion_tracker_support_flag()
+	_update_depth_support_flag()
 	_ensure_audio_permission_prompted()
 
 	if _recording and record_control:
@@ -435,6 +469,64 @@ func _process(delta: float) -> void:
 	_stage_us_pose_loop += Time.get_ticks_usec() - t_pose_loop
 
 
+func _emit_pico_view_pose_probe() -> void:
+	# Compare three head-pose sources on the same tick, in the same play-space
+	# coordinate frame, so the user can read the delta from `make log`.
+	if hmd_camera == null:
+		return
+	var godot_t: Transform3D = hmd_camera.global_transform
+	var godot_pos := godot_t.origin
+	var godot_quat := godot_t.basis.get_rotation_quaternion()
+	_pico_view_pose_log_count += 1
+
+	# 1) Godot's XRCamera3D.global_transform — what we record into the MP4.
+	print("[PROBE %d] godot.hmd_camera.global_transform pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)" % [
+		_pico_view_pose_log_count,
+		godot_pos.x, godot_pos.y, godot_pos.z,
+		godot_quat.x, godot_quat.y, godot_quat.z, godot_quat.w,
+	])
+
+	# 2) Authoritative OpenXR VIEW space pose in play space, via xrLocateSpace.
+	if pico_openxr_bridge != null and pico_openxr_bridge.has_method("probe_view_space_pose"):
+		var probe: Dictionary = pico_openxr_bridge.call("probe_view_space_pose")
+		var available: bool = bool(probe.get("available", false))
+		if available:
+			var t: Transform3D = probe.get("transform", Transform3D())
+			var p := t.origin
+			var q := t.basis.get_rotation_quaternion()
+			var dp := godot_pos - p
+			print("[PROBE %d] xrLocateSpace(VIEW, play)    pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)  delta_pos_from_godot=(%.4f, %.4f, %.4f) |delta|=%.4f" % [
+				_pico_view_pose_log_count,
+				p.x, p.y, p.z,
+				q.x, q.y, q.z, q.w,
+				dp.x, dp.y, dp.z, dp.length(),
+			])
+		else:
+			print("[PROBE %d] xrLocateSpace probe unavailable: %s flags=%s xr_result=%s" % [
+				_pico_view_pose_log_count,
+				probe.get("reason", "?"),
+				probe.get("location_flags", "?"),
+				probe.get("xr_result", "?"),
+			])
+	else:
+		print("[PROBE %d] pico_openxr_bridge missing probe_view_space_pose() — APK not rebuilt with native probe" % _pico_view_pose_log_count)
+
+	# 3) The Pico RGB lens_pose we currently store as T_I_S (constant per session).
+	# Comes from the same native extension we just probed; .get_camera_image_info()
+	# returns the per-eye metadata dictionaries that get_rgb_extrinsics later reads.
+	if pico_openxr_bridge != null and pico_openxr_bridge.has_method("get_camera_image_info"):
+		var info: Dictionary = pico_openxr_bridge.call("get_camera_image_info")
+		var left_meta: Dictionary = info.get("left", {})
+		var trans: Array = left_meta.get("lens_pose_translation", []) as Array
+		var rot: Array = left_meta.get("lens_pose_rotation", []) as Array
+		if trans.size() == 3 and rot.size() == 4:
+			print("[PROBE %d] T_I_S (XR_PICO_camera_image left lens_pose) translation=(%.4f, %.4f, %.4f) rotation_xyzw=(%.4f, %.4f, %.4f, %.4f)" % [
+				_pico_view_pose_log_count,
+				float(trans[0]), float(trans[1]), float(trans[2]),
+				float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3]),
+			])
+
+
 func _emit_metrics(window_s: float) -> void:
 	var process_fps: float = _metrics_process_ticks / window_s
 	var engine_fps: float = float(Engine.get_frames_per_second())
@@ -466,6 +558,11 @@ func _emit_metrics(window_s: float) -> void:
 		var writer_metrics: Dictionary = writer.pop_metrics()
 		for key in writer_metrics.keys():
 			plugin_metrics["sink_%s" % key] = writer_metrics[key]
+	# GDScript-side Pico camera pump counters (submit ok/fail per eye plus
+	# skipped invalid frames). Empty unless the Pico OpenXR pump ran.
+	var pump_metrics := _pop_pico_pump_metrics()
+	for key in pump_metrics.keys():
+		plugin_metrics["pump_%s" % key] = pump_metrics[key]
 	# Compact one-liner so it doesn't drown the rest of logcat. Tagged
 	# "QcMetrics" so adb logcat -s godot:V | grep QcMetrics gives a clean
 	# table.
@@ -509,6 +606,12 @@ func _compact_dict(d: Dictionary) -> String:
 func _exit_tree() -> void:
 	stop_capture()
 	_stop_live_pull()
+	var interaction := _operator_interaction()
+	if interaction != null:
+		if interaction.has_method("set_busy"):
+			interaction.call("set_busy", false)
+		if interaction.has_method("set_mode_override"):
+			interaction.call("set_mode_override", "")
 	_set_passthrough_visible(false)
 
 
@@ -529,12 +632,9 @@ func _notification(what: int) -> void:
 
 
 func _reset_ui_input_state() -> void:
-	if settings_interaction_router == null:
-		return
-	if settings_interaction_router.has_method("reset_input_state"):
-		settings_interaction_router.call("reset_input_state")
-	else:
-		settings_interaction_router.release_pointer()
+	# The OperatorInteraction router resets its own input state on
+	# pause/resume; mirror that here by releasing the active pointer.
+	_release_ui_pointer()
 
 
 func start_capture() -> void:
@@ -552,6 +652,7 @@ func start_capture() -> void:
 	pose_sampler.set_capture_options(_active_capture_options)
 	body_motion_sampler.set_capture_options(_active_capture_options)
 	_recording = true
+	_update_operator_interaction_state()
 	_pose_accum = 0.0
 	_capture_started_ticks_us = Time.get_ticks_usec()
 	_camera_configured = false
@@ -563,7 +664,20 @@ func start_capture() -> void:
 	_audio_permission_wait_started_ticks_us = 0
 	_pico_camera_image_started = false
 	_pico_camera_frame_accum_s = 0.0
-	_pico_camera_submit_warned = false
+	_pico_camera_submit_ok_left = 0
+	_pico_camera_submit_ok_right = 0
+	_pico_camera_submit_fail_left = 0
+	_pico_camera_submit_fail_right = 0
+	_pico_camera_frames_skipped = 0
+	_pico_camera_submit_fail_session = 0
+	_pico_camera_fail_count_at_last_warn = 0
+	_pico_camera_fail_warn_ticks_us = 0
+	# Recording on Pico owns the XR_PICO_camera_image stream. Kick the QR
+	# scanner off it before our own pump starts — the stream's poll queue
+	# has a single drain point, so two consumers would steal each other's
+	# frames. Reachable with the scanner open via the volume-key shortcut.
+	if qr_scanner != null and qr_scanner.has_method("set_external_capture_busy"):
+		qr_scanner.set_external_capture_busy(_capture_provider_name == "pico")
 	if record_control:
 		record_control.set_recording(true)
 	# Park any in-flight upload while we record — see
@@ -601,6 +715,7 @@ func stop_capture() -> void:
 	if not is_live_feed:
 		saved_session_dir = writer.get_saved_path() if writer.has_method("get_saved_path") else writer.get_session_dir()
 	_recording = false
+	_update_operator_interaction_state()
 	_active_capture_options = {}
 	_camera_configured = false
 	_camera_start_attempted = false
@@ -610,7 +725,17 @@ func stop_capture() -> void:
 	_audio_permission_wait_started_ticks_us = 0
 	_pico_camera_image_started = false
 	_pico_camera_frame_accum_s = 0.0
-	_pico_camera_submit_warned = false
+	_pico_camera_submit_ok_left = 0
+	_pico_camera_submit_ok_right = 0
+	_pico_camera_submit_fail_left = 0
+	_pico_camera_submit_fail_right = 0
+	_pico_camera_frames_skipped = 0
+	_pico_camera_submit_fail_session = 0
+	_pico_camera_fail_count_at_last_warn = 0
+	_pico_camera_fail_warn_ticks_us = 0
+	# Recording released the camera stream; let the QR scanner use it again.
+	if qr_scanner != null and qr_scanner.has_method("set_external_capture_busy"):
+		qr_scanner.set_external_capture_busy(false)
 	if record_control:
 		record_control.set_recording(false)
 	_play_cue(_stop_cue)
@@ -694,15 +819,6 @@ func _setup_xr_scene() -> void:
 	right_pointer.pose = &"aim"
 	origin.add_child(right_pointer)
 
-	ui_pointer_visual = OperatorUIPointerVisualScript.new()
-	ui_pointer_visual.name = "OperatorUIPointerVisual"
-	origin.add_child(ui_pointer_visual)
-
-	settings_interaction_router = SettingsInteractionRouterScript.new()
-	settings_interaction_router.name = "SettingsInteractionRouter"
-	settings_interaction_router.configure(origin, hmd_camera, left_pointer, right_pointer, ui_pointer_visual)
-	origin.add_child(settings_interaction_router)
-
 	if _is_live_feed_mode() and enable_live_pull:
 		live_pull_view = LivePullDenseMapViewScript.new()
 		live_pull_view.name = "LivePullDenseMapView"
@@ -784,7 +900,9 @@ func _setup_xr_scene() -> void:
 	if status_popup.has_signal("cancel_requested"):
 		status_popup.cancel_requested.connect(_on_upload_cancel_requested)
 	origin.add_child(status_popup)
-	settings_interaction_router.set_targets([qr_scanner, settings_panel, settings_button, status_popup, record_control])
+	# Targets (qr_scanner, settings_panel, settings_button, status_popup,
+	# record_control) self-register into the OperatorInteraction group, so we
+	# no longer build an explicit target list here.
 
 
 func _on_body_pose_debug_toggled() -> void:
@@ -1303,9 +1421,10 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 	var prev_record_audio := bool(capture_options.get("record_audio", false))
 	_merge_capture_options(options)
 	capture_options["save_root"] = _configured_save_root()
+	_sync_operator_interaction_override()
 	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_release_ui_pointer()
-	record_control.show_for_mode(str(capture_options.get("interaction_mode", "controllers")))
+	record_control.show_for_mode(_current_ui_interaction_mode())
 	_prepare_output_storage()
 	# If the operator just flipped Audio on, drop the once-per-session latch
 	# so the next idle tick fires the system permission prompt. Without this
@@ -1408,27 +1527,76 @@ func _update_view_locked_panel() -> void:
 		qr_scanner.transform = hmd_camera.transform * QR_SCANNER_OFFSET
 
 
-func _update_ui_pointer() -> void:
-	if settings_interaction_router == null:
-		return
-	settings_interaction_router.interaction_mode = str(capture_options.get("interaction_mode", "controllers"))
-	settings_interaction_router.busy = _recording
-	# Scanner is intentionally target[0] so SettingsInteractionRouter's
-	# `_should_use_controller_pointer` returns true for it regardless of
-	# interaction_mode — picking a small floating arrow with a hand pinch
-	# is too fiddly. When the scanner isn't visible the router's
-	# `_active_target()` skips past it to the settings/record panel.
-	# status_popup must stay in this per-frame list (matching _setup_ui):
-	# during an upload it is the only visible target, and dropping it here
-	# leaves _active_target() empty — the cancel button never receives the
-	# ray and the whole pointer (hands included) goes dark.
-	settings_interaction_router.set_targets([qr_scanner, settings_panel, settings_button, status_popup, record_control])
-	settings_interaction_router.update_pointer()
+func _update_operator_interaction_state() -> void:
+	var interaction := _operator_interaction()
+	if interaction != null and interaction.has_method("set_busy"):
+		interaction.call("set_busy", _recording)
+
+
+func _current_ui_interaction_mode() -> String:
+	var interaction := _operator_interaction()
+	if interaction != null and interaction.has_method("get_current_mode"):
+		return str(interaction.call("get_current_mode"))
+	var configured := str(capture_options.get("interaction_mode", "controllers"))
+	if configured == "head" or configured == "hands":
+		return configured
+	return "controllers"
 
 
 func _release_ui_pointer() -> void:
-	if settings_interaction_router:
-		settings_interaction_router.release_pointer()
+	var interaction := _operator_interaction()
+	if interaction != null and interaction.has_method("release_pointer"):
+		interaction.call("release_pointer")
+
+
+func _bind_operator_interaction() -> void:
+	var interaction := _operator_interaction()
+	if interaction == null:
+		return
+	if interaction.has_signal("input_mode_changed") \
+			and not interaction.is_connected("input_mode_changed", Callable(self, "_on_global_interaction_mode_changed")):
+		interaction.connect("input_mode_changed", Callable(self, "_on_global_interaction_mode_changed"))
+
+
+func _operator_interaction() -> Node:
+	if get_tree() == null:
+		return null
+	return get_tree().root.get_node_or_null("OperatorInteraction")
+
+
+func _sync_operator_interaction_override() -> void:
+	var interaction := _operator_interaction()
+	if interaction == null or not interaction.has_method("set_mode_override"):
+		return
+	var configured := str(capture_options.get("interaction_mode", "controllers"))
+	if configured == "head" or configured == "hands":
+		interaction.call("set_mode_override", configured)
+	else:
+		interaction.call("set_mode_override", "")
+	if interaction.has_method("set_busy"):
+		interaction.call("set_busy", _recording)
+
+
+func _on_global_interaction_mode_changed(mode: String) -> void:
+	_apply_capture_interaction_mode(mode)
+
+
+func _apply_capture_interaction_mode(mode: String) -> void:
+	if mode.is_empty() or mode == _last_capture_interaction_mode:
+		return
+	_last_capture_interaction_mode = mode
+	print("[Operator] Capture input mode: %s" % mode)
+	_release_ui_pointer()
+	if mode == "hands":
+		capture_options["record_hand_data"] = true
+		capture_options["record_controller_pose"] = false
+	elif mode == "controllers":
+		capture_options["record_controller_pose"] = true
+		capture_options["record_hand_data"] = false
+	if settings_panel != null and settings_panel.has_method("set_interaction_mode"):
+		settings_panel.call("set_interaction_mode", mode)
+	if record_control != null and record_control.visible and not _recording:
+		record_control.show_for_mode(mode)
 
 
 func _on_settings_requested() -> void:
@@ -1437,7 +1605,7 @@ func _on_settings_requested() -> void:
 	_hide_debug_settings_button()
 	_release_ui_pointer()
 	record_control.hide_control()
-	var mode := str(capture_options.get("interaction_mode", "controllers"))
+	var mode := _current_ui_interaction_mode()
 	if settings_panel != null and settings_panel.has_method("set_feedback_input_mode"):
 		settings_panel.set_feedback_input_mode(mode, right_pointer if mode == "controllers" else null)
 	settings_panel.open()
@@ -1487,6 +1655,9 @@ func _effective_capture_options(options: Dictionary) -> Dictionary:
 	if camera_plugin == null:
 		_bind_android_plugin()
 	if camera_plugin != null:
+		var provider_name := CaptureProviderRegistryScript.provider_name(camera_plugin)
+		if not provider_name.is_empty():
+			effective["capture_provider"] = provider_name
 		if not CaptureProviderRegistryScript.supports_depth(camera_plugin):
 			effective["record_depth"] = false
 		if not CaptureProviderRegistryScript.supports_body_motion(camera_plugin):
@@ -1496,9 +1667,9 @@ func _effective_capture_options(options: Dictionary) -> Dictionary:
 		# when the provider reports body-motion support — Quest's body data
 		# comes purely from the Meta vendor AAR's XR_FB_body_tracking +
 		# XR_META_body_tracking_full_body extensions, no external trackers.
-		if CaptureProviderRegistryScript.provider_name(camera_plugin) != "pico":
+		if provider_name != "pico":
 			effective["record_motion_trackers"] = false
-		if CaptureProviderRegistryScript.provider_name(camera_plugin) == "pico":
+		if provider_name == "pico":
 			effective["record_audio"] = false
 	return effective
 
@@ -1525,7 +1696,8 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 	if not bool(info_dict.get("active", false)):
 		push_error("XR_PICO_camera_image did not become active: %s" % JSON.stringify(info_dict))
 		return false
-	_pico_camera_frame_interval_s = 1.0 / max(float(info_dict.get("fps", DEFAULT_RGB_FPS)), 1.0)
+	# Poll at 2x the negotiated camera fps (see _pico_camera_poll_interval_s).
+	_pico_camera_poll_interval_s = 0.5 / max(float(info_dict.get("fps", DEFAULT_RGB_FPS)), 1.0)
 	if camera_plugin.has_method("setOpenXrCameraImageInfoJson"):
 		camera_plugin.call("setOpenXrCameraImageInfoJson", JSON.stringify(info_dict))
 	var started: bool = bool(camera_plugin.call("startOpenXrCameraImageCapture", JSON.stringify(info_dict)))
@@ -1537,35 +1709,94 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 func _pump_pico_openxr_camera_frames(delta: float) -> void:
 	if _capture_provider_name != "pico" or not _pico_camera_image_started:
 		return
-	if pico_openxr_bridge == null or camera_plugin == null:
+	var bridge := pico_openxr_bridge
+	var plugin := camera_plugin
+	if bridge == null or plugin == null:
 		return
 	_pico_camera_frame_accum_s += delta
-	if _pico_camera_frame_accum_s < _pico_camera_frame_interval_s * 0.5:
+	if _pico_camera_frame_accum_s < _pico_camera_poll_interval_s:
 		return
-	_pico_camera_frame_accum_s = 0.0
-	var frames: Variant = pico_openxr_bridge.call("poll_camera_image_frames")
+	# Carry the remainder forward (instead of zeroing) so the effective poll
+	# rate tracks wall time, but clamp to one interval so a long frame hitch
+	# doesn't queue up a burst of catch-up polls.
+	_pico_camera_frame_accum_s = minf(
+		_pico_camera_frame_accum_s - _pico_camera_poll_interval_s,
+		_pico_camera_poll_interval_s
+	)
+	var frames: Variant = bridge.call("poll_camera_image_frames")
 	if typeof(frames) != TYPE_ARRAY:
 		return
 	for frame_variant in frames:
 		if typeof(frame_variant) != TYPE_DICTIONARY:
 			continue
 		var frame := frame_variant as Dictionary
-		var data: Variant = frame.get("data", PackedByteArray())
-		if typeof(data) != TYPE_PACKED_BYTE_ARRAY:
+		var data: Variant = frame.get("data")
+		var width := int(frame.get("width", 0))
+		var height := int(frame.get("height", 0))
+		if typeof(data) != TYPE_PACKED_BYTE_ARRAY \
+				or (data as PackedByteArray).is_empty() \
+				or width <= 0 or height <= 0:
+			_pico_camera_frames_skipped += 1
 			continue
-		var ok: bool = bool(camera_plugin.call(
+		var eye := str(frame.get("eye", "left"))
+		# The native bridge always sets effective_pixel_stride; the chained
+		# fallbacks only run for older bridge builds.
+		var pixel_stride: Variant = frame.get("effective_pixel_stride")
+		if pixel_stride == null:
+			pixel_stride = frame.get("pixel_stride", frame.get("bytes_per_pixel", 4))
+		var ok: bool = bool(plugin.call(
 			"submitOpenXrRgbaFrame",
-			str(frame.get("eye", "left")),
+			eye,
 			int(frame.get("xr_time_ns", 0)),
-			int(frame.get("width", 0)),
-			int(frame.get("height", 0)),
+			width,
+			height,
 			int(frame.get("stride", 0)),
-			int(frame.get("effective_pixel_stride", frame.get("pixel_stride", frame.get("bytes_per_pixel", 4)))),
+			int(pixel_stride),
 			data
 		))
-		if not ok and not _pico_camera_submit_warned:
-			_pico_camera_submit_warned = true
-			push_warning("Pico OpenXR camera frame submission failed; continuing to poll for later frames.")
+		if ok:
+			if eye == "right":
+				_pico_camera_submit_ok_right += 1
+			else:
+				_pico_camera_submit_ok_left += 1
+		else:
+			if eye == "right":
+				_pico_camera_submit_fail_right += 1
+			else:
+				_pico_camera_submit_fail_left += 1
+			_pico_camera_submit_fail_session += 1
+			_maybe_warn_pico_submit_failures()
+
+
+func _maybe_warn_pico_submit_failures() -> void:
+	var now_us := Time.get_ticks_usec()
+	if _pico_camera_fail_count_at_last_warn > 0 \
+			and _pico_camera_submit_fail_session - _pico_camera_fail_count_at_last_warn < PICO_CAMERA_FAIL_WARN_EVERY \
+			and now_us - _pico_camera_fail_warn_ticks_us < PICO_CAMERA_FAIL_WARN_INTERVAL_US:
+		return
+	_pico_camera_fail_count_at_last_warn = _pico_camera_submit_fail_session
+	_pico_camera_fail_warn_ticks_us = now_us
+	push_warning("Pico OpenXR camera frame submission failed %d time(s) this session; frames are being dropped (see QcMetrics pump_fail_l/pump_fail_r and plugin oxr_rej_* counters)." % _pico_camera_submit_fail_session)
+
+
+func _pop_pico_pump_metrics() -> Dictionary:
+	if _pico_camera_submit_ok_left == 0 and _pico_camera_submit_ok_right == 0 \
+			and _pico_camera_submit_fail_left == 0 and _pico_camera_submit_fail_right == 0 \
+			and _pico_camera_frames_skipped == 0:
+		return {}
+	var metrics := {
+		"ok_l": _pico_camera_submit_ok_left,
+		"ok_r": _pico_camera_submit_ok_right,
+		"fail_l": _pico_camera_submit_fail_left,
+		"fail_r": _pico_camera_submit_fail_right,
+		"skip": _pico_camera_frames_skipped,
+	}
+	_pico_camera_submit_ok_left = 0
+	_pico_camera_submit_ok_right = 0
+	_pico_camera_submit_fail_left = 0
+	_pico_camera_submit_fail_right = 0
+	_pico_camera_frames_skipped = 0
+	return metrics
 
 
 func _push_pico_external_camera_info_if_available() -> void:
@@ -1708,79 +1939,6 @@ func _request_pico_motion_trackers(options: Dictionary, force: bool = false) -> 
 	return bool(pico_openxr_bridge.call("request_motion_trackers", max_trackers))
 
 
-## Auto-detect hand-vs-controller state and surface it to the settings
-## panel + interaction router. The runtime answer flips when the operator
-## puts a controller down (or back into the optical tracker's FOV), so we
-## re-probe a few times per second instead of caching it for the lifetime
-## of the session.
-func _update_input_mode_detection(delta: float) -> void:
-	_input_mode_detect_accum += delta
-	if _input_mode_detect_accum < INPUT_MODE_DETECT_INTERVAL_S:
-		return
-	_input_mode_detect_accum = 0.0
-	# "head" is a niche volume-button capture flow opted into by automation
-	# args (see _collect_capture_automation_args). It has nothing to do with
-	# the physical input source, so detection must not stamp over it.
-	if str(capture_options.get("interaction_mode", "")) == "head":
-		if settings_panel != null and settings_panel.has_method("set_interaction_mode"):
-			settings_panel.call("set_interaction_mode", "head")
-		return
-	var detected := _detect_input_mode()
-	if detected == "":
-		return
-	if detected == _input_mode_detected:
-		return
-	_input_mode_detected = detected
-	# Auto-flip the record stream defaults so a gesture recording does not
-	# silently keep writing dead controller poses (and vice versa). Mirrors
-	# the rule the panel applies on set_interaction_mode().
-	if detected == "hands":
-		capture_options["record_hand_data"] = true
-		capture_options["record_controller_pose"] = false
-	elif detected == "controllers":
-		capture_options["record_controller_pose"] = true
-		capture_options["record_hand_data"] = false
-	# NOTE: We intentionally do NOT write capture_options["interaction_mode"]
-	# here, even though detection drives the indicator + record defaults.
-	# That key feeds the settings interaction router's pointer mode, and on
-	# main the router stayed on the controller laser; switching it to
-	# hand-pinch mid-session regressed the gesture ray, so we leave the
-	# router-facing mode at its initialized value ("controllers" by default,
-	# or whatever automation args set explicitly).
-	if settings_panel != null and settings_panel.has_method("set_interaction_mode"):
-		settings_panel.call("set_interaction_mode", detected)
-	# We intentionally do NOT persist on every detection flip -- a wobbly
-	# tracking moment could otherwise spam the settings cfg. The mode is
-	# re-detected on every launch, and the settings panel persists through
-	# BaseSettingsPanel when the operator presses Save.
-
-
-func _detect_input_mode() -> String:
-	# Optical hand tracking wins when either hand has unobstructed data --
-	# the operator can wear controllers but if their hands are also visible
-	# we treat the session as a hand session. Falls back to the controller
-	# state, then to whatever we last saw so the indicator doesn't flicker
-	# during a brief drop-out.
-	if _hand_tracker_active(&"/user/hand_tracker/left") or _hand_tracker_active(&"/user/hand_tracker/right"):
-		return "hands"
-	if _controller_active(left_controller) or _controller_active(right_controller):
-		return "controllers"
-	return ""
-
-
-func _hand_tracker_active(tracker_path: StringName) -> bool:
-	var tracker := XRServer.get_tracker(tracker_path)
-	if not (tracker is XRHandTracker):
-		return false
-	var hand_tracker := tracker as XRHandTracker
-	return hand_tracker.has_tracking_data \
-			and hand_tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
-
-
-func _controller_active(controller: XRController3D) -> bool:
-	return controller != null and controller.get_is_active() and controller.get_has_tracking_data()
-
-
 ## Push the "external motion-tracker capture is available on this device?"
 ## flag into the settings panel once we know the provider. Motion trackers
 ## (waist / feet pucks via XR_PICO_motion_tracking) are PICO-only — Quest
@@ -1811,6 +1969,35 @@ func _update_motion_tracker_support_flag() -> void:
 		# Force the in-memory option off so the configure path doesn't
 		# claim to record trackers that aren't there.
 		capture_options["record_motion_trackers"] = false
+
+
+## Same gating as _update_motion_tracker_support_flag(), but for the depth
+## stream: only Quest wires XR_META_environment_depth today (see
+## CaptureProviderRegistry.supports_depth), so on other providers we hide the
+## toggle and force the saved option off. _effective_capture_options() already
+## keeps depth out of the recording pipeline at session start; this pushes the
+## same truth into the UI so the operator never sees a switch that records
+## nothing.
+func _update_depth_support_flag() -> void:
+	if settings_panel == null or not settings_panel.has_method("set_depth_supported"):
+		return
+	if camera_plugin == null:
+		_bind_android_plugin()
+	if camera_plugin == null:
+		# Provider not yet bound — try again next frame; we don't want to
+		# tell the panel "depth capture is gone" while the singleton is
+		# still loading on cold boot.
+		return
+	var supported := CaptureProviderRegistryScript.supports_depth(camera_plugin)
+	if _depth_provider_known and supported == _depth_supported_pushed:
+		return
+	_depth_provider_known = true
+	_depth_supported_pushed = supported
+	settings_panel.call("set_depth_supported", supported)
+	if not supported:
+		# Force the in-memory option off so the configure path / manifest
+		# never claims a depth stream the device cannot produce.
+		capture_options["record_depth"] = false
 
 
 ## Audio defaults to ON, so we proactively request the RECORD_AUDIO runtime

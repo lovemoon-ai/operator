@@ -40,6 +40,21 @@ public:
 	bool start_body_tracking_calibration_app();
 	Dictionary sample_body_joints();
 
+	// Ad-hoc probe: returns the raw XR_REFERENCE_SPACE_TYPE_VIEW pose in
+	// the OpenXR runtime's play (LOCAL/STAGE) space, expressed as a Godot
+	// Transform3D. Used to verify whether Godot's XRCamera3D.global_transform
+	// matches what xrLocateSpace(view, play) reports. Empty dictionary when
+	// the probe can't run (no session yet, or function resolution failed).
+	// Also __android_log_print's the pose to the "Operator-PROBE" tag so the
+	// result is visible via logcat without relying on Godot's stdout being
+	// captured (it isn't, on Pico).
+	Dictionary probe_view_space_pose();
+
+	// Companion logger: emits the godot-side head pose alongside the latest
+	// xrLocateSpace VIEW pose so the two are timeline-adjacent in logcat and
+	// the delta (godot - openxr) is printed on a single line.
+	void log_head_pose_comparison(const Transform3D &godot_head_transform);
+
 protected:
 	static void _bind_methods();
 
@@ -137,6 +152,11 @@ private:
 	PFN_xrLocateBodyJointsBD xrLocateBodyJointsBD_ptr = nullptr;
 	PFN_xrStartBodyTrackingCalibrationAppPICO xrStartBodyTrackingCalibrationAppPICO_ptr = nullptr;
 	PFN_xrGetBodyTrackingStatePICO xrGetBodyTrackingStatePICO_ptr = nullptr;
+
+	// Core OpenXR ref-space probe; resolved at the same time as PICO extensions.
+	PFN_xrCreateReferenceSpace xrCreateReferenceSpace_ptr = nullptr;
+	PFN_xrDestroySpace xrDestroySpace_ptr = nullptr;
+	PFN_xrLocateSpace xrLocateSpace_ptr = nullptr;
 
 	bool function_resolution_attempted = false;
 	XrBodyTrackerBD body_tracker = XR_NULL_BODY_TRACKER_BD;

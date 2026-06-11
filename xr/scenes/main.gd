@@ -17,9 +17,7 @@ extends Node3D
 
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
-const SettingsInteractionRouterScript = preload("res://scripts/ui/settings_interaction_router.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
-const OperatorUIPointerVisualScript = preload("res://scripts/xr/operator_ui_pointer_visual.gd")
 
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
@@ -54,8 +52,6 @@ var _known_robots: Dictionary = {}
 var _settings_panel: Node3D
 var _settings_button: Node3D
 var _settings_ui: Node = null
-var _settings_interaction_router: Node
-var _settings_pointer_visual: Node3D
 var _teleop_controller_panel: Node3D
 
 ## Selected by the user in the Settings UI; used as a hint until the
@@ -150,37 +146,8 @@ func _process(_delta: float) -> void:
 			_settings_panel.transform = _camera.transform * SETTINGS_PANEL_OFFSET
 		if _settings_button:
 			_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
-	# The teleop session is controller-driven (robot mapping reads grip /
-	# trigger / buttons), and the gesture-ray code path produced regressions
-	# when the router was allowed to swap to hand-pinch mid-session, so the
-	# router stays locked to "controllers" here -- same as main. The detected
-	# mode is *only* used for the read-only title-bar indicator on the
-	# settings panel.
-	if _settings_interaction_router:
-		_settings_interaction_router.interaction_mode = "controllers"
-		_settings_interaction_router.busy = false
-		_settings_interaction_router.set_targets([_settings_panel, _settings_button])
-		_settings_interaction_router.update_pointer()
-	_apply_settings_input_indicator(_detect_input_mode())
+	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
-
-
-func _detect_input_mode() -> String:
-	if _tracking_provider:
-		if _tracking_provider.has_method("is_optical_hand_tracking_active"):
-			if bool(_tracking_provider.call("is_optical_hand_tracking_active", 0)) \
-					or bool(_tracking_provider.call("is_optical_hand_tracking_active", 1)):
-				return "hands"
-		if _tracking_provider.has_method("is_controller_mode_active"):
-			if bool(_tracking_provider.call("is_controller_mode_active", 0)) \
-					or bool(_tracking_provider.call("is_controller_mode_active", 1)):
-				return "controllers"
-	# Fallback: trust the XRController3D nodes' raw tracking state.
-	if _right_controller and _right_controller.get_is_active() and _right_controller.get_has_tracking_data():
-		return "controllers"
-	if _left_controller and _left_controller.get_is_active() and _left_controller.get_has_tracking_data():
-		return "controllers"
-	return "controllers"
 
 
 # Push the detected input source down to the teleop settings panel so the
@@ -194,6 +161,39 @@ func _apply_settings_input_indicator(mode: String) -> void:
 		return
 	_last_indicator_mode = mode
 	_settings_ui.call("set_input_mode_indicator", mode)
+
+
+func _bind_operator_interaction() -> void:
+	var interaction := _operator_interaction()
+	if interaction == null:
+		return
+	if interaction.has_signal("input_mode_changed") \
+			and not interaction.is_connected("input_mode_changed", Callable(self, "_on_global_interaction_mode_changed")):
+		interaction.connect("input_mode_changed", Callable(self, "_on_global_interaction_mode_changed"))
+	_apply_settings_input_indicator(_current_interaction_mode())
+
+
+func _operator_interaction() -> Node:
+	if get_tree() == null:
+		return null
+	return get_tree().root.get_node_or_null("OperatorInteraction")
+
+
+func _current_interaction_mode() -> String:
+	var interaction := _operator_interaction()
+	if interaction != null and interaction.has_method("get_current_mode"):
+		return str(interaction.call("get_current_mode"))
+	return "controllers"
+
+
+func _release_global_interaction_pointer() -> void:
+	var interaction := _operator_interaction()
+	if interaction != null and interaction.has_method("release_pointer"):
+		interaction.call("release_pointer")
+
+
+func _on_global_interaction_mode_changed(mode: String) -> void:
+	_apply_settings_input_indicator(mode)
 
 
 func _create_v2_nodes() -> void:
@@ -233,10 +233,6 @@ func _create_v2_nodes() -> void:
 # --- Settings UI wiring -------------------------------------------------------
 
 func _create_settings_ui_nodes() -> void:
-	_settings_pointer_visual = OperatorUIPointerVisualScript.new()
-	_settings_pointer_visual.name = "SettingsPointerVisual"
-	_origin.add_child(_settings_pointer_visual)
-
 	_settings_panel = SettingsUI.new()
 	_settings_panel.name = "TeleopSettingsPanel"
 	_settings_panel.settings_applied.connect(_on_settings_applied)
@@ -255,12 +251,7 @@ func _create_settings_ui_nodes() -> void:
 	# from the right controller so it stays aligned with the physical controller.
 	_origin.add_child(_teleop_controller_panel)
 	_update_teleop_controller_panel_transform()
-
-	_settings_interaction_router = SettingsInteractionRouterScript.new()
-	_settings_interaction_router.name = "SettingsInteractionRouter"
-	_settings_interaction_router.configure(_origin, _camera, _left_controller, _right_controller, _settings_pointer_visual)
-	_settings_interaction_router.set_targets([_settings_panel, _settings_button])
-	_origin.add_child(_settings_interaction_router)
+	_bind_operator_interaction()
 
 
 func _update_teleop_controller_panel() -> void:
@@ -405,6 +396,7 @@ func _on_settings_exit_requested() -> void:
 
 
 func _show_settings_panel() -> void:
+	_release_global_interaction_pointer()
 	# Re-push the latest discovery snapshot every time we open the panel —
 	# robots may have appeared / disappeared while it was closed.
 	_push_discovery_to_settings_ui()
@@ -413,7 +405,8 @@ func _show_settings_panel() -> void:
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
 	if _settings_panel and _settings_panel.has_method("set_feedback_input_mode"):
-		_settings_panel.set_feedback_input_mode("controllers", _right_controller)
+		var mode := _current_interaction_mode()
+		_settings_panel.set_feedback_input_mode(mode, _right_controller if mode == "controllers" else null)
 	if _settings_panel and _settings_panel.has_method("open"):
 		_settings_panel.open()
 	else:
@@ -422,6 +415,7 @@ func _show_settings_panel() -> void:
 
 
 func _hide_settings_panel() -> void:
+	_release_global_interaction_pointer()
 	if _settings_panel and _settings_panel.has_method("close"):
 		_settings_panel.close()
 	else:

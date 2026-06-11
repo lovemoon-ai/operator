@@ -8,7 +8,8 @@ BUILD_TYPE="${1:-Release}"
 BUILD_JOBS="${GODOT_MUJOCO_BUILD_JOBS:-4}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-DEPS_ROOT="${DEPS_ROOT:-$REPO_ROOT/.deps}"
+OPERATOR_DEPS_CACHE_ROOT="${OPERATOR_DEPS_CACHE_ROOT:-${DEPS_ROOT:-$REPO_ROOT/.deps}}"
+DEPS_ROOT="$OPERATOR_DEPS_CACHE_ROOT"
 GODOT_CPP_SOURCE="$DEPS_ROOT/src/godot-cpp"
 GODOT_CPP_LINK="$SCRIPT_DIR/godot-cpp"
 if [[ "$DEPS_ROOT" == "$REPO_ROOT/.deps" ]]; then
@@ -58,9 +59,16 @@ ensure_godot_cpp_link() {
 }
 
 if [[ ! -f "$GODOT_CPP_SOURCE/SConstruct" ]]; then
-    "$DEPS_SCRIPT" godot-cpp
+    OPERATOR_DEPS_CACHE_ROOT="$OPERATOR_DEPS_CACHE_ROOT" "$DEPS_SCRIPT" godot-cpp
 fi
 ensure_godot_cpp_link
+
+GODOT_CPP_DIR_REAL="$(cd "$GODOT_CPP_LINK" && pwd -P)"
+if [[ -z "$GODOT_CPP_DIR_REAL" ]]; then
+    echo "ERROR: failed to resolve $GODOT_CPP_LINK to a real path" >&2
+    echo "       (is the godot-cpp symlink broken? try: make -C xr deps)" >&2
+    exit 1
+fi
 
 BUILD_DIR="build-arm64"
 cmake -B "$BUILD_DIR" \
@@ -68,7 +76,7 @@ cmake -B "$BUILD_DIR" \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM=android-29 \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DGODOT_CPP_DIR="$GODOT_CPP_LINK" \
+    -DGODOT_CPP_DIR="$GODOT_CPP_DIR_REAL" \
     -DGODOT_CPP_BUILD_DIR="$GODOT_CPP_BUILD" \
     -DMUJOCO_ROOT="$MUJOCO_ANDROID_ROOT"
 

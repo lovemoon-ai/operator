@@ -1,12 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA" />
     <!--
-        Pico-OS and Meta Horizon OS both gate access to the passthrough /
-        headset cameras behind vendor-specific permissions in addition to
-        android.permission.CAMERA. Declare both; the runtime grants whichever
-        applies on the actual device.
+        Meta Horizon OS gates Camera2 passthrough behind HEADSET_CAMERA.
+        Pico QR scanning sources frames from XR_PICO_camera_image; declare
+        the Pico camera-image entitlements here, but only dangerous runtime
+        permissions are requested by QRScannerPlugin.kt.
     -->
     <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
+    <uses-permission android:name="com.pico.permission.CAMERA_DATA" />
     <uses-permission android:name="com.picovr.permission.CAMERA" />
 
     <application>
