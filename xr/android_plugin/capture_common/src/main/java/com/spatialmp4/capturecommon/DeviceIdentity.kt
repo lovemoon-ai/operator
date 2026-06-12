@@ -48,19 +48,22 @@ data class DeviceIdentity(
             manufacturer: String,
             model: String,
             device: String,
-            @Suppress("UNUSED_PARAMETER") product: String
+            product: String
         ): String {
             val mfg = manufacturer.lowercase()
             val mdl = model.lowercase()
+            val hardware = "${device.lowercase()} ${product.lowercase()}"
 
             // ---- Meta Quest family. Build.MANUFACTURER is "Oculus" on Quest
             // 1/2/3/Pro and "Meta" on newer firmware; check both. We classify
-            // by MODEL only -- Build.DEVICE codenames published on the web
+            // by MODEL first -- Build.DEVICE codenames published on the web
             // (panther / eureka / seacliff / hollywood / ...) are reported
             // inconsistently across sources and an actual Quest 3 in this
             // worktree showed device=eureka, which contradicts several
             // public roundups. MODEL ("Quest 3", "Quest 3S", "Quest Pro",
-            // "Quest 2") is the only field we trust to be stable.
+            // "Quest 2") is the preferred stable field. Some Quest 3S
+            // firmware reports Build.MODEL as only "Quest", though, so use
+            // the observed panther hardware codename as a narrow 3S fallback.
             if (mfg.contains("oculus") || mfg.contains("meta")) {
                 // Quest 3S must be checked before Quest 3 because "quest 3"
                 // is a substring of "quest 3s".
@@ -75,6 +78,9 @@ data class DeviceIdentity(
                 }
                 if (mdl.contains("quest 2")) {
                     return "quest2"
+                }
+                if (mdl.contains("quest") && hardware.split(' ').any { it == "panther" }) {
+                    return "quest3s"
                 }
                 if (mdl.contains("quest")) {
                     return "quest_unknown"

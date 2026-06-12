@@ -97,6 +97,10 @@ import bisect
 import importlib
 import json
 import os
+import re
+import shutil
+import struct
+import subprocess
 import sys
 import sysconfig
 from dataclasses import dataclass
@@ -820,6 +824,11 @@ HAND_COLORS: Dict[str, Tuple[int, int, int]] = {
     "right_hand": (255, 160, 80),
 }
 
+# Hands are normally 60-90 Hz while RGB/body/head are lower or similar rate.
+# Cap nearest-neighbour matches so a brief hand-tracking gap does not leave
+# stale hand positions connected to live body joints.
+HAND_FRAME_MATCH_MAX_DT = 0.08
+
 
 # ---------------------------------------------------------------------------
 # BD body-skeleton metadata (PICO XR_BD_body_tracking, 24 joints)
@@ -867,6 +876,7 @@ BODY_COLOR: Tuple[int, int, int] = (110, 235, 130)
 # larger default than the 4 mm hand fallback so the skeleton reads at room
 # scale.
 BODY_JOINT_RADIUS_M = 0.02
+BODY_HAND_BRIDGE_RADIUS_M = 0.004
 
 
 # ---------------------------------------------------------------------------
@@ -926,17 +936,17 @@ assert len(GODOT_XR_BODY_JOINT_NAMES) == 87, "Godot XRBodyTracker has 87 joints 
 
 
 # Body bone chain for Godot XRBodyTracker — kinematic parent → child pairs.
-# Arms terminate at LOWER_ARM (10 / 13). Everything from WRIST onwards
-# (HAND / PALM / WRIST + all 26 finger joints per side) belongs to the
-# dedicated hand-joint stream and is filtered out of the body render below;
-# drawing both at once produced two overlapping skeletons.
+# Keep HAND/PALM/WRIST as coarse bridge joints so the body skeleton connects
+# to the dedicated hand-joint stream. Finger joints are still filtered below;
+# drawing the full body-hand fingers on top of the hand_joints stream produced
+# two overlapping hand skeletons.
 GODOT_XR_BODY_BONES: Tuple[Tuple[int, int], ...] = (
     # Spine
     (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7),
     # Left arm
-    (4, 8), (8, 9), (9, 10),
+    (4, 8), (8, 9), (9, 10), (10, 22), (22, 24), (22, 23),
     # Right arm
-    (4, 11), (11, 12), (12, 13),
+    (4, 11), (11, 12), (12, 13), (13, 49), (49, 51), (49, 50),
     # Left leg
     (1, 14), (14, 15), (15, 16), (16, 17),
     # Right leg
@@ -944,10 +954,20 @@ GODOT_XR_BODY_BONES: Tuple[Tuple[int, int], ...] = (
 )
 
 # Joint ids that the body track shares with the dedicated hand-joint streams
-# (Godot XRBodyTracker enum: LEFT_HAND..RIGHT_PINKY_FINGER_TIP, ids 22..75).
-# We drop them from the body Points3D + bone strips so the body skeleton ends
-# at the lower arm and the hand stream owns everything past the wrist.
-GODOT_XR_BODY_HAND_JOINT_IDS: frozenset[int] = frozenset(range(22, 76))
+# (Godot XRBodyTracker enum: hand finger joints under ids 25..48 and 52..75).
+# HAND/PALM/WRIST (22..24 and 49..51) stay in the body render as bridge points
+# so lower arms visibly connect to the hand stream.
+GODOT_XR_BODY_HAND_JOINT_IDS: frozenset[int] = frozenset(
+    [*range(25, 49), *range(52, 76)]
+)
+
+# Body-track bridge joints to dedicated OpenXR hand-track joints. The body
+# endpoints are preserved and rendered; these pairs only add visual connector
+# lines to the higher-fidelity hand skeleton.
+GODOT_XR_BODY_TO_HAND_BRIDGES: Dict[str, Tuple[Tuple[int, int], ...]] = {
+    "left_hand": ((24, 1), (23, 0)),
+    "right_hand": ((51, 1), (50, 0)),
+}
 
 
 def _body_skeleton_for_manifest(
@@ -1260,26 +1280,224 @@ def format_controller_input(frame) -> str:
 # ---------------------------------------------------------------------------
 
 
-def collect_tracks(reader) -> Dict[str, List[str]]:
+_HJNT_MAGIC = 0x544E4A48
+_HJNT_HEADER_BYTES = 8
+_HJNT_JOINT_BYTES = 36
+_FFPROBE_HEXDUMP_OFFSET_RE = re.compile(r"^\s*[0-9a-fA-F]+$")
+
+
+@dataclass
+class _TimedJoint:
+    joint_id: int
+    flags: int
+    radius_m: float
+    x: float
+    y: float
+    z: float
+    qx: float
+    qy: float
+    qz: float
+    qw: float
+
+
+@dataclass
+class _TimedJointFrame:
+    timestamp: float
+    track_id: str
+    joints: List[_TimedJoint]
+
+
+def _find_ffprobe() -> Optional[str]:
+    env = os.environ.get("FFPROBE")
+    if env:
+        return env
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+
+    repo_root = Path(__file__).resolve().parents[3]
+    deps_root = Path(os.environ.get("OPERATOR_DEPS_CACHE_ROOT", repo_root / ".deps")).expanduser()
+    candidate = deps_root / "build" / "spatialmp4" / "host_deps" / "ffmpeg" / "ffprobe"
+    if candidate.exists():
+        return str(candidate)
+    return None
+
+
+def _ffprobe_json(ffprobe: str, args: Sequence[str], input_path: Path) -> Optional[dict]:
+    cmd = [ffprobe, "-v", "error", *args, "-of", "json", str(input_path)]
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        info(f"ffprobe failed while reading body metadata: {detail.strip()}")
+        return None
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        info(f"ffprobe returned invalid JSON while reading body metadata: {exc}")
+        return None
+
+
+def _bytes_from_ffprobe_hexdump(dump: str) -> bytes:
+    raw = bytearray()
+    for line in dump.splitlines():
+        if ":" not in line:
+            continue
+        offset, rest = line.split(":", 1)
+        if _FFPROBE_HEXDUMP_OFFSET_RE.match(offset) is None:
+            continue
+        if rest.startswith(" "):
+            rest = rest[1:]
+        hex_columns = rest.split("  ", 1)[0]
+        for group in re.findall(r"[0-9a-fA-F]{4}", hex_columns):
+            raw.extend(bytes.fromhex(group))
+    return bytes(raw)
+
+
+def _parse_hjnt_packet(raw: bytes, timestamp: float, track_id: str) -> Optional[_TimedJointFrame]:
+    if len(raw) < _HJNT_HEADER_BYTES:
+        return None
+    magic, version, joint_count = struct.unpack_from("<IHH", raw, 0)
+    if magic != _HJNT_MAGIC or version != 1:
+        return None
+    expected_size = _HJNT_HEADER_BYTES + int(joint_count) * _HJNT_JOINT_BYTES
+    if len(raw) < expected_size:
+        return None
+
+    joints: List[_TimedJoint] = []
+    offset = _HJNT_HEADER_BYTES
+    for _ in range(joint_count):
+        joint_id, flags, radius_m, x, y, z, qx, qy, qz, qw = struct.unpack_from(
+            "<HHffffffff", raw, offset
+        )
+        joints.append(
+            _TimedJoint(
+                joint_id=int(joint_id),
+                flags=int(flags),
+                radius_m=float(radius_m),
+                x=float(x),
+                y=float(y),
+                z=float(z),
+                qx=float(qx),
+                qy=float(qy),
+                qz=float(qz),
+                qw=float(qw),
+            )
+        )
+        offset += _HJNT_JOINT_BYTES
+    return _TimedJointFrame(timestamp=timestamp, track_id=track_id, joints=joints)
+
+
+def load_body_joint_frames_from_mp4(input_path: Path) -> Dict[str, List[_TimedJointFrame]]:
+    """Fallback reader for body_joints mett tracks.
+
+    The current SpatialMP4 Python binding exposes hand_joints but not the
+    newer body_joints getter. Our writer stores body payloads in the same
+    count-driven HJNT v1 binary layout, so we can recover them from the MP4
+    data stream until the SDK grows a first-class API.
+    """
+    ffprobe = _find_ffprobe()
+    if ffprobe is None:
+        info("ffprobe not found; body_joints MP4 fallback disabled")
+        return {}
+
+    streams_json = _ffprobe_json(ffprobe, ["-show_streams"], input_path)
+    streams = streams_json.get("streams", []) if isinstance(streams_json, dict) else []
+    body_streams: List[Tuple[int, str]] = []
+    for stream in streams:
+        tags = stream.get("tags", {}) if isinstance(stream, dict) else {}
+        handler = str(tags.get("handler_name", ""))
+        if not handler.startswith("spatialmp4:body_joints:"):
+            continue
+        try:
+            stream_index = int(stream["index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        track_id = handler.split(":", 2)[2] or f"body_{stream_index}"
+        body_streams.append((stream_index, track_id))
+
+    if not body_streams:
+        return {}
+
+    frames_by_track: Dict[str, List[_TimedJointFrame]] = {}
+    for stream_index, track_id in body_streams:
+        packets_json = _ffprobe_json(
+            ffprobe,
+            ["-select_streams", str(stream_index), "-show_packets", "-show_data"],
+            input_path,
+        )
+        packets = packets_json.get("packets", []) if isinstance(packets_json, dict) else []
+        frames: List[_TimedJointFrame] = []
+        for packet in packets:
+            if not isinstance(packet, dict):
+                continue
+            data = packet.get("data")
+            if not isinstance(data, str):
+                continue
+            try:
+                timestamp = float(packet.get("pts_time", "0"))
+            except (TypeError, ValueError):
+                timestamp = 0.0
+            frame = _parse_hjnt_packet(
+                _bytes_from_ffprobe_hexdump(data),
+                timestamp=timestamp,
+                track_id=track_id,
+            )
+            if frame is not None:
+                frames.append(frame)
+        if frames:
+            frames_by_track[track_id] = frames
+
+    if frames_by_track:
+        summary = ", ".join(f"{tid}={len(frames)}" for tid, frames in frames_by_track.items())
+        info(f"decoded body_joints from MP4 data packets via ffprobe: {summary}")
+    return frames_by_track
+
+
+def _body_frames_for_track(
+    reader,
+    track_id: str,
+    fallback_body_frames: Dict[str, List[_TimedJointFrame]],
+):
+    if hasattr(reader, "get_body_joint_frames"):
+        try:
+            sdk_frames = reader.get_body_joint_frames(track_id)
+        except Exception as exc:  # pragma: no cover - defensive for SDK drift.
+            info(f"SDK get_body_joint_frames({track_id!r}) failed: {exc}")
+            sdk_frames = []
+        if sdk_frames:
+            return sdk_frames
+    return fallback_body_frames.get(track_id, [])
+
+
+def collect_tracks(
+    reader,
+    fallback_body_frames: Optional[Dict[str, List[_TimedJointFrame]]] = None,
+) -> Dict[str, List[str]]:
+    fallback_body_frames = fallback_body_frames or {}
     rigid: List[str] = []
     hands: List[str] = []
     bodies: List[str] = []
     inputs: List[str] = []
-    # SDK builds older than the body_joints kind don't expose the getter;
-    # degrade to "no body track" instead of crashing on old .so files.
-    has_body_api = hasattr(reader, "get_body_joint_frames")
     for tid in reader.list_timed_metadata_tracks():
-        if reader.get_rigid_pose_frames(tid):
-            rigid.append(tid)
+        # Prefer typed body-joint reads before rigid-pose reads. The body
+        # track id is literally "body", and older SDK builds can expose that
+        # same track through get_rigid_pose_frames even though its handler is
+        # spatialmp4:body_joints:body.
+        if _body_frames_for_track(reader, tid, fallback_body_frames):
+            bodies.append(tid)
             continue
         if reader.get_hand_joint_frames(tid):
             hands.append(tid)
             continue
-        if has_body_api and reader.get_body_joint_frames(tid):
-            bodies.append(tid)
+        if reader.get_rigid_pose_frames(tid):
+            rigid.append(tid)
             continue
         if reader.get_controller_input_frames(tid):
             inputs.append(tid)
+    for tid, frames in fallback_body_frames.items():
+        if frames and tid not in bodies:
+            bodies.append(tid)
     return {
         "rigid_pose": rigid,
         "hand_joints": hands,
@@ -1328,9 +1546,14 @@ def log_all_hand_tracks_head_relative(
             log_hand_frame_head_relative(tid, frame, head_lookup)
 
 
-def log_all_body_tracks(reader, track_ids: Sequence[str]) -> None:
+def log_all_body_tracks(
+    reader,
+    track_ids: Sequence[str],
+    fallback_body_frames: Optional[Dict[str, List[_TimedJointFrame]]] = None,
+) -> None:
+    fallback_body_frames = fallback_body_frames or {}
     for tid in track_ids:
-        for frame in reader.get_body_joint_frames(tid):
+        for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
             if frame.timestamp <= 0:
                 continue
             set_time_seconds("time", frame.timestamp)
@@ -1338,10 +1561,14 @@ def log_all_body_tracks(reader, track_ids: Sequence[str]) -> None:
 
 
 def log_all_body_tracks_head_relative(
-    reader, track_ids: Sequence[str], head_lookup: PoseLookup
+    reader,
+    track_ids: Sequence[str],
+    head_lookup: PoseLookup,
+    fallback_body_frames: Optional[Dict[str, List[_TimedJointFrame]]] = None,
 ) -> None:
+    fallback_body_frames = fallback_body_frames or {}
     for tid in track_ids:
-        for frame in reader.get_body_joint_frames(tid):
+        for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
             if frame.timestamp <= 0:
                 continue
             set_time_seconds("time", frame.timestamp)
@@ -1497,6 +1724,138 @@ class HandFrameLookup:
                     best_dt = dt
                     best_i = i
         return self._frames[best_i] if best_i is not None else None
+
+
+def _joint_position_by_id(joints) -> Dict[int, np.ndarray]:
+    return {
+        int(j.joint_id): np.array([j.x, j.y, j.z], dtype=np.float64)
+        for j in joints
+    }
+
+
+def _log_body_hand_bridge_strips(
+    entity_prefix: str,
+    strips: List[np.ndarray],
+    colors: List[Tuple[int, int, int]],
+) -> None:
+    rr.log(
+        f"{entity_prefix}/hand_bridge",
+        rr.LineStrips3D(
+            strips=strips,
+            colors=colors,
+            radii=BODY_HAND_BRIDGE_RADIUS_M,
+        ),
+    )
+
+
+def log_body_hand_bridge_frame(
+    body_frame,
+    hand_lookups: Dict[str, HandFrameLookup],
+    profile: DeviceProfile,
+) -> None:
+    if not hand_lookups or not body_frame.joints:
+        return
+
+    body_by_id = _joint_position_by_id(body_frame.joints)
+    strips: List[np.ndarray] = []
+    colors: List[Tuple[int, int, int]] = []
+    for track_id, joint_pairs in GODOT_XR_BODY_TO_HAND_BRIDGES.items():
+        lookup = hand_lookups.get(track_id)
+        if lookup is None:
+            continue
+        hand_frame = lookup.nearest_within(
+            body_frame.timestamp,
+            HAND_FRAME_MATCH_MAX_DT,
+        )
+        if hand_frame is None or not hand_frame.joints:
+            continue
+        hand_by_id = _joint_position_by_id(hand_frame.joints)
+        for body_joint_id, hand_joint_id in joint_pairs:
+            body_pos = body_by_id.get(body_joint_id)
+            hand_pos_raw = hand_by_id.get(hand_joint_id)
+            if body_pos is None or hand_pos_raw is None:
+                continue
+            hand_pos = device_logged_capture_points(
+                hand_pos_raw.reshape(1, 3),
+                profile,
+            )[0]
+            strips.append(np.stack([body_pos, hand_pos], axis=0))
+            colors.append(HAND_COLORS.get(track_id, BODY_COLOR))
+    _log_body_hand_bridge_strips("world/body", strips, colors)
+
+
+def log_body_hand_bridge_frame_head_relative(
+    body_frame,
+    head_lookup: PoseLookup,
+    hand_lookups: Dict[str, HandFrameLookup],
+) -> None:
+    if not hand_lookups or not body_frame.joints:
+        return
+
+    head = head_lookup.nearest(body_frame.timestamp)
+    if head is None:
+        return
+    T_W_H = pose_frame_to_matrix(head)
+    R = T_W_H[:3, :3]
+    t = T_W_H[:3, 3]
+
+    body_by_id = _joint_position_by_id(body_frame.joints)
+    strips: List[np.ndarray] = []
+    colors: List[Tuple[int, int, int]] = []
+    for track_id, joint_pairs in GODOT_XR_BODY_TO_HAND_BRIDGES.items():
+        lookup = hand_lookups.get(track_id)
+        if lookup is None:
+            continue
+        hand_frame = lookup.nearest_within(
+            body_frame.timestamp,
+            HAND_FRAME_MATCH_MAX_DT,
+        )
+        if hand_frame is None or not hand_frame.joints:
+            continue
+        hand_by_id = _joint_position_by_id(hand_frame.joints)
+        for body_joint_id, hand_joint_id in joint_pairs:
+            body_pos = body_by_id.get(body_joint_id)
+            hand_pos = hand_by_id.get(hand_joint_id)
+            if body_pos is None or hand_pos is None:
+                continue
+            points_head = (np.stack([body_pos, hand_pos], axis=0) - t) @ R
+            strips.append(points_head)
+            colors.append(HAND_COLORS.get(track_id, BODY_COLOR))
+    _log_body_hand_bridge_strips("head_relative/body", strips, colors)
+
+
+def log_all_body_hand_bridges(
+    reader,
+    track_ids: Sequence[str],
+    fallback_body_frames: Dict[str, List[_TimedJointFrame]],
+    hand_lookups: Dict[str, HandFrameLookup],
+    profile: DeviceProfile,
+) -> None:
+    if not hand_lookups:
+        return
+    for tid in track_ids:
+        for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
+            if frame.timestamp <= 0:
+                continue
+            set_time_seconds("time", frame.timestamp)
+            log_body_hand_bridge_frame(frame, hand_lookups, profile)
+
+
+def log_all_body_hand_bridges_head_relative(
+    reader,
+    track_ids: Sequence[str],
+    fallback_body_frames: Dict[str, List[_TimedJointFrame]],
+    head_lookup: PoseLookup,
+    hand_lookups: Dict[str, HandFrameLookup],
+) -> None:
+    if not hand_lookups:
+        return
+    for tid in track_ids:
+        for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
+            if frame.timestamp <= 0:
+                continue
+            set_time_seconds("time", frame.timestamp)
+            log_body_hand_bridge_frame_head_relative(frame, head_lookup, hand_lookups)
 
 
 # UBR (X-up, Y-back, Z-right) → RDF (X-right, Y-down, Z-forward) pure
@@ -2083,7 +2442,12 @@ def run(args: argparse.Namespace) -> int:
     if not has_rgb and not has_depth:
         fatal("input has neither RGB nor depth — nothing to visualize")
 
+    body_frames_by_track: Dict[str, List[_TimedJointFrame]] = {}
     tracks = collect_tracks(reader)
+    if not tracks["body_joints"]:
+        body_frames_by_track = load_body_joint_frames_from_mp4(input_path)
+        if body_frames_by_track:
+            tracks = collect_tracks(reader, body_frames_by_track)
     info("timed-metadata tracks: " + ", ".join(
         f"{k}={v}" for k, v in tracks.items()
     ))
@@ -2099,6 +2463,19 @@ def run(args: argparse.Namespace) -> int:
     if head_lookup.empty():
         fatal("no head pose data — refusing to write a .rrd without it")
     info(f"head pose samples: {len(head_lookup)}")
+
+    hand_lookups: Dict[str, HandFrameLookup] = {
+        tid: HandFrameLookup(reader.get_hand_joint_frames(tid))
+        for tid in tracks["hand_joints"]
+    }
+    if hand_lookups:
+        info(
+            "hand tracks for nearest-frame lookup: "
+            + ", ".join(
+                f"{tid}={'empty' if hl.empty() else 'ok'}"
+                for tid, hl in hand_lookups.items()
+            )
+        )
 
     # ---- recording init ---------------------------------------------------
     rec_name = f"spatialmp4_{input_path.stem}"
@@ -2219,8 +2596,27 @@ def run(args: argparse.Namespace) -> int:
     log_all_rigid_pose_tracks(reader, tracks["rigid_pose"], profile)
     log_all_hand_tracks(reader, tracks["hand_joints"], profile)
     log_all_hand_tracks_head_relative(reader, tracks["hand_joints"], head_lookup)
-    log_all_body_tracks(reader, tracks["body_joints"])
-    log_all_body_tracks_head_relative(reader, tracks["body_joints"], head_lookup)
+    log_all_body_tracks(reader, tracks["body_joints"], body_frames_by_track)
+    log_all_body_tracks_head_relative(
+        reader,
+        tracks["body_joints"],
+        head_lookup,
+        body_frames_by_track,
+    )
+    log_all_body_hand_bridges(
+        reader,
+        tracks["body_joints"],
+        body_frames_by_track,
+        hand_lookups,
+        profile,
+    )
+    log_all_body_hand_bridges_head_relative(
+        reader,
+        tracks["body_joints"],
+        body_frames_by_track,
+        head_lookup,
+        hand_lookups,
+    )
     log_all_controller_input_tracks(reader, tracks["controller_input"])
 
     # ---- RFC-003 H2 robot ------------------------------------------------
@@ -2426,22 +2822,6 @@ def run(args: argparse.Namespace) -> int:
 
     # ---- RGB pass --------------------------------------------------------
     if has_rgb:
-        # Pre-build per-hand-track timestamp lookups so each RGB frame
-        # can pick up its nearest hand sample for the 2D overlay.
-        hand_lookups: Dict[str, HandFrameLookup] = {
-            tid: HandFrameLookup(reader.get_hand_joint_frames(tid))
-            for tid in tracks["hand_joints"]
-        }
-        if hand_lookups:
-            info(
-                "hand tracks for RGB overlay: "
-                + ", ".join(f"{tid}={'empty' if hl.empty() else 'ok'}" for tid, hl in hand_lookups.items())
-            )
-        # Tolerance for matching a hand frame to an RGB frame. RGB is
-        # ~50 fps (20 ms cadence), hands are ~60-90 Hz; 80 ms keeps
-        # stale joints off the image during brief tracking gaps.
-        HAND_MATCH_MAX_DT = 0.08
-
         reader.set_read_mode(sm.ReadMode.RGB_ONLY)
         reader.reset()
         processed = 0
@@ -2478,7 +2858,7 @@ def run(args: argparse.Namespace) -> int:
             # converts them into the device-native world before using
             # the native RGB camera extrinsic for projection.
             for tid, hl in hand_lookups.items():
-                hand_frame = hl.nearest_within(ts, HAND_MATCH_MAX_DT)
+                hand_frame = hl.nearest_within(ts, HAND_FRAME_MATCH_MAX_DT)
                 if hand_frame is None:
                     continue
                 joint_drawn_total += log_hand_joints_on_image(
