@@ -5,9 +5,9 @@ extends Node3D
 ##
 ## The overlay subscribes to BodyPoseProvider.canonical_frame_ready, uses the
 ## Godot-defined 87-joint vocabulary, and re-projects every valid joint into a
-## copy of the user's body placed one metre in front of the HMD at creation
-## time. The copy is world-locked after that; it does not follow the view.
-## This keeps the debug view compatible with Pico and Quest because the
+## copy of the user's body placed in front of the HMD. The copy follows the
+## view by default so the diagnostic pose stays visible while testing. This
+## keeps the debug view compatible with Pico and Quest because the
 ## vendor-specific body sources have already been resolved into canonical
 ## joints by BodyPoseProvider.
 
@@ -71,12 +71,13 @@ const HAND_ROOT_FALLBACK_LINKS: Array[Array] = [
 	["%s_hand", "%s_pinky_finger_metacarpal", ["%s_palm"]],
 ]
 
-@export var front_distance_m: float = 1.0
-@export var front_vertical_offset_m: float = -0.65
-@export var point_radius_m: float = 0.025
-@export var hand_point_radius_m: float = 0.008
-@export var bone_radius_m: float = 0.008
-@export var hand_bone_radius_m: float = 0.004
+@export var front_distance_m: float = 1.2
+@export var front_vertical_offset_m: float = -0.45
+@export var point_radius_m: float = 0.035
+@export var hand_point_radius_m: float = 0.012
+@export var bone_radius_m: float = 0.012
+@export var hand_bone_radius_m: float = 0.006
+@export var follow_head_camera := true
 
 var _head_camera: Node3D = null
 var _point_nodes: Dictionary = {}
@@ -94,6 +95,9 @@ var _display_root_locked := false
 
 var _diag_total_frames := 0
 var _diag_last_log_usec := 0
+var _diag_last_visible_count := 0
+var _diag_last_bounds_min := Vector3.ZERO
+var _diag_last_bounds_max := Vector3.ZERO
 const _DIAG_LOG_INTERVAL_USEC := 5_000_000
 
 
@@ -138,7 +142,9 @@ func _make_point_material(color: Color) -> StandardMaterial3D:
 	mat.albedo_color = color
 	mat.emission_enabled = true
 	mat.emission = Color(color.r, color.g, color.b, 1.0)
-	mat.emission_energy_multiplier = 0.45
+	mat.emission_energy_multiplier = 0.8
+	mat.no_depth_test = true
+	mat.render_priority = 3
 	return mat
 
 
@@ -216,6 +222,9 @@ func _on_canonical_frame_ready(frame: Dictionary) -> void:
 	var visible_count := 0
 	var display_positions: Dictionary = {}
 	var display_records: Dictionary = {}
+	var bounds_min := Vector3.ZERO
+	var bounds_max := Vector3.ZERO
+	var have_bounds := false
 
 	for joint_name_v in CanonicalJointsCls.JOINT_NAMES:
 		var joint_name := String(joint_name_v)
@@ -234,9 +243,20 @@ func _on_canonical_frame_ready(frame: Dictionary) -> void:
 		marker.visible = true
 		display_positions[joint_name] = display_position
 		display_records[joint_name] = joint_pose["record"]
+		if have_bounds:
+			bounds_min = bounds_min.min(display_position)
+			bounds_max = bounds_max.max(display_position)
+		else:
+			bounds_min = display_position
+			bounds_max = display_position
+			have_bounds = true
 		visible_count += 1
 
 	_update_bones(display_positions, display_records)
+	if have_bounds:
+		_diag_last_bounds_min = bounds_min
+		_diag_last_bounds_max = bounds_max
+	_diag_last_visible_count = visible_count
 	_diag_total_frames += 1
 	_maybe_log_diag(visible_count)
 
@@ -369,7 +389,7 @@ func _joint_transform(joints: Dictionary, joint_name: String) -> Dictionary:
 
 
 func _display_root_transform() -> Transform3D:
-	if not _display_root_locked:
+	if follow_head_camera or not _display_root_locked:
 		_lock_display_root_to_current_view()
 	return _display_root
 
@@ -379,14 +399,10 @@ func _lock_display_root_to_current_view() -> bool:
 		return false
 	var camera_xf := _head_camera.global_transform
 	var basis := camera_xf.basis.orthonormalized()
-	var forward := -basis.z
-	forward.y = 0.0
+	var forward := -basis.z.normalized()
 	if forward.length_squared() < 0.0001:
 		forward = Vector3.FORWARD
-	else:
-		forward = forward.normalized()
-	var anchor := camera_xf.origin + forward * front_distance_m
-	anchor.y += front_vertical_offset_m
+	var anchor := camera_xf.origin + forward * front_distance_m + basis.y * front_vertical_offset_m
 	_display_root = Transform3D(Basis.IDENTITY, anchor)
 	_display_root_locked = true
 	return true
@@ -453,8 +469,12 @@ func _maybe_log_diag(visible_count: int) -> void:
 	if now - _diag_last_log_usec < _DIAG_LOG_INTERVAL_USEC:
 		return
 	_diag_last_log_usec = now
-	print("[BodyPoseDebugOverlay] %d canonical frames applied; visible_points=%d/%d" % [
+	print("[BodyPoseDebugOverlay] %d canonical frames applied; visible_points=%d/%d root=%s bounds=%s..%s follow=%s" % [
 		_diag_total_frames,
 		visible_count,
 		_point_nodes.size(),
+		str(_display_root.origin),
+		str(_diag_last_bounds_min),
+		str(_diag_last_bounds_max),
+		str(follow_head_camera),
 	])

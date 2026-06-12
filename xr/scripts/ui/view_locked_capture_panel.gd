@@ -196,7 +196,7 @@ func get_options() -> Dictionary:
 		# probe and latches trackers off on Pico (where they ARE supported)
 		# when the panel options are merged at _setup_ui.
 		"record_motion_trackers": _toggle_enabled("record_motion_trackers"),
-		"max_motion_trackers": 3,
+		"max_motion_trackers": 2,
 		# v3 spatial audio: opt-in for privacy. The toggle defaults off below
 		# (default_on=false in _add_stream_toggle) so a recording never opens
 		# the mic without the operator explicitly enabling it.
@@ -1299,7 +1299,7 @@ static func _default_options() -> Dictionary:
 		"record_hand_data": false,
 		"record_body_tracking": true,
 		"record_motion_trackers": true,
-		"max_motion_trackers": 3,
+		"max_motion_trackers": 2,
 		"record_audio": true,
 		"audio_channel_layout": "stereo",
 		"audio_sample_rate_hz": 48000,

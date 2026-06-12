@@ -5,7 +5,11 @@ const BODY_TRACKER_NAME := &"/user/body_tracker"
 const BODY_JOINT_COUNT := 87
 const BODY_SAMPLE_INTERVAL_US := 33333
 const MOTION_SAMPLE_INTERVAL_US := 11111
+const DEFAULT_MOTION_TRACKERS := 2
 const MAX_MOTION_TRACKERS := 3
+const PICO_BODY_STATUS_VALID := 1
+const PICO_BODY_STATUS_LIMITED := 2
+const PICO_MIN_BODY_SPAN_M := 0.05
 const MOTION_POSE_NAMES := [&"default", &"grip", &"aim", &"pose"]
 const RESERVED_TRACKER_NAMES := [
 	&"head",
@@ -38,7 +42,7 @@ var pose_sampler: Object
 var pico_openxr_bridge: Object
 var _record_body_tracking := false
 var _record_motion_trackers := false
-var _max_motion_trackers := MAX_MOTION_TRACKERS
+var _max_motion_trackers := DEFAULT_MOTION_TRACKERS
 var _last_body_sample_us := 0
 var _last_motion_sample_us := 0
 var _motion_tracker_names: Array[StringName] = []
@@ -107,7 +111,12 @@ func set_capture_options(options: Dictionary) -> void:
 	_last_fallback_body_flags = 0
 	_record_body_tracking = bool(options.get("record_body_tracking", false))
 	_record_motion_trackers = bool(options.get("record_motion_trackers", false))
-	_max_motion_trackers = clampi(int(options.get("max_motion_trackers", MAX_MOTION_TRACKERS)), 0, MAX_MOTION_TRACKERS)
+	if _record_body_tracking and _record_motion_trackers and _pico_body_supported():
+		_log_body_diag_once(
+			"pico_body_tracking_disables_independent_trackers",
+			"Pico body tracking is enabled; skipping independent motion tracker sampling to keep full-body capture mode.")
+		_record_motion_trackers = false
+	_max_motion_trackers = clampi(int(options.get("max_motion_trackers", DEFAULT_MOTION_TRACKERS)), 0, MAX_MOTION_TRACKERS)
 	if pico_openxr_bridge != null:
 		if _record_body_tracking and pico_openxr_bridge.has_method("start_body_tracking"):
 			pico_openxr_bridge.call("start_body_tracking", {})
@@ -132,7 +141,7 @@ func pop_metrics() -> Dictionary:
 		"body_joints": _body_joint_count,
 		"motion_writes": _motion_writes,
 		"motion_event_writes": _motion_event_writes,
-		"motion_trackers": _max_motion_trackers if _pico_motion_supported() else _motion_tracker_names.size(),
+		"motion_trackers": _max_motion_trackers if _record_motion_trackers and _pico_motion_supported() else _motion_tracker_names.size(),
 		"pico_openxr": _pico_bridge_status()
 	}
 	_sample_count = 0
@@ -320,9 +329,21 @@ func _sample_pico_body(timestamp_ns: int) -> bool:
 		return false
 	if not _pico_body_supported():
 		return false
-	var body: Dictionary = pico_openxr_bridge.call("sample_body_joints")
-	var joints: Array = body.get("joints", [])
+	var body_v: Variant = pico_openxr_bridge.call("sample_body_joints")
+	if typeof(body_v) != TYPE_DICTIONARY:
+		_log_body_diag_once("pico_body_sample_not_dict",
+			"Pico body sample returned %s, expected Dictionary" % type_string(typeof(body_v)))
+		return true
+	var body := body_v as Dictionary
+	var joints_v: Variant = body.get("joints", [])
+	if typeof(joints_v) != TYPE_ARRAY:
+		_log_body_diag_once("pico_body_joints_not_array",
+			"Pico body sample joints returned %s, expected Array" % type_string(typeof(joints_v)))
+		return true
+	var joints := joints_v as Array
 	if joints.is_empty():
+		return true
+	if not _pico_body_sample_ready(body, joints):
 		return true
 	var body_flags := int(body.get("body_flags", 0))
 	if bool(_frame_sink.on_frame(BodyFrame.build(timestamp_ns, body_flags, joints, "pico_bd", body))):
@@ -330,6 +351,88 @@ func _sample_pico_body(timestamp_ns: int) -> bool:
 		_body_writes += 1
 		_body_joint_count += joints.size()
 	return true
+
+
+func _pico_body_sample_ready(body: Dictionary, joints: Array) -> bool:
+	var status := _pico_bridge_status()
+	if bool(status.get("pico_body_tracking2_extension", false)):
+		var body_status := int(body.get("status", 0))
+		if body_status != PICO_BODY_STATUS_VALID and body_status != PICO_BODY_STATUS_LIMITED:
+			_log_body_diag_once(
+				_pico_body_diag_key(body, "not_ready"),
+				"Pico body sample not ready; skipping recording write: %s"
+				% _pico_body_diag_summary(body, joints)
+			)
+			return false
+	var raw_span := _pico_raw_joint_span(joints)
+	if raw_span >= 0.0 and raw_span < PICO_MIN_BODY_SPAN_M:
+		_log_body_diag_once(
+			_pico_body_diag_key(body, "collapsed"),
+			"Pico body sample collapsed to one point; skipping recording write: %s"
+			% _pico_body_diag_summary(body, joints)
+		)
+		return false
+	return true
+
+
+func _pico_body_diag_key(body: Dictionary, prefix: String) -> String:
+	return "%s:%s:%s:%s:%s" % [
+		prefix,
+		str(body.get("status", "")),
+		str(body.get("message", "")),
+		str(body.get("locate_result", "")),
+		str(body.get("state_result", "")),
+	]
+
+
+func _pico_body_diag_summary(body: Dictionary, joints: Array) -> String:
+	return "status=%s message=%s joints=%d locate_result=%s state_result=%s raw_span=%.4f" % [
+		str(body.get("status", "")),
+		str(body.get("message", "")),
+		joints.size(),
+		str(body.get("locate_result", "")),
+		str(body.get("state_result", "")),
+		_pico_raw_joint_span(joints),
+	]
+
+
+func _pico_raw_joint_span(joints: Array) -> float:
+	var have_bounds := false
+	var bounds_min := Vector3.ZERO
+	var bounds_max := Vector3.ZERO
+	for entry_v in joints:
+		if typeof(entry_v) != TYPE_DICTIONARY:
+			continue
+		var position := _pico_joint_position(entry_v as Dictionary)
+		if position.is_empty():
+			continue
+		var p: Vector3 = position["value"]
+		if have_bounds:
+			bounds_min = bounds_min.min(p)
+			bounds_max = bounds_max.max(p)
+		else:
+			bounds_min = p
+			bounds_max = p
+			have_bounds = true
+	if not have_bounds:
+		return -1.0
+	return (bounds_max - bounds_min).length()
+
+
+func _pico_joint_position(entry: Dictionary) -> Dictionary:
+	var position_v: Variant = entry.get("position", null)
+	match typeof(position_v):
+		TYPE_VECTOR3:
+			return {"value": position_v}
+		TYPE_DICTIONARY:
+			var dict := position_v as Dictionary
+			if dict.has("x") and dict.has("y") and dict.has("z"):
+				return {"value": Vector3(float(dict["x"]), float(dict["y"]), float(dict["z"]))}
+		TYPE_ARRAY:
+			var arr := position_v as Array
+			if arr.size() >= 3:
+				return {"value": Vector3(float(arr[0]), float(arr[1]), float(arr[2]))}
+	return {}
 
 
 func _sample_pico_motion_trackers(timestamp_ns: int) -> bool:

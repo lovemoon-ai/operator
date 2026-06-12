@@ -50,6 +50,13 @@ var _fallback_adapter: FallbackBodyAdapter = FallbackBodyAdapter.new()
 var _last_frame: Dictionary = {}
 var _time_since_last_sample: float = 0.0
 var _enabled: bool = false
+var _last_pico_diag_key := ""
+var _last_pico_diag_usec := 0
+
+const PICO_DIAG_REPRINT_USEC := 5_000_000
+const PICO_BODY_STATUS_VALID := 1
+const PICO_BODY_STATUS_LIMITED := 2
+const PICO_MIN_BODY_SPAN_M := 0.05
 
 
 func configure(p_tracking_provider: Object, p_pico_bridge: Object = null) -> void:
@@ -133,22 +140,253 @@ func _sample_godot(timestamp_ns: int) -> Dictionary:
 
 func _sample_pico(timestamp_ns: int) -> Dictionary:
 	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("sample_body_joints"):
+		_log_pico_diag_once(
+			"bridge_missing",
+			"Pico body source unavailable: missing PicoOpenXRExtension.sample_body_joints"
+		)
 		return {}
 	var status_method_ok := pico_openxr_bridge.has_method("get_status")
 	if status_method_ok:
 		var status: Variant = pico_openxr_bridge.call("get_status")
 		if typeof(status) == TYPE_DICTIONARY:
 			if not bool((status as Dictionary).get("bd_body_tracking_supported", false)):
+				_log_pico_diag_once("unsupported", "Pico body source unsupported: %s" % JSON.stringify(status))
 				return {}
 	var body: Variant = pico_openxr_bridge.call("sample_body_joints")
 	if typeof(body) != TYPE_DICTIONARY:
+		_log_pico_diag_once(
+			"sample_not_dict",
+			"Pico body sample returned %s, expected Dictionary" % type_string(typeof(body))
+		)
+		return {}
+	var body_dict := body as Dictionary
+	var joints_v: Variant = body_dict.get("joints", [])
+	var joint_count := (joints_v as Array).size() if typeof(joints_v) == TYPE_ARRAY else 0
+	if joint_count <= 0:
+		_log_pico_diag_once(_pico_diag_key(body_dict, "empty"),
+			"Pico body sample has no joints: %s" % _pico_body_diag_summary(body_dict))
+		return {}
+	if _pico_bridge_has_body_tracking2() and not _pico_body_state_ready(body_dict):
+		_log_pico_diag_once(_pico_diag_key(body_dict, "not_ready"),
+			"Pico body state not ready; ignoring sample: %s"
+			% _pico_body_diag_summary(body_dict))
+		return {}
+	var raw_span := _pico_raw_joint_span(body_dict)
+	if raw_span >= 0.0 and raw_span < PICO_MIN_BODY_SPAN_M:
+		_log_pico_diag_once(_pico_diag_key(body_dict, "collapsed"),
+			"Pico body sample collapsed to one point; ignoring sample: %s"
+			% _pico_body_diag_summary(body_dict))
 		return {}
 	# Pico's body_dict IS the vendor proto — joint indices, position +
 	# rotation sub-dicts, flags. Translate it directly into the
 	# raw_vendor_pose.v1 shape so an offline replay can drive the entire
 	# pipeline from disk without the OpenXR runtime.
-	raw_vendor_pose_ready.emit(_build_raw_frame_from_pico(body as Dictionary, timestamp_ns))
-	return _pico_adapter.sample(body as Dictionary, timestamp_ns)
+	raw_vendor_pose_ready.emit(_build_raw_frame_from_pico(body_dict, timestamp_ns))
+	var frame := _pico_adapter.sample(body_dict, timestamp_ns)
+	if frame.is_empty():
+		_log_pico_diag_once(_pico_diag_key(body_dict, "invalid"),
+			"Pico body sample produced no valid canonical joints: %s"
+			% _pico_body_diag_summary(body_dict))
+	else:
+		_log_pico_diag_once(_pico_diag_key(body_dict, "online"),
+			"Pico body source online: %s" % _pico_body_diag_summary(body_dict))
+	return frame
+
+
+func _log_pico_diag_once(key: String, message: String) -> void:
+	var now := Time.get_ticks_usec()
+	if key == _last_pico_diag_key and now - _last_pico_diag_usec < PICO_DIAG_REPRINT_USEC:
+		return
+	_last_pico_diag_key = key
+	_last_pico_diag_usec = now
+	print("[BodyPoseProvider] %s" % message)
+
+
+func _pico_diag_key(body: Dictionary, prefix: String) -> String:
+	return "%s:%s:%s:%s:%s" % [
+		prefix,
+		str(body.get("status", "")),
+		str(body.get("message", "")),
+		str(body.get("locate_result", "")),
+		str(body.get("state_result", "")),
+	]
+
+
+func _pico_body_diag_summary(body: Dictionary) -> String:
+	var joints_v: Variant = body.get("joints", [])
+	var joint_count := (joints_v as Array).size() if typeof(joints_v) == TYPE_ARRAY else 0
+	var status := _pico_body_status_name(int(body.get("status", 0)))
+	var message := _pico_body_message_name(int(body.get("message", 0)))
+	var span := _pico_raw_joint_span(body)
+	var parts := [
+		"active=%s" % str(body.get("active", false)),
+		"supported=%s" % str(body.get("supported", false)),
+		"status=%s(%d)" % [status, int(body.get("status", 0))],
+		"message=%s(%d)" % [message, int(body.get("message", 0))],
+		"joints=%d" % joint_count,
+		"locate_result=%s" % str(body.get("locate_result", "")),
+		"state_result=%s" % str(body.get("state_result", "")),
+		"all_tracked=%s" % str(body.get("all_tracked", false)),
+		"body_flags=%s" % str(body.get("body_flags", "")),
+		"raw_span=%.4f" % span,
+		"raw_sample=%s" % _pico_raw_joint_sample_summary(body),
+		"bridge={%s}" % _pico_bridge_diag_summary(),
+	]
+	return " ".join(PackedStringArray(parts))
+
+
+func _pico_body_state_ready(body: Dictionary) -> bool:
+	var status := int(body.get("status", 0))
+	return status == PICO_BODY_STATUS_VALID or status == PICO_BODY_STATUS_LIMITED
+
+
+func _pico_bridge_has_body_tracking2() -> bool:
+	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("get_status"):
+		return false
+	var raw: Variant = pico_openxr_bridge.call("get_status")
+	if typeof(raw) != TYPE_DICTIONARY:
+		return false
+	return bool((raw as Dictionary).get("pico_body_tracking2_extension", false))
+
+
+func _pico_raw_joint_span(body: Dictionary) -> float:
+	var joints_v: Variant = body.get("joints", [])
+	if typeof(joints_v) != TYPE_ARRAY:
+		return -1.0
+	var have_bounds := false
+	var bounds_min := Vector3.ZERO
+	var bounds_max := Vector3.ZERO
+	for entry_v in (joints_v as Array):
+		if typeof(entry_v) != TYPE_DICTIONARY:
+			continue
+		var position := _pico_joint_position(entry_v as Dictionary)
+		if position.is_empty():
+			continue
+		var p: Vector3 = position["value"]
+		if have_bounds:
+			bounds_min = bounds_min.min(p)
+			bounds_max = bounds_max.max(p)
+		else:
+			bounds_min = p
+			bounds_max = p
+			have_bounds = true
+	if not have_bounds:
+		return -1.0
+	return (bounds_max - bounds_min).length()
+
+
+func _pico_raw_joint_sample_summary(body: Dictionary) -> String:
+	var joints_v: Variant = body.get("joints", [])
+	if typeof(joints_v) != TYPE_ARRAY:
+		return "[]"
+	var samples: Array = []
+	for entry_v in (joints_v as Array):
+		if samples.size() >= 3:
+			break
+		if typeof(entry_v) != TYPE_DICTIONARY:
+			continue
+		var entry := entry_v as Dictionary
+		var position := _pico_joint_position(entry)
+		var position_text := str(position.get("value", Vector3.ZERO)) if not position.is_empty() else "missing"
+		samples.append("#%s:%s:%s" % [
+			str(entry.get("joint", entry.get("source_joint", "?"))),
+			type_string(typeof(entry.get("position", null))),
+			position_text,
+		])
+	return "[" + ", ".join(PackedStringArray(samples)) + "]"
+
+
+func _pico_joint_position(entry: Dictionary) -> Dictionary:
+	var position := _vector3_from_variant(entry.get("position", null))
+	if not position.is_empty():
+		return position
+	var transform_v: Variant = entry.get("transform", null)
+	if typeof(transform_v) == TYPE_TRANSFORM3D:
+		var transform: Transform3D = transform_v
+		return {"value": transform.origin}
+	return {}
+
+
+func _vector3_from_variant(value: Variant) -> Dictionary:
+	match typeof(value):
+		TYPE_VECTOR3:
+			return {"value": value}
+		TYPE_DICTIONARY:
+			var dict := value as Dictionary
+			if dict.has("x") and dict.has("y") and dict.has("z"):
+				return {"value": Vector3(float(dict["x"]), float(dict["y"]), float(dict["z"]))}
+			if dict.has("p"):
+				return _vector3_from_variant(dict["p"])
+		TYPE_ARRAY:
+			var arr := value as Array
+			if arr.size() >= 3:
+				return {"value": Vector3(float(arr[0]), float(arr[1]), float(arr[2]))}
+		TYPE_PACKED_FLOAT32_ARRAY:
+			var arr32: PackedFloat32Array = value
+			if arr32.size() >= 3:
+				return {"value": Vector3(float(arr32[0]), float(arr32[1]), float(arr32[2]))}
+		TYPE_PACKED_FLOAT64_ARRAY:
+			var arr64: PackedFloat64Array = value
+			if arr64.size() >= 3:
+				return {"value": Vector3(float(arr64[0]), float(arr64[1]), float(arr64[2]))}
+	return {}
+
+
+func _pico_bridge_diag_summary() -> String:
+	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("get_status"):
+		return "status_unavailable"
+	var raw: Variant = pico_openxr_bridge.call("get_status")
+	if typeof(raw) != TYPE_DICTIONARY:
+		return "status_type=%s" % type_string(typeof(raw))
+	var status := raw as Dictionary
+	var parts := [
+		"session=%s" % str(status.get("session_created", false)),
+		"bd_ext=%s" % str(status.get("bd_body_tracking_extension", false)),
+		"bd_supported=%s" % str(status.get("bd_body_tracking_supported", false)),
+		"body_tracker=%s" % str(status.get("body_tracker_created", false)),
+		"motion_ext=%s" % str(status.get("motion_tracking_extension", false)),
+		"motion_trackers=%s" % str(status.get("motion_tracker_count", 0)),
+		"motion_request_sent=%s" % str(status.get("motion_request_sent", false)),
+		"last_create=%s" % str(status.get("last_body_create_result", "")),
+		"last_state=%s" % str(status.get("last_body_state_result", "")),
+		"last_locate=%s" % str(status.get("last_body_locate_result", "")),
+		"last_motion_request=%s" % str(status.get("last_motion_request_result", "")),
+	]
+	return " ".join(PackedStringArray(parts))
+
+
+func _pico_body_status_name(status: int) -> String:
+	var name := "UNKNOWN"
+	match status:
+		0:
+			name = "INVALID"
+		1:
+			name = "VALID"
+		2:
+			name = "LIMITED"
+	return name
+
+
+func _pico_body_message_name(message: int) -> String:
+	var name := "UNKNOWN"
+	match message:
+		0:
+			name = "NO_ERROR"
+		1:
+			name = "TRACKER_NOT_CALIBRATED"
+		2:
+			name = "TRACKER_NUM_NOT_ENOUGH"
+		3:
+			name = "TRACKER_STATE_NOT_SATISFIED"
+		4:
+			name = "TRACKER_PERSISTENT_INVISIBILITY"
+		5:
+			name = "TRACKER_DATA_ERROR"
+		6:
+			name = "USER_CHANGE"
+		7:
+			name = "TRACKING_POSE_ERROR"
+	return name
 
 
 # -- raw vendor frame builders ------------------------------------------------
@@ -170,18 +408,25 @@ func _build_raw_frame_from_pico(body_dict: Dictionary, timestamp_ns: int) -> Dic
 			if idx < 0:
 				continue
 			var flags: int = int(entry.get("flags", 0))
-			var pos_dict: Dictionary = entry.get("position", {})
-			var rot_dict: Dictionary = entry.get("rotation", {})
+			var position := _pico_joint_position(entry)
+			var rot_v: Variant = entry.get("rotation", {})
+			var rot_dict := {}
+			if typeof(rot_v) == TYPE_DICTIONARY:
+				rot_dict = rot_v as Dictionary
 			var joint_out: Dictionary = {"source_joint": idx, "flags": flags}
-			if not pos_dict.is_empty() and not rot_dict.is_empty():
-				joint_out["pose"] = {
-					"p": [float(pos_dict.get("x", 0.0)), float(pos_dict.get("y", 0.0)), float(pos_dict.get("z", 0.0))],
-					"q": [
+			if not position.is_empty():
+				var p: Vector3 = position["value"]
+				var q := Quaternion.IDENTITY
+				if not rot_dict.is_empty():
+					q = Quaternion(
 						float(rot_dict.get("x", 0.0)),
 						float(rot_dict.get("y", 0.0)),
 						float(rot_dict.get("z", 0.0)),
-						float(rot_dict.get("w", 1.0)),
-					],
+						float(rot_dict.get("w", 1.0))
+					)
+				joint_out["pose"] = {
+					"p": [p.x, p.y, p.z],
+					"q": [q.x, q.y, q.z, q.w],
 				}
 			else:
 				joint_out["pose"] = null
