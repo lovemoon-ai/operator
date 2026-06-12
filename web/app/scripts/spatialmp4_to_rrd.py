@@ -964,24 +964,36 @@ GODOT_XR_BODY_HAND_JOINT_IDS: frozenset[int] = frozenset(
 # Body-track bridge joints to dedicated OpenXR hand-track joints. The body
 # endpoints are preserved and rendered; these pairs only add visual connector
 # lines to the higher-fidelity hand skeleton.
-GODOT_XR_BODY_TO_HAND_BRIDGES: Dict[str, Tuple[Tuple[int, int], ...]] = {
+BodyHandBridgeMap = Dict[str, Tuple[Tuple[int, int], ...]]
+
+GODOT_XR_BODY_TO_HAND_BRIDGES: BodyHandBridgeMap = {
     "left_hand": ((24, 1), (23, 0)),
     "right_hand": ((51, 1), (50, 0)),
 }
+NO_BODY_TO_HAND_BRIDGES: BodyHandBridgeMap = {}
 
 
 def _body_skeleton_for_manifest(
     manifest_data: Optional[dict],
-) -> Tuple[Tuple[str, ...], Tuple[Tuple[int, int], ...], frozenset[int]]:
-    """Pick the (joint_names, bones, hand_joint_ids) triple that matches the
-    body track's joint set as declared in the manifest. Falls back to BD-24
-    only when the manifest explicitly says so — anything else (Quest,
-    unknown) defaults to the broader Godot/Meta 87-joint set, which is what
-    the body_motion_sampler writes when the Meta vendor AAR is the runtime.
+) -> Tuple[
+    Tuple[str, ...],
+    Tuple[Tuple[int, int], ...],
+    frozenset[int],
+    BodyHandBridgeMap,
+]:
+    """Pick body render tables that match the manifest's joint set. Falls
+    back to BD-24 only when the manifest explicitly says so — anything else
+    (Quest, unknown) defaults to the broader Godot/Meta 87-joint set, which is
+    what the body_motion_sampler writes when the Meta vendor AAR is the
+    runtime.
 
     `hand_joint_ids` is the set of body-track joints that overlap the
     dedicated hand_joints stream; the per-frame logger drops them so the
     two skeletons never render on top of each other.
+
+    `body_to_hand_bridges` is skeleton-specific. Pico BD-24 joint id 23 is
+    RIGHT_HAND, while the Godot/Meta map treats 23 as LEFT_PALM, so Pico must
+    not reuse the Quest/Godot bridge map.
     """
     joint_set = ""
     device_type = ""
@@ -993,8 +1005,18 @@ def _body_skeleton_for_manifest(
     if joint_set == "pico_bd_24" or (joint_set == "" and device_type.startswith("pico")):
         # BD's LEFT_HAND (22) and RIGHT_HAND (23) are coarse end-of-arm
         # markers already covered by the hand stream's wrist/palm — hide them.
-        return BD_BODY_JOINT_NAMES, BD_BODY_BONES, frozenset({22, 23})
-    return GODOT_XR_BODY_JOINT_NAMES, GODOT_XR_BODY_BONES, GODOT_XR_BODY_HAND_JOINT_IDS
+        return (
+            BD_BODY_JOINT_NAMES,
+            BD_BODY_BONES,
+            frozenset({22, 23}),
+            NO_BODY_TO_HAND_BRIDGES,
+        )
+    return (
+        GODOT_XR_BODY_JOINT_NAMES,
+        GODOT_XR_BODY_BONES,
+        GODOT_XR_BODY_HAND_JOINT_IDS,
+        GODOT_XR_BODY_TO_HAND_BRIDGES,
+    )
 
 CONTROLLER_COLORS: Dict[str, Tuple[int, int, int]] = {
     "left_controller": (120, 220, 255),
@@ -1752,14 +1774,15 @@ def log_body_hand_bridge_frame(
     body_frame,
     hand_lookups: Dict[str, HandFrameLookup],
     profile: DeviceProfile,
+    body_to_hand_bridges: BodyHandBridgeMap,
 ) -> None:
-    if not hand_lookups or not body_frame.joints:
+    if not body_to_hand_bridges or not hand_lookups or not body_frame.joints:
         return
 
     body_by_id = _joint_position_by_id(body_frame.joints)
     strips: List[np.ndarray] = []
     colors: List[Tuple[int, int, int]] = []
-    for track_id, joint_pairs in GODOT_XR_BODY_TO_HAND_BRIDGES.items():
+    for track_id, joint_pairs in body_to_hand_bridges.items():
         lookup = hand_lookups.get(track_id)
         if lookup is None:
             continue
@@ -1788,8 +1811,9 @@ def log_body_hand_bridge_frame_head_relative(
     body_frame,
     head_lookup: PoseLookup,
     hand_lookups: Dict[str, HandFrameLookup],
+    body_to_hand_bridges: BodyHandBridgeMap,
 ) -> None:
-    if not hand_lookups or not body_frame.joints:
+    if not body_to_hand_bridges or not hand_lookups or not body_frame.joints:
         return
 
     head = head_lookup.nearest(body_frame.timestamp)
@@ -1802,7 +1826,7 @@ def log_body_hand_bridge_frame_head_relative(
     body_by_id = _joint_position_by_id(body_frame.joints)
     strips: List[np.ndarray] = []
     colors: List[Tuple[int, int, int]] = []
-    for track_id, joint_pairs in GODOT_XR_BODY_TO_HAND_BRIDGES.items():
+    for track_id, joint_pairs in body_to_hand_bridges.items():
         lookup = hand_lookups.get(track_id)
         if lookup is None:
             continue
@@ -1830,15 +1854,21 @@ def log_all_body_hand_bridges(
     fallback_body_frames: Dict[str, List[_TimedJointFrame]],
     hand_lookups: Dict[str, HandFrameLookup],
     profile: DeviceProfile,
+    body_to_hand_bridges: BodyHandBridgeMap,
 ) -> None:
-    if not hand_lookups:
+    if not body_to_hand_bridges or not hand_lookups:
         return
     for tid in track_ids:
         for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
             if frame.timestamp <= 0:
                 continue
             set_time_seconds("time", frame.timestamp)
-            log_body_hand_bridge_frame(frame, hand_lookups, profile)
+            log_body_hand_bridge_frame(
+                frame,
+                hand_lookups,
+                profile,
+                body_to_hand_bridges,
+            )
 
 
 def log_all_body_hand_bridges_head_relative(
@@ -1847,15 +1877,21 @@ def log_all_body_hand_bridges_head_relative(
     fallback_body_frames: Dict[str, List[_TimedJointFrame]],
     head_lookup: PoseLookup,
     hand_lookups: Dict[str, HandFrameLookup],
+    body_to_hand_bridges: BodyHandBridgeMap,
 ) -> None:
-    if not hand_lookups:
+    if not body_to_hand_bridges or not hand_lookups:
         return
     for tid in track_ids:
         for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
             if frame.timestamp <= 0:
                 continue
             set_time_seconds("time", frame.timestamp)
-            log_body_hand_bridge_frame_head_relative(frame, head_lookup, hand_lookups)
+            log_body_hand_bridge_frame_head_relative(
+                frame,
+                head_lookup,
+                hand_lookups,
+                body_to_hand_bridges,
+            )
 
 
 # UBR (X-up, Y-back, Z-right) → RDF (X-right, Y-down, Z-forward) pure
@@ -2408,11 +2444,17 @@ def run(args: argparse.Namespace) -> int:
             manifest_data = json.loads(manifest_path.read_text())
         except (json.JSONDecodeError, OSError) as exc:
             info(f"manifest read failed ({manifest_path}): {exc}; body skeleton defaulting to Godot/Meta superset")
-    body_joint_names, body_bones, body_hand_joint_ids = _body_skeleton_for_manifest(manifest_data)
+    (
+        body_joint_names,
+        body_bones,
+        body_hand_joint_ids,
+        body_to_hand_bridges,
+    ) = _body_skeleton_for_manifest(manifest_data)
     _set_body_skeleton(body_joint_names, body_bones, body_hand_joint_ids)
     info(
         f"body skeleton: {len(body_joint_names)} joints, {len(body_bones)} bones, "
-        f"hiding {len(body_hand_joint_ids)} hand-region joint id(s) (rendered by hand stream)"
+        f"hiding {len(body_hand_joint_ids)} hand-region joint id(s), "
+        f"{sum(len(pairs) for pairs in body_to_hand_bridges.values())} body-hand bridge(s)"
     )
 
     info(f"opening {input_path}")
@@ -2609,6 +2651,7 @@ def run(args: argparse.Namespace) -> int:
         body_frames_by_track,
         hand_lookups,
         profile,
+        body_to_hand_bridges,
     )
     log_all_body_hand_bridges_head_relative(
         reader,
@@ -2616,6 +2659,7 @@ def run(args: argparse.Namespace) -> int:
         body_frames_by_track,
         head_lookup,
         hand_lookups,
+        body_to_hand_bridges,
     )
     log_all_controller_input_tracks(reader, tracks["controller_input"])
 
