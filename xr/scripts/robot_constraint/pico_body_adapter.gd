@@ -48,7 +48,11 @@ const PICO_TO_CANONICAL: Array[String] = [
 ]
 
 
-func sample(body_dict: Dictionary, timestamp_ns: int, space: String = "openxr_local_floor") -> Dictionary:
+func sample(
+	body_dict: Dictionary,
+	timestamp_ns: int,
+	space: String = "openxr_local_floor",
+) -> Dictionary:
 	if body_dict == null or body_dict.is_empty():
 		return {}
 	var joints_in: Array = body_dict.get("joints", [])
@@ -75,17 +79,29 @@ func sample(body_dict: Dictionary, timestamp_ns: int, space: String = "openxr_lo
 		var rot_valid := (flags & FLAG_ORIENTATION_VALID) != 0
 		var pos_tracked := all_tracked or (flags & FLAG_POSITION_TRACKED) != 0
 		var rot_tracked := all_tracked or (flags & FLAG_ORIENTATION_TRACKED) != 0
-		if not pos_valid or not rot_valid or pos_dict.is_empty() or rot_dict.is_empty():
+		if not pos_valid or pos_dict.is_empty():
 			joints_out[canonical_name] = CanonicalJointsCls.empty_joint_record()
 			continue
-		var p := Vector3(float(pos_dict.get("x", 0.0)), float(pos_dict.get("y", 0.0)), float(pos_dict.get("z", 0.0)))
-		var q := Quaternion(
-			float(rot_dict.get("x", 0.0)),
-			float(rot_dict.get("y", 0.0)),
-			float(rot_dict.get("z", 0.0)),
-			float(rot_dict.get("w", 1.0))
+		var p := Vector3(
+			float(pos_dict.get("x", 0.0)),
+			float(pos_dict.get("y", 0.0)),
+			float(pos_dict.get("z", 0.0))
 		)
-		var confidence := 1.0 if (pos_tracked and rot_tracked) else 0.5
+		var q := Quaternion.IDENTITY
+		if rot_valid and not rot_dict.is_empty():
+			q = Quaternion(
+				float(rot_dict.get("x", 0.0)),
+				float(rot_dict.get("y", 0.0)),
+				float(rot_dict.get("z", 0.0)),
+				float(rot_dict.get("w", 1.0))
+			)
+		var confidence: float
+		if pos_tracked and rot_tracked:
+			confidence = 1.0
+		elif rot_valid:
+			confidence = 0.5
+		else:
+			confidence = 0.4
 		joints_out[canonical_name] = CanonicalJointsCls.make_joint_record(
 			p, q, SOURCE_ID, idx, pos_tracked and rot_tracked, false, confidence
 		)

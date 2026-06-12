@@ -7,6 +7,7 @@ const BodyMotionSamplerScript := preload("res://scripts/body_motion_sampler.gd")
 const BodyPoseProviderScript := preload("res://scripts/robot_constraint/body_pose_provider.gd")
 const BodyPoseDebugOverlayScript := preload("res://scripts/robot_constraint/body_pose_debug_overlay.gd")
 const H2OverlayScript := preload("res://scripts/robot_constraint/robot/h2_overlay.gd")
+const TrackingProviderScript := preload("res://scripts/xr/tracking_provider.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
@@ -31,6 +32,17 @@ const AUDIO_PERMISSION_GRACE_US := 3000000
 const TRACKER_STATUS_REFRESH_SECONDS := 0.5
 const TRACKER_REQUEST_RETRY_SECONDS := 3.0
 const TRACKER_SETUP_OPENING_SECONDS := 4.0
+const DEFAULT_PICO_BODY_TRACKERS := 2
+const PICO_BODY_MESSAGE_TRACKER_NOT_CALIBRATED := 1
+const PICO_BODY_MESSAGE_TRACKER_NUM_NOT_ENOUGH := 2
+const PICO_BODY_MESSAGE_TRACKER_STATE_NOT_SATISFIED := 3
+const PICO_BODY_MESSAGE_TRACKER_PERSISTENT_INVISIBILITY := 4
+const PICO_BODY_MESSAGE_TRACKING_POSE_ERROR := 7
+const PICO_BODY_STATUS_VALID := 1
+const PICO_BODY_STATUS_LIMITED := 2
+const XR_TRACKING_STABLE_SECONDS := 0.75
+const XR_TRACKING_WAIT_TIMEOUT_SECONDS := 15.0
+const XR_TRACKING_POLL_SECONDS := 0.1
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
 @export var keep_passthrough_visible := true
@@ -77,6 +89,8 @@ var _jsonl_sink: JsonlSidecarSink = null
 var _live_stream_sink: LiveStreamSink = null
 var _upload_sink: UploadQueueSink = null
 var pose_sampler: Node
+var _body_pose_debug_started_pico_body := false
+var _body_pose_debug_tracking_provider: Node = null
 var _body_pose_debug_provider: Node = null
 var _body_pose_debug_overlay: Node3D = null
 var _h2_debug_provider: Node = null
@@ -112,7 +126,7 @@ var capture_options := {
 	"record_hand_data": true,
 	"record_body_tracking": true,
 	"record_motion_trackers": true,
-	"max_motion_trackers": 3,
+	"max_motion_trackers": DEFAULT_PICO_BODY_TRACKERS,
 	# v3 spatial audio: now on by default ("Audio" toggle in the settings
 	# panel). The pipeline still gates on the Android RECORD_AUDIO runtime
 	# permission downstream -- if the user denies the prompt, the session
@@ -200,6 +214,7 @@ var _tracker_status_refresh_accum := TRACKER_STATUS_REFRESH_SECONDS
 var _tracker_last_request_ticks_us := 0
 var _tracker_setup_opened_ticks_us := 0
 var _last_capture_interaction_mode := ""
+var _auto_show_body_pose_debug := false
 var _motion_tracker_supported_pushed := false
 var _motion_tracker_provider_known := false
 var _depth_supported_pushed := false
@@ -314,8 +329,11 @@ func _ready() -> void:
 		print("Capture automation interaction_mode=%s" % capture_options["interaction_mode"])
 
 	if bool(automation.get("auto_start", false)):
-		call_deferred("start_capture")
-		_schedule_auto_stop_for_device_test(float(automation.get("auto_stop_seconds", AUTO_STOP_AFTER_SECONDS)))
+		call_deferred(
+			"_start_capture_when_xr_tracking_ready",
+			"capture automation",
+			float(automation.get("auto_stop_seconds", AUTO_STOP_AFTER_SECONDS))
+		)
 	elif AUTO_START_FOR_DEVICE_TEST:
 		capture_options["interaction_mode"] = "head"
 		if settings_panel and settings_panel.has_method("set_options"):
@@ -323,21 +341,35 @@ func _ready() -> void:
 		call_deferred("start_capture")
 		_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)
 	elif auto_start:
-		start_capture()
+		call_deferred("_start_capture_when_xr_tracking_ready", "auto_start", 0.0)
 	elif _is_live_feed_mode():
 		call_deferred("_open_live_feed_settings")
+	if _auto_show_body_pose_debug:
+		call_deferred("_start_body_pose_debug_overlay_from_args")
 
 
 func _apply_automation_args() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.is_empty():
 		args = OS.get_cmdline_args()
-	for arg_value in args:
+	var i := 0
+	while i < args.size():
+		var arg_value := args[i]
 		var arg := String(arg_value).strip_edges()
 		if arg == "--operator-auto-start":
 			auto_start = true
 		elif arg.begins_with("operator.auto_start="):
 			auto_start = _truthy_string(arg.substr("operator.auto_start=".length()))
+		elif arg == "--operator-body-pose-debug":
+			_auto_show_body_pose_debug = true
+		elif arg.begins_with("--operator-body-pose-debug="):
+			_auto_show_body_pose_debug = _truthy_string(arg.substr("--operator-body-pose-debug=".length()))
+		elif arg.begins_with("operator.body_pose_debug="):
+			_auto_show_body_pose_debug = _truthy_string(arg.substr("operator.body_pose_debug=".length()))
+		elif arg == "operator.body_pose_debug" and i + 1 < args.size():
+			_auto_show_body_pose_debug = _truthy_string(String(args[i + 1]))
+			i += 1
+		i += 1
 
 
 func _truthy_string(value: String) -> bool:
@@ -363,6 +395,86 @@ func _auto_stop_for_device_test() -> void:
 	await get_tree().create_timer(2.0).timeout
 	print("AUTO_STOP_FOR_DEVICE_TEST: quitting")
 	get_tree().quit()
+
+
+func _start_capture_when_xr_tracking_ready(reason: String, auto_stop_seconds: float = 0.0) -> void:
+	var stable := await _wait_for_xr_head_pose_tracking_stable(reason)
+	if not stable:
+		push_warning("[CaptureApp] XR tracking did not stabilize; skipping %s" % reason)
+		return
+	if _recording:
+		return
+	start_capture()
+	if auto_stop_seconds > 0.0 and _recording:
+		_schedule_auto_stop_for_device_test(auto_stop_seconds)
+
+
+func _wait_for_xr_head_pose_tracking_stable(reason: String) -> bool:
+	if not _should_wait_for_xr_tracking():
+		return true
+
+	print("[CaptureApp] waiting for XR head pose tracking before %s" % reason)
+	var wait_start_us := Time.get_ticks_usec()
+	var stable_start_us := 0
+	var timeout_us := int(XR_TRACKING_WAIT_TIMEOUT_SECONDS * 1000000.0)
+	var stable_us := int(XR_TRACKING_STABLE_SECONDS * 1000000.0)
+	while is_inside_tree() and Time.get_ticks_usec() - wait_start_us < timeout_us:
+		if _xr_head_pose_confident():
+			if stable_start_us <= 0:
+				stable_start_us = Time.get_ticks_usec()
+			elif Time.get_ticks_usec() - stable_start_us >= stable_us:
+				var waited_s := float(Time.get_ticks_usec() - wait_start_us) / 1000000.0
+				print("[CaptureApp] XR tracking stable after %.2fs before %s" % [waited_s, reason])
+				return true
+		else:
+			stable_start_us = 0
+		await get_tree().create_timer(XR_TRACKING_POLL_SECONDS).timeout
+
+	push_warning("[CaptureApp] XR tracking stability wait timed out before %s" % reason)
+	return false
+
+
+func _should_wait_for_xr_tracking() -> bool:
+	if OS.has_feature("quest"):
+		return true
+	if camera_plugin == null:
+		_bind_android_plugin()
+	if camera_plugin == null:
+		return false
+	return CaptureProviderRegistryScript.provider_name(camera_plugin) == "quest"
+
+
+func _xr_head_pose_confident() -> bool:
+	var tracker := XRServer.get_tracker(&"head")
+	if not (tracker is XRPositionalTracker):
+		return false
+	var positional := tracker as XRPositionalTracker
+	if not positional.has_pose(&"default"):
+		return false
+	var pose := positional.get_pose(&"default")
+	if pose == null:
+		return false
+	return int(pose.get_tracking_confidence()) != XRPose.XR_TRACKING_CONFIDENCE_NONE
+
+
+func _start_body_pose_debug_overlay_from_args() -> void:
+	await get_tree().create_timer(1.0).timeout
+	_start_body_pose_debug_overlay_when_xr_tracking_ready("body pose debug launch args")
+
+
+func _start_body_pose_debug_overlay_when_xr_tracking_ready(reason: String) -> void:
+	if _body_pose_debug_overlay != null:
+		return
+	var stable := await _wait_for_xr_head_pose_tracking_stable(reason)
+	if not stable:
+		push_warning("[CaptureApp] XR tracking did not stabilize; skipping %s" % reason)
+		return
+	if _body_pose_debug_overlay != null:
+		return
+	_start_body_pose_debug_overlay()
+	_hide_settings_for_debug_overlay()
+	_set_debug_panel_state()
+	print("[CaptureApp] Godot body pose debug overlay requested: %s" % reason)
 
 
 func _capture_automation_options_from_args() -> Dictionary:
@@ -991,18 +1103,21 @@ func _on_body_pose_debug_toggled() -> void:
 	if _body_pose_debug_overlay != null:
 		_stop_body_pose_debug_overlay()
 	else:
-		_start_body_pose_debug_overlay()
-		_hide_settings_for_debug_overlay()
-	_set_debug_panel_state()
+		_start_body_pose_debug_overlay_when_xr_tracking_ready("body pose debug toggle")
 
 
 func _start_body_pose_debug_overlay() -> void:
 	if _body_pose_debug_overlay != null:
 		return
+	_prepare_body_pose_debug_sources()
+	var tracking_provider: Node = TrackingProviderScript.new()
+	tracking_provider.name = "DebugBodyPoseTrackingProvider"
+	add_child(tracking_provider)
+
 	var provider: Node = BodyPoseProviderScript.new()
 	provider.name = "DebugBodyPoseProvider"
-	provider.call("configure", null, pico_openxr_bridge)
-	provider.set("source_mode", BodyPoseProviderScript.SourceMode.AUTO)
+	provider.call("configure", tracking_provider, pico_openxr_bridge)
+	provider.set("source_mode", _body_pose_debug_source_mode())
 	provider.set("sample_rate_hz", 60.0)
 	add_child(provider)
 	provider.call("set_enabled", true)
@@ -1013,6 +1128,7 @@ func _start_body_pose_debug_overlay() -> void:
 	add_child(overlay)
 	overlay.call("configure", provider)
 
+	_body_pose_debug_tracking_provider = tracking_provider
 	_body_pose_debug_provider = provider
 	_body_pose_debug_overlay = overlay
 	print("[CaptureApp] Godot body pose debug overlay on")
@@ -1027,9 +1143,58 @@ func _stop_body_pose_debug_overlay() -> void:
 		_body_pose_debug_provider.call("set_enabled", false)
 		_body_pose_debug_provider.queue_free()
 		_body_pose_debug_provider = null
+	if _body_pose_debug_tracking_provider != null:
+		_body_pose_debug_tracking_provider.queue_free()
+		_body_pose_debug_tracking_provider = null
+	if _body_pose_debug_started_pico_body:
+		if not _recording \
+				and pico_openxr_bridge != null \
+				and pico_openxr_bridge.has_method("stop_body_tracking"):
+			pico_openxr_bridge.call("stop_body_tracking")
+		_body_pose_debug_started_pico_body = false
 	if had_overlay:
 		print("[CaptureApp] Godot body pose debug overlay off")
 	_set_debug_panel_state()
+
+
+func _prepare_body_pose_debug_sources() -> void:
+	if pico_openxr_bridge == null:
+		_setup_pico_openxr_bridge()
+	if pico_openxr_bridge == null:
+		return
+	var options: Dictionary = capture_options
+	if settings_panel != null and settings_panel.has_method("get_options"):
+		options = settings_panel.get_options()
+	if pico_openxr_bridge.has_method("start_body_tracking"):
+		var had_body_tracker := bool(
+			_pico_openxr_status().get("body_tracker_created", false)
+		)
+		var started := bool(pico_openxr_bridge.call("start_body_tracking", {}))
+		if started:
+			if not had_body_tracker:
+				_body_pose_debug_started_pico_body = true
+			print("[CaptureApp] Pico body tracking started for debug overlay")
+		else:
+			push_warning(
+				"[CaptureApp] Pico body tracking did not start for debug overlay: %s"
+				% JSON.stringify(_pico_openxr_status())
+			)
+	if pico_openxr_bridge.has_method("sample_body_joints"):
+		var body_v: Variant = pico_openxr_bridge.call("sample_body_joints")
+		if typeof(body_v) == TYPE_DICTIONARY:
+			var body := body_v as Dictionary
+			if _pico_body_debug_needs_setup(body):
+				_open_pico_body_tracking_setup("body pose debug", body)
+
+
+func _body_pose_debug_source_mode() -> int:
+	if OS.has_feature("pico"):
+		return BodyPoseProviderScript.SourceMode.PICO_ONLY
+	var status := _pico_openxr_status()
+	if bool(status.get("bd_body_tracking_extension", false)) \
+			or bool(status.get("pico_body_tracking2_extension", false)):
+		return BodyPoseProviderScript.SourceMode.PICO_ONLY
+	return BodyPoseProviderScript.SourceMode.AUTO
 
 
 func _on_h2_debug_toggled() -> void:
@@ -1349,11 +1514,11 @@ func _start_camera_plugin() -> void:
 	# implement the call will see a plain "method not found" GDScript error
 	# at startup, which is the loud failure mode we want.
 	camera_plugin.call(
-		"setBodyMotionCaptureOptions",
-		_stream_enabled("record_body_tracking"),
-		_stream_enabled("record_motion_trackers"),
-		int(_capture_option("max_motion_trackers", 3))
-	)
+			"setBodyMotionCaptureOptions",
+			_stream_enabled("record_body_tracking"),
+			_stream_enabled("record_motion_trackers"),
+			int(_capture_option("max_motion_trackers", DEFAULT_PICO_BODY_TRACKERS))
+		)
 	_camera_configured = bool(configured_result)
 	print("%s configureSession returned: %s (audio=%s)" % [_provider_label(), configured_result, want_audio])
 	if not _camera_configured:
@@ -1964,9 +2129,11 @@ func _on_tracker_connect_requested() -> void:
 	var options: Dictionary = settings_panel.get_options() if settings_panel != null and settings_panel.has_method("get_options") else capture_options
 	if not _pico_tracker_setup_required(options):
 		return
-	var opened := _request_pico_motion_trackers(options, true)
-	if not opened and pico_openxr_bridge != null and pico_openxr_bridge.has_method("start_body_tracking_calibration_app"):
-		opened = bool(pico_openxr_bridge.call("start_body_tracking_calibration_app"))
+	var opened := false
+	if bool(options.get("record_body_tracking", false)):
+		opened = _open_pico_body_tracking_setup("tracker setup", {})
+	elif bool(options.get("record_motion_trackers", false)):
+		opened = _request_pico_motion_trackers(options, true)
 	if opened:
 		_tracker_setup_opened_ticks_us = Time.get_ticks_usec()
 		print("PICO tracker setup requested")
@@ -1987,14 +2154,74 @@ func _pico_tracker_setup_required(options: Dictionary) -> bool:
 func _request_pico_motion_trackers(options: Dictionary, force: bool = false) -> bool:
 	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("request_motion_trackers"):
 		return false
-	var max_trackers := clampi(int(options.get("max_motion_trackers", 3)), 0, 6)
+	var max_trackers := clampi(int(options.get("max_motion_trackers", DEFAULT_PICO_BODY_TRACKERS)), 0, 6)
 	if max_trackers <= 0:
 		return false
 	var now_us := Time.get_ticks_usec()
-	if not force and _tracker_last_request_ticks_us > 0 and now_us - _tracker_last_request_ticks_us < int(TRACKER_REQUEST_RETRY_SECONDS * 1000000.0):
+	var retry_window_us := int(TRACKER_REQUEST_RETRY_SECONDS * 1000000.0)
+	if not force \
+			and _tracker_last_request_ticks_us > 0 \
+			and now_us - _tracker_last_request_ticks_us < retry_window_us:
 		return false
 	_tracker_last_request_ticks_us = now_us
 	return bool(pico_openxr_bridge.call("request_motion_trackers", max_trackers))
+
+
+func _pico_body_debug_needs_setup(body: Dictionary) -> bool:
+	var status := _pico_openxr_status()
+	if not bool(status.get("pico_body_tracking2_extension", false)):
+		return false
+	var body_status := int(body.get("status", 0))
+	if body_status != PICO_BODY_STATUS_VALID and body_status != PICO_BODY_STATUS_LIMITED:
+		return true
+	var joints_v: Variant = body.get("joints", [])
+	if typeof(joints_v) == TYPE_ARRAY and not (joints_v as Array).is_empty():
+		return false
+	var message := int(body.get("message", 0))
+	if [
+			PICO_BODY_MESSAGE_TRACKER_NOT_CALIBRATED,
+			PICO_BODY_MESSAGE_TRACKER_NUM_NOT_ENOUGH,
+			PICO_BODY_MESSAGE_TRACKER_STATE_NOT_SATISFIED,
+			PICO_BODY_MESSAGE_TRACKER_PERSISTENT_INVISIBILITY,
+			PICO_BODY_MESSAGE_TRACKING_POSE_ERROR,
+	].has(message):
+		return true
+	return int(status.get("motion_tracker_count", 0)) <= 0
+
+
+func _open_pico_body_tracking_setup(reason: String, body: Dictionary) -> bool:
+	if pico_openxr_bridge == null \
+			or not pico_openxr_bridge.has_method("start_body_tracking_calibration_app"):
+		return false
+	var opened := bool(pico_openxr_bridge.call("start_body_tracking_calibration_app"))
+	if opened:
+		_tracker_setup_opened_ticks_us = Time.get_ticks_usec()
+		print(
+			"[CaptureApp] Pico body tracking setup opened for %s: body=%s status=%s"
+			% [reason, _pico_body_setup_summary(body), JSON.stringify(_pico_openxr_status())]
+		)
+	else:
+		push_warning(
+			"[CaptureApp] Pico body tracking setup failed for %s: body=%s status=%s"
+			% [reason, _pico_body_setup_summary(body), JSON.stringify(_pico_openxr_status())]
+		)
+	return opened
+
+
+func _pico_body_setup_summary(body: Dictionary) -> String:
+	if body == null or body.is_empty():
+		return "{}"
+	var joints_v: Variant = body.get("joints", [])
+	var joint_count := (joints_v as Array).size() if typeof(joints_v) == TYPE_ARRAY else 0
+	return "status=%s message=%s joints=%d locate_result=%s state_result=%s active=%s supported=%s" % [
+		str(body.get("status", "")),
+		str(body.get("message", "")),
+		joint_count,
+		str(body.get("locate_result", "")),
+		str(body.get("state_result", "")),
+		str(body.get("active", false)),
+		str(body.get("supported", false)),
+	]
 
 
 ## Push the "external motion-tracker capture is available on this device?"

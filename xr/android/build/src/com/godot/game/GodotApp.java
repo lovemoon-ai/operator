@@ -58,6 +58,7 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_CAPTURE_INTERACTION_MODE = "operator.capture.interaction_mode";
 	private static final String EXTRA_CAPTURE_AUTO_START = "operator.capture.auto_start";
 	private static final String EXTRA_CAPTURE_AUTO_STOP_SECONDS = "operator.capture.auto_stop_seconds";
+	private static final String EXTRA_BODY_POSE_DEBUG = "operator.body_pose_debug";
 	private static final String EXTRA_OPERATOR_AUTO_START = "operator.auto_start";
 	private static final String EXTRA_OPERATOR_AUTO_START_LEGACY = "operator_auto_start";
 	private static final String EXTRA_MUJOCO_DURATION = "mujoco.duration";
@@ -119,6 +120,7 @@ public class GodotApp extends GodotActivity {
 		appendIntentExtraArg(args, EXTRA_CAPTURE_INTERACTION_MODE, "--operator-capture-interaction-mode");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_START, "--operator-capture-auto-start");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_STOP_SECONDS, "--operator-capture-auto-stop-seconds");
+		appendIntentExtraArg(args, EXTRA_BODY_POSE_DEBUG, "--operator-body-pose-debug");
 		if (readBooleanExtra(EXTRA_OPERATOR_AUTO_START) || readBooleanExtra(EXTRA_OPERATOR_AUTO_START_LEGACY)) {
 			ensureUserArgsDelimiter(args);
 			args.add("--operator-auto-start");

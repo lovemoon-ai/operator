@@ -87,6 +87,13 @@ static func effective_capture_options(options: Dictionary, camera_plugin: Object
 		# XR_META_body_tracking_full_body extensions, no external trackers.
 		if not CaptureProviderRegistryScript.supports_motion_trackers(camera_plugin):
 			effective["record_motion_trackers"] = false
+		if CaptureProviderRegistryScript.provider_uses_pico_bridge(provider_name) \
+				and bool(effective.get("record_body_tracking", false)):
+			# PICO full-body capture and independent tracker capture are separate
+			# runtime modes. Keep the manifest and sidecars aligned with the
+			# sampler, which must not request independent trackers while body
+			# tracking is active.
+			effective["record_motion_trackers"] = false
 		if not CaptureProviderRegistryScript.provider_supports_audio_capture(provider_name):
 			effective["record_audio"] = false
 	return effective

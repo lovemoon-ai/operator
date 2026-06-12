@@ -39,7 +39,7 @@ func open_video_in_system_player(path: String) -> bool:
 	return bool(_plugin.call("openVideoInSystemPlayer", path))
 
 
-func set_body_motion_capture_options(record_body_tracking: bool, record_motion_trackers: bool, max_motion_trackers: int = 3) -> bool:
+func set_body_motion_capture_options(record_body_tracking: bool, record_motion_trackers: bool, max_motion_trackers: int = 2) -> bool:
 	if _plugin == null:
 		return false
 	return bool(_plugin.call("setBodyMotionCaptureOptions", record_body_tracking, record_motion_trackers, max_motion_trackers))
