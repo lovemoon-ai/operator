@@ -1,8 +1,9 @@
 # Pico Body-Hand Bridge Known Issue
 
-Status: deferred
+Status: fixed
 
 Date noted: 2026-06-12
+Date fixed: 2026-06-13
 
 ## Context
 
@@ -48,5 +49,6 @@ that active bridge map into the bridge logger.
 
 ## Notes
 
-Do not change Pico visualization behavior as part of the Quest 3S support
-cleanup unless the fix is explicitly requested.
+Fixed by making `_body_skeleton_for_manifest()` return the active body-to-hand
+bridge map with the selected body skeleton. Godot/Meta 87-joint captures keep
+`GODOT_XR_BODY_TO_HAND_BRIDGES`; Pico BD-24 captures use an empty bridge map.
