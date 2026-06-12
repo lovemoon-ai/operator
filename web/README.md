@@ -1,6 +1,6 @@
 # web/
 
-Web tier for the Teleoperate-Anything project.
+Web tier for Operator.
 
 ```
 web/

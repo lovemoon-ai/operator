@@ -1,62 +1,75 @@
 # AGENTS.md
 
-## What this repo is
+## What This Repo Is
 
-Operator is an unified toolkit for teleoperation and egocentric data collection. 
+Operator is a unified toolkit for teleoperation and egocentric data
+collection.
 
-- **`robot/`** — xr-bridge and robot-adapter.
-- **`xr/`** — Godot 4.5 client APK. Runs in-headset.
-- **`claw/`** — Project's own design-doc system.
-- **`examples/mujuco-arm-so101/`** — MuJoCo SO-101 simulation.
+- `robot/` - Rust crates for `teleop-protocol`, `xr-bridge`, and
+  `robot-adapter`.
+- `xr/` - Godot 4.5 Android XR client APK. It runs in-headset.
+- `web/` - local ingest and review app for egocentric recordings.
+- `claw/` - current architecture documentation.
+- `examples/mujuco-arm-so101/` - MuJoCo SO-101 simulation.
 
-## Common commands
+## XR Side
 
-### XR side (Godot + Android)
+Run from `xr/`. First Android export can take more than 10 minutes, so run
+long builds in the background when useful. The build invokes
+`godot --headless` for export only; do not use desktop headless mode to run or
+test the XR project.
 
-It costs much time ( > 10 minites )to build godot apk for the first time. Please
-run it in background avoiding timeout when building project.
+Required host state:
 
-Run from `xr/`. The build hits `godot --headless` so the `godot`
-binary must be on `PATH` (Godot 4.5.1.stable). Android export
-templates must be installed at the matching version — the Makefile
-auto-extracts the AAR from `~/Library/Application Support/Godot/...`
-or `~/.local/share/godot/...`.
+- `godot` on `PATH`, version 4.5.1 stable.
+- matching Android export templates.
+- Android platform tools on `PATH`.
+- a real Android XR device for runtime tests.
 
 ```bash
-make deps               # sync pinned third-party repos into ../.deps
-make build-pico         # build/pico/Operator.apk
-make build-quest        # build/quest/Operator.apk
-make build-glassxr      # build/glassxr/Operator.apk
-make install            # adb install -r the Quest APK
+make deps
+make build-pico
+make build-quest
+make build-glassxr
+make install
 make install-pico
-make ship-pico          # build + install + adb-reverse + relaunch + filtered logcat tail
-make ship-quest         # build + install + adb-reverse + relaunch + filtered logcat tail
-make log                # adb logcat filtered for Operator/godot
-make crash              # dump full logcat to crash.log
+make ship-pico
+make ship-quest
+make log
+make crash
 ```
 
-NEVER try to run "godot --headless" mode on desktop to test xr project.
-Android XR device is required to run xr project.
+## Robot Side
 
-### Robot side (Rust)
+Run from `robot/`.
 
-TBD
+```bash
+cargo build --release
+cargo test
+```
 
 ## Architecture
-See `claw/architecture/overview.md`..
 
-## Run test
+See `claw/architecture/overview.md`. Historical RFC, issue, lesson, and v2
+planning documents have been removed from the repo; keep architecture docs
+current instead of adding new history logs.
 
-- Run video e2e test: bash tests/01_rtsp_test.sh
-- Run ego recording e2e test: bash tests/02_ego_record.sh
-- Run mujoco test: bash tests/03_godot_mujoco_device.sh
-- Run live feed e2e test: bash tests/04_live_feed_e2e.sh
+## Tests
 
-DON'T try to create any fixture for these tests. ONLY run the tests on target
-device.
+Run device tests only on target devices. Do not create local fixtures to
+replace device coverage.
 
-## About lessons
+```bash
+bash tests/01_rtsp_test.sh
+bash tests/02_ego_record.sh
+bash tests/03_godot_mujoco_device.sh
+bash tests/04_live_feed_e2e.sh
+```
 
-If you spend much time on a bugfix and fix it in the end, remember to create 
-a lesson document in claw/lessons/ to record the bug and how you fix it.
-Keep lesson simple, short but with important details.
+Static checks that do not run the XR runtime:
+
+```bash
+python3 tests/validate_xr_features.py
+python3 tests/validate_xr_test_manifests.py
+bash tests/03_godot_mujoco_static.sh
+```

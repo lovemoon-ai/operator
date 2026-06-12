@@ -6,7 +6,7 @@
 
 - `LiveVideoView` custom node and `live_video_view.tscn`.
 - Annex-B H.264 access-unit submission via `submit_h264_access_unit()`.
-- Teleoperate-Anything packet compatibility via `report_video_packet()`.
+- Operator packet compatibility via `report_video_packet()`.
 - Android MediaCodec integration through the `KotlinVideoDecoderPlugin` singleton.
 - AHB, YUV-plane, and RGBA presentation paths using `stereo_display.gdshader`.
 
@@ -25,7 +25,7 @@ func _on_access_unit(access_unit: PackedByteArray) -> void:
 	view.submit_h264_access_unit(access_unit)
 ```
 
-For Teleoperate-Anything receivers, keep sending packet dictionaries to `report_video_packet(packet)`.
+For Operator receivers, keep sending packet dictionaries to `report_video_packet(packet)`.
 
 ## RTSP
 
