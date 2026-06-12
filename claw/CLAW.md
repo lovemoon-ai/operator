@@ -17,6 +17,8 @@ so design intent belongs in the live architecture docs.
 - `architecture/live-feed-cloud.md` - Live Feed server integration.
 - `architecture/rust-agent.md` - Rust crates and runtime responsibilities.
 - `sop/add-new-video-source.md` - procedure for adding a video source.
+- `sop/add-new-vr-device-or-brand.md` - procedure for adding a headset model
+  or vendor family.
 
 Keep these files short enough to stay useful. If a decision becomes
 implemented, update the relevant architecture doc instead of adding a new
