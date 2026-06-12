@@ -502,7 +502,7 @@ func _use_pico_camera_path() -> bool:
 		return false
 	# The export preset's custom feature tag is the cheap, reliable signal
 	# for "this APK was built for Pico".
-	if OS.has_feature("pico"):
+	if PicoPlatformAdapter.is_pico_build():
 		return true
 	# Fallback for builds without the tag (editor exports, sideloads): trust
 	# the native extension's own report that XR_PICO_camera_image was
@@ -586,8 +586,8 @@ func _resolve_plugin() -> Object:
 	if _plugin_checked:
 		return _plugin
 	_plugin_checked = true
-	if Engine.has_singleton("QRScannerPlugin"):
-		_plugin = Engine.get_singleton("QRScannerPlugin")
+	# WP2: QR plugin singleton probing lives in the platform layer.
+	_plugin = QrProvider.bind()
 	return _plugin
 
 

@@ -116,3 +116,4 @@ xr/native/pico_openxr/godot-cpp
 
 # release artifacts
 xr/dist/
+tests/results/

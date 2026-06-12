@@ -32,6 +32,8 @@ const MOTION_TRACKER_CANDIDATES := [
 ]
 
 var writer: Object
+# WP4: canonical-frame sink (default: FrameWriterShim over `writer`).
+var _frame_sink: Object
 var pose_sampler: Object
 var pico_openxr_bridge: Object
 var _record_body_tracking := false
@@ -86,9 +88,14 @@ func _log_body_diag_once(key: String, message: String) -> void:
 
 func configure(p_writer: Object, p_pose_sampler: Object, p_pico_openxr_bridge: Object = null) -> void:
 	writer = p_writer
+	_frame_sink = FrameWriterShim.new(writer) if writer != null else null
 	pose_sampler = p_pose_sampler
 	pico_openxr_bridge = p_pico_openxr_bridge
 	_refresh_motion_trackers()
+
+
+func set_frame_sink(sink: Object) -> void:
+	_frame_sink = sink
 
 
 func set_capture_options(options: Dictionary) -> void:
@@ -137,7 +144,7 @@ func pop_metrics() -> Dictionary:
 
 
 func sample(timestamp_ns: int) -> void:
-	if writer == null:
+	if _frame_sink == null:
 		return
 	if not _record_body_tracking and not _record_motion_trackers:
 		return
@@ -197,7 +204,7 @@ func _sample_body(timestamp_ns: int) -> void:
 	if joints.is_empty():
 		return
 	_last_fallback_body_flags = int(body_tracker.body_flags)
-	if bool(writer.write_body_joints(timestamp_ns, _last_fallback_body_flags, joints)):
+	if bool(_frame_sink.on_frame(BodyFrame.build(timestamp_ns, _last_fallback_body_flags, joints, "godot_xr_body_tracker"))):
 		if _observed_body_runtime != "godot_xr_body_tracker":
 			# First successful write — log so the operator can see body tracking
 			# really came online (and confirm the joint count matches their
@@ -254,7 +261,7 @@ func _sample_motion_trackers(timestamp_ns: int) -> void:
 		var pose_record := _tracker_pose_record(tracker)
 		if pose_record.is_empty():
 			continue
-		if bool(writer.write_motion_tracker_pose(index, String(tracker_name), timestamp_ns, pose_record["transform"], true)):
+		if bool(_frame_sink.on_frame(MotionTrackerFrame.build_pose(index, String(tracker_name), timestamp_ns, pose_record["transform"], true))):
 			_motion_writes += 1
 
 
@@ -281,7 +288,8 @@ func _refresh_motion_trackers() -> void:
 
 
 func _looks_like_motion_tracker(name: String) -> bool:
-	return name.contains("motion") or name.contains("tracker") or name.contains("waist") or name.contains("foot") or name.contains("ankle") or name.contains("pico")
+	# WP6 sweep: vendor-name heuristics live in xr/scripts/platform/.
+	return PicoPlatformAdapter.looks_like_motion_tracker_name(name)
 
 
 func _tracker_pose_record(tracker: Object) -> Dictionary:
@@ -317,7 +325,7 @@ func _sample_pico_body(timestamp_ns: int) -> bool:
 	if joints.is_empty():
 		return true
 	var body_flags := int(body.get("body_flags", 0))
-	if bool(writer.write_body_joints(timestamp_ns, body_flags, joints, body)):
+	if bool(_frame_sink.on_frame(BodyFrame.build(timestamp_ns, body_flags, joints, "pico_bd", body))):
 		_observed_body_runtime = "pico_bd"
 		_body_writes += 1
 		_body_joint_count += joints.size()
@@ -339,13 +347,16 @@ func _sample_pico_motion_trackers(timestamp_ns: int) -> bool:
 		var transform: Transform3D = record.get("transform", Transform3D.IDENTITY)
 		var tracker_index := int(record.get("tracker_index", 0))
 		var source := "pico_motion_tracker_%s" % str(record.get("id", tracker_index))
-		if bool(writer.write_motion_tracker_pose(tracker_index, source, timestamp_ns, transform, tracking_valid, record)):
+		if bool(_frame_sink.on_frame(MotionTrackerFrame.build_pose(tracker_index, source, timestamp_ns, transform, tracking_valid, record))):
 			_motion_writes += 1
 	return true
 
 
 func _sample_pico_motion_power_key(timestamp_ns: int) -> void:
-	if writer == null or not writer.has_method("write_motion_tracker_event"):
+	# Mirrors the legacy `writer.has_method("write_motion_tracker_event")`
+	# guard (LivePushWriter has no motion-tracker event surface).
+	if _frame_sink == null or not _frame_sink.has_method("supports_motion_tracker_events") \
+			or not _frame_sink.supports_motion_tracker_events():
 		return
 	var status := _pico_bridge_status()
 	var event: Variant = status.get("last_motion_power_key_event", {})
@@ -355,7 +366,7 @@ func _sample_pico_motion_power_key(timestamp_ns: int) -> void:
 	if signature.is_empty() or signature == _last_power_key_event_signature:
 		return
 	_last_power_key_event_signature = signature
-	if bool(writer.write_motion_tracker_event(timestamp_ns, "power_key", event)):
+	if bool(_frame_sink.on_frame(MotionTrackerFrame.build_event(timestamp_ns, "power_key", event))):
 		_motion_event_writes += 1
 
 

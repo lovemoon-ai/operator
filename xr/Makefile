@@ -7,13 +7,14 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: log build-quest build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 # ADB=adb -s PB321XKGL4210070B
 ADB=adb
 GRADLE_USER_HOME?=$(HOME)/.gradle
 
 apk_quest=build/quest/Operator.apk
+apk_quest_test=build/quest_test/Operator.apk
 apk_pico=build/pico/Operator.apk
 apk_androidxr=build/androidxr/Operator.apk
 package=com.lovemoon.operator
@@ -43,6 +44,13 @@ include makefiles/Makefile.addons
 build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
+
+# Test-harness APK (export preset "Meta Quest Test"):
+# operator_feature_test_harness=true, includes res://tests/** and
+# res://scripts/test_support/**. Consumed by tests/xr_module_harness.sh.
+build-quest-test: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
+	@mkdir -p $(dir $(apk_quest_test)) $(GRADLE_USER_HOME)
+	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest Test,$(apk_quest_test))
 
 build-pico: setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-capture-plugins
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
