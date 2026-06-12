@@ -465,4 +465,5 @@ result port: 63912
 - `xr/addons/live-pull/live_pull_client.gd`
 - `xr/addons/live-pull/live_pull_dense_map_view.gd`
 - `examples/live-feed-demo/operator_live_feed_server.py`
-- `claw/rfcs/002-live-feed-cloud-vggt-slam2.md`
+- `claw/architecture/live-feed-cloud.md`
+- `claw/architecture/wire-protocol.md`

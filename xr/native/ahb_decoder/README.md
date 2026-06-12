@@ -1,7 +1,7 @@
 # ahb_decoder — Vulkan AHardwareBuffer GDExtension
 
-This is the scaffold for **plan.md item 10** — the terminal zero-copy
-video path. When complete, a `MediaCodec`-decoded H.264 frame goes
+This addon implements the optional zero-copy Android video presentation path.
+When enabled, a `MediaCodec`-decoded H.264 frame goes
 straight from the codec's `AHardwareBuffer` into a Vulkan `VkImage`
 sampled by our existing fragment shader, with **zero CPU bytes
 touched** between decoder output and the GPU.
@@ -28,8 +28,8 @@ touched** between decoder output and the GPU.
    loaded, it switches MediaCodec into Surface mode (ImageReader →
    AHardwareBuffer → nativeImportAhb) and skips the YUV plane copy.
 
-See `claw/issues/005-decisions.md` D-6 for the architectural
-rationale (and why we chose AHB over OES SurfaceTexture).
+See `claw/architecture/xr-client.md` and
+`claw/architecture/wire-protocol.md` for the current video architecture.
 
 ## Build
 

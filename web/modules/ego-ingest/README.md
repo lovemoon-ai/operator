@@ -1,7 +1,7 @@
 # @love-moon/ego-ingest
 
 Receive, store, and visualize ego-mode XR recordings uploaded over
-**TUS 1.0.0** from the [Teleoperate-Anything](../../README.md) XR
+**TUS 1.0.0** from the [Operator](../../../README.md) XR
 client.
 
 The XR client (Quest / Pico / Glass XR) finalizes each recording to a
@@ -162,8 +162,8 @@ On any network error the client sends `HEAD /ingest/<resourceId>` to
 re-discover the server's persisted offset, then resumes PATCH from
 there.
 
-See [`claw/issues/010-ego-data-upload.md`](../../claw/issues/010-ego-data-upload.md)
-for the design doc, trip-wires, and rollout plan.
+See [`claw/architecture/wire-protocol.md`](../../../claw/architecture/wire-protocol.md)
+for the current upload contract.
 
 ## License
 
