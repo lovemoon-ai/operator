@@ -1,0 +1,22 @@
+{
+  "id": "sink_jsonl",
+  "feature": "operator_feature_sink_jsonl",
+  "owner": "sinks/jsonl",
+  "required_features": [],
+  "required_capabilities": [],
+  "test_cases": [
+    {
+      "id": "sink_jsonl.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "sink_jsonl.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    }
+  ]
+}

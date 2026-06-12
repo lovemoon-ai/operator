@@ -1,0 +1,22 @@
+{
+  "id": "sink_upload",
+  "feature": "operator_feature_sink_upload",
+  "owner": "sinks/upload",
+  "required_features": [],
+  "required_capabilities": [],
+  "test_cases": [
+    {
+      "id": "sink_upload.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "sink_upload.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    }
+  ]
+}
