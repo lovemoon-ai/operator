@@ -35,7 +35,7 @@ Quest, and Android XR-class devices.
 
 ## Why Operator
 
-| Core sell point | What it unlocks |
+| Points | What it unlocks |
 | --- | --- |
 | Multi-device XR | One Godot/OpenXR client architecture for PICO, Quest, and Android XR-class targets, with vendor adapters where the hardware exposes richer camera, body, depth, QR, and tracking APIs. |
 | Powerful workflows | A single in-headset launcher covers ego recording, robot teleop, live algorithm demos, VR mode, MuJoCo device smoke tests, and module tests. |
@@ -50,7 +50,7 @@ flowchart LR
     AndroidXR["Android XR / Glass XR"]
   end
 
-  Quest --> Client["Operator XR client<br/>Godot 4.5 + OpenXR"]
+  Quest --> Client["Operator XR"]
   Pico --> Client
   AndroidXR --> Client
 
