@@ -26,6 +26,11 @@ signal cancelled
 
 const VIEWPORT_SIZE := Vector2i(900, 700)
 const NO_POINTER := Vector2(-1.0, -1.0)
+const TARGET_GROUP := "operator_interaction_target"
+# ~10 fps poll of XR_PICO_camera_image. The Kotlin side throttles its own
+# decode at DECODE_INTERVAL_MS anyway; polling faster only burns main-thread
+# time copying 640x480 RGBA buffers across the GDExtension boundary.
+const PICO_PUMP_INTERVAL_S := 0.1
 const HIGHLIGHT_COLOR := Color(0.20, 0.86, 1.0, 0.98)
 const SCAN_COLOR := Color(0.18, 0.96, 0.52, 0.95)
 const SCAN_COLOR_MUTED := Color(0.18, 0.96, 0.52, 0.22)
@@ -108,9 +113,22 @@ var _plugin_checked := false
 var _running := false
 var _locked_detection := false
 var _last_detection_log_msec := 0
+# PicoOpenXRExtension bridge injected by capture_app. PicoOS has no Camera2
+# passthrough id, so on Pico we pump frames from XR_PICO_camera_image into
+# the Kotlin plugin's decoder instead of letting it open Camera2 itself.
+var _pico_bridge: Object
+var _pico_pump_active := false
+var _pico_pump_accum_s := 0.0
+var interaction_priority := 100
+# True while capture_app records on Pico — recording owns the same
+# XR_PICO_camera_image stream, and poll_camera_image_frames() drains a
+# shared queue, so a second consumer would steal frames from the capture
+# pipeline. See set_external_capture_busy().
+var _external_capture_busy := false
 
 
 func _init() -> void:
+	add_to_group(TARGET_GROUP)
 	# Slightly wider/taller than the capture panel so multiple URL
 	# previews don't crowd each other. Aspect: 900/700 ≈ 1.286.
 	quad_size = Vector2(0.72, 0.56)
@@ -127,6 +145,35 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _scan_effect:
 		_scan_effect.tick(delta)
+	_pump_pico_frames(delta)
+
+
+## Injected by capture_app.gd after it resolves the PicoOpenXRExtension
+## bridge. May be null (non-Pico device, missing GDExtension) — every
+## Pico-path entry point checks for that and falls back to the Kotlin
+## plugin's own Camera2 loop.
+func set_pico_bridge(bridge: Object) -> void:
+	_pico_bridge = bridge
+
+
+## Recording on Pico consumes the same XR_PICO_camera_image stream through
+## capture_app's own frame pump. The stream's poll queue has exactly one
+## drain point, so the capture pipeline must win: capture_app flips this
+## flag around start/stop_capture and we refuse to (or stop) pumping while
+## it is set.
+func set_external_capture_busy(busy: bool) -> void:
+	if _external_capture_busy == busy:
+		return
+	_external_capture_busy = busy
+	if busy and _pico_pump_active:
+		# Recording started while we were scanning (reachable via the
+		# hardware volume-key shortcut even with this overlay open).
+		# Surrender the camera stream immediately.
+		_stop_pico_pump()
+		_running = false
+		if _scan_effect:
+			_scan_effect.set_active(false)
+		_set_status("Stop recording before scanning.")
 
 
 func open() -> void:
@@ -161,9 +208,10 @@ func _start_plugin_scan() -> void:
 	_connect_plugin_signals(plugin)
 	if not plugin.is_connected("qr_error", Callable(self, "_on_qr_error")):
 		plugin.connect("qr_error", Callable(self, "_on_qr_error"))
-	# Permission gate. startScan() refuses without CAMERA + vendor
-	# (Quest HEADSET_CAMERA / Pico) permission, so we ask Android to
-	# show the OS dialog and tell the user what to do next.
+	# Permission gate. QRScannerPlugin decides the runtime-required
+	# permissions per device: Quest needs CAMERA + HEADSET_CAMERA, while
+	# Pico's XR_PICO_camera_image path only gates on runtime CAMERA
+	# (Pico vendor camera entitlements are manifest permissions).
 	#
 	# We deliberately do NOT guard the calls with `plugin.has_method(...)`.
 	# Godot 4 Android plugins expose @UsedByGodot methods via JNI in a
@@ -187,6 +235,15 @@ func _start_plugin_scan() -> void:
 		print("[QR] camera permission missing; requesting Android permission")
 		plugin.call("requestCameraPermission")
 		return
+	# Pico: PicoOS doesn't expose the passthrough cameras through Camera2,
+	# so startScan()'s pickCameraId() comes up empty (or grabs the wrong
+	# sensor). Source frames from XR_PICO_camera_image instead and feed
+	# them into the same Kotlin decode pipeline. The permission gate above
+	# still applies for android.permission.CAMERA; Pico vendor camera-image
+	# entitlements are declared in the merged Android manifest.
+	if _use_pico_camera_path():
+		_start_pico_scan()
+		return
 	var started := bool(plugin.call("startScan"))
 	print("[QR] QRScannerPlugin.startScan returned %s" % started)
 	if not started:
@@ -203,6 +260,7 @@ func close() -> void:
 	set_process(false)
 	visible = false
 	clear_pointer()
+	_stop_pico_pump()
 	if _plugin != null:
 		_plugin.call("stopScan")
 	if _scan_effect:
@@ -250,6 +308,26 @@ func clear_pointer() -> void:
 	_pointer_position = NO_POINTER
 	if _cursor:
 		_cursor.visible = false
+
+
+func get_interaction_priority() -> int:
+	return interaction_priority
+
+
+func is_interaction_target_visible() -> bool:
+	return is_inside_tree() and visible
+
+
+func get_ray_hit_point(ray_origin: Vector3, ray_direction: Vector3) -> Vector3:
+	var direction := ray_direction.normalized()
+	if direction.length_squared() < 0.000001:
+		return ray_origin
+	var normal := global_transform.basis.z.normalized()
+	var denominator := normal.dot(direction)
+	if absf(denominator) < 0.0001:
+		return ray_origin + direction * 0.25
+	var distance_m := normal.dot(global_transform.origin - ray_origin) / denominator
+	return ray_origin + direction * maxf(distance_m, 0.001)
 
 
 # --- Plugin signal handlers -------------------------------------------------
@@ -319,6 +397,10 @@ func _lock_detected_entries(entries: Array) -> void:
 	_locked_detection = true
 	_running = false
 	_show_frozen_frame_from_plugin()
+	# Release whichever camera source fed this detection. stopScan() is a
+	# no-op when the Pico pump was the source (Camera2 never started), and
+	# vice versa — calling both keeps this path source-agnostic.
+	_stop_pico_pump()
 	if _plugin != null:
 		_plugin.call("stopScan")
 	if _scan_effect:
@@ -399,11 +481,103 @@ func _on_cancel_pressed() -> void:
 func _on_rescan_pressed() -> void:
 	if not visible:
 		return
+	_stop_pico_pump()
 	if _plugin != null:
 		_plugin.call("stopScan")
 	clear_pointer()
 	_reset_for_scan()
 	_start_plugin_scan()
+
+
+# --- Pico XR_PICO_camera_image path ------------------------------------------
+# On Pico the passthrough cameras are only reachable through the private
+# OpenXR extension XR_PICO_camera_image (wrapped by the PicoOpenXRExtension
+# GDExtension). We pull RGBA frames from the bridge at ~10 fps and hand them
+# to QRScannerPlugin.decodeExternalRgbaFrame(), which reuses the exact same
+# ZXing decode + preview/frozen-frame + signal pipeline as the Quest Camera2
+# loop — so everything downstream of _start_plugin_scan() stays shared.
+
+func _use_pico_camera_path() -> bool:
+	if _pico_bridge == null:
+		return false
+	# The export preset's custom feature tag is the cheap, reliable signal
+	# for "this APK was built for Pico".
+	if PicoPlatformAdapter.is_pico_build():
+		return true
+	# Fallback for builds without the tag (editor exports, sideloads): trust
+	# the native extension's own report that XR_PICO_camera_image was
+	# negotiated with the runtime — it can only be true on a Pico headset.
+	if _pico_bridge.has_method("get_status"):
+		var status: Variant = _pico_bridge.call("get_status")
+		if typeof(status) == TYPE_DICTIONARY:
+			return bool((status as Dictionary).get("camera_image_extension", false))
+	return false
+
+
+func _start_pico_scan() -> void:
+	if _external_capture_busy:
+		# capture_app owns the camera stream while recording; see
+		# set_external_capture_busy() for why it can't be shared.
+		_set_status("Stop recording before scanning.")
+		return
+	# Mono 640x480 matches the Camera2 path's ZXing budget and halves the
+	# per-poll RGBA copy cost versus stereo; the right eye adds no coverage
+	# for a code the user is deliberately looking at.
+	var info: Variant = _pico_bridge.call("start_camera_image_capture", false, 640, 480, 30)
+	if typeof(info) != TYPE_DICTIONARY or not bool((info as Dictionary).get("active", false)):
+		_set_status("Pico camera stream did not start. Check camera permission and logcat.")
+		push_warning("[QR] XR_PICO_camera_image start failed: %s" % JSON.stringify(info))
+		return
+	print("[QR] Pico camera image scan started: %s" % JSON.stringify(info))
+	_pico_pump_accum_s = 0.0
+	_pico_pump_active = true
+	_running = true
+
+
+func _pump_pico_frames(delta: float) -> void:
+	if not _pico_pump_active or _locked_detection:
+		return
+	if _pico_bridge == null or _plugin == null:
+		return
+	_pico_pump_accum_s += delta
+	if _pico_pump_accum_s < PICO_PUMP_INTERVAL_S:
+		return
+	_pico_pump_accum_s = 0.0
+	var frames: Variant = _pico_bridge.call("poll_camera_image_frames")
+	if typeof(frames) != TYPE_ARRAY:
+		return
+	for frame_variant in frames:
+		if typeof(frame_variant) != TYPE_DICTIONARY:
+			continue
+		var frame := frame_variant as Dictionary
+		# Mono capture should only ever yield "left", but guard anyway —
+		# decoding both eyes would double the CPU for no extra coverage.
+		if str(frame.get("eye", "left")) != "left":
+			continue
+		var data: Variant = frame.get("data", PackedByteArray())
+		if typeof(data) != TYPE_PACKED_BYTE_ARRAY:
+			continue
+		# Same stride-key fallback chain as capture_app's recording pump;
+		# the native extension fills effective_pixel_stride but older
+		# builds only expose pixel_stride / bytes_per_pixel.
+		_plugin.call(
+			"decodeExternalRgbaFrame",
+			int(frame.get("width", 0)),
+			int(frame.get("height", 0)),
+			int(frame.get("stride", 0)),
+			int(frame.get("effective_pixel_stride", frame.get("pixel_stride", frame.get("bytes_per_pixel", 4)))),
+			data
+		)
+
+
+func _stop_pico_pump() -> void:
+	if not _pico_pump_active:
+		return
+	# Flip the flag before touching the bridge so a re-entrant call (e.g.
+	# close() during a stop already in flight) can't double-stop.
+	_pico_pump_active = false
+	if _pico_bridge != null:
+		_pico_bridge.call("stop_camera_image_capture")
 
 
 # --- Plugin resolution ------------------------------------------------------
@@ -412,8 +586,8 @@ func _resolve_plugin() -> Object:
 	if _plugin_checked:
 		return _plugin
 	_plugin_checked = true
-	if Engine.has_singleton("QRScannerPlugin"):
-		_plugin = Engine.get_singleton("QRScannerPlugin")
+	# WP2: QR plugin singleton probing lives in the platform layer.
+	_plugin = QrProvider.bind()
 	return _plugin
 
 

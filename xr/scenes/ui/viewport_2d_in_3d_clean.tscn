@@ -1,7 +1,8 @@
-[gd_scene load_steps=5 format=3]
+[gd_scene load_steps=6 format=3]
 
 [ext_resource type="Script" path="res://addons/godot-xr-tools/objects/viewport_2d_in_3d.gd" id="1_viewport"]
 [ext_resource type="Script" path="res://addons/godot-xr-tools/objects/viewport_2d_in_3d_body.gd" id="2_body"]
+[ext_resource type="Script" path="res://scripts/interaction/viewport_2d_interaction_target.gd" id="3_interaction"]
 
 [sub_resource type="QuadMesh" id="QuadMesh_screen"]
 resource_local_to_scene = true
@@ -36,3 +37,6 @@ viewport_size = Vector2(300, 200)
 [node name="CollisionShape3D" type="CollisionShape3D" parent="StaticBody3D"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.01)
 shape = SubResource("BoxShape3D_body")
+
+[node name="InteractionTarget" type="Node" parent="."]
+script = ExtResource("3_interaction")

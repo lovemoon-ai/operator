@@ -65,6 +65,12 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
     @Volatile private var recordControllerPose: Boolean = true
     @Volatile private var recordHandData: Boolean = true
     @Volatile private var recordControllerInput: Boolean = true
+    // v4: body joints gating. Both PICO (XR_BD_body_tracking) and Quest
+    // (Meta XR_FB_body_tracking / XR_META_body_tracking_full_body) populate
+    // the same `mett:body_joints:body` track via writeBodyJointsPayload;
+    // the flag keeps a stray write from poking the native writer when the
+    // session never allocated the body track.
+    @Volatile private var recordBodyJoints: Boolean = false
     // v3: audio gating mirrors the depth/pose flags. recordAudio is the
     // host's "is the audio sink expected to run at all" bit; audioConfigured
     // flips after the muxer accepts the first AAC CSD from the provider.
@@ -76,6 +82,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
     private val metricNativeWriteDepth = AtomicLong(0L)
     private val metricNativeWritePose = AtomicLong(0L)
     private val metricNativeWriteHand = AtomicLong(0L)
+    private val metricNativeWriteBody = AtomicLong(0L)
     private val metricNativeWriteControllerInput = AtomicLong(0L)
     // v3: audio writes. Non-zero when an enabled session is actually feeding
     // the encoder; zero proves the audio gate (recordAudio + audioConfigured)
@@ -109,6 +116,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             config.controllerPoseExpected,
             config.handJointsExpected,
             config.controllerInputExpected,
+            config.bodyJointsExpected,
             config.rgbIcam,
             config.rgbEcam,
             config.rgbDstr,
@@ -133,8 +141,13 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         recordControllerPose = config.controllerPoseExpected
         recordHandData = config.handJointsExpected
         recordControllerInput = config.controllerInputExpected
+        recordBodyJoints = config.bodyJointsExpected
         recordAudio = config.audioExpected
-        Log.i(TAG, "SpatialMP4 writer started -> ${config.finalPath} (audio=${config.audioExpected})")
+        Log.i(
+            TAG,
+            "SpatialMP4 writer started -> ${config.finalPath} " +
+                "(audio=${config.audioExpected} body=${config.bodyJointsExpected})"
+        )
         return true
     }
 
@@ -153,6 +166,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         rgbConfigured = false
         audioConfigured = false
         recordAudio = false
+        recordBodyJoints = false
         val resolved = finalMp4Path
         finalMp4Path = ""
         return if (ok) resolved else ""
@@ -434,6 +448,24 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         return ok
     }
 
+    /**
+     * v4: body-joints write. The payload shares the HJNT binary layout with
+     * hand joints (count-driven header, 36 bytes per joint) but lands on the
+     * dedicated `spatialmp4:body_joints:body` mett track. GDScript's
+     * session_spool_writer.gd packs the bytes and calls this at ~30 Hz.
+     */
+    @UsedByGodot
+    fun writeBodyJointsPayload(timestampNs: Long, payload: ByteArray): Boolean {
+        val handle = nativeWriterHandle
+        if (handle == 0L || !recordBodyJoints || payload.isEmpty()) return false
+        metricNativeWriteBody.incrementAndGet()
+        val ok = SpatialMp4Native.nativeWriteTimedMetadata(
+            handle, TRACK_BODY_JOINTS, payload, timestampNs / 1000L, DEFAULT_BODY_DURATION_US
+        )
+        if (!ok) emitError("Failed to write body joints packet: ${SpatialMp4Native.nativeGetLastError(handle)}")
+        return ok
+    }
+
     @UsedByGodot
     fun writeControllerInput(
         controller: String,
@@ -482,6 +514,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             .put("native_depth_writes", metricNativeWriteDepth.getAndSet(0L))
             .put("native_pose_writes", metricNativeWritePose.getAndSet(0L))
             .put("native_hand_writes", metricNativeWriteHand.getAndSet(0L))
+            .put("native_body_writes", metricNativeWriteBody.getAndSet(0L))
             .put("native_input_writes", metricNativeWriteControllerInput.getAndSet(0L))
             .put("native_audio_writes", metricNativeWriteAudio.getAndSet(0L))
         return payload.toString()
@@ -572,6 +605,9 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         private const val DEFAULT_DEPTH_DURATION_US: Long = 200_000L
         private const val DEFAULT_POSE_DURATION_US: Long = 11_111L
         private const val DEFAULT_HAND_DURATION_US: Long = 33_333L
+        // Body sampling runs at BODY_SAMPLE_INTERVAL_US (33333 µs, ~30 Hz) on
+        // the GDScript side; mirror it as the default packet duration.
+        private const val DEFAULT_BODY_DURATION_US: Long = 33_333L
         private const val DEFAULT_INPUT_DURATION_US: Long = 1_000L
 
         private const val TRACK_HEAD_POSE = 0
@@ -581,6 +617,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         private const val TRACK_RIGHT_HAND_JOINTS = 4
         private const val TRACK_LEFT_CONTROLLER_INPUT = 5
         private const val TRACK_RIGHT_CONTROLLER_INPUT = 6
+        private const val TRACK_BODY_JOINTS = 7
 
         private const val CONTROLLER_INPUT_PAYLOAD_BYTES = 68
         private const val CONTROLLER_INPUT_MAGIC = 0x504E4943

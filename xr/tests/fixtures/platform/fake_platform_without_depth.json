@@ -1,0 +1,16 @@
+{
+  "id": "fake_platform_without_depth",
+  "version": 1,
+  "provider_id": "fake_generic",
+  "permission_granted": true,
+  "capabilities": [
+    "pose",
+    "controller",
+    "hand_tracking",
+    "camera_rgb",
+    "openxr_timebase",
+    "spatial_mp4_mux",
+    "live_stream_server",
+    {"capability": "depth_map", "state": "unavailable", "reason": "fixture: no depth"}
+  ]
+}

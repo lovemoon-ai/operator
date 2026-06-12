@@ -18,12 +18,16 @@ var android_plugin: Object
 # is kept only for legacy callers and to query camera intrinsics if needed.
 var muxer_plugin: Object
 
-var _head_file: FileAccess
-var _controller_file: FileAccess
-var _hand_file: FileAccess
-var _depth_file: FileAccess
-var _body_file: FileAccess
-var _motion_file: FileAccess
+# WP5: the JSONL sidecar files (poses/*.jsonl, body_motion/*.jsonl,
+# depth/frames.jsonl) moved verbatim to sinks/jsonl/jsonl_sidecar_sink.gd.
+# This writer keeps the mp4/muxer engine: session dirs, manifest write +
+# finalize rewrite, sha256, and all native write* calls.
+# Body-tracking runtime info captured at close() time so the manifest reflects
+# which extension actually fed samples (PICO BD vs Meta XR_FB / full_body).
+# capture_app.gd::stop_capture() queries body_motion_sampler.get_runtime_info()
+# and forwards the dict here via set_body_tracking_runtime_info() before
+# calling close().
+var _body_tracking_runtime_info: Dictionary = {}
 # Debug-only: when capture option `dump_raw_depth` is true, every pre-encode
 # depth payload is written here in capture order so the FFV1 mp4 track can be
 # checked bit-for-bit offline (scripts/verify_depth_ffv1.py --reference).
@@ -38,6 +42,10 @@ var _depth_last_mp4_write_error := ""
 func start_session(options: Dictionary = {}) -> bool:
 	close()
 	capture_options = options.duplicate(true)
+	# Wipe any body-runtime info left over from a prior session; the new
+	# session's sampler will report fresh values via
+	# set_body_tracking_runtime_info() before the next close().
+	_body_tracking_runtime_info = {}
 	_depth_raw_dir = ""
 	_depth_raw_index = 0
 	_depth_sidecar_frame_count = 0
@@ -62,7 +70,8 @@ func start_session(options: Dictionary = {}) -> bool:
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		if _make_dir("%s/poses" % session_dir) != OK:
 			return false
-	if _capture_enabled("record_body_tracking") or _capture_enabled("record_motion_trackers"):
+	var save_body_sidecar := bool(capture_options.get("save_body_sidecar", false))
+	if (save_body_sidecar and _capture_enabled("record_body_tracking")) or _capture_enabled("record_motion_trackers"):
 		if _make_dir("%s/body_motion" % session_dir) != OK:
 			return false
 	if _capture_enabled("record_depth"):
@@ -76,13 +85,24 @@ func start_session(options: Dictionary = {}) -> bool:
 				_depth_raw_dir = ""
 
 	var sources := {}
-	sources["rgb"] = "Android Camera2 stereo side-by-side + HEVC MediaCodec" if _capture_enabled("stereo_rgb") else "Android Camera2 left camera + HEVC MediaCodec"
+	var capture_provider := str(capture_options.get("capture_provider", ""))
+	# WP6: provider-keyed source text lives in the manifest contract.
+	sources["rgb"] = SpatialMp4ManifestContract.rgb_source_description(capture_provider, _capture_enabled("stereo_rgb"))
 	if _capture_enabled("record_depth"):
 		sources["depth"] = "OpenXRMetaEnvironmentDepthExtension converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		sources["pose"] = "Godot OpenXR nodes and XRHandTracker; PTS from OpenXRMetaEnvironmentDepthExtensionWrapper.get_predicted_display_time_ns() when available, else Time.get_ticks_usec()"
 	if _capture_enabled("record_body_tracking"):
-		sources["body_tracking"] = "PICO OpenXR XR_BD_body_tracking plus XR_PICO_body_tracking2 state/velocity/acceleration when available; stored as body_motion/body_joints.jsonl sidecar"
+		# Placeholder — close() patches in the actual runtime info once the
+		# sampler has observed at least one frame, so the manifest stores the
+		# specific extension / joint set instead of a vague "either-or" blurb.
+		sources["body_tracking"] = {
+			"description": "Body joints in the mp4 mett track `spatialmp4:body_joints:body` (HJNT v1 layout). The runtime (PICO BD vs Meta XR_FB / XR_META_full_body) is patched in at session close based on the samples actually observed.",
+			"observed_runtime": "",
+			"extension": "",
+			"joint_set": "",
+			"joint_count": 0
+		}
 	if _capture_enabled("record_motion_trackers"):
 		sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored as body_motion/motion_trackers.jsonl sidecar"
 	# v3 spatial audio. The audio path is provider-driven (AudioRecord ->
@@ -129,48 +149,14 @@ func start_session(options: Dictionary = {}) -> bool:
 	})
 
 	# Every pose stream (head, controllers, hands) flows into the MP4's `mett`
-	# tracks via the muxer plugin -- the JSONL sidecars are debug-only mirrors.
-	# Stage 5 made the head sidecar optional too (it used to be the only place
-	# downstream tools could read pose data; SpatialMP4/scripts/read_mett_pose.py
-	# now decodes the mp4 `mett:head` track directly, so the sidecar's only
-	# remaining job is to feed the legacy SpatialMP4/scripts/godot_spool_pack.py
-	# offline packer).
-	var save_head_pose_sidecar := bool(capture_options.get("save_head_pose_sidecar", false))
-	var save_controller_hand_sidecar := bool(capture_options.get("save_controller_hand_sidecar", false))
-	if save_head_pose_sidecar and _capture_enabled("record_head_pose"):
-		_head_file = FileAccess.open("%s/poses/head.jsonl" % session_dir, FileAccess.WRITE)
-	if save_controller_hand_sidecar and _capture_enabled("record_controller_pose"):
-		_controller_file = FileAccess.open("%s/poses/controllers.jsonl" % session_dir, FileAccess.WRITE)
-	if save_controller_hand_sidecar and _capture_enabled("record_hand_data"):
-		_hand_file = FileAccess.open("%s/poses/hands.jsonl" % session_dir, FileAccess.WRITE)
-	if _capture_enabled("record_body_tracking"):
-		_body_file = FileAccess.open("%s/body_motion/body_joints.jsonl" % session_dir, FileAccess.WRITE)
-	if _capture_enabled("record_motion_trackers"):
-		_motion_file = FileAccess.open("%s/body_motion/motion_trackers.jsonl" % session_dir, FileAccess.WRITE)
-	if _capture_enabled("record_depth"):
-		_depth_file = FileAccess.open("%s/depth/frames.jsonl" % session_dir, FileAccess.WRITE)
+	# tracks via the muxer plugin. The JSONL sidecars are debug-only mirrors
+	# and are owned by JsonlSidecarSink since WP5 (identical filenames,
+	# option gating, and line shapes; SpoolWriterAdapter opens it right after
+	# this returns).
 	return true
 
 
 func close() -> void:
-	if _head_file:
-		_head_file.close()
-		_head_file = null
-	if _controller_file:
-		_controller_file.close()
-		_controller_file = null
-	if _hand_file:
-		_hand_file.close()
-		_hand_file = null
-	if _depth_file:
-		_depth_file.close()
-		_depth_file = null
-	if _body_file:
-		_body_file.close()
-		_body_file = null
-	if _motion_file:
-		_motion_file.close()
-		_motion_file = null
 	var attempted_native_finish := muxer_plugin != null
 	if muxer_plugin != null:
 		var finalized: String = str(muxer_plugin.call("finishSpatialMp4"))
@@ -250,6 +236,22 @@ func _rewrite_manifest_after_finalize(media_path: String, media_sha256: String) 
 			media_artifact["hash_algo"] = "sha256"
 		artifacts["media"] = media_artifact
 		manifest["artifacts"] = artifacts
+	# Patch in the body-tracking runtime info collected at close() so the
+	# offline viewer can pick the right skeleton table for the joint ids it
+	# finds in `spatialmp4:body_joints:body`. If the sampler never observed a
+	# frame (no body tracking permission, runtime did not support it, …) we
+	# still leave the original "observed_runtime: ''" placeholder so the
+	# downstream tooling can distinguish "tried but got nothing" from "never
+	# asked".
+	if not _body_tracking_runtime_info.is_empty():
+		var sources_field: Variant = manifest.get("sources", {})
+		var sources_dict: Dictionary = sources_field if sources_field is Dictionary else {}
+		var body_field: Variant = sources_dict.get("body_tracking", {})
+		var body_entry: Dictionary = body_field if body_field is Dictionary else {"description": str(body_field)}
+		for key in _body_tracking_runtime_info.keys():
+			body_entry[key] = _body_tracking_runtime_info[key]
+		sources_dict["body_tracking"] = body_entry
+		manifest["sources"] = sources_dict
 	var depth_confirmation := _depth_confirmation_record(true, media_path)
 	manifest["depth_saved_in_mp4"] = bool(depth_confirmation.get("saved_in_mp4", false))
 	var confirmations_field: Variant = manifest.get("stream_confirmations", {})
@@ -296,12 +298,11 @@ func _depth_confirmation_record(finalized: bool, media_path: String) -> Dictiona
 	}
 
 
-func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, write_jsonl: bool = true) -> void:
+func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_jsonl_sidecar: bool = true) -> void:
 	# The mp4 `mett` head-pose stream is always fed at the caller's sample
-	# rate via a fast JNI Enqueue (~50 µs). The GDScript-side JSONL is far
-	# more expensive (Dictionary + JSON.stringify + FileAccess.store_line ~
-	# 150-200 µs each) and is throttled by the caller via write_jsonl=false
-	# to keep the main thread responsive at the XR refresh rate.
+	# rate via a fast JNI Enqueue (~50 µs). The JSONL sidecar (and its
+	# throttle flag, kept here for signature compat) lives in
+	# JsonlSidecarSink since WP5.
 	if muxer_plugin != null:
 		var q := transform.basis.get_rotation_quaternion()
 		var p := transform.origin
@@ -317,11 +318,9 @@ func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: 
 			q.w,
 			tracking_valid
 		)
-	if write_jsonl:
-		_write_jsonl(_head_file, _pose_record(timestamp_ns, "head", transform, tracking_valid))
 
 
-func write_controller_pose(source: String, timestamp_ns: int, transform: Transform3D, tracking_valid: bool, write_jsonl: bool = true) -> void:
+func write_controller_pose(source: String, timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_jsonl_sidecar: bool = true) -> void:
 	if muxer_plugin != null:
 		var q := transform.basis.get_rotation_quaternion()
 		var p := transform.origin
@@ -338,19 +337,11 @@ func write_controller_pose(source: String, timestamp_ns: int, transform: Transfo
 			q.w,
 			tracking_valid
 		)
-	if write_jsonl:
-		_write_jsonl(_controller_file, _pose_record(timestamp_ns, source, transform, tracking_valid))
 
 
 func write_hand_joints(hand: String, timestamp_ns: int, joints: Array) -> void:
 	if muxer_plugin != null and not joints.is_empty():
 		muxer_plugin.call("writeHandJointsPayload", hand, timestamp_ns, _pack_hand_joints_payload(joints))
-	_write_jsonl(_hand_file, {
-		"timestamp_ns": timestamp_ns,
-		"hand": hand,
-		"joint_count": joints.size(),
-		"joints": joints
-	})
 
 
 func write_controller_input(
@@ -426,68 +417,31 @@ func write_depth_frame(
 				raw_file.store_buffer(depth_u16_mm)
 				raw_file.close()
 				_depth_raw_index += 1
-	var record := {
-		"timestamp_ns": timestamp_ns,
-		"eye": eye,
-		"image_path": image_path,
-		"width": width,
-		"height": height,
-		"metadata": metadata
-	}
+	# Counts every depth frame handed to the writer; feeds the manifest
+	# stream_confirmations.depth.sidecar_frame_count with the same per-call
+	# semantics as before WP5 (the depth/frames.jsonl line itself is written
+	# by JsonlSidecarSink).
 	_depth_sidecar_frame_count += 1
-	_write_jsonl(_depth_file, record)
 
 
-func write_body_joints(timestamp_ns: int, body_flags: int, joints: Array, metadata: Dictionary = {}) -> bool:
-	if _body_file == null or joints.is_empty():
+func write_body_joints(timestamp_ns: int, body_flags: int, joints: Array, _metadata: Dictionary = {}) -> bool:
+	if joints.is_empty():
 		return false
-	var json_joints: Array = []
-	for joint in joints:
-		if typeof(joint) == TYPE_DICTIONARY:
-			json_joints.append(_json_safe_joint_record(joint))
-	var record := {
-		"timestamp_ns": timestamp_ns,
-		"body_flags": body_flags,
-		"joint_count": json_joints.size(),
-		"joints": json_joints
-	}
-	for key in metadata.keys():
-		if key == "joints" or key == "transform":
-			continue
-		record[key] = _json_safe_value(metadata[key])
-	_write_jsonl(_body_file, record)
+	# The mp4 `mett:body_joints` track is the primary store: the joint dicts
+	# share the {joint, flags, radius_m, position, rotation} shape with hand
+	# joints, so the HJNT packer is reused verbatim. The opt-in JSONL sidecar
+	# (save_body_sidecar; the only place frame-level body_flags + PICO
+	# velocity/acceleration extras survive) lives in JsonlSidecarSink since
+	# WP5 — StreamBinding ORs the two sinks' results to preserve the legacy
+	# `wrote` return.
+	if muxer_plugin == null:
+		return false
+	muxer_plugin.call("writeBodyJointsPayload", timestamp_ns, _pack_hand_joints_payload(joints))
 	return true
 
 
-func write_motion_tracker_pose(
-	tracker_index: int,
-	source: String,
-	timestamp_ns: int,
-	transform: Transform3D,
-	tracking_valid: bool,
-	metadata: Dictionary = {}
-) -> bool:
-	if _motion_file == null:
-		return false
-	var record := _pose_record(timestamp_ns, source, transform, tracking_valid)
-	record["tracker_index"] = tracker_index
-	for key in metadata.keys():
-		if key == "transform" or key == "position" or key == "rotation" or key == "tracker_index":
-			continue
-		record[key] = _json_safe_value(metadata[key])
-	_write_jsonl(_motion_file, record)
-	return true
-
-
-func write_motion_tracker_event(timestamp_ns: int, event_type: String, event: Dictionary) -> bool:
-	if _motion_file == null:
-		return false
-	_write_jsonl(_motion_file, {
-		"timestamp_ns": timestamp_ns,
-		"event_type": event_type,
-		"event": _json_safe_value(event)
-	})
-	return true
+# WP5: write_motion_tracker_pose / write_motion_tracker_event moved to
+# JsonlSidecarSink — motion trackers are a JSONL-only stream (no mp4 track).
 
 
 func ticks_us_to_session_us(ticks_us: int) -> int:
@@ -522,6 +476,14 @@ func set_muxer_plugin(plugin: Object) -> void:
 	muxer_plugin = plugin
 
 
+# Capture the body-tracking sampler's runtime snapshot just before close() so
+# `_rewrite_manifest_with_media_integrity` can patch it into the on-disk
+# manifest alongside the mp4 hash + bytes. Cleared by start_session() so a
+# stale value from a prior session can't leak into the next.
+func set_body_tracking_runtime_info(info: Dictionary) -> void:
+	_body_tracking_runtime_info = info.duplicate(true) if info != null else {}
+
+
 func get_session_start_unix_us() -> int:
 	return session_start_unix_us
 
@@ -534,62 +496,6 @@ func _absolute_path(path: String) -> String:
 	if path.begins_with("/"):
 		return path
 	return ProjectSettings.globalize_path(path)
-
-
-func _pose_record(timestamp_ns: int, source: String, transform: Transform3D, tracking_valid: bool) -> Dictionary:
-	var q := transform.basis.get_rotation_quaternion()
-	var p := transform.origin
-	return {
-		"timestamp_ns": timestamp_ns,
-		"source": source,
-		"tracking_valid": tracking_valid,
-		"position": {"x": p.x, "y": p.y, "z": p.z},
-		"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
-	}
-
-
-func _json_safe_joint_record(joint_record: Dictionary) -> Dictionary:
-	var out := {}
-	for key in joint_record.keys():
-		if key == "transform":
-			continue
-		out[key] = _json_safe_value(joint_record[key])
-	return out
-
-
-func _json_safe_value(value: Variant) -> Variant:
-	match typeof(value):
-		TYPE_DICTIONARY:
-			var out := {}
-			var dict := value as Dictionary
-			for key in dict.keys():
-				out[key] = _json_safe_value(dict[key])
-			return out
-		TYPE_ARRAY:
-			var out: Array = []
-			for item in value:
-				out.append(_json_safe_value(item))
-			return out
-		TYPE_PACKED_BYTE_ARRAY:
-			return "<bytes:%d>" % (value as PackedByteArray).size()
-		TYPE_VECTOR2:
-			var v2 := value as Vector2
-			return {"x": v2.x, "y": v2.y}
-		TYPE_VECTOR3:
-			var v3 := value as Vector3
-			return {"x": v3.x, "y": v3.y, "z": v3.z}
-		TYPE_QUATERNION:
-			var q := value as Quaternion
-			return {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
-		TYPE_TRANSFORM3D:
-			var t := value as Transform3D
-			var q := t.basis.get_rotation_quaternion()
-			return {
-				"position": {"x": t.origin.x, "y": t.origin.y, "z": t.origin.z},
-				"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
-			}
-		_:
-			return value
 
 
 func _pack_hand_joints_payload(joints: Array) -> PackedByteArray:
@@ -626,11 +532,6 @@ func _pack_hand_joints_payload(joints: Array) -> PackedByteArray:
 		payload.encode_float(offset, float(rotation.get("w", 1.0)))
 		offset += 4
 	return payload
-
-
-func _write_jsonl(file: FileAccess, record: Dictionary) -> void:
-	if file:
-		file.store_line(JSON.stringify(record))
 
 
 func _write_json(path: String, value: Dictionary) -> void:

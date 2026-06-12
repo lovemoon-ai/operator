@@ -707,3 +707,30 @@ using PFN_xrDestroyBodyTrackerBD = XrResult(XRAPI_PTR)(XrBodyTrackerBD bodyTrack
 using PFN_xrLocateBodyJointsBD = XrResult(XRAPI_PTR)(XrBodyTrackerBD bodyTracker, const XrBodyJointsLocateInfoBD *locateInfo, XrBodyJointLocationsBD *locations);
 using PFN_xrStartBodyTrackingCalibrationAppPICO = XrResult(XRAPI_PTR)(XrSession session);
 using PFN_xrGetBodyTrackingStatePICO = XrResult(XRAPI_PTR)(XrSession session, XrBodyTrackingStatePICO *state);
+
+// --- Core OpenXR 1.0 reference-space symbols used by the ad-hoc head-pose probe. ---
+// These are exposed by every conformant runtime; the loader resolves them by name.
+using XrReferenceSpaceType = int32_t;
+static constexpr XrReferenceSpaceType XR_REFERENCE_SPACE_TYPE_VIEW = 1;
+static constexpr XrReferenceSpaceType XR_REFERENCE_SPACE_TYPE_LOCAL = 2;
+static constexpr XrReferenceSpaceType XR_REFERENCE_SPACE_TYPE_STAGE = 3;
+static constexpr XrStructureType XR_TYPE_REFERENCE_SPACE_CREATE_INFO = 37;
+static constexpr XrStructureType XR_TYPE_SPACE_LOCATION = 42;
+
+struct XrReferenceSpaceCreateInfo {
+	XrStructureType type;
+	const void *XR_MAY_ALIAS next;
+	XrReferenceSpaceType referenceSpaceType;
+	XrPosef poseInReferenceSpace;
+};
+
+struct XrSpaceLocation {
+	XrStructureType type;
+	void *XR_MAY_ALIAS next;
+	XrSpaceLocationFlags locationFlags;
+	XrPosef pose;
+};
+
+using PFN_xrCreateReferenceSpace = XrResult(XRAPI_PTR)(XrSession session, const XrReferenceSpaceCreateInfo *createInfo, XrSpace *space);
+using PFN_xrDestroySpace = XrResult(XRAPI_PTR)(XrSpace space);
+using PFN_xrLocateSpace = XrResult(XRAPI_PTR)(XrSpace space, XrSpace baseSpace, XrTime time, XrSpaceLocation *location);

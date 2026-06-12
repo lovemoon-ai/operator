@@ -1,0 +1,24 @@
+{
+  "id": "sink_live_stream",
+  "feature": "operator_feature_sink_live_stream",
+  "owner": "sinks/live_stream",
+  "required_features": [],
+  "required_capabilities": [
+    "LIVE_STREAM_SERVER"
+  ],
+  "test_cases": [
+    {
+      "id": "sink_live_stream.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "sink_live_stream.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    }
+  ]
+}

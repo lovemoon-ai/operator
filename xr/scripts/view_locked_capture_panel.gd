@@ -12,6 +12,9 @@ signal scan_upload_url_requested
 signal tracker_connect_requested
 signal scan_live_server_requested
 signal connect_live_server_requested(options: Dictionary)
+signal manual_upload_requested(sessions: Array, options: Dictionary)
+signal body_pose_debug_toggled
+signal h2_debug_toggled
 
 # 840 wide gives ~430px of detail column after sidebar + margins. The 1180-tall
 # legacy viewport went away once the form was split into groups — every group
@@ -24,24 +27,41 @@ const DEFAULT_LIVE_RESULT_PORT := 63912
 const STORAGE_REFRESH_SECONDS := 3.0
 const SETTINGS_PATH := "user://capture_settings.cfg"
 const SECTION := "capture"
+# Hand-joint capture (record_hand_data) and controller-pose capture
+# (record_controller_pose) describe two physically incompatible input
+# regimes -- the operator is either driving with bare hands or with the
+# Touch / PICO controllers, never both at once. Recording both at the
+# same time produces sidecar data that downstream consumers can't make
+# sense of (which transform "owns" the wrist at frame T?), so the
+# toggles are wired as a mutex: enabling one auto-disables the other
+# and we never let set_options leave both enabled. The pair is declared
+# as a constant so the mutex logic stays declarative -- adding another
+# pair later is just another entry.
+const INPUT_SOURCE_MUTEX := {
+	"record_hand_data": "record_controller_pose",
+	"record_controller_pose": "record_hand_data",
+}
 # Health check timeout: keep short so the user is not stuck staring at
 # "Checking..." if the endpoint is firewalled/dead. 8 s is enough for a
 # TLS handshake on slow Wi-Fi but short enough that the operator can
 # react. Anything longer feels broken in a HMD.
 const UPLOAD_HEALTH_TIMEOUT_S := 8.0
+const MAX_LOCAL_UPLOAD_SESSIONS := 40
+const MAX_LOCAL_STORAGE_SESSIONS := 0
+const LOCAL_UPLOAD_PREVIEW_BUTTON_WIDTH := 116
+const LOCAL_FILE_MODE_UPLOAD := "upload"
+const LOCAL_FILE_MODE_DELETE := "delete"
 
-# Auto-detected input source ("hands" or "controllers") used ONLY for the
-# title-bar indicator + record-stream defaults. We deliberately do not own
-# `interaction_mode` any more -- the field that drives the settings
-# interaction router's pointer mode (controller laser vs hand pinch) is
-# stored in capture_app.gd's capture_options dict and is only set via
-# automation args or the controllers-default init. If the panel propagated
-# the detected mode back through get_options(), pressing Save while a hand
-# was briefly visible would flip the router to hand-pinch -- the bug we
-# fixed when "controller ray broken in capture mode" was reported.
+# Auto-detected input source ("hands" or "controllers") used for the title-bar
+# indicator + record-stream defaults. The current pointer mode is still owned
+# by capture_app.gd so the panel never persists a transient detection flip.
 var _indicator_mode := ""
 var _motion_tracker_toggle: CheckButton
+var _body_pose_debug_button: Button
+var _h2_debug_button: Button
 var _motion_tracker_supported := false
+var _depth_toggle: CheckButton
+var _depth_supported := false
 var _save_root: LineEdit
 var _server_host: LineEdit
 var _server_port: SpinBox
@@ -51,7 +71,22 @@ var _stream_toggles: Dictionary = {}
 var _upload_url: LineEdit
 var _upload_token := ""
 var _upload_status_label: Label
+var _upload_url_ready := false
+var _upload_url_ready_value := ""
+var _upload_health_pending_url := ""
+var _upload_main_view: VBoxContainer
+var _local_upload_view: VBoxContainer
+var _local_file_menu_mode := LOCAL_FILE_MODE_UPLOAD
+var _local_file_title_label: Label
+var _manual_upload_button: Button
+var _local_upload_status_label: Label
+var _local_upload_scroll: ScrollContainer
+var _local_upload_list: VBoxContainer
+var _local_upload_upload_button: Button
+var _local_upload_sessions: Array = []
+var _local_upload_selection: Dictionary = {}
 var _live_server_status_label: Label
+var _storage_view_button: Button
 # Dedicated HTTPRequest for the open()-time upload-URL health probe.
 # Separate from capture_app.gd's upload_ack_request so the two flows
 # (QR ACK challenge vs plain reachability check) don't clobber each
@@ -138,17 +173,29 @@ func _process(delta: float) -> void:
 
 func get_options() -> Dictionary:
 	# interaction_mode is intentionally NOT returned here. The router's
-	# pointer mode lives in capture_app.gd::capture_options and is only
-	# changed by automation args + the controllers default -- not by the
-	# panel and not by detection. See `_indicator_mode` for context.
+	# persisted/automation override lives in capture_app.gd::capture_options;
+	# runtime hand/controller detection is kept out of saved settings.
 	var options := {
 		"stereo_rgb": _toggle_enabled("stereo_rgb"),
+		# NOTE: deliberately NOT gated on _depth_supported. capture_app.gd owns
+		# depth gating for unsupported providers (Pico) via its
+		# _update_depth_support_flag()/_effective_capture_options() force-off,
+		# which run with the camera plugin bound. Gating here too races against
+		# the provider probe: at _setup_ui the panel options are merged into
+		# capture_options while _depth_supported is still false, latching depth
+		# off even on Quest where it IS supported.
 		"record_depth": _toggle_enabled("record_depth"),
 		"record_head_pose": _toggle_enabled("record_head_pose"),
 		"record_controller_pose": _toggle_enabled("record_controller_pose"),
 		"record_hand_data": _toggle_enabled("record_hand_data"),
 		"record_body_tracking": _toggle_enabled("record_body_tracking"),
-		"record_motion_trackers": _motion_tracker_supported and _toggle_enabled("record_motion_trackers"),
+		# Same rationale as record_depth above: NOT gated on
+		# _motion_tracker_supported. capture_app.gd force-offs trackers for
+		# non-Pico providers via _update_motion_tracker_support_flag() and
+		# _effective_capture_options(); gating here too races the provider
+		# probe and latches trackers off on Pico (where they ARE supported)
+		# when the panel options are merged at _setup_ui.
+		"record_motion_trackers": _toggle_enabled("record_motion_trackers"),
 		"max_motion_trackers": 3,
 		# v3 spatial audio: opt-in for privacy. The toggle defaults off below
 		# (default_on=false in _add_stream_toggle) so a recording never opens
@@ -161,6 +208,7 @@ func get_options() -> Dictionary:
 		options["server_result_port"] = _configured_result_port()
 		options["server_auth_token"] = _server_token.text.strip_edges() if _server_token != null else ""
 		options["save_controller_hand_sidecar"] = false
+		options["save_body_sidecar"] = false
 		options["save_root"] = ""
 		options["upload_url"] = ""
 		options["upload_token"] = ""
@@ -168,30 +216,43 @@ func get_options() -> Dictionary:
 		options["keep_local_after_upload"] = true
 	else:
 		options["save_controller_hand_sidecar"] = _toggle_enabled("save_controller_hand_sidecar")
+		options["save_body_sidecar"] = _toggle_enabled("save_body_sidecar")
 		options["save_root"] = _configured_save_root()
 		options["upload_url"] = _upload_url.text.strip_edges() if _upload_url else ""
 		options["upload_token"] = _upload_token
-		options["upload_on_finalize"] = _toggle_enabled("upload_on_finalize")
+		options["upload_on_finalize"] = _toggle_enabled("upload_on_finalize") and _upload_url_can_auto_upload()
 		options["keep_local_after_upload"] = _toggle_enabled("keep_local_after_upload")
 	return options
 
 
 func set_options(options: Dictionary) -> void:
 	# We deliberately do NOT read `interaction_mode` from the options dict
-	# here. The router's pointer mode is owned by capture_app.gd; the panel
-	# only knows the auto-detected indicator state (driven via
-	# set_interaction_mode() from the detection loop) and never lets the
-	# detected value escape through get_options() either.
+	# here. capture_app.gd owns both the persisted override and the runtime
+	# detection state; the panel only mirrors the detected indicator and
+	# stream defaults.
 	for key in _stream_toggles.keys():
 		var toggle := _stream_toggles[key] as CheckButton
-		if toggle != null:
-			toggle.button_pressed = bool(options.get(key, _default_value_for_key(key)))
+		if toggle == null:
+			continue
+		var value := bool(options.get(key, _default_value_for_key(key)))
+		# For the input-source mutex pair, bypass the `toggled` signal so
+		# bulk-load doesn't fire the mutex callback (which would otherwise
+		# silently flip whichever key arrived second based on Dictionary
+		# iteration order). We resolve any "both true" config explicitly
+		# below via _enforce_input_source_mutex_from_loaded_state().
+		if INPUT_SOURCE_MUTEX.has(key) or key == "upload_on_finalize":
+			toggle.set_pressed_no_signal(value)
+		else:
+			toggle.button_pressed = value
+	_enforce_input_source_mutex_from_loaded_state()
 	if _save_root != null:
 		var save_root := str(options.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
 		_save_root.text = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
 	if _upload_url != null:
 		_upload_url.text = str(options.get("upload_url", ""))
+	_clear_upload_url_ready()
 	_upload_token = str(options.get("upload_token", ""))
+	_enforce_auto_upload_ready(false)
 	if _server_host != null:
 		var server_host := str(options.get("server_host", DEFAULT_LIVE_SERVER_HOST)).strip_edges()
 		_server_host.text = DEFAULT_LIVE_SERVER_HOST if server_host.is_empty() else server_host
@@ -210,6 +271,7 @@ func open() -> void:
 	super.open()
 	if _live_server_mode:
 		return
+	_show_upload_main_menu()
 	_storage_refresh_accum = STORAGE_REFRESH_SECONDS
 	_refresh_storage_usage()
 	# Don't auto-probe on open — every open() would hit the operator's
@@ -255,9 +317,19 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	var streams := register_group("streams", "UI_CAPTURED_STREAMS", "camera")
 	_add_stream_toggle(streams, "stereo_rgb", tr("UI_STEREO_RGB"))
 	_add_stream_toggle(streams, "record_depth", tr("UI_DEPTH"))
+	# Depth capture is Quest-only today (XR_META_environment_depth). Like the
+	# motion-tracker row below, hide the slot until capture_app confirms the
+	# provider supports it so a Pico operator never flips a switch that
+	# silently records nothing.
+	_depth_toggle = _stream_toggles.get("record_depth")
+	_set_depth_row_visible(_depth_supported)
 	_add_stream_toggle(streams, "record_head_pose", tr("UI_HEAD_POSE"))
 	_add_stream_toggle(streams, "record_controller_pose", tr("UI_CONTROLLER_POSES"))
-	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"))
+	_add_stream_toggle(streams, "record_hand_data", tr("UI_HAND_JOINTS"), false)
+	# Hand vs. controller capture is one-or-the-other -- wire the mutex
+	# before any other state is loaded so set_options (which fires below
+	# via _load_settings()) still goes through the same enforcement.
+	_wire_input_source_mutex()
 	_add_stream_toggle(streams, "record_body_tracking", tr("UI_BODY_TRACKING"))
 	_add_stream_toggle(streams, "record_motion_trackers", tr("UI_MOTION_TRACKERS"))
 	# Motion-tracker capture is a PICO-only stream (powered by the PICO
@@ -284,6 +356,22 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# video-only instead of failing the session.
 	_add_stream_toggle(streams, "record_audio", tr("UI_RECORD_AUDIO"), true)
 
+	# --- Robot constraint group -------------------------------------------
+	var robot_constraint := register_group("robot_constraint", "UI_ROBOT_CONSTRAINT_GROUP", "robot-arm")
+	_body_pose_debug_button = Button.new()
+	_body_pose_debug_button.text = tr("UI_SHOW_BODY_POSE_DEBUG")
+	_body_pose_debug_button.custom_minimum_size.y = 55
+	_body_pose_debug_button.add_theme_font_size_override("font_size", 21)
+	_body_pose_debug_button.pressed.connect(_on_body_pose_debug_pressed)
+	add_interactive(robot_constraint, _body_pose_debug_button)
+
+	_h2_debug_button = Button.new()
+	_h2_debug_button.text = tr("UI_SHOW_H2_DEBUG")
+	_h2_debug_button.custom_minimum_size.y = 55
+	_h2_debug_button.add_theme_font_size_override("font_size", 21)
+	_h2_debug_button.pressed.connect(_on_h2_debug_pressed)
+	add_interactive(robot_constraint, _h2_debug_button)
+
 	if _live_server_mode:
 		return
 
@@ -293,6 +381,10 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# controls whether they are ALSO written as separate JSONL sidecar files for
 	# debugging. Default off to avoid the extra main-thread JSON cost.
 	_add_stream_toggle(outputs, "save_controller_hand_sidecar", tr("UI_CONTROLLER_HAND_SIDECAR"), false)
+	# Body joints likewise always land in the MP4 mett body_joints track; this
+	# toggle only adds the JSONL sidecar (the one place the frame-level
+	# body_flags + PICO velocity/acceleration extras are preserved).
+	_add_stream_toggle(outputs, "save_body_sidecar", tr("UI_BODY_SIDECAR"), false)
 
 	# --- Storage group -----------------------------------------------------
 	var storage := register_group("storage", "UI_GROUP_STORAGE", "plug")
@@ -307,6 +399,15 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	_storage_label = _add_status_label_to(storage, tr("UI_STORAGE_CHECKING"))
 
+	_storage_view_button = Button.new()
+	_storage_view_button.text = tr("UI_STORAGE_VIEW")
+	_storage_view_button.tooltip_text = tr("UI_STORAGE_VIEW_TOOLTIP")
+	_storage_view_button.custom_minimum_size.y = 55
+	_storage_view_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_storage_view_button.add_theme_font_size_override("font_size", 21)
+	_storage_view_button.pressed.connect(_on_storage_view_button_pressed)
+	add_interactive(storage, _storage_view_button)
+
 	# --- Upload group ------------------------------------------------------
 	# Optional: if `upload_url` is non-empty and `upload_on_finalize` is
 	# on, every finalized session is queued for resumable upload (TUS
@@ -314,6 +415,11 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# `claw/issues/010-ego-data-upload.md`. Settings persist via
 	# BaseSettingsPanel across app launches.
 	var upload := register_group("upload", "UI_UPLOAD", "signal")
+	_upload_main_view = VBoxContainer.new()
+	_upload_main_view.add_theme_constant_override("separation", 14)
+	_upload_main_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_upload_main_view.size_flags_vertical = Control.SIZE_FILL
+	upload.add_child(_upload_main_view)
 
 	# [LineEdit — Upload URL] [💓 health-check] [📷 scan]
 	# The health-check button (pulse icon) probes the configured URL
@@ -327,13 +433,14 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	var upload_url_row := HBoxContainer.new()
 	upload_url_row.add_theme_constant_override("separation", 8)
 	upload_url_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	upload.add_child(upload_url_row)
+	_upload_main_view.add_child(upload_url_row)
 
 	_upload_url = LineEdit.new()
 	_upload_url.placeholder_text = "https://my-ingest.local:8443/ingest"
 	_upload_url.custom_minimum_size.y = 55
 	_upload_url.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_upload_url.add_theme_font_size_override("font_size", 19)
+	_upload_url.text_changed.connect(_on_upload_url_text_changed)
 	add_interactive(upload_url_row, _upload_url)
 
 	# Manual health-check trigger. Always available — even on desktop
@@ -353,11 +460,22 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 			_on_scan_button_pressed
 		)
 
-	_upload_status_label = _add_status_label_to(upload, "")
+	_upload_status_label = _add_status_label_to(_upload_main_view, "")
 	_upload_status_label.visible = false
 
-	_add_stream_toggle(upload, "upload_on_finalize", tr("UI_AUTO_UPLOAD_ON_STOP"), true)
-	_add_stream_toggle(upload, "keep_local_after_upload", tr("UI_KEEP_LOCAL_AFTER_UPLOAD"), true)
+	var auto_upload_toggle := _add_stream_toggle(_upload_main_view, "upload_on_finalize", tr("UI_AUTO_UPLOAD_ON_STOP"), true)
+	auto_upload_toggle.toggled.connect(_on_upload_on_finalize_toggled)
+	_add_stream_toggle(_upload_main_view, "keep_local_after_upload", tr("UI_KEEP_LOCAL_AFTER_UPLOAD"), true)
+
+	_manual_upload_button = Button.new()
+	_manual_upload_button.text = tr("UI_UPLOAD_LOCAL_RECORDINGS")
+	_manual_upload_button.custom_minimum_size.y = 55
+	_manual_upload_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_manual_upload_button.add_theme_font_size_override("font_size", 21)
+	_manual_upload_button.pressed.connect(_on_local_upload_button_pressed)
+	add_interactive(_upload_main_view, _manual_upload_button)
+	_sync_manual_upload_button_state()
+	_build_local_upload_menu(parent)
 
 
 func _build_live_server_group() -> void:
@@ -440,9 +558,10 @@ func _on_confirm_requested() -> void:
 	saved.emit(options)
 
 
-func _add_stream_toggle(parent: Container, key: String, label: String, default_on: bool = true) -> void:
+func _add_stream_toggle(parent: Container, key: String, label: String, default_on: bool = true) -> CheckButton:
 	var toggle := add_toggle(parent, label, default_on, 23)
 	_stream_toggles[key] = toggle
+	return toggle
 
 
 func _add_section_label_to(parent: Container, text_key: String) -> Label:
@@ -464,6 +583,26 @@ func _add_status_label_to(parent: Container, initial_text: String) -> Label:
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	parent.add_child(lbl)
 	return lbl
+
+
+func _on_body_pose_debug_pressed() -> void:
+	emit_signal("body_pose_debug_toggled")
+
+
+func _on_h2_debug_pressed() -> void:
+	emit_signal("h2_debug_toggled")
+
+
+func set_body_pose_debug_visible(visible_for_debug: bool) -> void:
+	if _body_pose_debug_button == null:
+		return
+	_body_pose_debug_button.text = tr("UI_HIDE_BODY_POSE_DEBUG") if visible_for_debug else tr("UI_SHOW_BODY_POSE_DEBUG")
+
+
+func set_h2_debug_visible(visible_for_debug: bool) -> void:
+	if _h2_debug_button == null:
+		return
+	_h2_debug_button.text = tr("UI_HIDE_H2_DEBUG") if visible_for_debug else tr("UI_SHOW_H2_DEBUG")
 
 
 func set_pico_tracker_status(
@@ -497,9 +636,7 @@ func set_pico_tracker_status(
 
 ## Push the auto-detected input source ("hands" / "controllers" / "head")
 ## into the panel. Updates ONLY the title-bar indicator and the record-
-## stream defaults; it does NOT touch the field that drives the settings
-## interaction router (so the controller ray stays put even if the operator
-## briefly waves a bare hand in front of the headset).
+## stream defaults; the panel never persists or owns the active pointer mode.
 ##
 ##   - hands       -> hand icon,        record_hand_data on,   record_controller_pose off
 ##   - controllers -> controller icon,  record_controller_pose on, record_hand_data off
@@ -545,6 +682,25 @@ func _set_motion_tracker_row_visible(visible_for_capture: bool) -> void:
 		(slot as Control).visible = visible_for_capture
 
 
+## Declares whether the bound capture provider can produce environment-depth
+## data (Quest only, today). When false the UI row is hidden and the saved
+## option is forced off so the recording manifest never advertises a depth
+## stream the device cannot read.
+func set_depth_supported(supported: bool) -> void:
+	_depth_supported = supported
+	_set_depth_row_visible(supported)
+	if not supported and _depth_toggle != null:
+		_depth_toggle.button_pressed = false
+
+
+func _set_depth_row_visible(visible_for_capture: bool) -> void:
+	if _depth_toggle == null:
+		return
+	var slot := _depth_toggle.get_parent()
+	if slot is Control:
+		(slot as Control).visible = visible_for_capture
+
+
 func _force_stream_default(key: String, value: bool) -> void:
 	if not _stream_toggles.has(key):
 		return
@@ -552,6 +708,56 @@ func _force_stream_default(key: String, value: bool) -> void:
 	if toggle == null:
 		return
 	toggle.button_pressed = value
+
+
+# Hook the mutex pair so the user clicking either toggle disables its
+# partner. We connect once after both toggles have been registered. The
+# callback only acts when the toggle was just enabled -- a disable never
+# implies the partner should flip back on -- so the partner's own
+# `toggled` signal fires with `enabled=false`, hits this same callback,
+# and short-circuits. No recursion guard needed.
+func _wire_input_source_mutex() -> void:
+	for primary in INPUT_SOURCE_MUTEX.keys():
+		var toggle := _stream_toggles.get(primary) as CheckButton
+		if toggle == null:
+			continue
+		toggle.toggled.connect(_on_input_source_toggled.bind(primary))
+
+
+func _on_input_source_toggled(enabled: bool, key: String) -> void:
+	if not enabled:
+		return
+	var partner_key := String(INPUT_SOURCE_MUTEX.get(key, ""))
+	if partner_key.is_empty():
+		return
+	var partner := _stream_toggles.get(partner_key) as CheckButton
+	if partner == null or not partner.button_pressed:
+		return
+	# set_pressed_no_signal so we don't bounce back through this handler
+	# (and don't trigger the toggle_off click sound from add_interactive,
+	# which would feel like a phantom UI click to the operator).
+	partner.set_pressed_no_signal(false)
+
+
+# After bulk-loading toggle state from disk we may still have a config
+# where both mutex partners are recorded as true (e.g. an install that
+# pre-dates this rule, or a hand-edited cfg). Resolve it deterministically
+# so the panel never displays a contradictory state: prefer the value the
+# operator most recently confirmed via `_indicator_mode`, otherwise fall
+# back to keeping `record_controller_pose` enabled because the runtime
+# also defaults to the controllers interaction mode.
+func _enforce_input_source_mutex_from_loaded_state() -> void:
+	var hand_toggle := _stream_toggles.get("record_hand_data") as CheckButton
+	var controller_toggle := _stream_toggles.get("record_controller_pose") as CheckButton
+	if hand_toggle == null or controller_toggle == null:
+		return
+	if not (hand_toggle.button_pressed and controller_toggle.button_pressed):
+		return
+	var keep_hands := _indicator_mode == "hands"
+	if keep_hands:
+		controller_toggle.set_pressed_no_signal(false)
+	else:
+		hand_toggle.set_pressed_no_signal(false)
 
 
 func _add_field_label(parent: Container, text: String) -> Label:
@@ -566,6 +772,482 @@ func _add_field_label(parent: Container, text: String) -> Label:
 func _toggle_enabled(key: String) -> bool:
 	var toggle: CheckButton = _stream_toggles[key]
 	return toggle.button_pressed
+
+
+func _upload_url_can_auto_upload() -> bool:
+	if _upload_url == null:
+		return false
+	var url := _upload_url.text.strip_edges()
+	return not url.is_empty() and _upload_url_ready and _upload_url_ready_value == url
+
+
+func _sync_manual_upload_button_state() -> void:
+	if _manual_upload_button == null:
+		return
+	var ready := _upload_url_can_auto_upload()
+	_manual_upload_button.disabled = not ready
+	_manual_upload_button.tooltip_text = "" if ready else tr("UI_UPLOAD_MANUAL_REQUIRES_READY")
+	if not ready and _local_file_menu_mode == LOCAL_FILE_MODE_UPLOAD and _local_upload_view != null and _local_upload_view.visible:
+		_show_upload_main_menu()
+
+
+func _mark_upload_url_ready(url: String) -> void:
+	_upload_url_ready_value = url.strip_edges()
+	_upload_url_ready = not _upload_url_ready_value.is_empty()
+	_upload_health_pending_url = ""
+	_sync_manual_upload_button_state()
+
+
+func _clear_upload_url_ready() -> void:
+	_upload_url_ready = false
+	_upload_url_ready_value = ""
+	_upload_health_pending_url = ""
+	_sync_manual_upload_button_state()
+
+
+func _enforce_auto_upload_ready(show_message: bool = true) -> void:
+	if not _stream_toggles.has("upload_on_finalize"):
+		return
+	var toggle := _stream_toggles["upload_on_finalize"] as CheckButton
+	if toggle == null or not toggle.button_pressed:
+		return
+	if _upload_url_can_auto_upload():
+		return
+	toggle.set_pressed_no_signal(false)
+	if show_message:
+		set_upload_connectivity_status(tr("UI_UPLOAD_AUTO_REQUIRES_READY"), "warning")
+
+
+func _on_upload_url_text_changed(_new_text: String) -> void:
+	_clear_upload_url_ready()
+	_enforce_auto_upload_ready(true)
+
+
+func _on_upload_on_finalize_toggled(enabled: bool) -> void:
+	if enabled:
+		_enforce_auto_upload_ready(true)
+
+
+func _build_local_upload_menu(parent: Container) -> void:
+	_local_upload_view = VBoxContainer.new()
+	_local_upload_view.add_theme_constant_override("separation", 14)
+	_local_upload_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_local_upload_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	parent.add_child(_local_upload_view)
+
+	var header := HBoxContainer.new()
+	header.add_theme_constant_override("separation", 12)
+	header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_local_upload_view.add_child(header)
+
+	var back_button := Button.new()
+	back_button.text = tr("UI_UPLOAD_BACK_TO_SETTINGS")
+	_apply_button_icon(back_button, "arrow-left")
+	back_button.custom_minimum_size = Vector2(190, 52)
+	back_button.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+	back_button.add_theme_font_size_override("font_size", 18)
+	back_button.pressed.connect(_on_local_upload_close_pressed)
+	add_interactive(header, back_button)
+
+	_local_file_title_label = Label.new()
+	_local_file_title_label.text = tr("UI_UPLOAD_LOCAL_RECORDINGS")
+	_local_file_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_local_file_title_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_local_file_title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_local_file_title_label.add_theme_font_size_override("font_size", 24)
+	_local_file_title_label.add_theme_color_override("font_color", COL_TITLE)
+	header.add_child(_local_file_title_label)
+
+	_local_upload_status_label = _add_status_label_to(_local_upload_view, "")
+
+	_local_upload_scroll = ScrollContainer.new()
+	_local_upload_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_local_upload_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_local_upload_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_local_upload_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_local_upload_view.add_child(_local_upload_scroll)
+
+	_local_upload_list = VBoxContainer.new()
+	_local_upload_list.add_theme_constant_override("separation", 8)
+	_local_upload_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_local_upload_scroll.add_child(_local_upload_list)
+
+	var actions := HBoxContainer.new()
+	actions.add_theme_constant_override("separation", 10)
+	actions.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_local_upload_view.add_child(actions)
+
+	_local_upload_upload_button = Button.new()
+	_local_upload_upload_button.text = tr("UI_UPLOAD_SELECTED")
+	_local_upload_upload_button.custom_minimum_size = Vector2(190, 50)
+	_local_upload_upload_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_local_upload_upload_button.add_theme_font_size_override("font_size", 19)
+	_local_upload_upload_button.disabled = true
+	_local_upload_upload_button.pressed.connect(_on_local_upload_confirm_pressed)
+	add_interactive(actions, _local_upload_upload_button)
+
+	var close_button := Button.new()
+	close_button.text = tr("UI_UPLOAD_BACK_TO_SETTINGS")
+	close_button.custom_minimum_size = Vector2(140, 50)
+	close_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	close_button.add_theme_font_size_override("font_size", 19)
+	close_button.pressed.connect(_on_local_upload_close_pressed)
+	add_interactive(actions, close_button)
+
+	_local_upload_view.visible = false
+
+
+func _set_local_file_menu_mode(mode: String) -> void:
+	_local_file_menu_mode = LOCAL_FILE_MODE_DELETE if mode == LOCAL_FILE_MODE_DELETE else LOCAL_FILE_MODE_UPLOAD
+	if _local_file_title_label:
+		_local_file_title_label.text = tr("UI_STORAGE_LOCAL_RECORDINGS") if _local_file_menu_mode == LOCAL_FILE_MODE_DELETE else tr("UI_UPLOAD_LOCAL_RECORDINGS")
+	if _local_upload_upload_button:
+		_local_upload_upload_button.text = tr("UI_STORAGE_DELETE_SELECTED") if _local_file_menu_mode == LOCAL_FILE_MODE_DELETE else tr("UI_UPLOAD_SELECTED")
+
+
+func _local_file_count_text(count: int) -> String:
+	if _local_file_menu_mode == LOCAL_FILE_MODE_DELETE:
+		return tr("UI_STORAGE_LOCAL_COUNT") % count
+	return tr("UI_UPLOAD_LOCAL_COUNT") % count
+
+
+func _local_file_empty_text() -> String:
+	if _local_file_menu_mode == LOCAL_FILE_MODE_DELETE:
+		return tr("UI_STORAGE_LOCAL_EMPTY")
+	return tr("UI_UPLOAD_LOCAL_EMPTY")
+
+
+func _on_local_upload_button_pressed() -> void:
+	if not _upload_url_can_auto_upload():
+		set_upload_connectivity_status(tr("UI_UPLOAD_MANUAL_REQUIRES_READY"), "warning")
+		_sync_manual_upload_button_state()
+		return
+	_set_local_file_menu_mode(LOCAL_FILE_MODE_UPLOAD)
+	_refresh_local_upload_list()
+	_show_local_upload_menu()
+
+
+func _on_storage_view_button_pressed() -> void:
+	_set_local_file_menu_mode(LOCAL_FILE_MODE_DELETE)
+	_refresh_local_upload_list()
+	_show_local_upload_menu()
+
+
+func _show_local_upload_menu() -> void:
+	_set_two_column_visible(false)
+	_set_panel_chrome_visible(false)
+	if _local_upload_view:
+		_local_upload_view.visible = true
+	_reset_local_upload_scroll()
+
+
+func _show_upload_main_menu() -> void:
+	if _local_upload_view:
+		_local_upload_view.visible = false
+	_set_panel_chrome_visible(true)
+	_set_two_column_visible(true)
+	reset_detail_scroll()
+
+
+func _refresh_local_upload_list() -> void:
+	_set_local_file_menu_mode(_local_file_menu_mode)
+	_clear_local_upload_list()
+	_local_upload_sessions = _scan_local_upload_sessions()
+	_local_upload_selection.clear()
+	if _local_upload_sessions.is_empty():
+		if _local_upload_status_label:
+			_local_upload_status_label.text = _local_file_empty_text()
+		if _local_upload_upload_button:
+			_local_upload_upload_button.disabled = true
+		return
+	if _local_upload_status_label:
+		_local_upload_status_label.text = _local_file_count_text(_local_upload_sessions.size())
+	for i in range(_local_upload_sessions.size()):
+		var item: Dictionary = _local_upload_sessions[i]
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_local_upload_list.add_child(row)
+
+		var toggle := CheckButton.new()
+		toggle.text = str(item.get("label", item.get("session_id", "")))
+		toggle.clip_text = true
+		toggle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		toggle.custom_minimum_size.y = 48
+		toggle.add_theme_font_size_override("font_size", 17)
+		toggle.toggled.connect(_on_local_upload_item_toggled.bind(i))
+		add_interactive(row, toggle)
+
+		var preview_button := Button.new()
+		preview_button.text = tr("UI_UPLOAD_PREVIEW")
+		preview_button.tooltip_text = tr("UI_UPLOAD_PREVIEW_TOOLTIP")
+		preview_button.custom_minimum_size = Vector2(LOCAL_UPLOAD_PREVIEW_BUTTON_WIDTH, 48)
+		preview_button.add_theme_font_size_override("font_size", 16)
+		preview_button.pressed.connect(_on_local_upload_preview_pressed.bind(i))
+		var preview_slot := add_interactive(row, preview_button)
+		preview_slot.custom_minimum_size = Vector2(LOCAL_UPLOAD_PREVIEW_BUTTON_WIDTH, 48)
+		preview_slot.size_flags_horizontal = Control.SIZE_SHRINK_END
+	if _local_upload_upload_button:
+		_local_upload_upload_button.disabled = true
+
+
+func _clear_local_upload_list() -> void:
+	if _local_upload_list == null:
+		return
+	for child in _local_upload_list.get_children():
+		child.queue_free()
+
+
+func _on_local_upload_item_toggled(enabled: bool, index: int) -> void:
+	if enabled:
+		_local_upload_selection[index] = true
+	else:
+		_local_upload_selection.erase(index)
+	if _local_upload_upload_button:
+		_local_upload_upload_button.disabled = _local_upload_selection.is_empty()
+
+
+func _on_local_upload_preview_pressed(index: int) -> void:
+	if index < 0 or index >= _local_upload_sessions.size():
+		return
+	var item: Dictionary = _local_upload_sessions[index]
+	var mp4_path := str(item.get("mp4_path", "")).strip_edges()
+	if _local_upload_status_label:
+		_local_upload_status_label.text = tr("UI_UPLOAD_PREVIEW_OPENING")
+	call_deferred("_open_video_preview_deferred", mp4_path)
+
+
+func _open_video_preview_deferred(mp4_path: String) -> void:
+	clear_pointer()
+	if _open_video_preview(mp4_path):
+		return
+	if _local_upload_status_label:
+		_local_upload_status_label.text = tr("UI_UPLOAD_PREVIEW_FAILED")
+
+
+func _on_local_upload_confirm_pressed() -> void:
+	if _local_file_menu_mode == LOCAL_FILE_MODE_DELETE:
+		_delete_selected_local_sessions()
+		return
+	var selected := []
+	for index in _local_upload_selection.keys():
+		var i := int(index)
+		if i >= 0 and i < _local_upload_sessions.size():
+			selected.append(_local_upload_sessions[i])
+	if selected.is_empty():
+		return
+	manual_upload_requested.emit(selected, get_options())
+	close()
+	if _local_upload_status_label:
+		_local_upload_status_label.text = tr("UI_UPLOAD_MANUAL_QUEUED") % selected.size()
+	if _local_upload_upload_button:
+		_local_upload_upload_button.disabled = true
+
+
+func _on_local_upload_close_pressed() -> void:
+	_show_upload_main_menu()
+
+
+func _delete_selected_local_sessions() -> void:
+	var selected_indices := _local_upload_selection.keys()
+	if selected_indices.is_empty():
+		return
+	var deleted := 0
+	var failed := 0
+	for index in selected_indices:
+		var i := int(index)
+		if i < 0 or i >= _local_upload_sessions.size():
+			continue
+		var item: Dictionary = _local_upload_sessions[i]
+		if _delete_local_session(item):
+			deleted += 1
+		else:
+			failed += 1
+	_local_upload_selection.clear()
+	_refresh_local_upload_list()
+	_refresh_storage_usage()
+	if _local_upload_status_label:
+		if failed > 0:
+			_local_upload_status_label.text = tr("UI_STORAGE_DELETE_RESULT_WITH_FAILED") % [deleted, failed]
+		else:
+			_local_upload_status_label.text = tr("UI_STORAGE_DELETE_RESULT") % deleted
+
+
+func _delete_local_session(item: Dictionary) -> bool:
+	var save_root := _configured_save_root()
+	var session_dir := str(item.get("session_dir", "")).strip_edges()
+	var mp4_path := str(item.get("mp4_path", "")).strip_edges()
+	var ok := true
+	if not session_dir.is_empty() and not _path_is_inside(session_dir, save_root):
+		return false
+	if not mp4_path.is_empty() and not _path_is_inside(mp4_path, save_root):
+		return false
+	if not session_dir.is_empty() and DirAccess.dir_exists_absolute(session_dir):
+		ok = _remove_path_recursive(session_dir) and ok
+	if not mp4_path.is_empty() and FileAccess.file_exists(mp4_path):
+		if session_dir.is_empty() or not _path_is_inside(mp4_path, session_dir):
+			ok = DirAccess.remove_absolute(mp4_path) == OK and ok
+	return ok
+
+
+func _remove_path_recursive(path: String) -> bool:
+	if path.is_empty():
+		return false
+	if FileAccess.file_exists(path):
+		return DirAccess.remove_absolute(path) == OK
+	if not DirAccess.dir_exists_absolute(path):
+		return true
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return false
+	var ok := true
+	dir.list_dir_begin()
+	while true:
+		var entry := dir.get_next()
+		if entry.is_empty():
+			break
+		if entry == "." or entry == "..":
+			continue
+		var child := path.path_join(entry)
+		if dir.current_is_dir():
+			ok = _remove_path_recursive(child) and ok
+		else:
+			ok = DirAccess.remove_absolute(child) == OK and ok
+	dir.list_dir_end()
+	ok = DirAccess.remove_absolute(path) == OK and ok
+	return ok
+
+
+func _path_is_inside(path: String, root: String) -> bool:
+	var clean_path := ProjectSettings.globalize_path(path).simplify_path()
+	var clean_root := ProjectSettings.globalize_path(root).simplify_path()
+	while clean_root.length() > 1 and clean_root.ends_with("/"):
+		clean_root = clean_root.substr(0, clean_root.length() - 1)
+	return clean_path == clean_root or clean_path.begins_with("%s/" % clean_root)
+
+
+func _open_video_preview(path: String) -> bool:
+	if path.is_empty() or not FileAccess.file_exists(path):
+		return false
+	var plugin := _resolve_storage_plugin()
+	if plugin != null:
+		var opened: Variant = plugin.call("openVideoInSystemPlayer", path)
+		if bool(opened):
+			return true
+	if OS.get_name() == "Android":
+		return false
+	var global_path := ProjectSettings.globalize_path(path)
+	var err := OS.shell_open(global_path)
+	if err != OK:
+		err = OS.shell_open("file://%s" % global_path)
+	return err == OK
+
+
+func scroll_by_pixels(delta_pixels: float) -> bool:
+	if _local_upload_view != null and _local_upload_view.visible:
+		return _scroll_container_by_pixels(_local_upload_scroll, delta_pixels)
+	return super.scroll_by_pixels(delta_pixels)
+
+
+func _reset_local_upload_scroll() -> void:
+	if _local_upload_scroll:
+		_local_upload_scroll.scroll_vertical = 0
+
+
+func _scan_local_upload_sessions() -> Array:
+	var root := _configured_save_root()
+	var dir := DirAccess.open(root)
+	if dir == null:
+		return []
+	var sessions: Array = []
+	dir.list_dir_begin()
+	while true:
+		var entry := dir.get_next()
+		if entry.is_empty():
+			break
+		if entry == "." or entry == ".." or entry.begins_with("."):
+			continue
+		if not dir.current_is_dir():
+			continue
+		var session_dir := root.path_join(entry)
+		var manifest_path := session_dir.path_join("manifest.json")
+		if not FileAccess.file_exists(manifest_path):
+			continue
+		var mp4_path := _mp4_path_for_local_session(root, entry, manifest_path)
+		if mp4_path.is_empty() or not FileAccess.file_exists(mp4_path):
+			continue
+		var bytes := _file_size(mp4_path)
+		if bytes <= 0:
+			continue
+		sessions.append({
+			"session_id": entry,
+			"session_dir": session_dir,
+			"mp4_path": mp4_path,
+			"bytes": bytes,
+			"modified": FileAccess.get_modified_time(mp4_path),
+			"label": "%s  %s" % [entry, _format_bytes(bytes)],
+		})
+	dir.list_dir_end()
+	sessions.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("modified", 0)) > int(b.get("modified", 0))
+	)
+	var limit := _local_file_session_limit()
+	if limit > 0 and sessions.size() > limit:
+		sessions = sessions.slice(0, limit)
+	return sessions
+
+
+func _mp4_path_for_local_session(root: String, session_id: String, manifest_path: String) -> String:
+	var manifest := _read_json_object(manifest_path)
+	var output_mp4 := str(manifest.get("output_mp4_path", "")).strip_edges()
+	if not output_mp4.is_empty() and _path_is_inside(output_mp4, root) and FileAccess.file_exists(output_mp4):
+		return output_mp4
+	var artifacts_value: Variant = manifest.get("artifacts", {})
+	var artifacts: Dictionary = artifacts_value if artifacts_value is Dictionary else {}
+	var media_value: Variant = artifacts.get("media", {})
+	var media: Dictionary = media_value if media_value is Dictionary else {}
+	var filename := str(media.get("filename", "")).strip_edges()
+	if not filename.is_empty():
+		var candidate := filename if filename.begins_with("/") else root.path_join(filename)
+		if _path_is_inside(candidate, root) and FileAccess.file_exists(candidate):
+			return candidate
+	var fallback := root.path_join("%s.mp4" % session_id)
+	return fallback if FileAccess.file_exists(fallback) else ""
+
+
+func _local_file_session_limit() -> int:
+	return MAX_LOCAL_STORAGE_SESSIONS if _local_file_menu_mode == LOCAL_FILE_MODE_DELETE else MAX_LOCAL_UPLOAD_SESSIONS
+
+
+func _read_json_object(path: String) -> Dictionary:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return {}
+	var text := f.get_as_text()
+	f.close()
+	var parsed: Variant = JSON.parse_string(text)
+	return parsed if parsed is Dictionary else {}
+
+
+func _file_size(path: String) -> int:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return 0
+	var size := int(f.get_length())
+	f.close()
+	return size
+
+
+func _format_bytes(bytes: int) -> String:
+	var value := float(bytes)
+	var units := ["B", "KB", "MB", "GB"]
+	var unit := 0
+	while value >= 1024.0 and unit < units.size() - 1:
+		value /= 1024.0
+		unit += 1
+	if unit == 0:
+		return "%d %s" % [int(value), units[unit]]
+	return "%.1f %s" % [value, units[unit]]
 
 
 func _configured_save_root() -> String:
@@ -608,8 +1290,13 @@ static func _default_options() -> Dictionary:
 		"stereo_rgb": true,
 		"record_depth": true,
 		"record_head_pose": true,
+		# Hand vs. controller capture is mutually exclusive (see
+		# INPUT_SOURCE_MUTEX). The runtime defaults to the controllers
+		# interaction mode, so we ship with controllers on and hands off;
+		# selecting hands in the panel auto-disables controllers and
+		# persists that choice.
 		"record_controller_pose": true,
-		"record_hand_data": true,
+		"record_hand_data": false,
 		"record_body_tracking": true,
 		"record_motion_trackers": true,
 		"max_motion_trackers": 3,
@@ -622,6 +1309,7 @@ static func _default_options() -> Dictionary:
 		"server_result_port": DEFAULT_LIVE_RESULT_PORT,
 		"server_auth_token": "",
 		"save_controller_hand_sidecar": false,
+		"save_body_sidecar": false,
 		"save_root": DEFAULT_SAVE_ROOT,
 		"upload_url": "",
 		"upload_token": "",
@@ -748,7 +1436,7 @@ func _add_live_connect_button(row: HBoxContainer) -> Button:
 ## scan survives an app restart even if the user never taps Save (this used
 ## to be the source of confusion: scan succeeded but the config still showed
 ## the old URL the next time the panel opened). See `claw/issues/...`.
-func set_upload_url_from_scan(url: String, token: String = "", enable_auto_upload: bool = false) -> void:
+func set_upload_url_from_scan(url: String, token: String = "", enable_auto_upload: bool = false, mark_ready: bool = true) -> void:
 	if _upload_url == null:
 		return
 	var trimmed := url.strip_edges()
@@ -756,6 +1444,10 @@ func set_upload_url_from_scan(url: String, token: String = "", enable_auto_uploa
 		return
 	_upload_url.text = trimmed
 	_upload_token = token
+	if mark_ready:
+		_mark_upload_url_ready(trimmed)
+	else:
+		_clear_upload_url_ready()
 	if enable_auto_upload and _stream_toggles.has("upload_on_finalize"):
 		(_stream_toggles["upload_on_finalize"] as CheckButton).button_pressed = true
 	# Persist immediately so the scanned endpoint is part of the saved config
@@ -1080,12 +1772,15 @@ func _trigger_upload_health_check() -> void:
 	if _upload_url != null:
 		url = _upload_url.text.strip_edges()
 	if url.is_empty():
+		_clear_upload_url_ready()
 		# Nothing configured — collapse the status row entirely so we don't
 		# show stale "OK" text from a previous URL the user just cleared.
 		_upload_status_label.text = ""
 		_upload_status_label.visible = false
 		return
 	if not (url.begins_with("http://") or url.begins_with("https://")):
+		_clear_upload_url_ready()
+		_enforce_auto_upload_ready(false)
 		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_INVALID_URL"), "error")
 		return
 	if _upload_health_request == null:
@@ -1097,6 +1792,8 @@ func _trigger_upload_health_check() -> void:
 	# open() calls don't deliver stale callbacks.
 	if _upload_health_request.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
 		_upload_health_request.cancel_request()
+	_clear_upload_url_ready()
+	_upload_health_pending_url = url
 	set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_CHECKING"), "normal")
 	# Tus-Resumable in the *request* is recommended by the TUS spec for
 	# OPTIONS probes. Many ingest servers also accept a plain OPTIONS.
@@ -1104,13 +1801,23 @@ func _trigger_upload_health_check() -> void:
 		"User-Agent: ego-uploader/1.0 (godot)",
 		"Tus-Resumable: 1.0.0",
 	])
+	if not _upload_token.is_empty():
+		headers.append("Authorization: Bearer %s" % _upload_token)
 	var err := _upload_health_request.request(url, headers, HTTPClient.METHOD_OPTIONS)
 	if err != OK:
+		_upload_health_pending_url = ""
 		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_REQUEST_FAILED") % err, "error")
 
 
 func _on_upload_health_completed(result: int, response_code: int, headers: PackedStringArray, _body: PackedByteArray) -> void:
+	var checked_url := _upload_health_pending_url
+	_upload_health_pending_url = ""
+	var current_url := _upload_url.text.strip_edges() if _upload_url != null else ""
+	if checked_url.is_empty() or current_url != checked_url:
+		return
 	if result != HTTPRequest.RESULT_SUCCESS:
+		_clear_upload_url_ready()
+		_enforce_auto_upload_ready(false)
 		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_NETWORK_ERROR") % result, "error")
 		return
 	# Look for Tus-Resumable / Tus-Version response headers (case-insensitive).
@@ -1128,15 +1835,21 @@ func _on_upload_health_completed(result: int, response_code: int, headers: Packe
 		if name == "tus-resumable" and tus_version.is_empty():
 			tus_version = h.substr(idx + 1).strip_edges()
 	if not tus_version.is_empty():
+		_mark_upload_url_ready(checked_url)
 		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_TUS_OK") % tus_version, "success")
 		return
 	if response_code >= 200 and response_code < 400:
+		_mark_upload_url_ready(checked_url)
 		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_OK") % response_code, "success")
 	elif response_code >= 400 and response_code < 500:
 		# Reachable but rejected the probe. Plenty of perfectly fine ingest
 		# servers return 401/404 to OPTIONS — flag as warning, not error.
+		_clear_upload_url_ready()
+		_enforce_auto_upload_ready(false)
 		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_HTTP_WARN") % response_code, "warning")
 	else:
+		_clear_upload_url_ready()
+		_enforce_auto_upload_ready(false)
 		set_upload_connectivity_status(tr("UI_UPLOAD_HEALTH_HTTP_ERROR") % response_code, "error")
 
 

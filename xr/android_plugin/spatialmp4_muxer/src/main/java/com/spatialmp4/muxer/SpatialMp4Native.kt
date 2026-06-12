@@ -27,6 +27,10 @@ object SpatialMp4Native {
         controllerPoseExpected: Boolean,
         handJointsExpected: Boolean,
         controllerInputExpected: Boolean,
+        // v4: when true the writer pre-creates the `mett` body-joints track
+        // (handler `spatialmp4:body_joints:body`); payloads arrive via
+        // nativeWriteTimedMetadata on TRACK_BODY_JOINTS.
+        bodyJointsExpected: Boolean,
         rgbIcam: ByteArray,
         rgbEcam: ByteArray,
         rgbDstr: ByteArray,

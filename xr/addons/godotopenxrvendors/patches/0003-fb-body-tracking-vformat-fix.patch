@@ -1,0 +1,30 @@
+Fix vformat() call in openxr_fb_body_tracking_extension_wrapper.cpp
+
+The ERR_FAIL_COND_MSG path for xrLocateBodyJointsFB() passed a second
+argument to vformat() without a corresponding "%s" placeholder in the
+format string. Godot's String::format raises
+"not all arguments converted during string formatting" the first time
+xrLocateBodyJointsFB() returns a failure, and the wrapper then spams the
+error every frame (~90Hz) for as long as the runtime keeps failing.
+
+That is what fills xr/scripts logcat with stacks pointing at
+openxr_fb_body_tracking_extension_wrapper.cpp:382 during OpenXR session
+start-up on Quest 3 (XR_ERROR_POSE_INVALID window) and during any
+transient body-tracking outage.
+
+Adding the missing "%s" makes vformat() succeed, the error message
+becomes useful ("Failed to get body joint locations: <error>"), and the
+log noise stops.
+
+diff --git a/plugin/src/main/cpp/extensions/openxr_fb_body_tracking_extension_wrapper.cpp b/plugin/src/main/cpp/extensions/openxr_fb_body_tracking_extension_wrapper.cpp
+--- a/plugin/src/main/cpp/extensions/openxr_fb_body_tracking_extension_wrapper.cpp
++++ b/plugin/src/main/cpp/extensions/openxr_fb_body_tracking_extension_wrapper.cpp
+@@ -379,7 +379,7 @@
+
+ 	// Read the weights
+ 	XrResult result = xrLocateBodyJointsFB(body_tracker, &locate_info, &locations);
+-	ERR_FAIL_COND_MSG(XR_FAILED(result), vformat("Failed to get body joint locations: ", get_openxr_api()->get_error_string(result)));
++	ERR_FAIL_COND_MSG(XR_FAILED(result), vformat("Failed to get body joint locations: %s", get_openxr_api()->get_error_string(result)));
+
+ 	// Set the tracking active flag
+ 	xr_body_tracker->set_has_tracking_data(locations.isActive);

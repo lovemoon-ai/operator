@@ -2,9 +2,11 @@ extends OpenXRCompositionLayerQuad
 class_name CompositionViewportUI
 
 const NO_POINTER := Vector2(-1.0, -1.0)
+const TARGET_GROUP := "operator_interaction_target"
 const COL_ACCENT := Color(1.0, 0.647, 0.169, 0.98)
 const COL_ACCENT_MUTED := Color(1.0, 0.647, 0.169, 0.78)
 
+var interaction_priority := 50
 var _viewport: SubViewport
 var _viewport_size := Vector2i.ZERO
 var _cursor: Panel
@@ -21,6 +23,7 @@ func _setup_viewport_layer(
 		layer_sort_order: int,
 		cursor_size: float = 18.0
 ) -> SubViewport:
+	add_to_group(TARGET_GROUP)
 	_viewport_size = viewport_size
 	quad_size = quad_size_m
 	alpha_blend = true
@@ -88,6 +91,14 @@ func clear_pointer() -> void:
 	if _cursor:
 		_cursor.visible = false
 	_on_pointer_cleared()
+
+
+func get_interaction_priority() -> int:
+	return interaction_priority
+
+
+func is_interaction_target_visible() -> bool:
+	return is_inside_tree() and visible
 
 
 func get_ray_hit_point(ray_origin: Vector3, ray_direction: Vector3) -> Vector3:

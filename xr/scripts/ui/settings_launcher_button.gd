@@ -10,6 +10,7 @@ var _button: Button
 
 
 func _init() -> void:
+	interaction_priority = 30
 	var viewport := _setup_viewport_layer("SettingsButtonViewport", VIEWPORT_SIZE, Vector2(0.08, 0.08), 3, 10.0)
 	_build_button(viewport)
 	visible = false

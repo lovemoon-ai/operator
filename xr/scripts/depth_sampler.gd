@@ -4,6 +4,8 @@ class_name DepthSampler
 @export var request_interval_sec := 0.2
 
 var writer: Object
+# WP4: canonical-frame sink (default: FrameWriterShim over `writer`).
+var _frame_sink: Object
 var _extension: Object
 var _timer := 0.0
 var _started := false
@@ -17,6 +19,7 @@ var _convert_us := 0
 var _native_convert_plugin: Object
 var _native_convert_checked := false
 var _capture_provider: Object
+var _platform: Object
 var _extension_name := ""
 var _drop_count := 0
 var _last_drop_reason := ""
@@ -45,28 +48,30 @@ func pop_metrics() -> Dictionary:
 	return metrics
 
 
-func configure(p_writer: Object, p_capture_provider: Object = null) -> void:
+func configure(p_writer: Object, p_capture_provider: Object = null, p_platform: Object = null) -> void:
 	writer = p_writer
+	_frame_sink = FrameWriterShim.new(writer) if writer != null else null
 	_capture_provider = p_capture_provider
-	for singleton_name in [
-		"OpenXRMetaEnvironmentDepthExtensionWrapper",
-		"OpenXRMetaEnvironmentDepthExtension",
-		"OpenXRAndroidEnvironmentDepthExtensionWrapper",
-		"OpenXRAndroidEnvironmentDepthExtension"
-	]:
-		if Engine.has_singleton(singleton_name):
-			_extension = Engine.get_singleton(singleton_name)
-			_extension_name = singleton_name
-			print("DepthSampler bound %s" % singleton_name)
-			break
+	# WP2: vendor singleton probing moved to the platform layer (same probe
+	# order as before — see QuestPlatformAdapter.DEPTH_SINGLETONS).
+	_platform = p_platform if p_platform != null else PlatformRegistry.shared()
+	var info: Dictionary = _platform.depth_extension_info()
+	if not info.is_empty():
+		_extension = info.get("extension")
+		_extension_name = str(info.get("name", ""))
+		print("DepthSampler bound %s" % _extension_name)
+
+
+func set_frame_sink(sink: Object) -> void:
+	_frame_sink = sink
 
 
 func _resolve_xr_time_offset_ns() -> int:
 	if _xr_time_offset_resolved:
 		return _xr_time_offset_ns
 	var plugin := _capture_provider
-	if plugin == null and Engine.has_singleton("QuestCapturePlugin"):
-		plugin = Engine.get_singleton("QuestCapturePlugin")
+	if plugin == null and _platform != null:
+		plugin = _platform.fallback_capture_provider()
 	if plugin == null:
 		return 0
 	# Skip `has_method()` checks here: Godot's Android singleton wrapper does
@@ -111,7 +116,7 @@ func stop() -> void:
 
 
 func pump(delta: float) -> void:
-	if writer == null or _extension == null or not _started or _request_pending:
+	if _frame_sink == null or _extension == null or not _started or _request_pending:
 		return
 
 	if not _extension.has_method("get_environment_depth_map_async"):
@@ -129,7 +134,7 @@ func pump(delta: float) -> void:
 
 func _on_depth_map(data: Array) -> void:
 	_request_pending = false
-	if writer == null or not _started:
+	if _frame_sink == null or not _started:
 		return
 
 	var cb_start := Time.get_ticks_usec()
@@ -206,7 +211,7 @@ func _on_depth_map(data: Array) -> void:
 				"count": _empty_conversion_count
 			})
 			continue
-		writer.write_depth_frame(timestamp_ns, eye, "", image.get_width(), image.get_height(), metadata, depth_u16_mm)
+		_frame_sink.on_frame(DepthFrame.build(timestamp_ns, eye, image.get_width(), image.get_height(), metadata, depth_u16_mm))
 		_frame_count += 1
 	_callback_us += Time.get_ticks_usec() - cb_start
 
@@ -231,8 +236,8 @@ func _resolve_native_convert_plugin() -> Object:
 	_native_convert_checked = true
 	if _capture_provider != null:
 		_native_convert_plugin = _capture_provider
-	elif Engine.has_singleton("QuestCapturePlugin"):
-		var plugin := Engine.get_singleton("QuestCapturePlugin")
+	elif _platform != null:
+		var plugin: Object = _platform.fallback_capture_provider()
 		if plugin != null:
 			_native_convert_plugin = plugin
 	return _native_convert_plugin

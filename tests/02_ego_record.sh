@@ -26,7 +26,8 @@
 #                      legacy override when ADB_SERIAL/PICO_SERIAL are unset.
 #   CAPTURE_SECONDS     recording duration baked into the CI APK (default 12).
 #   OUTPUT_DIR          artifact directory (default tests/logs/ego-record-<stamp>).
-#   SKIP_BUILD=1        use the existing xr/build/<kind>/Operator.apk.
+#   SKIP_BUILD=1        use the existing xr/build/<kind>/Operator-ci.apk
+#                       (clean APK at .../Operator.apk is also reused if present).
 #   SKIP_INSTALL=1      assume the correct APK is already installed.
 #   SKIP_DEVICE=1       validate existing OUTPUT_DIR/session/SpatialMP4 only.
 #   KEEP_CI_APK=1       do not reinstall the clean APK after the run.
@@ -83,7 +84,8 @@ REMOTE_CAPTURE_ROOT="${DEVICE_ROOT:-/sdcard/Movies/SpatialMP4}"
 REMOTE_SESSION_DIR=""
 REMOTE_FINAL_MP4=""
 
-APK_PATH=""           # filled in by configure_device_kind
+APK_PATH=""           # clean (production) APK; filled in by configure_device_kind
+CI_APK_PATH=""        # CI auto-record APK; filled in by configure_device_kind
 MAKE_TARGET=""        # build-quest / build-pico
 EXPECTED_DEVICE_PREFIX=""  # quest / pico — used by validator
 CLEAN_APK_PATH="$OUTPUT_DIR/Operator-clean.apk"
@@ -94,11 +96,13 @@ configure_device_kind() {
   case "$DEVICE_KIND" in
     quest)
       APK_PATH="$XR_DIR/build/quest/Operator.apk"
+      CI_APK_PATH="$XR_DIR/build/quest/Operator-ci.apk"
       MAKE_TARGET="build-quest"
       EXPECTED_DEVICE_PREFIX="quest"
       ;;
     pico)
       APK_PATH="$XR_DIR/build/pico/Operator.apk"
+      CI_APK_PATH="$XR_DIR/build/pico/Operator-ci.apk"
       MAKE_TARGET="build-pico"
       EXPECTED_DEVICE_PREFIX="pico"
       ;;
@@ -365,6 +369,104 @@ injected = (
 if needle not in text:
     raise SystemExit("AUTO_START_FOR_DEVICE_TEST capture_options hook not found")
 text = text.replace(needle, injected, 1)
+
+# CI-only: defer start_capture() until Quest head-pose tracking is stable.
+# In the AUTO_START_FOR_DEVICE_TEST branch _ready() fires call_deferred(
+# "start_capture") within ~4s of process launch, but Quest's TrackingLostMgr
+# may still be reporting "tracking lost" at that point (it typically only
+# resumes ~5s post-launch). Opening the RGB camera + audio + body tracker
+# while tracking is still lost causes vrshell to steal focus to show the
+# guardianless-app NUX, which triggers APPLICATION_PAUSED, which the existing
+# _notification PAUSE handler treats as "headset doffed -> finalize". Real
+# users never hit this race because they click Record manually well after
+# tracking has settled. Wait for tracking-confidence != NONE for 0.75s of
+# stable readings (15s timeout fallback so the test cannot hang forever).
+start_capture_needle = (
+    '\t\tcall_deferred("start_capture")\n'
+    '\t\t_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)\n'
+)
+start_capture_replacement = (
+    '\t\t_ci_start_when_tracking_stable()\n'
+    '\t\t_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)\n'
+)
+if start_capture_needle not in text:
+    raise SystemExit(
+        "AUTO_START_FOR_DEVICE_TEST start_capture hook not found"
+    )
+text = text.replace(start_capture_needle, start_capture_replacement, 1)
+
+# CI-only: do not finalize on the first APPLICATION_PAUSED. Quest sends
+# transient PAUSEs whenever vrshell steals focus (guardian NUX, system
+# toasts, focus loss). Production code never enters this branch because
+# AUTO_START_FOR_DEVICE_TEST defaults to false. We record the pause
+# timestamp instead and only finalize on RESUMED if the pause persisted
+# longer than 30s (the "headset actually doffed" case the original handler
+# was guarding against).
+pause_needle = (
+    '\tif what == NOTIFICATION_APPLICATION_PAUSED and _recording:\n'
+    '\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: paused, finalizing recording")\n'
+    '\t\tstop_capture()\n'
+)
+pause_replacement = (
+    '\tif what == NOTIFICATION_APPLICATION_PAUSED and _recording:\n'
+    '\t\t_ci_paused_at_unix_us = int(Time.get_unix_time_from_system() * 1000000.0)\n'
+    '\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: paused (deferring finalize, awaiting RESUMED)")\n'
+    '\telif what == NOTIFICATION_APPLICATION_RESUMED and _recording and _ci_paused_at_unix_us > 0:\n'
+    '\t\tvar paused_s := float(int(Time.get_unix_time_from_system() * 1000000.0) - _ci_paused_at_unix_us) / 1000000.0\n'
+    '\t\t_ci_paused_at_unix_us = 0\n'
+    '\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: resumed after %.2fs pause" % paused_s)\n'
+    '\t\tif paused_s > 30.0:\n'
+    '\t\t\tprint("AUTO_STOP_FOR_DEVICE_TEST: pause exceeded 30s, finalizing")\n'
+    '\t\t\tstop_capture()\n'
+)
+if pause_needle not in text:
+    raise SystemExit("AUTO_STOP_FOR_DEVICE_TEST pause hook not found")
+text = text.replace(pause_needle, pause_replacement, 1)
+
+# CI-only: helper functions + state variable used by the two patches above.
+# Appended at file scope so GDScript parses them as part of the class.
+text += '''
+
+# --- CI test scaffolding injected by tests/02_ego_record.sh ---
+
+var _ci_paused_at_unix_us: int = 0
+
+
+func _ci_start_when_tracking_stable() -> void:
+\tprint("AUTO_START_FOR_DEVICE_TEST: waiting for XR head pose to stabilize")
+\tvar wait_start_us := Time.get_ticks_usec()
+\tvar stable_start_us := 0
+\tvar timeout_us := 15 * 1000000
+\tvar stable_us := 750 * 1000
+\twhile is_inside_tree() and Time.get_ticks_usec() - wait_start_us < timeout_us:
+\t\tif _ci_xr_head_pose_confident():
+\t\t\tif stable_start_us <= 0:
+\t\t\t\tstable_start_us = Time.get_ticks_usec()
+\t\t\telif Time.get_ticks_usec() - stable_start_us >= stable_us:
+\t\t\t\tvar waited_s := float(Time.get_ticks_usec() - wait_start_us) / 1000000.0
+\t\t\t\tprint("AUTO_START_FOR_DEVICE_TEST: XR tracking stable after %.2fs" % waited_s)
+\t\t\t\tstart_capture()
+\t\t\t\treturn
+\t\telse:
+\t\t\tstable_start_us = 0
+\t\tawait get_tree().create_timer(0.1).timeout
+\tpush_warning("AUTO_START_FOR_DEVICE_TEST: tracking stability wait timed out; starting capture anyway")
+\tstart_capture()
+
+
+func _ci_xr_head_pose_confident() -> bool:
+\tvar tracker := XRServer.get_tracker(&"head")
+\tif not (tracker is XRPositionalTracker):
+\t\treturn false
+\tvar positional := tracker as XRPositionalTracker
+\tif not positional.has_pose(&"default"):
+\t\treturn false
+\tvar pose := positional.get_pose(&"default")
+\tif pose == null:
+\t\treturn false
+\treturn int(pose.get_tracking_confidence()) != XRPose.XR_TRACKING_CONFIDENCE_NONE
+'''
+
 path.write_text(text)
 PY
   if [ "$EXPECT_AUDIO" = "1" ]; then
@@ -375,6 +477,18 @@ PY
 }
 
 build_clean_apk() {
+  # Reuse the cached production APK if it already exists. APK_PATH is set per
+  # platform by configure_device_kind (quest: xr/build/quest/Operator.apk,
+  # pico: xr/build/pico/Operator.apk), so the same check covers both. Saves
+  # ~3-6 min per test run; the CI-patched build that follows always rebuilds
+  # via flip_auto_start_on, so the source state on disk remains clean.
+  if [ -f "$APK_PATH" ]; then
+    step "Reuse existing clean ${DEVICE_KIND} APK ($APK_PATH)"
+    cp -f "$APK_PATH" "$CLEAN_APK_PATH"
+    CLEAN_APK_READY=1
+    ok "clean APK reused from $APK_PATH"
+    return 0
+  fi
   step "Build clean ${DEVICE_KIND} APK ($MAKE_TARGET)"
   (cd "$XR_DIR" && "$MAKE" "$MAKE_TARGET" 2>&1 | tee "$OUTPUT_DIR/build-clean.log")
   if [ ! -f "$APK_PATH" ]; then
@@ -395,14 +509,21 @@ build_ci_apk() {
     err "APK export did not produce $APK_PATH"
     exit 2
   fi
-  ok "CI APK ready: $APK_PATH"
+  # Move the CI-patched output to its own path so the clean APK at
+  # $APK_PATH is never overwritten across runs. The next call to
+  # build_clean_apk can then safely fast-path on $APK_PATH existence.
+  mv -f "$APK_PATH" "$CI_APK_PATH"
+  if [ "$CLEAN_APK_READY" = "1" ] && [ -f "$CLEAN_APK_PATH" ]; then
+    cp -f "$CLEAN_APK_PATH" "$APK_PATH"
+  fi
+  ok "CI APK ready: $CI_APK_PATH"
 }
 
 install_ci_apk() {
   step "Install CI APK"
-  run_adb install -r -d "$APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-install.log"
+  run_adb install -r -d "$CI_APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-install.log"
   DEVICE_NEEDS_CLEAN=1
-  ok "installed $PKG on $SERIAL"
+  ok "installed $PKG (CI) on $SERIAL"
 }
 
 reinstall_clean_apk() {
@@ -865,6 +986,22 @@ def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         passed("capture option record_depth=true")
     else:
         failed("capture option record_depth=true", repr(options.get("record_depth")))
+    # Body tracking defaults: ON for both providers in the current code base
+    # (Quest goes through the godot-openxr-meta vendor AAR + XR_FB_body_tracking,
+    # Pico goes through pico_openxr + XR_BD_body_tracking). save_body_sidecar
+    # defaults OFF — the sidecar JSONL is only useful when the operator wants
+    # the frame-level body_flags + PICO velocity/acceleration extras that the
+    # mp4 mett payload does not carry.
+    if options.get("record_body_tracking") is True:
+        passed("capture option record_body_tracking=true")
+    else:
+        failed("capture option record_body_tracking=true", repr(options.get("record_body_tracking")))
+    if "save_body_sidecar" in options:
+        if options.get("save_body_sidecar") is False:
+            passed("capture option save_body_sidecar=false (default)")
+        else:
+            warned("capture option save_body_sidecar=true",
+                   "sidecar JSONL will be written next to the mp4")
     if expect_audio:
         if options.get("record_audio") is True:
             passed("capture option record_audio=true")
@@ -980,6 +1117,104 @@ def check_depth(session_dir: Path) -> list[dict[str, Any]]:
     else:
         failed("depth frame index non-empty")
     return rows
+
+
+def check_body_tracking_source(manifest: dict[str, Any], options: dict[str, Any]) -> None:
+    # session_spool_writer patches manifest.sources.body_tracking at close()
+    # with the runtime info collected by body_motion_sampler.get_runtime_info():
+    #   observed_runtime ∈ {"", "pico_bd", "godot_xr_body_tracker"}
+    #   extension        : "pico_bd_body_tracking" | "meta_fb_body_tracking" | ""
+    #   joint_set        : "pico_bd_24" | "godot_xr_body_tracker_v1" | ""
+    #   joint_count      : 24 / 87 / 0
+    #   runtime_body_flags (godot path only) : XRBodyTracker.body_flags bitfield
+    # When record_body_tracking is off, sources.body_tracking is absent —
+    # both states are valid and tested below.
+    sources = manifest.get("sources") or {}
+    body = sources.get("body_tracking")
+    if options.get("record_body_tracking") is not True:
+        if body is None:
+            passed("manifest.sources.body_tracking absent when tracking off")
+        else:
+            warned("manifest.sources.body_tracking present despite tracking off", repr(body))
+        return
+    if not isinstance(body, dict):
+        failed("manifest.sources.body_tracking present", repr(body))
+        return
+    passed("manifest.sources.body_tracking present")
+
+    observed = str(body.get("observed_runtime", "")).strip()
+    if expected_device_prefix == "pico":
+        expected_runtime = "pico_bd"
+        expected_joint_set = "pico_bd_24"
+        expected_extension = "pico_bd_body_tracking"
+        expected_joint_count = 24
+    elif expected_device_prefix == "quest":
+        expected_runtime = "godot_xr_body_tracker"
+        expected_joint_set = "godot_xr_body_tracker_v1"
+        expected_extension = "meta_fb_body_tracking"
+        expected_joint_count = 87
+    else:
+        expected_runtime = ""
+        expected_joint_set = ""
+        expected_extension = ""
+        expected_joint_count = 0
+
+    if observed == "":
+        # No body sample reached the writer this session — could be transient
+        # (HMT off-head briefly), runtime quirk, or a real regression in the
+        # sampler / vendor AAR. We can't disambiguate from artefacts alone,
+        # so flag as a WARN rather than FAIL.
+        warned(
+            "body_tracking.observed_runtime is non-empty",
+            "sampler observed zero body frames this session; check head-mount + permission",
+        )
+        return
+
+    if observed == expected_runtime:
+        passed("body_tracking.observed_runtime", observed)
+    else:
+        failed(
+            "body_tracking.observed_runtime",
+            f"got {observed!r}, expected {expected_runtime!r} for --device {expected_device_prefix}",
+        )
+    if str(body.get("joint_set", "")) == expected_joint_set:
+        passed("body_tracking.joint_set", expected_joint_set)
+    else:
+        failed("body_tracking.joint_set", f"got {body.get('joint_set')!r}, expected {expected_joint_set!r}")
+    if str(body.get("extension", "")) == expected_extension:
+        passed("body_tracking.extension", expected_extension)
+    else:
+        failed("body_tracking.extension", f"got {body.get('extension')!r}, expected {expected_extension!r}")
+    try:
+        joint_count = int(body.get("joint_count") or 0)
+    except (TypeError, ValueError):
+        joint_count = 0
+    if joint_count == expected_joint_count:
+        passed("body_tracking.joint_count", str(joint_count))
+    else:
+        failed("body_tracking.joint_count", f"got {joint_count}, expected {expected_joint_count}")
+
+    if expected_device_prefix == "quest":
+        # runtime_body_flags is XRBodyTracker.body_flags — at minimum we
+        # require UPPER_BODY_SUPPORTED (bit 0, value 1). LOWER (2) and HANDS (4)
+        # are nice-to-have and reported as WARN so a Quest 3 without IK-inferred
+        # lower body (e.g. older firmware) doesn't fail CI.
+        try:
+            body_flags = int(body.get("runtime_body_flags") or 0)
+        except (TypeError, ValueError):
+            body_flags = 0
+        if body_flags & 1:
+            passed("body_tracking.runtime_body_flags has UPPER", f"flags={body_flags}")
+        else:
+            failed("body_tracking.runtime_body_flags has UPPER", f"flags={body_flags}")
+        for name, bit in (("LOWER", 2), ("HANDS", 4)):
+            if body_flags & bit:
+                passed(f"body_tracking.runtime_body_flags has {name}", f"flags={body_flags}")
+            else:
+                warned(
+                    f"body_tracking.runtime_body_flags has {name}",
+                    f"flags={body_flags} — full-body extension may be unavailable",
+                )
 
 
 def check_device_block(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1163,6 +1398,26 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
             passed("MP4 contains depth stream", f"{depth.get('codec_name')}/{depth.get('codec_tag_string')}")
         else:
             failed("MP4 contains depth stream")
+    # Body joints mett track: the muxer pre-creates `spatialmp4:body_joints:body`
+    # whenever SessionConfig.bodyJointsExpected=true (i.e. record_body_tracking
+    # is on). We check the handler_name because mov muxer drops timed-metadata
+    # streams that received zero packets at av_write_trailer time — so when the
+    # OpenXR body runtime never produces a frame (no permission, runtime not
+    # initialised, …) the track disappears even though it was allocated. That
+    # is a real, user-visible regression we want to catch here.
+    if options.get("record_body_tracking") is True:
+        body_mett = [
+            s for s in mett
+            if (s.get("tags") or {}).get("handler_name") == "spatialmp4:body_joints:body"
+        ]
+        if body_mett:
+            passed("MP4 contains body_joints mett track")
+        else:
+            handlers = [str((s.get("tags") or {}).get("handler_name", "?")) for s in mett]
+            failed(
+                "MP4 contains body_joints mett track",
+                f"handler_name list={handlers}",
+            )
     if wants_head_pose(options):
         if mett:
             passed("MP4 contains timed metadata stream", f"{len(mett)} mett stream(s)")
@@ -1264,6 +1519,7 @@ if not manifest_path.exists() or not timebase_path.exists():
 manifest = safe_json(manifest_path)
 timebase = safe_json(timebase_path)
 options = check_manifest(manifest)
+check_body_tracking_source(manifest, options)
 device = check_device_block(manifest)
 check_timebase(timebase)
 check_required_files(session_dir, mp4, options)
@@ -1306,9 +1562,9 @@ main() {
     build_clean_apk
     build_ci_apk
   else
-    warn "SKIP_BUILD=1; using existing $APK_PATH (must already be a CI auto-record APK)"
-    if [ ! -f "$APK_PATH" ]; then
-      err "missing APK: $APK_PATH"
+    warn "SKIP_BUILD=1; using existing $CI_APK_PATH (must already be a CI auto-record APK)"
+    if [ ! -f "$CI_APK_PATH" ]; then
+      err "missing CI APK: $CI_APK_PATH (run without SKIP_BUILD=1 first)"
       exit 2
     fi
   fi

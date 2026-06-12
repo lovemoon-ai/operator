@@ -1,0 +1,32 @@
+{
+  "id": "sink_spatialmp4",
+  "feature": "operator_feature_sink_spatialmp4",
+  "owner": "sinks/spatialmp4",
+  "required_features": [],
+  "required_capabilities": [
+    "SPATIAL_MP4_MUX"
+  ],
+  "test_cases": [
+    {
+      "id": "sink_spatialmp4.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "sink_spatialmp4.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    },
+    {
+      "id": "capture.sink_failure_during_recording",
+      "level": "integration",
+      "suite": "capture.pipeline",
+      "module": "core/capture",
+      "fixture": "synthetic_walk_pose_stream",
+      "script": "res://tests/integration/capture/sink_failure_during_recording_test.gd"
+    }
+  ]
+}

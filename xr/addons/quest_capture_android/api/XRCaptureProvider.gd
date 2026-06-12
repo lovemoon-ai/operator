@@ -101,6 +101,12 @@ func get_storage_usage_json(path: String) -> String:
 	return str(_plugin.call("getStorageUsageJson", path))
 
 
+func open_video_in_system_player(path: String) -> bool:
+	if _plugin == null:
+		return false
+	return bool(_plugin.call("openVideoInSystemPlayer", path))
+
+
 # ---- session configure / camera lifecycle ---------------------------------
 
 func configure_spatialmp4_session(

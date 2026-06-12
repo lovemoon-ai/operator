@@ -22,6 +22,7 @@
 #include <Eigen/Cholesky>
 #include <Eigen/Geometry>
 #include <Eigen/QR>
+#include <Eigen/SVD>
 
 #include <algorithm>
 #include <cmath>
@@ -326,21 +327,39 @@ bool variant_to_rot(const godot::Variant &v, Eigen::Matrix3d &out) {
     } else {
         return false;
     }
-    // Re-orthogonalize against drift. HouseholderQR's Q factor is *an*
-    // orthogonal matrix near the input (not the Frobenius-closest one —
-    // that's the polar decomposition / SVD — but for the 1e-6 drift we
-    // expect from accumulated Godot Basis composes either is fine, and
-    // QR is cheaper). If a caller hands us a 5° off-axis "rotation" the
-    // QR-projected output is still on SO(3) but may not be the obvious
-    // nearest rotation; document that upstream if it matters.
-    Eigen::HouseholderQR<Eigen::Matrix3d> qr(out);
-    Eigen::Matrix3d Q = qr.householderQ();
-    // Fix improper rotations: if det(Q) ≈ -1 (reflection), flip the last
-    // column so we land on SO(3) rather than O(3).
-    if (Q.determinant() < 0.0) {
-        Q.col(2) *= -1.0;
+    // Re-orthogonalize against drift, but ONLY when drift is detected.
+    //
+    // The previous implementation always ran HouseholderQR on `out` and
+    // took Q. For an arbitrary orthonormal R, HouseholderQR does NOT
+    // generally give Q = R — it gives some Q such that R = Q · R'_upper,
+    // and the column signs of Q depend on Householder's sign-stability
+    // convention in a way that frequently differs from R. The follow-up
+    // ``if (det(Q) < 0) Q.col(2) *= -1`` can then turn a clean rotation
+    // into a reflection composed with rotation, which is a totally
+    // different SO(3) element. That bug was the root cause of L7/L8b
+    // smoke-test divergence when the wrist task had ``weight_rot > 0``.
+    //
+    // The right reprojection is the polar factor of `out` (from SVD),
+    // which IS the Frobenius-closest SO(3) element. We pay the SVD cost
+    // only when drift exceeds a tiny threshold; clean inputs (a fresh
+    // Eigen ``toRotationMatrix()``, a Godot ``Basis(Quaternion)``, or
+    // ``data.get_frame_transform()``) skip the re-projection entirely.
+    const double orthonormal_err = (out.transpose() * out
+                                    - Eigen::Matrix3d::Identity()).squaredNorm();
+    const double det_err = std::abs(out.determinant() - 1.0);
+    if (orthonormal_err > 1.0e-10 || det_err > 1.0e-6) {
+        Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+                out, Eigen::ComputeFullU | Eigen::ComputeFullV);
+        Eigen::Matrix3d U = svd.matrixU();
+        Eigen::Matrix3d V = svd.matrixV();
+        Eigen::Matrix3d S = Eigen::Matrix3d::Identity();
+        // Polar factor on SO(3): if det(U V^T) < 0 we'd land on O(3)
+        // minus SO(3), so flip the smallest singular direction.
+        if ((U * V.transpose()).determinant() < 0.0) {
+            S(2, 2) = -1.0;
+        }
+        out = U * S * V.transpose();
     }
-    out = Q;
     return true;
 }
 

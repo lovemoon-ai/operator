@@ -1,0 +1,31 @@
+{
+  "id": "mode_teleop",
+  "feature": "operator_feature_mode_teleop",
+  "owner": "app/modes",
+  "required_features": [],
+  "required_capabilities": [],
+  "test_cases": [
+    {
+      "id": "mode_teleop.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "mode_teleop.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd",
+      "fixture": "fake_platform_pico_like"
+    },
+    {
+      "id": "teleop.control_mode_mapping",
+      "level": "unit",
+      "suite": "teleop.mapping",
+      "module": "core/teleop",
+      "fixture": "fake_robot_descriptor_so101",
+      "script": "res://tests/unit/teleop/control_mode_mapping_test.gd"
+    }
+  ]
+}

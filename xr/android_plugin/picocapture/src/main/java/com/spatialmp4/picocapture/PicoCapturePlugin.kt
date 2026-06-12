@@ -26,6 +26,7 @@ import android.util.Log
 import android.util.Size
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.spatialmp4.capturecommon.CapturedYuvFrame
 import com.spatialmp4.capturecommon.ChromaLayout
 import com.spatialmp4.capturecommon.DeviceIdentity
@@ -97,6 +98,13 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private val metricEncoderPairsOffered = AtomicLong(0L)
     private val metricEncoderMonoOffered = AtomicLong(0L)
     private val metricEncoderPacketsOut = AtomicLong(0L)
+    // Per-reason reject counters for submitOpenXrRgbaFrame so silent frame
+    // drops on the XR_PICO_camera_image path show up in popMetricsJson().
+    private val metricOxrRejectNotAccepting = AtomicLong(0L)
+    private val metricOxrRejectNoConfig = AtomicLong(0L)
+    private val metricOxrRejectBadSize = AtomicLong(0L)
+    private val metricOxrRejectBadBuffer = AtomicLong(0L)
+    private val metricOxrRejectNoEncoder = AtomicLong(0L)
 
     override fun getPluginName(): String = "PicoCapturePlugin"
 
@@ -358,6 +366,34 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     }
 
     @UsedByGodot
+    fun openVideoInSystemPlayer(path: String): Boolean {
+        val activity = mainActivity ?: return false
+        if (path.isBlank()) {
+            emitSignal("camera_error", "Video preview path is empty")
+            return false
+        }
+        val file = File(path)
+        if (!file.isFile) {
+            emitSignal("camera_error", "Video preview file does not exist: $path")
+            return false
+        }
+        return try {
+            val authority = "${activity.packageName}.fileprovider"
+            val uri = FileProvider.getUriForFile(activity, authority, file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "video/mp4")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(intent)
+            true
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to open video preview: $path", error)
+            emitSignal("camera_error", "Failed to open video preview: ${error.message}")
+            false
+        }
+    }
+
+    @UsedByGodot
     fun requestCameraPermission() {
         val activity = mainActivity ?: return
         val missing = requiredRuntimePermissions().filter {
@@ -512,22 +548,33 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         bytesPerPixel: Int,
         rgba: ByteArray
     ): Boolean {
-        if (!acceptingFrames) return false
+        if (!acceptingFrames) {
+            metricOxrRejectNotAccepting.incrementAndGet()
+            return false
+        }
         val normalizedEye = if (eye == "right") "right" else "left"
-        val config = openXrCameraConfigs[normalizedEye] ?: return false
+        val config = openXrCameraConfigs[normalizedEye] ?: run {
+            metricOxrRejectNoConfig.incrementAndGet()
+            return false
+        }
         if (width != config.size.width || height != config.size.height) {
+            metricOxrRejectBadSize.incrementAndGet()
             emitSignal("camera_error", "Dropping OpenXR $normalizedEye frame with unexpected size ${width}x$height")
             return false
         }
         val timestampNs = openXrTimeToGodotTicksNs(xrTimeNs)
         val frame = rgbaToYuvFrame(normalizedEye, timestampNs, width, height, stride, bytesPerPixel, rgba)
         if (frame == null) {
+            metricOxrRejectBadBuffer.incrementAndGet()
             emitSignal("camera_error", "Dropping OpenXR $normalizedEye frame with invalid RGBA buffer")
             return false
         }
         if (normalizedEye == "left") metricCameraFramesLeft.incrementAndGet()
         else metricCameraFramesRight.incrementAndGet()
-        hevcEncoder?.offer(frame) ?: return false
+        hevcEncoder?.offer(frame) ?: run {
+            metricOxrRejectNoEncoder.incrementAndGet()
+            return false
+        }
         writeFrameIndex(normalizedEye, config, timestampNs, xrTimeNs, width, height)
         emitSignal("camera_frame_saved", normalizedEye, finalMp4Path?.absolutePath ?: "", timestampNs)
         return true
@@ -618,6 +665,11 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("enc_pairs_in", metricEncoderPairsOffered.getAndSet(0L))
             .put("enc_mono_in", metricEncoderMonoOffered.getAndSet(0L))
             .put("enc_packets_out", metricEncoderPacketsOut.getAndSet(0L))
+            .put("oxr_rej_not_accepting", metricOxrRejectNotAccepting.getAndSet(0L))
+            .put("oxr_rej_no_config", metricOxrRejectNoConfig.getAndSet(0L))
+            .put("oxr_rej_bad_size", metricOxrRejectBadSize.getAndSet(0L))
+            .put("oxr_rej_bad_buffer", metricOxrRejectBadBuffer.getAndSet(0L))
+            .put("oxr_rej_no_encoder", metricOxrRejectNoEncoder.getAndSet(0L))
             .toString()
     }
 
@@ -743,7 +795,10 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             rgbDstr = rgbSideData.dstr,
             deviceType = deviceIdentity.type,
             deviceModel = deviceIdentity.model,
-            deviceManufacturer = deviceIdentity.manufacturer
+            deviceManufacturer = deviceIdentity.manufacturer,
+            // v4: pre-allocate the mp4 body-joints mett track whenever the host
+            // asked for body tracking; payloads flow from GDScript at ~30 Hz.
+            bodyJointsExpected = recordBodyTracking
         )
         if (!sink.startSession(sessionConfig)) {
             return false

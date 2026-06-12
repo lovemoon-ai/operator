@@ -1,0 +1,30 @@
+{
+  "id": "robot_control",
+  "feature": "operator_feature_robot_control",
+  "owner": "core/teleop",
+  "required_features": [],
+  "required_capabilities": [],
+  "test_cases": [
+    {
+      "id": "robot_control.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "robot_control.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    },
+    {
+      "id": "teleop.command_output",
+      "level": "integration",
+      "suite": "teleop.mapping",
+      "module": "core/teleop",
+      "fixture": "fake_robot_descriptor_so101",
+      "script": "res://tests/integration/teleop/command_output_test.gd"
+    }
+  ]
+}
