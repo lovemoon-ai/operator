@@ -3,6 +3,7 @@ package com.lovemoon.qrscanner
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.content.pm.PermissionInfo
 import android.graphics.Bitmap
 import android.os.Build
 import android.graphics.ImageFormat
@@ -131,19 +132,20 @@ internal fun computeQrBounds(
  *     thread (on startScan / stopScan).
  *
  * Permission handling:
- *   The headset camera on Quest 3 / Pico 4 is gated by *two* runtime
- *   permissions: standard `android.permission.CAMERA` AND a vendor
- *   "headset/passthrough camera" permission. Just declaring the vendor
- *   permission in the manifest is not enough — Horizon OS classifies
- *   `horizonos.permission.HEADSET_CAMERA` as dangerous, so it has to be
- *   requested at runtime separately. Same story on PicoOS for
- *   `com.picovr.permission.CAMERA` on the SKUs that enforce it.
+ *   Camera2 scanning on Quest is gated by standard `android.permission.CAMERA`
+ *   plus Horizon OS's dangerous `horizonos.permission.HEADSET_CAMERA` runtime
+ *   permission. Pico QR scanning does not open Camera2: the GDScript overlay
+ *   pumps XR_PICO_camera_image frames into decodeExternalRgbaFrame(), so the
+ *   only runtime permission we can reliably request is the same standard
+ *   CAMERA permission used by PicoCapturePlugin. Pico vendor camera
+ *   entitlements still live in the merged manifest, but most Pico permission
+ *   names are normal/signature permissions and will never be granted through
+ *   requestPermissions().
  *
- *   We resolve the per-device permission set dynamically: each candidate
- *   is filtered through PackageManager.getPermissionInfo() so a Quest-only
- *   permission isn't required on a Pico device (and vice versa) — that
- *   would otherwise wedge `hasCameraPermission()` at false forever
- *   because the permission can never be granted.
+ *   We resolve the per-device permission set dynamically and only include
+ *   vendor permissions that are actually dangerous runtime permissions.
+ *   Quest keeps a manufacturer fallback because Horizon OS builds have
+ *   hidden HEADSET_CAMERA from PackageManager on some releases.
  *
  *   If any required permission is missing, hasCameraPermission() returns
  *   false; the GDScript overlay calls requestCameraPermission() to pop
@@ -170,11 +172,9 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         private const val META_CAMERA_POSITION_LEFT = 0
         private const val META_CAMERA_POSITION_RIGHT = 1
 
-        // Vendor passthrough/headset camera permissions. We probe each
-        // through PackageManager.getPermissionInfo() at request time and
-        // only require the ones the running device actually defines —
-        // so a Quest binary doesn't get permanently stuck waiting for
-        // the Pico permission to be granted, and vice versa.
+        // Vendor passthrough/headset camera permissions. At runtime we only
+        // request dangerous permissions; normal/signature vendor entitlements
+        // are manifest-only and cannot be granted by requestPermissions().
         private const val PERM_HEADSET_CAMERA = "horizonos.permission.HEADSET_CAMERA"
         private const val PERM_PICOVR_CAMERA = "com.picovr.permission.CAMERA"
         private val VENDOR_CAMERA_PERMISSIONS = listOf(
@@ -366,20 +366,17 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
      * Per-device required runtime permission set.
      *
      * - Standard `android.permission.CAMERA` is always required.
-     * - `horizonos.permission.HEADSET_CAMERA` (Meta Quest) and
-     *   `com.picovr.permission.CAMERA` (Pico) are vendor passthrough
-     *   permissions; we include each only when the running device
-     *   actually needs it. Adding an unsupported vendor permission to
-     *   this list is fatal — Android silently auto-denies unknown
-     *   permission names, which would wedge hasCameraPermission() at
-     *   false forever and the user could never start the scanner.
-     *
-     * Detection has two independent signals; either is enough:
-     *   1. PackageManager.getPermissionInfo() recognises the perm.
-     *   2. Build.MANUFACTURER / BRAND matches the vendor (fallback for
-     *      Horizon OS builds where the vendor perm is declared in a
-     *      system partition that getPermissionInfo() doesn't surface to
-     *      apps — we hit exactly this on Quest 3 / v68+).
+     * - `horizonos.permission.HEADSET_CAMERA` is required on Quest because
+     *   Horizon OS treats it as a dangerous runtime permission. Some Quest
+     *   builds hide it from getPermissionInfo(), so we keep a manufacturer
+     *   fallback there.
+     * - `com.picovr.permission.CAMERA` is *not* required just because the
+     *   device is Pico. On current Pico builds it can appear in the merged
+     *   manifest via the OpenXR loader, but requestPermissions() cannot grant
+     *   it as a normal/signature permission; requiring it wedged QR scanning
+     *   at "camera permission needed" even after PicoCapturePlugin had already
+     *   obtained android.permission.CAMERA for recording. Only require it if
+     *   the runtime explicitly reports it as dangerous.
      *
      * All three perms are declared in our merged manifest already; this
      * function only decides which ones we treat as required at runtime.
@@ -393,42 +390,45 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         val isPico = mfr.contains("pico") || mfr.contains("bytedance") ||
             brand.contains("pico")
         for (vendor in VENDOR_CAMERA_PERMISSIONS) {
-            val probeKnown = isPermissionDefined(ctx, vendor)
-            val deviceMatches = when (vendor) {
-                PERM_HEADSET_CAMERA -> isQuest
-                PERM_PICOVR_CAMERA -> isPico
-                else -> false
-            }
-            if (probeKnown || deviceMatches) {
+            val info = permissionInfoOrNull(ctx, vendor)
+            val dangerous = isDangerousPermission(info)
+            val questFallback = vendor == PERM_HEADSET_CAMERA && isQuest
+            if (dangerous || questFallback) {
                 out.add(vendor)
                 Log.i(
                     TAG,
-                    "requiring vendor permission $vendor (probe=$probeKnown deviceMatches=$deviceMatches mfr=$mfr brand=$brand)",
+                    "requiring vendor permission $vendor (dangerous=$dangerous questFallback=$questFallback isPico=$isPico mfr=$mfr brand=$brand)",
                 )
             } else {
                 Log.i(
                     TAG,
-                    "skipping vendor permission $vendor (probe=false deviceMatches=false mfr=$mfr brand=$brand)",
+                    "skipping vendor permission $vendor (dangerous=false questFallback=false isPico=$isPico mfr=$mfr brand=$brand)",
                 )
             }
         }
         return out
     }
 
-    private fun isPermissionDefined(ctx: Activity, name: String): Boolean {
+    private fun permissionInfoOrNull(ctx: Activity, name: String): PermissionInfo? {
         return try {
             ctx.packageManager.getPermissionInfo(name, 0)
-            true
         } catch (_: PackageManager.NameNotFoundException) {
-            false
+            null
         } catch (t: Throwable) {
             // Defensive — some OEM stubs throw RuntimeException on unknown
             // permission lookups instead of NameNotFoundException. Treat
             // every failure as "probe inconclusive"; the Build.MANUFACTURER
             // signal in requiredRuntimePermissions() is the real safety net.
             Log.w(TAG, "getPermissionInfo($name) threw; treating as undefined", t)
-            false
+            null
         }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isDangerousPermission(info: PermissionInfo?): Boolean {
+        if (info == null) return false
+        return (info.protectionLevel and PermissionInfo.PROTECTION_MASK_BASE) ==
+            PermissionInfo.PROTECTION_DANGEROUS
     }
 
     @UsedByGodot
@@ -650,18 +650,94 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
         val width = image.width
         val height = image.height
         val out = copyLumaPlane(image)
+        processLumaFrame(out, width, height)
+    }
 
-        val previewPath = maybeWritePreviewFrame(out, width, height)
+    /**
+     * Decode one externally-captured RGBA8888 frame.
+     *
+     * Pico path: PicoOS does not expose the passthrough cameras through
+     * Camera2, so startScan()'s pickCameraId() finds nothing usable there.
+     * Instead the GDScript overlay pumps frames out of the OpenXR
+     * XR_PICO_camera_image extension (PicoOpenXRExtension GDExtension)
+     * and pushes them here. This entry point therefore deliberately does
+     * NOT require `running` or a Camera2 session — the caller owns the
+     * camera lifecycle; we only own decode + preview/frozen-frame +
+     * signal emission, which is the same tail the Camera2 path uses.
+     *
+     * Threading: called on the Godot main thread. The Camera2 path
+     * decodes on `cameraHandler`, but the two sources are mutually
+     * exclusive by construction (a device either has a Camera2
+     * passthrough id or it routes through this entry point), so sharing
+     * `reader`/`multiReader`/`lastDecodeAtMs` without extra locking is
+     * safe in practice.
+     *
+     * Returns true iff the frame was accepted (valid + not throttled)
+     * and at least one QR code decoded. Detections are still delivered
+     * via the qr_detections signal like the Camera2 path.
+     */
+    @UsedByGodot
+    fun decodeExternalRgbaFrame(width: Int, height: Int, stride: Int, pixelStride: Int, data: ByteArray): Boolean {
+        if (width <= 0 || height <= 0) return false
+        val px = if (pixelStride > 0) pixelStride else 4
+        // The native extension already normalizes stride >= width * px;
+        // re-derive defensively so a zero/garbage stride can't make us
+        // walk the buffer with the wrong row pitch.
+        val rowStride = if (stride >= width * px) stride else width * px
+        // Last byte we touch is the B channel of the bottom-right pixel.
+        val required = (height - 1).toLong() * rowStride + (width - 1).toLong() * px + 3
+        if (data.size < required) {
+            Log.w(TAG, "decodeExternalRgbaFrame: short buffer ${data.size} < $required (${width}x$height stride=$rowStride px=$px)")
+            return false
+        }
+        // Same decode throttle as the Camera2 path. The GDScript pump is
+        // already paced (~10 fps), but a misbehaving caller shouldn't be
+        // able to spin ZXing on every render frame.
+        val now = System.currentTimeMillis()
+        if (now - lastDecodeAtMs < DECODE_INTERVAL_MS) return false
+        lastDecodeAtMs = now
+        // RGBA → luma with integer BT.601 ((77R + 150G + 29B) >> 8).
+        // True luminance instead of a G-only shortcut: QR codes rendered
+        // in saturated colors (red/blue on white is common on phone
+        // screens) keep their module contrast under BT.601 but can
+        // flatten into the background if only green is sampled. The
+        // integer form costs three multiplies per pixel — negligible at
+        // 640x480 @ ~10 fps.
+        val luma = ByteArray(width * height)
+        var dst = 0
+        for (y in 0 until height) {
+            var src = y * rowStride
+            for (x in 0 until width) {
+                val r = data[src].toInt() and 0xff
+                val g = data[src + 1].toInt() and 0xff
+                val b = data[src + 2].toInt() and 0xff
+                luma[dst] = ((77 * r + 150 * g + 29 * b) shr 8).toByte()
+                dst += 1
+                src += px
+            }
+        }
+        return processLumaFrame(luma, width, height)
+    }
+
+    /**
+     * Shared decode tail for both frame sources — Camera2 (Quest) and
+     * externally-pumped RGBA frames (Pico). Takes a tight (stride ==
+     * width) luma buffer; handles preview snapshots, ZXing decode, the
+     * frozen detection frame, and signal emission. Returns true when at
+     * least one QR code was decoded from this frame.
+     */
+    private fun processLumaFrame(luma: ByteArray, width: Int, height: Int): Boolean {
+        val previewPath = maybeWritePreviewFrame(luma, width, height)
         if (previewPath.isNotEmpty()) {
             emitOnGodotThread {
                 emitSignal("qr_preview_frame", previewPath)
             }
         }
 
-        val decoded = decodeAllSources(out, width, height)
-        if (decoded.isEmpty()) return
+        val decoded = decodeAllSources(luma, width, height)
+        if (decoded.isEmpty()) return false
         Log.i(TAG, "qr detected count=${decoded.size}")
-        lastDetectedFramePath = writeFrozenFrame(out, width, height)
+        lastDetectedFramePath = writeFrozenFrame(luma, width, height)
         val batch = JSONArray()
         for ((text, result) in decoded) {
             batch.put(
@@ -685,6 +761,7 @@ class QRScannerPlugin(godot: Godot) : GodotPlugin(godot) {
                 )
             }
         }
+        return true
     }
 
     private fun decodeAllSources(luma: ByteArray, width: Int, height: Int): LinkedHashMap<String, DecodedQr> {

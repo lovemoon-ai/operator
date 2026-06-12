@@ -27,6 +27,7 @@ import android.util.Log
 import android.util.Size
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.spatialmp4.capturecommon.AudioCapture
 import com.spatialmp4.capturecommon.CapturedYuvFrame
 import com.spatialmp4.capturecommon.ChromaLayout
@@ -86,6 +87,13 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var recordControllerPose = true
     private var recordHandData = true
     private var recordControllerInput = true
+    // v4: Quest body tracking via Meta OpenXR XR_FB_body_tracking +
+    // XR_META_body_tracking_full_body. Default on so the operator does not have
+    // to discover the option; the panel can still uncheck it. The actual joint
+    // sample loop runs in body_motion_sampler.gd's fallback path (Godot
+    // XRBodyTracker @ /user/body_tracker), which the Meta XR vendor AAR
+    // populates whenever the runtime grants the permission.
+    private var recordBodyTracking = true
     private var recordAudio = false
     private var audioChannelLayout: com.spatialmp4.contract.AudioChannelLayout =
         com.spatialmp4.contract.AudioChannelLayout.STEREO
@@ -142,7 +150,21 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     fun isDepthCaptureSupported(): Boolean = true
 
     @UsedByGodot
-    fun isBodyMotionCaptureSupported(): Boolean = false
+    fun isBodyMotionCaptureSupported(): Boolean = true
+
+    // GDScript counterpart of PicoCapturePlugin.setBodyMotionCaptureOptions —
+    // accepts the same wire shape so capture_app.gd can call it without a
+    // provider switch. Quest only honours the body-tracking flag (no motion
+    // trackers / no max-count), the rest is ignored.
+    @UsedByGodot
+    fun setBodyMotionCaptureOptions(
+        recordBodyTracking: Boolean,
+        @Suppress("UNUSED_PARAMETER") recordMotionTrackers: Boolean,
+        @Suppress("UNUSED_PARAMETER") maxMotionTrackerCount: Int
+    ): Boolean {
+        this.recordBodyTracking = recordBodyTracking
+        return true
+    }
 
     override fun getPluginSignals(): Set<SignalInfo> {
         return setOf(
@@ -512,6 +534,34 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             sum += directorySize(child)
         }
         return sum
+    }
+
+    @UsedByGodot
+    fun openVideoInSystemPlayer(path: String): Boolean {
+        val activity = mainActivity ?: return false
+        if (path.isBlank()) {
+            emitSignal("camera_error", "Video preview path is empty")
+            return false
+        }
+        val file = File(path)
+        if (!file.isFile) {
+            emitSignal("camera_error", "Video preview file does not exist: $path")
+            return false
+        }
+        return try {
+            val authority = "${activity.packageName}.fileprovider"
+            val uri = FileProvider.getUriForFile(activity, authority, file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "video/mp4")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            activity.startActivity(intent)
+            true
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to open video preview: $path", error)
+            emitSignal("camera_error", "Failed to open video preview: ${error.message}")
+            false
+        }
     }
 
     @UsedByGodot
@@ -923,7 +973,13 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             deviceModel = deviceIdentity.model,
             deviceManufacturer = deviceIdentity.manufacturer,
             audioExpected = audioGate,
-            audioChannelLayoutCode = audioChannelLayout.code
+            audioChannelLayoutCode = audioChannelLayout.code,
+            // v4: Quest body tracking runs through Godot's XRBodyTracker
+            // populated by the Meta vendor AAR's XR_FB_body_tracking +
+            // XR_META_body_tracking_full_body extensions. The capture_app +
+            // body_motion_sampler GDScript path is identical to PICO; we just
+            // gate the mp4 body-joints mett track on the host's flag.
+            bodyJointsExpected = recordBodyTracking
         )
         if (!sink.startSession(sessionConfig)) {
             // sink already logged + emitted; nothing more to do.

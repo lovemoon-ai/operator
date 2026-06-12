@@ -13,11 +13,10 @@
 const nextConfig = {
   reactStrictMode: true,
   transpilePackages: ["@love-moon/ego-ingest"],
-  // Honor NEXT_DIST_DIR so deploy.sh can build into `.next.build` and
-  // atomically swap it onto `.next`, mirroring conductor's
-  // deploy-prod.sh pattern. Without this env-driven override Next
-  // ignores the directory and writes straight into `.next`, defeating
-  // the atomicity guard.
+  // Honor NEXT_DIST_DIR so a build pipeline can target `.next.build`
+  // and atomically swap it onto `.next`. Without this env-driven
+  // override Next ignores the directory and writes straight into
+  // `.next`, defeating the atomicity guard.
   distDir: process.env.NEXT_DIST_DIR ?? ".next",
   webpack(config) {
     config.resolve.extensionAlias = {

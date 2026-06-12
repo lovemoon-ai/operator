@@ -1,4 +1,5 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
@@ -9,6 +10,36 @@
          manifest carries this through to the final APK. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Meta Quest body tracking: required for OpenXR XR_FB_body_tracking
+         (upper-body, 70 joints) and XR_META_body_tracking_full_body (adds
+         IK-inferred lower body for 84 joints total). The export preset
+         flips meta_xr_features/body_tracking=1 so the Godot Meta XR loader
+         requests both extensions when the runtime supports them; this
+         permission is what unlocks the actual body samples in the headset.
+
+         The Meta runtime explicitly checks for the matching uses-feature
+         tag at xrEnumerateInstanceExtensionProperties time and will skip
+         XR_FB_body_tracking with this exact logcat warning if the feature
+         is missing:
+           "xrEnumerateInstanceExtensionProperties: skipping extension
+            `XR_FB_body_tracking` due to: missing uses-feature string
+            `com.oculus.software.body_tracking` from AndroidManifest"
+         The godot-openxr-meta vendor AAR is supposed to inject this tag
+         when meta_xr_features/body_tracking >= 1, but in Godot 4.5 +
+         current vendor AAR the injection does not actually reach the
+         merged manifest — see the logcat above. We declare it ourselves so
+         the merge step picks it up regardless of vendor-side handling.
+         required="false" so non-Quest providers (PICO, future) still
+         install the same APK. tools:replace forces our required="false" to
+         win the merge against any future vendor-AAR injection that lands
+         with required="true" (manifest merger's default rule is "stricter
+         required wins", which would lock PICO out of the build). -->
+    <uses-permission android:name="com.oculus.permission.BODY_TRACKING" />
+    <uses-feature
+        android:name="com.oculus.software.body_tracking"
+        android:required="false"
+        tools:replace="android:required" />
 
     <application>
         <meta-data

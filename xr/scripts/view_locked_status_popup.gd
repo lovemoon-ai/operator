@@ -1,20 +1,20 @@
-extends OpenXRCompositionLayerQuad
+extends "res://scripts/ui/composition_viewport_ui.gd"
 class_name ViewLockedStatusPopup
 
-const VIEWPORT_SIZE := Vector2i(720, 220)
+signal cancel_requested
 
-var _viewport: SubViewport
+const VIEWPORT_SIZE := Vector2i(720, 270)
+
 var _title_label: Label
 var _path_label: Label
 var _panel_style: StyleBoxFlat
 var _progress_bar: ProgressBar
+var _cancel_button: Button
 var _hide_seconds := 0.0
 
 
 func _init() -> void:
-	quad_size = Vector2(0.56, 0.171)
-	alpha_blend = true
-	sort_order = 4
+	_setup_viewport_layer("StatusPopupViewport", VIEWPORT_SIZE, Vector2(0.56, 0.21), 4, 14.0)
 	visible = false
 	_build_viewport()
 
@@ -38,6 +38,8 @@ func show_saved_path(path: String, duration_seconds: float = 2.0) -> void:
 	if _progress_bar:
 		_progress_bar.visible = false
 		_progress_bar.value = 0.0
+	if _cancel_button:
+		_cancel_button.visible = false
 	_hide_seconds = duration_seconds
 	visible = true
 
@@ -51,11 +53,13 @@ func show_error(message: String, duration_seconds: float = 4.0) -> void:
 	if _progress_bar:
 		_progress_bar.visible = false
 		_progress_bar.value = 0.0
+	if _cancel_button:
+		_cancel_button.visible = false
 	_hide_seconds = duration_seconds
 	visible = true
 
 
-func show_upload_progress(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0) -> void:
+func show_upload_progress(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0, cancelable: bool = false) -> void:
 	_panel_style.bg_color = Color(0.055, 0.067, 0.08, 0.96)
 	_panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
 	_title_label.text = title
@@ -72,19 +76,17 @@ func show_upload_progress(title: String, detail: String, progress: float, level:
 	if _progress_bar:
 		_progress_bar.visible = progress >= 0.0
 		_progress_bar.value = clampf(progress, 0.0, 1.0) * 100.0
+	if _cancel_button:
+		_cancel_button.visible = cancelable
 	_hide_seconds = duration_seconds if duration_seconds > 0.0 else -1.0
 	visible = true
 
 
-func _build_viewport() -> void:
-	_viewport = SubViewport.new()
-	_viewport.name = "StatusPopupViewport"
-	_viewport.size = VIEWPORT_SIZE
-	_viewport.transparent_bg = true
-	_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-	add_child(_viewport)
-	layer_viewport = _viewport
+func accepts_pointer() -> bool:
+	return _cancel_button != null and _cancel_button.visible
 
+
+func _build_viewport() -> void:
 	var panel := PanelContainer.new()
 	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	_panel_style = StyleBoxFlat.new()
@@ -130,3 +132,19 @@ func _build_viewport() -> void:
 	_progress_bar.min_value = 0.0
 	_progress_bar.max_value = 100.0
 	content.add_child(_progress_bar)
+
+	_cancel_button = Button.new()
+	_cancel_button.text = tr("UI_CANCEL_UPLOAD")
+	_cancel_button.custom_minimum_size = Vector2(180, 46)
+	_cancel_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_cancel_button.add_theme_font_size_override("font_size", 20)
+	_cancel_button.visible = false
+	_cancel_button.pressed.connect(_on_cancel_pressed)
+	content.add_child(_cancel_button)
+	if _cursor:
+		_cursor.move_to_front()
+
+
+func _on_cancel_pressed() -> void:
+	_play_feedback("click")
+	cancel_requested.emit()

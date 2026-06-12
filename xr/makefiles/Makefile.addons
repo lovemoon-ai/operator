@@ -104,6 +104,7 @@ DEPS_SCRIPT ?= ../scripts/sync_deps.sh
 # godot-cpp / ffmpeg / godot-xr-tools source + build artifacts across branches
 # and conductor worktrees instead of rebuilding per-checkout.
 OPERATOR_DEPS_CACHE_ROOT ?= ../.deps
+OPERATOR_DEPS_CACHE_ROOT_ABS := $(abspath $(OPERATOR_DEPS_CACHE_ROOT))
 DEPS_SRC_DIR := $(abspath $(OPERATOR_DEPS_CACHE_ROOT)/src)
 DEPS_BUILD_DIR := $(abspath $(OPERATOR_DEPS_CACHE_ROOT)/build)
 GODOT_XR_TOOLS_ADDON := $(DEPS_SRC_DIR)/godot-xr-tools/addons/godot-xr-tools
@@ -191,7 +192,7 @@ $(AHB_ADDON_SO): $(AHB_SRC)
 	    echo "[ahb] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
 	    exit 1; \
 	fi; \
-	$(AHB_DIR)/build.sh Release
+	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(AHB_DIR)/build.sh Release
 
 $(AHB_JNI_SO): $(AHB_ADDON_SO)
 	@mkdir -p $(@D)
@@ -212,7 +213,7 @@ $(GODOT_MUJOCO_ADDON_SO): $(GODOT_MUJOCO_SRC)
 	    echo "[godot-mujoco] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
 	    exit 1; \
 	fi; \
-	$(GODOT_MUJOCO_DIR)/build.sh Release
+	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(GODOT_MUJOCO_DIR)/build.sh Release
 
 $(GODOT_MUJOCO_ADDON_LIB): $(GODOT_MUJOCO_ADDON_SO)
 	@test -s $@ || { echo "[godot-mujoco] missing $@ after build" >&2; exit 1; }
@@ -243,7 +244,7 @@ $(PICO_OPENXR_ADDON_SO): $(PICO_OPENXR_SRC)
 	    echo "[pico-openxr] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
 	    exit 1; \
 	fi; \
-	$(PICO_OPENXR_DIR)/build.sh Release
+	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(PICO_OPENXR_DIR)/build.sh Release
 
 $(PICO_OPENXR_JNI_SO): $(PICO_OPENXR_ADDON_SO)
 	@mkdir -p $(@D)
@@ -311,7 +312,7 @@ $(PINOCCHIO_ADDON_SO): $(PINOCCHIO_SRC) $(PINOCCHIO_LIB)
 	    echo "[pinocchio-gdext] ANDROID_NDK / ANDROID_NDK_HOME / ANDROID_NDK_ROOT must be set to build $@" >&2; \
 	    exit 1; \
 	fi; \
-	$(PINOCCHIO_DIR)/build.sh Release
+	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(PINOCCHIO_DIR)/build.sh Release
 
 # Wrapper build.sh already drops the wrapper + libpinocchio_default.so into
 # android/build/libs/<abi>/ AND into addons/pinocchio/, so the JNI sentinels
@@ -347,7 +348,7 @@ build-capture-plugins: $(FFMPEG_LIB)
 		addons/live-push/bin \
 		addons/spatialmp4_muxer/bin \
 		addons/qr_scanner/bin
-	cd android_plugin && GRADLE_USER_HOME=$(GRADLE_USER_HOME) $(CAPTURE_GRADLE) \
+	cd android_plugin && OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" GRADLE_USER_HOME=$(GRADLE_USER_HOME) $(CAPTURE_GRADLE) \
 		:contract:jar \
 		:capture_common:assembleDebug :capture_common:assembleRelease \
 		:questcapture:assembleDebug :questcapture:assembleRelease \

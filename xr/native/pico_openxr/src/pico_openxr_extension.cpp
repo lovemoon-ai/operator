@@ -13,6 +13,14 @@
 #include <thread>
 #include <vector>
 
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define PROBE_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Operator-PROBE", __VA_ARGS__)
+#else
+#include <cstdio>
+#define PROBE_LOG(...) do { fprintf(stderr, "[Operator-PROBE] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#endif
+
 using namespace godot;
 
 namespace {
@@ -84,6 +92,8 @@ void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("stop_body_tracking"), &PicoOpenXRExtension::stop_body_tracking);
 	ClassDB::bind_method(D_METHOD("start_body_tracking_calibration_app"), &PicoOpenXRExtension::start_body_tracking_calibration_app);
 	ClassDB::bind_method(D_METHOD("sample_body_joints"), &PicoOpenXRExtension::sample_body_joints);
+	ClassDB::bind_method(D_METHOD("probe_view_space_pose"), &PicoOpenXRExtension::probe_view_space_pose);
+	ClassDB::bind_method(D_METHOD("log_head_pose_comparison", "godot_head_transform"), &PicoOpenXRExtension::log_head_pose_comparison);
 }
 
 Dictionary PicoOpenXRExtension::_get_requested_extensions() {
@@ -694,6 +704,13 @@ bool PicoOpenXRExtension::resolve_functions() {
 		xrStartBodyTrackingCalibrationAppPICO_ptr = reinterpret_cast<PFN_xrStartBodyTrackingCalibrationAppPICO>(api->get_instance_proc_addr("xrStartBodyTrackingCalibrationAppPICO"));
 		xrGetBodyTrackingStatePICO_ptr = reinterpret_cast<PFN_xrGetBodyTrackingStatePICO>(api->get_instance_proc_addr("xrGetBodyTrackingStatePICO"));
 	}
+
+	// Core OpenXR reference-space + locate. Resolved unconditionally so the
+	// ad-hoc head-pose probe is always available.
+	xrCreateReferenceSpace_ptr = reinterpret_cast<PFN_xrCreateReferenceSpace>(api->get_instance_proc_addr("xrCreateReferenceSpace"));
+	xrDestroySpace_ptr = reinterpret_cast<PFN_xrDestroySpace>(api->get_instance_proc_addr("xrDestroySpace"));
+	xrLocateSpace_ptr = reinterpret_cast<PFN_xrLocateSpace>(api->get_instance_proc_addr("xrLocateSpace"));
+
 	return true;
 }
 
@@ -1397,6 +1414,92 @@ Transform3D PicoOpenXRExtension::transform_from_pose(const XrPosef &pose) const 
 	const Basis basis(q);
 	const Vector3 origin(pose.position.x, pose.position.y, pose.position.z);
 	return Transform3D(basis, origin);
+}
+
+Dictionary PicoOpenXRExtension::probe_view_space_pose() {
+	Dictionary result;
+	if (!session || !xrCreateReferenceSpace_ptr || !xrLocateSpace_ptr || !xrDestroySpace_ptr) {
+		result["available"] = false;
+		result["reason"] = "session_or_proc_unresolved";
+		PROBE_LOG("probe unavailable: session=%p createRef=%p locate=%p destroy=%p",
+				(void *)session, (void *)xrCreateReferenceSpace_ptr,
+				(void *)xrLocateSpace_ptr, (void *)xrDestroySpace_ptr);
+		return result;
+	}
+	const XrSpace base = current_play_space();
+	const XrTime now = current_display_time();
+	if (!base || now == 0) {
+		result["available"] = false;
+		result["reason"] = "play_space_or_time_unavailable";
+		return result;
+	}
+
+	XrReferenceSpaceCreateInfo create_info{
+		XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
+		nullptr,
+		XR_REFERENCE_SPACE_TYPE_VIEW,
+		{ { 0.0f, 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f } },
+	};
+	XrSpace view_space = nullptr;
+	XrResult create_result = xrCreateReferenceSpace_ptr(session, &create_info, &view_space);
+	if (XR_FAILED(create_result) || !view_space) {
+		result["available"] = false;
+		result["reason"] = "xrCreateReferenceSpace_failed";
+		result["xr_result"] = static_cast<int>(create_result);
+		return result;
+	}
+
+	XrSpaceLocation location{
+		XR_TYPE_SPACE_LOCATION,
+		nullptr,
+		0,
+		{ { 0.0f, 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f } },
+	};
+	XrResult locate_result = xrLocateSpace_ptr(view_space, base, now, &location);
+	xrDestroySpace_ptr(view_space);
+
+	const bool pose_valid =
+			XR_SUCCEEDED(locate_result) &&
+			(location.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+			(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+
+	result["available"] = pose_valid;
+	result["xr_result"] = static_cast<int>(locate_result);
+	result["location_flags"] = static_cast<int64_t>(location.locationFlags);
+	result["predicted_display_time"] = static_cast<int64_t>(now);
+	result["transform"] = transform_from_pose(location.pose);
+	result["position"] = vector3_record(Vector3(location.pose.position.x, location.pose.position.y, location.pose.position.z));
+	result["rotation"] = quaternion_record(quaternion_from_xr(location.pose.orientation));
+
+	// Always echo to logcat so we never have to rely on Godot's stdout being
+	// captured by the Android runtime (it isn't, on Pico). This is the line the
+	// `make log` pipeline picks up via the "Operator-PROBE" tag.
+	PROBE_LOG("xrLocateSpace(VIEW, play) valid=%d flags=0x%llx xr_result=%d t=%lld pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)",
+			pose_valid ? 1 : 0,
+			(unsigned long long)location.locationFlags,
+			(int)locate_result,
+			(long long)now,
+			location.pose.position.x, location.pose.position.y, location.pose.position.z,
+			location.pose.orientation.x, location.pose.orientation.y,
+			location.pose.orientation.z, location.pose.orientation.w);
+	return result;
+}
+
+void PicoOpenXRExtension::log_head_pose_comparison(const Transform3D &godot_head_transform) {
+	const Vector3 p = godot_head_transform.origin;
+	const Quaternion q = godot_head_transform.basis.get_rotation_quaternion();
+	PROBE_LOG("godot.XRCamera3D.global_transform pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)",
+			p.x, p.y, p.z, q.x, q.y, q.z, q.w);
+
+	// Inline second probe so the delta is on a single timeline. Reuses the
+	// publicly-bound probe so we don't duplicate the xrLocateSpace call.
+	Dictionary probe = probe_view_space_pose();
+	if (bool(probe.get("available", false))) {
+		Transform3D t = probe.get("transform", Transform3D());
+		Vector3 dp = p - t.origin;
+		PROBE_LOG("delta godot_camera - xrLocateSpace_VIEW = (%.4f, %.4f, %.4f)  |delta|=%.4f",
+				dp.x, dp.y, dp.z, dp.length());
+	}
 }
 
 Dictionary PicoOpenXRExtension::pose_record(const XrPosef &pose) const {

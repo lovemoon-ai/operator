@@ -1,0 +1,26 @@
+{
+  "id": "mode_live_feed",
+  "feature": "operator_feature_mode_live_feed",
+  "owner": "app/modes",
+  "required_features": [],
+  "required_capabilities": [
+    "CAMERA_RGB",
+    "LIVE_STREAM_SERVER"
+  ],
+  "test_cases": [
+    {
+      "id": "mode_live_feed.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "mode_live_feed.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd",
+      "fixture": "fake_platform_without_depth"
+    }
+  ]
+}

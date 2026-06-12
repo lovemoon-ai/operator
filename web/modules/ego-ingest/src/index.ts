@@ -20,7 +20,7 @@ export { IngestEvents } from "./events.js";
 export type { IngestEvent } from "./events.js";
 
 export { MemoryStore } from "./store/memory.js";
-export type { SessionStore, StoreStats } from "./store/index.js";
+export type { SessionDeletionTargets, SessionStore, StoreStats } from "./store/index.js";
 
 export { DiskStorage } from "./storage/disk.js";
 export type { StorageDriver, ArtifactWriteHandle, FinalizedLocator } from "./storage/index.js";

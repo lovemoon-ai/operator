@@ -10,6 +10,7 @@ const VR_SCENE := "res://scenes/vr_mode.tscn"
 const TELEOP_SCENE := "res://scenes/teleop_main.tscn"
 const EGO_CAPTURE_SCENE := "res://scenes/capture_app.tscn"
 const MUJOCO_SCENE := "res://scenes/mujoco/mujoco_device_test.tscn"
+const TEST_RUNNER_SCENE := "res://scenes/test_runner.tscn"
 const MODE_TELEOP := "teleop"
 const MODE_EGO_CAPTURE := "ego_capture"
 const MODE_LIVE_FEED := "live_feed"
@@ -18,6 +19,7 @@ const MODE_MUJOCO := "mujoco"
 const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
 const LAUNCHER_CARDS_CONFIGURED_FEATURE := "operator_launcher_cards_configured"
+const EXIT_CARD_FEATURE := "operator_launcher_card_exit"
 const DEFAULT_LAUNCHER_CARD_MODES := [MODE_EGO_CAPTURE, MODE_EXIT]
 
 const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
@@ -61,11 +63,25 @@ class CardEntry:
 var _cards: Array = []
 var _xr_started := false
 var _changing_scene := false
+# Typed runtime feature lookup (handles operator_feature_* tags, legacy
+# operator_launcher_card_* aliases, and editor defaults).
+var _features: FeatureSet = FeatureSet.from_export_tags()
 
 
 func _ready() -> void:
 	if Engine.is_editor_hint():
 		return
+
+	# Test harness entry (WP7): only when the APK was exported with the
+	# operator_feature_test_harness feature AND an explicit test suite was
+	# requested via intent extras. A test-enabled APK with no test request
+	# boots the normal launcher.
+	if _features.enabled(OperatorFeature.TEST_HARNESS):
+		var test_suite := _requested_test_suite()
+		if not test_suite.is_empty():
+			print("[Operator] Test harness requested: suite=%s" % test_suite)
+			_change_scene(TEST_RUNNER_SCENE)
+			return
 
 	var automation_mode := _get_automation_mode()
 	if not automation_mode.is_empty():
@@ -111,7 +127,7 @@ func _configured_launcher_card_modes() -> Array:
 	for mode in _all_launcher_card_modes():
 		if _launcher_card_feature_enabled(String(mode)):
 			modes.append(mode)
-	if modes.is_empty() and not OS.has_feature(LAUNCHER_CARDS_CONFIGURED_FEATURE):
+	if modes.is_empty() and not _launcher_cards_configured():
 		return DEFAULT_LAUNCHER_CARD_MODES.duplicate()
 	return modes
 
@@ -120,27 +136,32 @@ func _all_launcher_card_modes() -> Array:
 	return [MODE_TELEOP, MODE_EGO_CAPTURE, MODE_LIVE_FEED, MODE_VR, MODE_EXIT]
 
 
+func _launcher_cards_configured() -> bool:
+	return OS.has_feature(LAUNCHER_CARDS_CONFIGURED_FEATURE) \
+		or OS.has_feature(FeatureSet.FEATURES_CONFIGURED_TAG)
+
+
+## Mode cards are driven by the typed FeatureSet (operator_feature_* in
+## new APKs; legacy operator_launcher_card_* aliases handled inside
+## FeatureSet). The Exit card is not a product feature: it follows its
+## legacy launcher-card tag, defaulting to visible when no launcher
+## configuration was exported (editor/dev runs).
 func _launcher_card_feature_enabled(mode: String) -> bool:
-	for feature in _launcher_card_features(mode):
-		if OS.has_feature(String(feature)):
-			return true
-	return false
-
-
-func _launcher_card_features(mode: String) -> Array:
 	match mode:
 		MODE_TELEOP:
-			return ["operator_launcher_card_teleop"]
+			return _features.enabled(OperatorFeature.MODE_TELEOP)
 		MODE_EGO_CAPTURE:
-			return ["operator_launcher_card_ego", "operator_launcher_card_ego_capture"]
+			return _features.enabled(OperatorFeature.MODE_EGO_CAPTURE)
 		MODE_LIVE_FEED:
-			return ["operator_launcher_card_live", "operator_launcher_card_live_feed"]
+			return _features.enabled(OperatorFeature.MODE_LIVE_FEED)
 		MODE_VR:
-			return ["operator_launcher_card_vr"]
+			return _features.enabled(OperatorFeature.MODE_VR)
 		MODE_EXIT:
-			return ["operator_launcher_card_exit"]
+			if OS.has_feature(EXIT_CARD_FEATURE):
+				return true
+			return not _launcher_cards_configured()
 		_:
-			return []
+			return false
 
 
 func _all_card_data() -> Array:
@@ -184,6 +205,8 @@ func _all_card_data() -> Array:
 # z=-0.95" approach left the centre card visibly closer than the corners
 # because their straight-line distance grew with the X offset.
 func _compute_card_positions(card_count: int) -> Array:
+	# Restored after the merge resolution dropped the array init: the
+	# match block populates ``positions`` then every branch returns it.
 	var positions: Array = []
 	match card_count:
 		0:
@@ -202,10 +225,15 @@ func _compute_card_positions(card_count: int) -> Array:
 			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), BOTTOM_ROW_Y))
 		_:
+			# 5+ cards: 3 on the top row, the rest on the bottom.
+			# Two bottom cards use the tighter pair; three use the same
+			# three-slot spread as the top row.
 			for angle_deg in TOP_ROW_ANGLES_DEG:
 				positions.append(_card_position(float(angle_deg), TOP_ROW_Y))
-			for angle_deg in BOTTOM_ROW_ANGLES_DEG:
-				positions.append(_card_position(float(angle_deg), BOTTOM_ROW_Y))
+			var bottom_angles: Array = BOTTOM_ROW_ANGLES_DEG if (card_count - 3) <= 2 else TOP_ROW_ANGLES_DEG
+			var bottom_count: int = mini(card_count - 3, bottom_angles.size())
+			for i in range(bottom_count):
+				positions.append(_card_position(float(bottom_angles[i]), BOTTOM_ROW_Y))
 	return positions
 
 
@@ -467,6 +495,23 @@ func _mode_from_args(args: PackedStringArray) -> String:
 			return arg.substr("operator.mode=".length()).strip_edges()
 		if arg.begins_with("operator_mode="):
 			return arg.substr("operator_mode=".length()).strip_edges()
+	return ""
+
+
+## Intent extras surface as command-line args (same mechanism as
+## operator.mode): `--es operator_test_suite <s>` arrives as either an
+## "operator_test_suite <s>" pair or an "operator_test_suite=<s>" token.
+func _requested_test_suite() -> String:
+	var all_args: Array = []
+	all_args.append_array(OS.get_cmdline_user_args())
+	all_args.append_array(OS.get_cmdline_args())
+	for i in range(all_args.size()):
+		var arg := String(all_args[i]).strip_edges()
+		for key in ["operator_test_suite", "--operator-test-suite"]:
+			if arg == key and i + 1 < all_args.size():
+				return String(all_args[i + 1]).strip_edges()
+			if arg.begins_with(key + "="):
+				return arg.substr(key.length() + 1).strip_edges()
 	return ""
 
 

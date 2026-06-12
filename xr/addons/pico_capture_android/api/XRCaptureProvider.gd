@@ -33,6 +33,12 @@ func bind_muxer(muxer: Object) -> bool:
 	return bool(_plugin.call("bindMuxer", muxer))
 
 
+func open_video_in_system_player(path: String) -> bool:
+	if _plugin == null:
+		return false
+	return bool(_plugin.call("openVideoInSystemPlayer", path))
+
+
 func set_body_motion_capture_options(record_body_tracking: bool, record_motion_trackers: bool, max_motion_trackers: int = 3) -> bool:
 	if _plugin == null:
 		return false

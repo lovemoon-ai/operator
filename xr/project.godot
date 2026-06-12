@@ -20,13 +20,14 @@ config/icon="res://icon.png"
 Localization="*res://scripts/i18n/localization.gd"
 UISoundBus="*res://scripts/ui/ui_sound.gd"
 Haptics="*res://scripts/ui/haptics.gd"
+OperatorInteraction="*res://scripts/interaction/operator_interaction.gd"
 XRToolsUserSettings="*res://addons/godot-xr-tools/user_settings/user_settings.gd"
 XRToolsRumbleManager="*res://addons/godot-xr-tools/rumble/rumble_manager.gd"
 PicoOpenXRBridge="*res://scripts/xr/pico_openxr_bridge.gd"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://addons/godot-xr-tools/plugin.cfg", "res://addons/live_video/plugin.cfg", "res://addons/spatial_capture_contract/plugin.cfg", "res://addons/capture_common/plugin.cfg", "res://addons/spatialmp4_muxer/plugin.cfg", "res://addons/quest_capture_android/plugin.cfg", "res://addons/pico_capture_android/plugin.cfg", "res://addons/qr_scanner/plugin.cfg", "res://addons/live-push/plugin.cfg", "res://addons/live-pull/plugin.cfg", "res://addons/operator_launcher/plugin.cfg", "res://addons/godot_mujoco/plugin.cfg")
+enabled=PackedStringArray("res://addons/godot-xr-tools/plugin.cfg", "res://addons/live_video/plugin.cfg", "res://addons/spatial_capture_contract/plugin.cfg", "res://addons/capture_common/plugin.cfg", "res://addons/spatialmp4_muxer/plugin.cfg", "res://addons/quest_capture_android/plugin.cfg", "res://addons/pico_capture_android/plugin.cfg", "res://addons/qr_scanner/plugin.cfg", "res://addons/live-push/plugin.cfg", "res://addons/live-pull/plugin.cfg", "res://addons/operator_launcher/plugin.cfg", "res://addons/operator_features/plugin.cfg", "res://addons/godot_mujoco/plugin.cfg")
 
 [filesystem]
 
@@ -130,6 +131,7 @@ openxr/extensions/vendor_performance_metrics=true
 openxr/extensions/meta/render_model=true
 openxr/extensions/meta/passthrough=true
 openxr/extensions/meta/environment_depth=true
+openxr/extensions/meta/body_tracking=true
 openxr/extensions/androidxr/environment_depth=true
 openxr/extensions/meta/boundary_visibility=true
 openxr/extensions/meta/color_space/starting_color_space=3

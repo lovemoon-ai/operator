@@ -90,8 +90,15 @@ func is_optical_hand_tracking_active(hand: int) -> bool:
 	if not (tracker is XRHandTracker):
 		return false
 	var hand_tracker := tracker as XRHandTracker
-	return hand_tracker.has_tracking_data \
-			and hand_tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
+	if not hand_tracker.has_tracking_data:
+		return false
+	# Only reject hand data synthesized from a held controller (Quest with the
+	# XR_EXT_hand_tracking_data_source controller path). SOURCE_UNKNOWN must
+	# still count as optical: runtimes that don't support
+	# XR_EXT_hand_tracking_data_source (e.g. Pico OS) never report a source,
+	# yet their has_tracking_data is genuine bare-hand tracking. Requiring
+	# UNOBSTRUCTED here made hands permanently "inactive" on Pico.
+	return hand_tracker.hand_tracking_source != XRHandTracker.HAND_TRACKING_SOURCE_CONTROLLER
 
 
 func is_controller_mode_active(hand: int) -> bool:

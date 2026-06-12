@@ -37,7 +37,12 @@ const INPUT_TRACKPAD_CLICK := 1 << 16
 const INPUT_TRACKPAD_TOUCH := 1 << 17
 
 var writer: Object
+# WP4: canonical-frame sink. Samples are emitted as SensorFrames and routed
+# through this sink (default: FrameWriterShim bound to `writer`, which calls
+# the legacy writer methods with identical args). Injectable for tests/WP5.
+var _frame_sink: Object
 var hmd_camera: XRCamera3D
+var xr_origin: XROrigin3D
 var left_controller: XRController3D
 var right_controller: XRController3D
 var _record_head_pose := true
@@ -49,6 +54,7 @@ var _last_controller_jsonl_us := 0
 var _last_hand_jsonl_us := 0
 var _xr_display_time_provider: Object
 var _capture_provider: Object
+var _platform: Object
 var _xr_display_time_supported := true
 var _xr_time_offset_ns := 0
 var _xr_time_offset_resolved := false
@@ -86,26 +92,30 @@ func configure(
 	p_hmd_camera: XRCamera3D,
 	p_left_controller: XRController3D,
 	p_right_controller: XRController3D,
-	p_capture_provider: Object = null
+	p_capture_provider: Object = null,
+	p_platform: Object = null
 ) -> void:
 	writer = p_writer
+	_frame_sink = FrameWriterShim.new(writer) if writer != null else null
 	hmd_camera = p_hmd_camera
+	xr_origin = null
+	if hmd_camera != null and hmd_camera.get_parent() is XROrigin3D:
+		xr_origin = hmd_camera.get_parent() as XROrigin3D
 	left_controller = p_left_controller
 	right_controller = p_right_controller
 	_capture_provider = p_capture_provider
+	# WP2: vendor singleton probing moved to the platform layer. An injected
+	# platform object (PlatformRegistry-compatible) is preferred; the shared
+	# registry preserves the legacy default behavior.
+	_platform = p_platform if p_platform != null else PlatformRegistry.shared()
 	_connect_controller_input_signals(left_controller, "left_controller")
 	_connect_controller_input_signals(right_controller, "right_controller")
-	_xr_display_time_provider = null
+	_xr_display_time_provider = _platform.depth_time_extension()
 	_xr_display_time_supported = true
-	for singleton_name in [
-		"OpenXRMetaEnvironmentDepthExtensionWrapper",
-		"OpenXRMetaEnvironmentDepthExtension"
-	]:
-		if Engine.has_singleton(singleton_name):
-			var candidate := Engine.get_singleton(singleton_name)
-			if candidate != null and candidate.has_method("get_predicted_display_time_ns"):
-				_xr_display_time_provider = candidate
-				break
+
+
+func set_frame_sink(sink: Object) -> void:
+	_frame_sink = sink
 
 
 func resolve_pose_timestamp_ns(default_ticks_ns: int) -> int:
@@ -127,8 +137,8 @@ func _resolve_xr_time_offset_ns() -> int:
 	if _xr_time_offset_resolved:
 		return _xr_time_offset_ns
 	var plugin := _capture_provider
-	if plugin == null and Engine.has_singleton("QuestCapturePlugin"):
-		plugin = Engine.get_singleton("QuestCapturePlugin")
+	if plugin == null and _platform != null:
+		plugin = _platform.fallback_capture_provider()
 	if plugin == null:
 		return 0
 	# Same caveat as DepthSampler: Android singleton `has_method` is unreliable
@@ -154,7 +164,7 @@ func set_capture_options(options: Dictionary) -> void:
 
 
 func sample(timestamp_ns: int) -> void:
-	if writer == null:
+	if _frame_sink == null:
 		return
 
 	_sample_count += 1
@@ -165,28 +175,28 @@ func sample(timestamp_ns: int) -> void:
 		# mp4 mett stream gets every sample (cheap JNI). JSONL is throttled
 		# so GDScript JSON.stringify does not dominate the main thread.
 		var head_jsonl: bool = (now_us - _last_head_jsonl_us) >= HEAD_JSONL_INTERVAL_US
-		writer.write_head_pose(resolved_ts, hmd_camera.global_transform, true, head_jsonl)
+		_frame_sink.on_frame(PoseFrame.build(resolved_ts, hmd_camera.global_transform, true, head_jsonl))
 		_head_count += 1
 		if head_jsonl:
 			_last_head_jsonl_us = now_us
 
 	var controller_jsonl: bool = (now_us - _last_controller_jsonl_us) >= CONTROLLER_JSONL_INTERVAL_US
 	if _record_controller_pose and left_controller and controller_jsonl:
-		writer.write_controller_pose(
+		_frame_sink.on_frame(ControllerFrame.build_pose(
 			"left_controller",
 			resolved_ts,
 			left_controller.global_transform,
 			left_controller.get_has_tracking_data()
-		)
+		))
 		_controller_count += 1
 
 	if _record_controller_pose and right_controller and controller_jsonl:
-		writer.write_controller_pose(
+		_frame_sink.on_frame(ControllerFrame.build_pose(
 			"right_controller",
 			resolved_ts,
 			right_controller.global_transform,
 			right_controller.get_has_tracking_data()
-		)
+		))
 		_controller_count += 1
 	if controller_jsonl and _record_controller_pose:
 		_last_controller_jsonl_us = now_us
@@ -216,6 +226,8 @@ func _sample_hand(hand: String, tracker_name: StringName, timestamp_ns: int) -> 
 	var joints: Array = []
 	for joint in range(XRHandTracker.HAND_JOINT_MAX):
 		var transform := hand_tracker.get_hand_joint_transform(joint)
+		if xr_origin != null:
+			transform = xr_origin.global_transform * transform
 		var q := transform.basis.get_rotation_quaternion()
 		var p := transform.origin
 		joints.append({
@@ -226,7 +238,7 @@ func _sample_hand(hand: String, tracker_name: StringName, timestamp_ns: int) -> 
 			"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
 		})
 
-	writer.write_hand_joints(hand, timestamp_ns, joints)
+	_frame_sink.on_frame(HandFrame.build(hand, timestamp_ns, joints))
 	_hand_count += 1
 	_hand_joint_count += joints.size()
 
@@ -257,7 +269,7 @@ func _on_controller_vector2_input_changed(_action: StringName, _value: Vector2, 
 
 
 func _sample_controller_input(source: String, controller: XRController3D, timestamp_ns: int) -> void:
-	if writer == null or not _record_controller_input:
+	if _frame_sink == null or not _record_controller_input:
 		return
 	var state := _read_controller_input_state(source, controller)
 	var previous: Variant = _controller_input_states.get(source)
@@ -346,18 +358,8 @@ func _read_controller_input_state(source: String, controller: XRController3D) ->
 
 
 func _write_controller_input_state(source: String, timestamp_ns: int, packet_type: int, state: Dictionary, changed_mask: int) -> bool:
-	var ok: bool = bool(writer.write_controller_input(
-		source,
-		timestamp_ns,
-		packet_type,
-		int(state.get("available_mask", 0)),
-		int(state.get("pressed_mask", 0)),
-		int(state.get("touched_mask", 0)),
-		changed_mask,
-		float(state.get("trigger_value", 0.0)),
-		float(state.get("grip_value", 0.0)),
-		state.get("thumbstick", Vector2.ZERO) as Vector2,
-		state.get("trackpad", Vector2.ZERO) as Vector2
+	var ok: bool = bool(_frame_sink.on_frame(
+		ControllerFrame.build_input(source, timestamp_ns, packet_type, state, changed_mask)
 	))
 	if ok:
 		_controller_input_count += 1

@@ -1,0 +1,22 @@
+{
+  "id": "debug_metrics",
+  "feature": "operator_feature_debug_metrics",
+  "owner": "app/debug",
+  "required_features": [],
+  "required_capabilities": [],
+  "test_cases": [
+    {
+      "id": "debug_metrics.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "debug_metrics.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    }
+  ]
+}

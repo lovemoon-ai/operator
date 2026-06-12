@@ -32,6 +32,7 @@ signal upload_started(session_id: String, artifact_kind: String)
 signal upload_progress(session_id: String, artifact_kind: String, sent_bytes: int, total_bytes: int)
 signal upload_finished(session_id: String, artifact_kind: String, response: Dictionary)
 signal upload_failed(session_id: String, artifact_kind: String, error: String)
+signal upload_cancelled(session_id: String, reason: String)
 signal session_uploaded(session_id: String)
 signal queue_changed(pending_count: int)
 
@@ -43,6 +44,16 @@ const MAX_BACKOFF_SECONDS := 30.0
 const INITIAL_BACKOFF_SECONDS := 1.0
 const HTTP_CONNECT_TIMEOUT_S := 15.0
 const HTTP_POLL_TIMEOUT_S := 60.0
+# Hard upper bound on transient retries per job. The TUS retry loop is meant
+# to survive flaky Wi-Fi / brief server hiccups; without a ceiling a job whose
+# failure mode is borderline-permanent (DNS that resolves but POST 502s, a
+# tunnel that accepts the connect but drops PATCH, etc.) would otherwise block
+# every later session forever — that is the "previous failed upload keeps
+# retrying when I record a new file" bug. 20 attempts × up-to-30 s backoff
+# gives us several minutes of resilience before we give up; permanent
+# failures (4xx, missing local file) drop out much sooner via the
+# permanent-failure path below.
+const MAX_TRANSIENT_ATTEMPTS_PER_JOB := 20
 
 # Artifact kinds — also written verbatim into Upload-Metadata so the
 # server can route each artifact to the right slot.
@@ -55,6 +66,7 @@ var _wake: Semaphore
 var _exit_requested := false
 var _paused := false
 var _queue: Array = []                          # Array[Dictionary]
+var _cancel_requested: Dictionary = {}           # session_id -> true
 
 
 func _ready() -> void:
@@ -170,22 +182,45 @@ func prioritize(session_id: String) -> bool:
 	return found
 
 
-## Drop a job by session_id. Returns true if a job was removed.
-func cancel(session_id: String) -> bool:
-	var removed := false
+## Drop every queued job that is currently in the "permanent failure" state.
+## Useful as a manual escape hatch (settings panel "Clear failed uploads")
+## when, say, a user mass-deleted local recordings while the queue still
+## referenced them. Active uploads in progress are NOT touched — those are
+## still in the worker thread's `job` local and will go through the normal
+## permanent-failure exit path on the next attempt.
+func clear_failed() -> int:
+	var removed := 0
 	_mutex.lock()
 	for i in range(_queue.size() - 1, -1, -1):
-		if str(_queue[i].get("session_id", "")) == session_id:
+		if bool(_queue[i].get("_permanent_failure", false)):
 			_queue.remove_at(i)
-			removed = true
-			break
-	if removed:
+			removed += 1
+	if removed > 0:
 		_save_queue_locked()
 	var pending: int = _queue.size()
 	_mutex.unlock()
-	if removed:
+	if removed > 0:
 		call_deferred("emit_signal", "queue_changed", pending)
 	return removed
+
+
+## Cancel a job by session_id. The job stays queued until the worker deletes
+## any remote TUS resources it already created, then the worker removes it.
+func cancel(session_id: String) -> bool:
+	var found := false
+	_mutex.lock()
+	for i in range(_queue.size() - 1, -1, -1):
+		if str(_queue[i].get("session_id", "")) == session_id:
+			found = true
+			break
+	if found:
+		_cancel_requested[session_id] = true
+	var pending: int = _queue.size()
+	_mutex.unlock()
+	if found:
+		call_deferred("emit_signal", "queue_changed", pending)
+		_wake.post()
+	return found
 
 
 # --- Worker thread -----------------------------------------------------------
@@ -215,6 +250,15 @@ func _worker_loop() -> void:
 		var head_matches := not _queue.is_empty() and str(_queue[0].get("session_id", "")) == str(job.get("session_id", ""))
 		if head_matches:
 			_queue[0] = job
+		var cancelled := bool(job.get("_cancelled", false))
+		if cancelled and head_matches:
+			_queue.pop_front()
+			_save_queue_locked()
+			var cancelled_sid := str(job.get("session_id", ""))
+			_mutex.unlock()
+			call_deferred("emit_signal", "queue_changed", _queue_size())
+			call_deferred("emit_signal", "upload_cancelled", cancelled_sid, "cancelled")
+			continue
 		if ok and head_matches:
 			var finished_job: Dictionary = _queue.pop_front()
 			_save_queue_locked()
@@ -228,13 +272,43 @@ func _worker_loop() -> void:
 			call_deferred("emit_signal", "session_uploaded", sid)
 			call_deferred("emit_signal", "queue_changed", _queue_size())
 			continue
-		else:
+		# Failure path. Decide whether to retry the same job (transient) or
+		# drop it from the queue (permanent, or transient-with-budget-exhausted)
+		# so that a poison job does not block every later session forever.
+		var permanent := head_matches and bool(job.get("_permanent_failure", false))
+		var attempt: int = int(job.get("attempt", 0))
+		var exhausted := head_matches and attempt >= MAX_TRANSIENT_ATTEMPTS_PER_JOB
+		if permanent or exhausted:
+			# Pop FIRST, release the mutex, THEN do the best-effort remote
+			# TUS DELETE. Earlier revisions kept the cleanup inside the lock,
+			# which meant a wedged server blocked main-thread enqueue() /
+			# cancel() / clear_failed() / pending_jobs() / get_options() polls
+			# for up to MAX_DELETE_TIME_S × N artifacts — i.e. the same
+			# "cancel button frozen" symptom the popup-routing fix was
+			# supposed to kill. The job is already poison; if cleanup also
+			# fails we just leak the TUS resource at the server and log it.
+			var dropped_job: Dictionary = {}
+			var dropped_sid := str(job.get("session_id", ""))
+			var drop_reason := str(job.get("_failure_message", "transient failure budget exhausted")) if permanent else ("transient failure budget exhausted after %d attempts" % attempt)
+			if head_matches:
+				dropped_job = _queue.pop_front()
 			_save_queue_locked()
+			_mutex.unlock()
+			if not dropped_job.is_empty():
+				if not _cleanup_cancelled_job(dropped_job):
+					push_warning("[EgoUploader] dropping job %s but remote TUS cleanup failed; resources may linger at the server until GC" % dropped_sid)
+			push_warning("[EgoUploader] dropping job %s after permanent/exhausted failure: %s" % [dropped_sid, drop_reason])
+			call_deferred("emit_signal", "queue_changed", _queue_size())
+			# upload_failed was already emitted from _fail(); add a terminal
+			# upload_cancelled to clearly signal "this session will not retry"
+			# so the status popup can move on instead of staying spinning.
+			call_deferred("emit_signal", "upload_cancelled", dropped_sid, drop_reason)
+			continue
+		_save_queue_locked()
 		_mutex.unlock()
 
-		# Job failed but stayed in queue — back off before retrying so we
-		# don't spin against a wedged server.
-		var attempt: int = int(job.get("attempt", 1))
+		# Transient failure — TUS resume on the next attempt. Exponential
+		# back-off so we don't spin against a wedged server.
 		var backoff: float = minf(INITIAL_BACKOFF_SECONDS * pow(2.0, attempt - 1), MAX_BACKOFF_SECONDS)
 		var deadline_ms: int = Time.get_ticks_msec() + int(backoff * 1000.0)
 		while Time.get_ticks_msec() < deadline_ms:
@@ -243,6 +317,8 @@ func _worker_loop() -> void:
 			_mutex.unlock()
 			if bail:
 				return
+			if _is_cancel_requested(str(job.get("session_id", ""))) and not bool(job.get("_cancel_cleanup_failed", false)):
+				break
 			OS.delay_msec(200)
 
 
@@ -258,7 +334,16 @@ func _queue_size() -> int:
 # Returns true iff every artifact finished.
 func _process_job(job: Dictionary) -> bool:
 	job["attempt"] = int(job.get("attempt", 0)) + 1
+	# Wipe the per-attempt failure flags so a transient retry can't inherit
+	# a stale "permanent" marker from a previous attempt. _fail() will set
+	# them again if this attempt also fails.
+	job.erase("_permanent_failure")
+	job.erase("_failure_message")
+	job.erase("_failure_kind")
 	var session_id := str(job.get("session_id", ""))
+	if _is_cancel_requested(session_id):
+		_cleanup_cancelled_job(job)
+		return false
 	var artifacts: Dictionary = job.get("artifacts", {})
 	# Manifest first so the server can allocate the session record before
 	# the (much larger) mp4 arrives.
@@ -272,6 +357,8 @@ func _process_job(job: Dictionary) -> bool:
 		var ok := _upload_artifact(job, kind, artifact)
 		artifacts[kind] = artifact
 		if not ok:
+			if _is_cancel_requested(session_id):
+				_cleanup_cancelled_job(job)
 			return false
 		artifact["done"] = true
 		artifacts[kind] = artifact
@@ -281,13 +368,18 @@ func _process_job(job: Dictionary) -> bool:
 
 
 func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bool:
+	var session_id := str(job.get("session_id", ""))
+	if _is_cancel_requested(session_id):
+		return false
 	var path := str(artifact.get("path", ""))
 	if not FileAccess.file_exists(path):
-		_fail(job, kind, "local file missing: %s" % path)
+		# Local file disappeared (user deleted the session via Storage panel,
+		# DCIM was cleared, sdcard yanked). Retrying will never resurrect it.
+		_fail(job, kind, "local file missing: %s" % path, true)
 		return false
 	var total: int = int(FileAccess.get_file_as_bytes(path).size()) if kind == ARTIFACT_MANIFEST else int(_file_size(path))
 	if total <= 0:
-		_fail(job, kind, "empty artifact: %s" % path)
+		_fail(job, kind, "empty artifact: %s" % path, true)
 		return false
 
 	var http := _connect_to(job)
@@ -307,6 +399,8 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 			return false
 		tus_location = creation
 		artifact["tus_location"] = tus_location
+		if _is_cancel_requested(session_id):
+			return false
 	else:
 		# Resume path: HEAD the existing resource so we believe the server
 		# about how many bytes it actually persisted.
@@ -321,20 +415,22 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 			tus_location = creation2
 			artifact["tus_location"] = tus_location
 			offset = 0
+			if _is_cancel_requested(session_id):
+				return false
 		else:
 			offset = server_offset
 			artifact["offset"] = offset
 
-	call_deferred("emit_signal", "upload_progress", str(job["session_id"]), kind, offset, total)
+	call_deferred("emit_signal", "upload_progress", session_id, kind, offset, total)
 
 	var file := FileAccess.open(path, FileAccess.READ)
 	if file == null:
-		_fail(job, kind, "cannot read %s" % path)
+		_fail(job, kind, "cannot read %s" % path, true)
 		return false
 	file.seek(offset)
 	while offset < total:
 		_mutex.lock()
-		var should_stop := _exit_requested or _paused
+		var should_stop := _exit_requested or _paused or _cancel_requested.has(session_id)
 		_mutex.unlock()
 		if should_stop:
 			file.close()
@@ -343,7 +439,8 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 		var chunk_size := mini(CHUNK_SIZE, total - offset)
 		var chunk: PackedByteArray = file.get_buffer(chunk_size)
 		if chunk.size() != chunk_size:
-			_fail(job, kind, "short read from %s at offset %d" % [path, offset])
+			# File truncated under us — same logic as "local file missing".
+			_fail(job, kind, "short read from %s at offset %d" % [path, offset], true)
 			file.close()
 			return false
 
@@ -353,7 +450,7 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 			return false
 		offset = new_offset
 		artifact["offset"] = offset
-		call_deferred("emit_signal", "upload_progress", str(job["session_id"]), kind, offset, total)
+		call_deferred("emit_signal", "upload_progress", session_id, kind, offset, total)
 
 	file.close()
 	return true
@@ -375,7 +472,17 @@ func _tus_create(http: HTTPClient, endpoint_path: String, job: Dictionary, kind:
 		_fail(job, kind, "POST drive_http error")
 		return ""
 	if status != 201:
-		_fail(job, kind, "POST expected 201, got %d (%s)" % [status, _body_text(http)])
+		# 401 deserves a targeted hint: the panel's connectivity probe is an
+		# unauthenticated OPTIONS (TUS discovery), so "endpoint OK" + 401 here
+		# almost always means the Bearer token is missing (URL was typed or
+		# came from a plain-URL QR) or no longer matches the server's user
+		# table — re-scanning the signed connect QR refreshes both.
+		if status == 401:
+			_drain_body(http)
+			var token_hint := "no upload token configured" if str(job.get("upload_token", "")).is_empty() else "upload token rejected by server"
+			_fail(job, kind, "POST got 401 (%s) — re-scan the connect QR to refresh credentials" % token_hint, true)
+			return ""
+		_fail(job, kind, "POST expected 201, got %d (%s)" % [status, _body_text(http)], _is_permanent_http_status(status))
 		return ""
 	var location := _response_header(http, "location")
 	if location.is_empty():
@@ -418,7 +525,14 @@ func _tus_patch(http: HTTPClient, tus_location: String, offset: int, chunk: Pack
 		_fail(job, kind, "PATCH drive_http error")
 		return -1
 	if status != 204 and status != 200:
-		_fail(job, kind, "PATCH expected 204, got %d (%s)" % [status, _body_text(http)])
+		# 401 here almost certainly means the operator rotated their upload
+		# token mid-upload (or the server restarted with a fresh secret).
+		# Either way the in-flight TUS resource is now stranded — re-scan.
+		if status == 401:
+			_drain_body(http)
+			_fail(job, kind, "PATCH got 401 — upload token rejected mid-stream; re-scan the connect QR", true)
+			return -1
+		_fail(job, kind, "PATCH expected 204, got %d (%s)" % [status, _body_text(http)], _is_permanent_http_status(status))
 		return -1
 	var new_off := _response_header(http, "upload-offset")
 	_drain_body(http)
@@ -427,10 +541,77 @@ func _tus_patch(http: HTTPClient, tus_location: String, offset: int, chunk: Pack
 	return int(new_off)
 
 
+func _cleanup_cancelled_job(job: Dictionary) -> bool:
+	var session_id := str(job.get("session_id", ""))
+	if session_id.is_empty():
+		return false
+	if bool(job.get("_cancelled", false)):
+		return true
+	job["_cancel_cleanup_failed"] = false
+	var cleaned := true
+	var artifacts: Dictionary = job.get("artifacts", {})
+	for kind in artifacts.keys():
+		var artifact: Dictionary = artifacts[kind]
+		var location := str(artifact.get("tus_location", ""))
+		if not location.is_empty():
+			cleaned = _tus_delete_location(job, location) and cleaned
+	cleaned = _delete_remote_session(job) and cleaned
+	if not cleaned:
+		job["_cancel_cleanup_failed"] = true
+		_fail(job, "cancel", "remote cleanup failed; will retry")
+		return false
+	_clear_cancel_requested(session_id)
+	job["_cancelled"] = true
+	return true
+
+
+func _tus_delete_location(job: Dictionary, tus_location: String) -> bool:
+	var base_url := str(job.get("upload_url", ""))
+	var target_url := _normalize_tus_location(base_url, tus_location)
+	return _delete_url(job, target_url)
+
+
+func _delete_remote_session(job: Dictionary) -> bool:
+	var session_id := str(job.get("session_id", ""))
+	var upload_url := str(job.get("upload_url", ""))
+	var target_url := _session_cleanup_url(upload_url, session_id)
+	if target_url.is_empty():
+		return false
+	return _delete_url(job, target_url)
+
+
+func _delete_url(job: Dictionary, url: String) -> bool:
+	var http := _connect_to_url(url)
+	if http == null:
+		return false
+	var err := http.request(HTTPClient.METHOD_DELETE, _path_of_url(url), _common_headers(job))
+	if err != OK:
+		return false
+	var status := _drive_http(http)
+	_drain_body(http)
+	return status == 204 or status == 404 or status == 410
+
+
+func _is_cancel_requested(session_id: String) -> bool:
+	_mutex.lock()
+	var requested := _cancel_requested.has(session_id)
+	_mutex.unlock()
+	return requested
+
+
+func _clear_cancel_requested(session_id: String) -> void:
+	_mutex.lock()
+	_cancel_requested.erase(session_id)
+	_mutex.unlock()
+
+
 # --- HTTP helpers ------------------------------------------------------------
 
 func _connect_to(job: Dictionary) -> HTTPClient:
-	var url := str(job.get("upload_url", ""))
+	return _connect_to_url(str(job.get("upload_url", "")))
+
+
+func _connect_to_url(url: String) -> HTTPClient:
 	var parsed := _parse_url(url)
 	if parsed.is_empty():
 		return null
@@ -586,6 +767,21 @@ func _normalize_tus_location(base_url: String, location: String) -> String:
 	return authority + location
 
 
+func _session_cleanup_url(upload_url: String, session_id: String) -> String:
+	var parsed := _parse_url(upload_url)
+	if parsed.is_empty() or session_id.is_empty():
+		return ""
+	var authority := "%s://%s" % [parsed["scheme"], parsed["host"]]
+	var port := int(parsed["port"])
+	var default_port := 443 if parsed["scheme"] == "https" else 80
+	if port != default_port:
+		authority += ":%d" % port
+	var path := str(parsed.get("path", "/"))
+	while path.ends_with("/") and path.length() > 1:
+		path = path.substr(0, path.length() - 1)
+	return "%s%s/sessions/%s" % [authority, path, session_id]
+
+
 # --- Queue persistence -------------------------------------------------------
 
 func _save_queue_locked() -> void:
@@ -611,11 +807,25 @@ func _load_queue_from_disk() -> void:
 	if typeof(parsed) != TYPE_ARRAY:
 		return
 	# Reset transient state — the worker will HEAD each resource to
-	# rediscover the real Upload-Offset before resuming.
+	# rediscover the real Upload-Offset before resuming. Also drop any
+	# entries that were already marked as a permanent failure on a
+	# previous run: keeping them would just have the worker re-emit the
+	# same upload_failed signal at startup and then sit on them, which is
+	# the bug we're fixing here.
+	var cleaned: Array = []
+	var dropped := 0
 	for entry in parsed:
-		if typeof(entry) == TYPE_DICTIONARY:
-			entry["attempt"] = 0
-	_queue = parsed
+		if typeof(entry) != TYPE_DICTIONARY:
+			continue
+		if bool(entry.get("_permanent_failure", false)):
+			dropped += 1
+			continue
+		entry["attempt"] = 0
+		cleaned.append(entry)
+	_queue = cleaned
+	if dropped > 0:
+		_save_queue_locked()
+		print("[EgoUploader] dropped %d permanently-failed job(s) at load" % dropped)
 	print("[EgoUploader] loaded %d pending job(s) from %s" % [_queue.size(), QUEUE_PATH])
 
 
@@ -660,6 +870,35 @@ func _recursive_delete(dir_path: String) -> void:
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(dir_path))
 
 
-func _fail(job: Dictionary, kind: String, message: String) -> void:
-	push_warning("[EgoUploader] %s/%s: %s" % [str(job.get("session_id", "?")), kind, message])
+## Mark `job` as failed. `permanent=true` flips a sticky flag the worker
+## checks AFTER _process_job returns so the job leaves the queue instead of
+## getting retried forever (which is what the pre-fix behaviour did to e.g.
+## 401-Authorization failures, blocking every subsequent recording from ever
+## uploading until the user manually wiped user://ego_upload_queue.json).
+func _fail(job: Dictionary, kind: String, message: String, permanent: bool = false) -> void:
+	push_warning("[EgoUploader] %s/%s: %s%s" % [
+		str(job.get("session_id", "?")),
+		kind,
+		message,
+		" (permanent)" if permanent else "",
+	])
+	if permanent:
+		job["_permanent_failure"] = true
+		job["_failure_message"] = message
+		job["_failure_kind"] = kind
 	call_deferred("emit_signal", "upload_failed", str(job.get("session_id", "")), kind, message)
+
+
+# TUS / HTTP statuses that should NOT be retried — the next attempt would just
+# produce the same error. We treat the standard 4xx client errors as
+# permanent (bad token, missing resource, conflict, payload too big, …) while
+# leaving 408 / 425 / 429 + everything ≥500 + raw connection failures on the
+# transient retry path. Anything outside the documented HTTP space (status < 0
+# from drive_http(), 0 from a torn-down poll) is transient by definition: we
+# never actually got a response, so the next attempt might.
+func _is_permanent_http_status(status: int) -> bool:
+	if status < 400 or status >= 500:
+		return false
+	if status == 408 or status == 425 or status == 429:
+		return false
+	return true

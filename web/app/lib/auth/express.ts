@@ -1,8 +1,7 @@
 /**
  * Express middleware + auth routes used by server.ts.
  *
- *   GET  /auth/start             → start conductor SSO (or stamp dev cookie)
- *   GET  /api/auth/callback      → finish conductor SSO
+ *   GET  /auth/start             → stamp a session for the fixed dev user
  *   GET|POST /auth/logout        → clear cookie
  *
  *   browserAuthMiddleware()      → for every browser-facing route, looks
@@ -12,6 +11,9 @@
  *                                  router can pick it up. Unauthenticated
  *                                  requests get a 302 to /login (HTML
  *                                  navigations) or 401 (XHR / fetch).
+ *
+ * The web tier is local-only and always runs in bypass mode (see
+ * lib/auth/config.ts for the rationale).
  */
 import type { Request, RequestHandler, Response } from "express";
 import express from "express";
@@ -21,7 +23,6 @@ import { findOrCreateUserBySub, getUserById, type User } from "../users.js";
 import { seedDemoForUser } from "../seed.js";
 import { verifyArtifactToken } from "./artifact-token.js";
 import { loadAuthConfig, type AuthConfig } from "./config.js";
-import { buildAuthorizeUrl, exchangeCode } from "./conductor.js";
 import { readSession } from "./session.js";
 
 declare module "express-serve-static-core" {
@@ -40,9 +41,8 @@ function config(): AuthConfig {
 // --- /auth/start ----------------------------------------------------------
 
 /**
- * Bypass mode shortcut: stamp a session for the fixed dev user and
- * redirect home. In SSO mode: capture state in the cookie session, 302
- * to conductor's `/oauth/authorize`.
+ * Bypass-mode handler: stamp a session for the fixed dev user and
+ * redirect home.
  */
 function loginHandler(): RequestHandler {
   return async (req: Request, res: Response) => {
@@ -51,81 +51,17 @@ function loginHandler(): RequestHandler {
     const returnTo =
       typeof req.query.returnTo === "string" ? req.query.returnTo : "/";
 
-    if (cfg.bypass) {
-      const user = findOrCreateUserBySub(cfg.devUser.sub, {
-        email: cfg.devUser.email,
-        name: cfg.devUser.name,
-      });
-      session.userId = user.id;
-      await session.save();
-      await seedDemoForUser(user).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error("[auth] seed failed:", err);
-      });
-      return res.redirect(safeReturnTo(returnTo));
-    }
-
-    const { url, state } = buildAuthorizeUrl(cfg);
-    session.oauthState = state;
-    session.returnTo = safeReturnTo(returnTo);
+    const user = findOrCreateUserBySub(cfg.devUser.sub, {
+      email: cfg.devUser.email,
+      name: cfg.devUser.name,
+    });
+    session.userId = user.id;
     await session.save();
-    res.redirect(url);
-  };
-}
-
-// --- /api/auth/callback ---------------------------------------------------
-
-function callbackHandler(): RequestHandler {
-  return async (req: Request, res: Response) => {
-    const cfg = config();
-    if (cfg.bypass) return res.redirect("/");
-
-    const session = await readSession(req, res, cfg.sessionSecret);
-    const expectedState = session.oauthState;
-    const returnTo = session.returnTo ?? "/";
-    const code = typeof req.query.code === "string" ? req.query.code : "";
-    const callbackState = typeof req.query.state === "string" ? req.query.state : "";
-
-    if (!expectedState) {
-      return res.status(400).type("text/plain").send("missing oauth state");
-    }
-    if (!code || !callbackState || callbackState !== expectedState) {
-      return res.status(400).type("text/plain").send("invalid state");
-    }
-    // Single-use: clear before we attempt the exchange so a retry can't
-    // reuse a captured state value.
-    session.oauthState = undefined;
-    session.returnTo = undefined;
-    await session.save();
-
-    try {
-      const tok = await exchangeCode(cfg, code);
-      // Conductor's user.id is opaque and stable — slot it into the
-      // same `oidc_sub` column the schema reserves for the upstream
-      // identity. (The column name predates conductor SSO; renaming
-      // the column would be a wider migration.)
-      const sub = tok.user.id;
-      const displayName =
-        tok.user.name ?? tok.user.email ?? tok.user.phone ?? sub;
-      const user = findOrCreateUserBySub(sub, {
-        email: tok.user.email ?? null,
-        name: displayName ?? null,
-      });
-      session.userId = user.id;
-      await session.save();
-      await seedDemoForUser(user).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error("[auth] seed failed:", err);
-      });
-      res.redirect(safeReturnTo(returnTo));
-    } catch (err) {
+    await seedDemoForUser(user).catch((err) => {
       // eslint-disable-next-line no-console
-      console.error("[auth] callback failed:", err);
-      res
-        .status(401)
-        .type("text/plain")
-        .send(`callback failed: ${(err as Error).message}`);
-    }
+      console.error("[auth] seed failed:", err);
+    });
+    res.redirect(safeReturnTo(returnTo));
   };
 }
 
@@ -220,22 +156,15 @@ export function authRoutes(): express.Router {
   // marketing copy + a "Continue" button without clashing with this
   // redirect handler.
   r.get("/auth/start", loginHandler());
-  r.get("/api/auth/callback", callbackHandler());
   r.post("/auth/logout", logoutHandler());
   r.get("/auth/logout", logoutHandler());
   return r;
 }
 
 /** Surface the loaded config so server.ts can log status at boot. */
-export function describeAuth(): {
-  mode: "bypass" | "conductor";
-  baseUrl: string;
-  conductor?: string;
-} {
+export function describeAuth(): { mode: "bypass"; baseUrl: string } {
   const cfg = config();
-  return cfg.bypass
-    ? { mode: "bypass", baseUrl: cfg.baseUrl }
-    : { mode: "conductor", baseUrl: cfg.baseUrl, conductor: cfg.conductor!.baseUrl };
+  return { mode: "bypass", baseUrl: cfg.baseUrl };
 }
 
 /**

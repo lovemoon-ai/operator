@@ -12,6 +12,11 @@ import type {
  * we don't run the ingest across multiple Node workers because the
  * SessionEvents stream is process-local.
  */
+export interface SessionDeletionTargets {
+  artifactUris: string[];
+  resourceIds: string[];
+}
+
 export interface SessionStore {
   // --- Resource (in-flight) state -------------------------------------------
 
@@ -60,29 +65,29 @@ export interface SessionStore {
   stats(opts?: { userId?: string }): Promise<StoreStats>;
 
   /**
+   * Return the storage objects that must be removed before deleting a
+   * session's metadata. Keeping this as a separate read lets callers
+   * retry cleanup if the bytes layer fails partway through.
+   */
+  getSessionDeletionTargets(
+    sessionId: string,
+    opts?: { userId?: string },
+  ): Promise<SessionDeletionTargets | null>;
+
+  /**
    * Hard-delete a session and every artifact row pointing at it. Also
-   * sweeps any in-flight TUS resources whose `sessionId` matches —
-   * those would otherwise resurrect the session as soon as they
-   * finalize.
+   * sweeps any in-flight TUS resources whose `sessionId` matches.
    *
-   * `opts.userId`, when set, scopes the operation: returns `null`
-   * (no-op) if the session exists but belongs to a different user, so
-   * a dashboard call from user A can never delete user B's data.
-   * Returns `null` if the session simply doesn't exist.
-   *
-   * On success returns the list of `uri`s the caller should pass to
-   * `StorageDriver.deleteFinalized` so the byte files can be removed.
-   * We don't do that here — store ↔ storage stay decoupled, and the
-   * caller already holds the storage handle.
-   *
-   * Implementations MUST run the row deletes inside one transaction
-   * (or equivalent) so a concurrent read can't observe a session row
-   * whose artifacts have already been cleared.
+   * Callers should clean the targets returned by
+   * `getSessionDeletionTargets` first, then call this to commit the
+   * metadata delete. Implementations MUST run the row deletes inside
+   * one transaction (or equivalent) so a concurrent read can't observe
+   * a session row whose artifacts have already been cleared.
    */
   deleteSession(
     sessionId: string,
     opts?: { userId?: string },
-  ): Promise<{ artifactUris: string[] } | null>;
+  ): Promise<SessionDeletionTargets | null>;
 }
 
 export interface StoreStats {

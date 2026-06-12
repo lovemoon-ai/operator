@@ -36,8 +36,18 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 			var json_str = data.get_string_from_utf8()
 			var parsed = JSON.parse_string(json_str)
 			if parsed and parsed is Dictionary:
+				# WP2: validate against the v2 descriptor contract. The emitted
+				# payload stays the raw parsed dictionary (wire-compatible);
+				# contract violations are diagnostics only.
+				var contract: Dictionary = DeviceDescriptorContract.parse(parsed)
+				var contract_errors: Array = contract.get("errors", [])
+				if not contract_errors.is_empty():
+					print("[Session] DeviceDescriptor contract warnings: %s" % str(contract_errors))
 				_descriptor = parsed
 				_handshake_done = true
+				# device.name here is robot identity metadata for logs/UI
+				# only — never used for capability or vendor branching
+				# (WP6 device-name sweep: keep).
 				var device_name = _descriptor.get("device", {}).get("name", "Unknown")
 				print("[Session] DeviceDescriptor received: %s" % device_name)
 				device_connected.emit(_descriptor)
