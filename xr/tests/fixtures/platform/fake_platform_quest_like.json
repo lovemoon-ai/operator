@@ -1,0 +1,21 @@
+{
+  "id": "fake_platform_quest_like",
+  "version": 1,
+  "provider_id": "fake_quest",
+  "permission_granted": true,
+  "capabilities": [
+    "pose",
+    "controller",
+    "hand_tracking",
+    "body_tracking",
+    "camera_rgb",
+    "camera_stereo",
+    "depth_map",
+    "audio_capture",
+    "boundary",
+    "openxr_timebase",
+    "spatial_mp4_mux",
+    "live_stream_server",
+    "qr_scan"
+  ]
+}

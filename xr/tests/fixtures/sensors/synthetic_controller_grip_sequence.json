@@ -1,0 +1,16 @@
+{
+  "id": "synthetic_controller_grip_sequence",
+  "version": 1,
+  "seed": 1,
+  "rate_hz": 30,
+  "steps": [
+    {"hand": "right", "input": {"grip_value": 0.0, "trigger_value": 0.0, "thumbstick": [0.0, 0.0]}},
+    {"hand": "right", "input": {"grip_value": 0.25, "trigger_value": 0.0, "thumbstick": [0.0, 0.0]}},
+    {"hand": "right", "input": {"grip_value": 0.5, "trigger_value": 0.1, "thumbstick": [0.1, 0.0]}},
+    {"hand": "right", "input": {"grip_value": 0.75, "trigger_value": 0.4, "thumbstick": [0.2, 0.0]}},
+    {"hand": "right", "input": {"grip_value": 1.0, "trigger_value": 0.8, "thumbstick": [0.3, 0.0], "pressed_mask": 2}},
+    {"hand": "right", "input": {"grip_value": 1.0, "trigger_value": 1.0, "thumbstick": [0.3, 0.0], "pressed_mask": 2}},
+    {"hand": "right", "input": {"grip_value": 0.5, "trigger_value": 0.5, "thumbstick": [0.1, 0.0]}},
+    {"hand": "right", "input": {"grip_value": 0.0, "trigger_value": 0.0, "thumbstick": [0.0, 0.0]}}
+  ]
+}

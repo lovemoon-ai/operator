@@ -1,0 +1,45 @@
+{
+  "id": "test_harness",
+  "feature": "operator_feature_test_harness",
+  "owner": "test_support",
+  "required_features": [],
+  "required_capabilities": [],
+  "test_cases": [
+    {
+      "id": "test_harness.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "test_harness.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    },
+    {
+      "id": "contracts.feature_registry",
+      "level": "unit",
+      "suite": "contracts.features",
+      "module": "app/features",
+      "script": "res://tests/unit/contracts/feature_registry_test.gd"
+    },
+    {
+      "id": "device.quest.capability_snapshot",
+      "level": "device",
+      "suite": "device.smoke",
+      "module": "platform",
+      "required_device": "quest",
+      "script": "res://tests/device/quest/capability_snapshot_smoke_test.gd"
+    },
+    {
+      "id": "device.pico.capability_snapshot",
+      "level": "device",
+      "suite": "device.smoke",
+      "module": "platform",
+      "required_device": "pico",
+      "script": "res://tests/device/pico/capability_snapshot_smoke_test.gd"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": "fake_platform_pico_like",
+  "version": 1,
+  "provider_id": "fake_pico",
+  "permission_granted": true,
+  "capabilities": [
+    "pose",
+    "controller",
+    "hand_tracking",
+    "body_tracking",
+    "motion_trackers",
+    "camera_rgb",
+    "openxr_timebase",
+    "spatial_mp4_mux",
+    "live_stream_server",
+    "qr_scan",
+    {"capability": "depth_map", "state": "unavailable", "reason": "no depth camera stream"}
+  ]
+}

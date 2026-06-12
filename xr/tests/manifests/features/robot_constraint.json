@@ -1,0 +1,26 @@
+{
+  "id": "robot_constraint",
+  "feature": "operator_feature_robot_constraint",
+  "owner": "core/teleop",
+  "required_features": [
+    "operator_feature_robot_control"
+  ],
+  "required_capabilities": [
+    "ROBOT_CONTROL"
+  ],
+  "test_cases": [
+    {
+      "id": "robot_constraint.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "robot_constraint.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd"
+    }
+  ]
+}

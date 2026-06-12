@@ -1,0 +1,52 @@
+{
+  "id": "mode_ego_capture",
+  "feature": "operator_feature_mode_ego_capture",
+  "owner": "app/modes",
+  "required_features": [],
+  "required_capabilities": [
+    "CAMERA_RGB"
+  ],
+  "test_cases": [
+    {
+      "id": "mode_ego_capture.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "mode_ego_capture.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd",
+      "fixture": "fake_platform_quest_like"
+    },
+    {
+      "id": "capture.state_machine",
+      "level": "unit",
+      "suite": "capture.pipeline",
+      "module": "core/capture",
+      "script": "res://tests/unit/capture/capture_state_machine_test.gd"
+    },
+    {
+      "id": "capture.start_stop_with_fake_sources",
+      "level": "integration",
+      "suite": "capture.pipeline",
+      "module": "core/capture",
+      "fixture": "synthetic_walk_pose_stream",
+      "script": "res://tests/integration/capture/capture_start_stop_with_fakes_test.gd"
+    },
+    {
+      "id": "contracts.sensor_frame_validation",
+      "level": "contract",
+      "suite": "contracts.sensor",
+      "module": "core/sensors",
+      "script": "res://tests/unit/contracts/sensor_frame_test.gd"
+    },
+    {
+      "id": "mode_ego_capture.device_smoke",
+      "level": "device",
+      "required_device": "quest_or_pico"
+    }
+  ]
+}
