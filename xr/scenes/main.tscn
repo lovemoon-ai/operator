@@ -1,7 +1,7 @@
 [gd_scene load_steps=5 format=3]
 
 [ext_resource type="PackedScene" uid="uid://clc5dre31iskm" path="res://addons/godot-xr-tools/xr/start_xr.tscn" id="1_startxr"]
-[ext_resource type="Script" path="res://scenes/mode_select.gd" id="2_mode_select"]
+[ext_resource type="Script" path="res://scripts/app/launcher/mode_select.gd" id="2_mode_select"]
 [ext_resource type="PackedScene" path="res://scenes/ui/operator_function_pointer.tscn" id="7_fnptr"]
 [ext_resource type="Script" path="res://scripts/xr/function_pointer_click_bridge.gd" id="8_pointer_click"]
 

@@ -6,7 +6,7 @@ extends Node3D
 ##                   device summary + Disconnect / Back-to-Select.
 ##
 ## Phase transitions are driven by `set_connected(bool)` and
-## `show_device_info(descriptor)` from main.gd.
+## `show_device_info(descriptor)` from the teleop controller.
 
 signal connect_requested(ip: String, port: int)
 signal disconnect_requested()
@@ -383,7 +383,7 @@ func _make_robot_card(robot_name: String, info: Dictionary) -> Button:
 
 # --- State management ------------------------------------------------------
 
-## Update connected state and UI. Called by main.gd from TcpHandler signals.
+## Update connected state and UI. Called by the teleop controller from TcpHandler signals.
 ## Note: socket-level connect happens BEFORE the v2 descriptor handshake,
 ## so this only flips the status text. Page switching waits until
 ## `show_device_info` is called from `_on_device_connected`.
@@ -405,7 +405,7 @@ func set_connected(connected: bool) -> void:
 	_update_ui()
 
 
-## Called by main.gd once the DeviceDescriptor handshake completes.
+## Called by the teleop controller once the DeviceDescriptor handshake completes.
 ## Switches us into the driver-control phase.
 func show_device_info(descriptor: Dictionary) -> void:
 	var device_info: Dictionary = descriptor.get("device", {})

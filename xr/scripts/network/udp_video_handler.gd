@@ -3,7 +3,7 @@ extends Node
 ## [opt 9] UDP receiver for the video stream.
 ##
 ## Mirrors the API surface of TcpHandler (`video_frame_received` signal,
-## `connect_to_video_stream`/`disconnect_from_robot`) so main.gd can
+## `connect_to_video_stream`/`disconnect_from_robot`) so the teleop controller can
 ## swap between transports with minimal plumbing. The wire format is
 ## the same TimedVideoFrame layout as the TCP path, so the GDScript
 ## decoder (XRoboProtocol.decode_timed_video_frame) and RobotView code

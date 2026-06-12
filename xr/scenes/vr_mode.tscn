@@ -1,7 +1,7 @@
 [gd_scene load_steps=3 format=3]
 
 [ext_resource type="PackedScene" uid="uid://clc5dre31iskm" path="res://addons/godot-xr-tools/xr/start_xr.tscn" id="1_startxr"]
-[ext_resource type="Script" path="res://scenes/vr_mode.gd" id="2_vr_mode"]
+[ext_resource type="Script" path="res://scripts/app/modes/vr_mode.gd" id="2_vr_mode"]
 
 [node name="VRMode" type="Node3D"]
 script = ExtResource("2_vr_mode")

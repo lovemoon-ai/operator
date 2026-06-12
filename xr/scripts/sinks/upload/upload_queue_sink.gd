@@ -8,7 +8,7 @@ extends SensorSink
 ##
 ## Consumes no per-sample frames: its input is finalized session artifacts.
 
-const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
+const EgoUploaderScript := preload("res://scripts/sinks/upload/ego_uploader.gd")
 
 var _uploader: Node
 

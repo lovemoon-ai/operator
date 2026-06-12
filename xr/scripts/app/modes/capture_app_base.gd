@@ -1,18 +1,18 @@
 extends Node3D
 
 const LivePullDenseMapViewScript := preload("res://addons/live-pull/live_pull_dense_map_view.gd")
-const PoseSamplerScript := preload("res://scripts/pose_sampler.gd")
-const DepthSamplerScript := preload("res://scripts/depth_sampler.gd")
-const BodyMotionSamplerScript := preload("res://scripts/body_motion_sampler.gd")
+const PoseSamplerScript := preload("res://scripts/core/sensors/pose_sampler.gd")
+const DepthSamplerScript := preload("res://scripts/core/sensors/depth_sampler.gd")
+const BodyMotionSamplerScript := preload("res://scripts/core/sensors/body_motion_sampler.gd")
 const BodyPoseProviderScript := preload("res://scripts/robot_constraint/body_pose_provider.gd")
 const BodyPoseDebugOverlayScript := preload("res://scripts/robot_constraint/body_pose_debug_overlay.gd")
 const H2OverlayScript := preload("res://scripts/robot_constraint/robot/h2_overlay.gd")
-const ViewLockedCapturePanelScript := preload("res://scripts/view_locked_capture_panel.gd")
-const ViewLockedRecordControlScript := preload("res://scripts/view_locked_record_control.gd")
-const ViewLockedStatusPopupScript := preload("res://scripts/view_locked_status_popup.gd")
+const ViewLockedCapturePanelScript := preload("res://scripts/ui/view_locked_capture_panel.gd")
+const ViewLockedRecordControlScript := preload("res://scripts/ui/view_locked_record_control.gd")
+const ViewLockedStatusPopupScript := preload("res://scripts/ui/view_locked_status_popup.gd")
 const SettingsLauncherButtonScript := preload("res://scripts/ui/settings_launcher_button.gd")
-const EgoUploaderScript := preload("res://scripts/ego_uploader.gd")
-const EgoQRScannerScript := preload("res://scripts/ego_qr_scanner.gd")
+const EgoUploaderScript := preload("res://scripts/sinks/upload/ego_uploader.gd")
+const EgoQRScannerScript := preload("res://scripts/ui/ego_qr_scanner.gd")
 const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
 const QR_SCANNER_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const QR_TARGET_UPLOAD_URL := "upload_url"
@@ -1584,7 +1584,7 @@ func _on_exit_requested() -> void:
 	# Exit from the in-mode settings panel returns to the launcher / mode
 	# select page so the user can pick a different mode without restarting
 	# the app. The launcher's own Exit card is what actually quits the
-	# process (see scenes/mode_select.gd). Any active capture / live pull
+	# process (see scripts/app/launcher/mode_select.gd). Any active capture / live pull
 	# is stopped first so we don't leak an MP4 muxer or a network reader.
 	_release_ui_pointer()
 	if _recording:

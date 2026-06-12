@@ -1,7 +1,7 @@
 extends Control
 ## Tiny face-locked button that re-opens the settings panel.
-## Just emits `pressed` when the user clicks the gear; main.gd handles
-## the panel visibility.
+## Just emits `pressed` when the user clicks the gear; the active mode
+## controller handles the panel visibility.
 
 signal pressed
 

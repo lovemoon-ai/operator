@@ -5,8 +5,8 @@ extends RefCounted
 ## wraps it in RobotControlSink (latest-only, 72 Hz default — all wire
 ## formats live in CommandSender/ControlMode unchanged).
 ##
-## Session / TcpHandler / video handlers stay wired by the scene
-## (scenes/main.gd): they are transport plumbing with scene-tree lifecycle,
+## Session / TcpHandler / video handlers stay wired by the teleop mode
+## controller: they are transport plumbing with scene-tree lifecycle,
 ## not sensor-frame composition.
 ##
 ## Robot-constraint composition gate (for future use by the constraint

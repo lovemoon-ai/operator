@@ -33,8 +33,8 @@ var _title_row: HBoxContainer
 var _actions_row: HBoxContainer
 
 # Title-bar indicator that surfaces the auto-detected input source (hand vs
-# controller). Subclasses don't need to know it exists — capture_app /
-# scenes/main.gd drive it via `set_input_mode_indicator()`. The icon alone
+# controller). Subclasses don't need to know it exists; capture and teleop
+# mode controllers drive it via `set_input_mode_indicator()`. The icon alone
 # carries the meaning; a text label proved redundant in user testing so the
 # slot is icon-only now.
 var _input_mode_indicator: TextureRect
