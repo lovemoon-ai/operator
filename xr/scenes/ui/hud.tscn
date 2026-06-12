@@ -1,6 +1,6 @@
 [gd_scene load_steps=5 format=3]
 
-[ext_resource type="Script" path="res://scenes/ui/hud.gd" id="1_hud"]
+[ext_resource type="Script" path="res://scripts/ui/hud.gd" id="1_hud"]
 
 [sub_resource type="QuadMesh" id="QuadMesh_hud"]
 size = Vector2(0.3, 0.15)

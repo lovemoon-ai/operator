@@ -1,6 +1,6 @@
 [gd_scene load_steps=5 format=3]
 
-[ext_resource type="Script" path="res://scenes/ui/connection_panel.gd" id="1_conn"]
+[ext_resource type="Script" path="res://scripts/ui/connection_panel.gd" id="1_conn"]
 
 [sub_resource type="QuadMesh" id="QuadMesh_conn"]
 size = Vector2(0.8, 0.6)

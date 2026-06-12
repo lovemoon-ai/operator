@@ -1,6 +1,6 @@
 [gd_scene load_steps=3 format=3]
 
-[ext_resource type="Script" path="res://scenes/ui/settings_button_ui.gd" id="1_btn_ui"]
+[ext_resource type="Script" path="res://scripts/ui/settings_button_ui.gd" id="1_btn_ui"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_btn"]
 bg_color = Color(0.055, 0.067, 0.08, 0.86)

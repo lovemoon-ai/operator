@@ -14,7 +14,7 @@
 class_name SpoolWriterAdapter
 extends CaptureWriterAdapter
 
-const SessionSpoolWriterScript := preload("res://scripts/session_spool_writer.gd")
+const SessionSpoolWriterScript := preload("res://scripts/core/capture/session_spool_writer.gd")
 
 # JsonlSidecarSink (or null). Injected by the composition root so the same
 # instance also sits in the samplers' StreamBinding fanout.

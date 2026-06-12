@@ -67,7 +67,7 @@ func stop() -> void:
 		_timer.stop()
 
 
-## Called by the parent (main.gd) for every command frame received.
+## Called by the parent teleop controller for every command frame received.
 ## Returns true when we consumed a ClockPong (so caller can short-circuit
 ## any further dispatch).
 func handle_command(command: String, data: PackedByteArray) -> bool:

@@ -557,7 +557,7 @@ func _show_settings_panel_discovering() -> void:
 		_settings_ui.set_discovering(true, tr("UI_DISCOVERING_ROBOTS"))
 
 
-## Translate main.gd's IP-keyed `_known_robots` into the name-keyed
+## Translate this controller's IP-keyed `_known_robots` into the name-keyed
 ## structure SettingsUI expects, then push it down with the user's
 ## preferred IP so the dropdown auto-selects the right row.
 func _push_discovery_to_settings_ui() -> void:

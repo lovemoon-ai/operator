@@ -18,9 +18,9 @@ extends Node
 ##   "timeStampNs": 123456789
 ## }
 
-## Reference to the tracking provider (set by main.gd)
+## Reference to the tracking provider (set by the teleop controller)
 var tracking_provider: TrackingProvider
-## Reference to the TCP handler (set by main.gd)
+## Reference to the TCP handler (set by the teleop controller)
 var tcp_handler: TcpHandler
 
 ## Whether pose sending is active

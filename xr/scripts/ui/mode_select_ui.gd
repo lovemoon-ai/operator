@@ -1,10 +1,10 @@
 extends Control
 
-## Single-card UI used by the 3D launcher (scenes/mode_select.gd).
+## Single-card UI used by the 3D launcher (scripts/app/launcher/mode_select.gd).
 ##
 ## Each launcher card is its own Viewport2DIn3D quad floating in front of the
 ## user, so this Control renders exactly one card (icon + title + subtitle).
-## The 2-row grid that used to live here moved up into mode_select.gd, which
+## The 2-row grid that used to live here moved up into the launcher script, which
 ## now positions one of these scenes per mode. `selected` fires when the
 ## operator clicks the card; the launcher script maps that to the scene
 ## change (or app quit for the EXIT kind).

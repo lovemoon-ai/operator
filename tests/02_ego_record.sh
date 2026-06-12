@@ -89,7 +89,7 @@ CI_APK_PATH=""        # CI auto-record APK; filled in by configure_device_kind
 MAKE_TARGET=""        # build-quest / build-pico
 EXPECTED_DEVICE_PREFIX=""  # quest / pico — used by validator
 CLEAN_APK_PATH="$OUTPUT_DIR/Operator-clean.apk"
-CAPTURE_APP_GD="$XR_DIR/scripts/capture_app.gd"
+CAPTURE_APP_GD="$XR_DIR/scripts/app/modes/capture_app_base.gd"
 CAPTURE_APP_GD_BAK=""
 
 configure_device_kind() {
@@ -314,13 +314,13 @@ restore_auto_start() {
     cp "$CAPTURE_APP_GD_BAK" "$CAPTURE_APP_GD"
     rm -f "$CAPTURE_APP_GD_BAK"
     CAPTURE_APP_GD_BAK=""
-    ok "restored xr/scripts/capture_app.gd"
+    ok "restored xr/scripts/app/modes/capture_app_base.gd"
   fi
 }
 
 flip_auto_start_on() {
   if [ ! -f "$CAPTURE_APP_GD" ]; then
-    err "capture_app.gd not found at $CAPTURE_APP_GD"
+    err "capture_app_base.gd not found at $CAPTURE_APP_GD"
     exit 2
   fi
   local stop_value="$CAPTURE_SECONDS"

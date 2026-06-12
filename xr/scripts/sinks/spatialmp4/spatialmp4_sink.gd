@@ -7,7 +7,7 @@ extends SensorSink
 ## byte-compatible per SpatialMp4ManifestContract; this sink owns the
 ## SensorFrame -> muxer dispatch (JSONL sidecars moved to JsonlSidecarSink).
 
-const SessionSpoolWriterScript := preload("res://scripts/session_spool_writer.gd")
+const SessionSpoolWriterScript := preload("res://scripts/core/capture/session_spool_writer.gd")
 
 var _writer: Object
 

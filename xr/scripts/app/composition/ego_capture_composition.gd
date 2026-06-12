@@ -16,7 +16,7 @@ extends RefCounted
 ## missing capability degrades the option set; the manifest records the
 ## stream as absent with today's reasons text.
 
-const SessionSpoolWriterScript := preload("res://scripts/session_spool_writer.gd")
+const SessionSpoolWriterScript := preload("res://scripts/core/capture/session_spool_writer.gd")
 const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
 
 

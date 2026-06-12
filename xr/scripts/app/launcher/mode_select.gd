@@ -24,7 +24,7 @@ const DEFAULT_LAUNCHER_CARD_MODES := [MODE_EGO_CAPTURE, MODE_EXIT]
 
 const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
 const CardSceneTemplate := preload("res://scenes/ui/mode_select_ui.tscn")
-const CardUIScript := preload("res://scenes/ui/mode_select_ui.gd")
+const CardUIScript := preload("res://scripts/ui/mode_select_ui.gd")
 
 const CARD_VIEWPORT_SIZE := Vector2(420, 540)
 const CARD_SCREEN_SIZE := Vector2(0.30, 0.38)
