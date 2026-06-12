@@ -84,7 +84,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var recordControllerInput = true
     private var recordBodyTracking = false
     private var recordMotionTrackers = false
-    private var maxMotionTrackerCount = 3
+    private var maxMotionTrackerCount = 2
     private var stereoRgb = true
     private var rgbBitrate = DEFAULT_RGB_BITRATE
     private var rgbFps = DEFAULT_RGB_FPS
