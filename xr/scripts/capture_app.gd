@@ -1,7 +1,5 @@
 extends Node3D
 
-const SessionSpoolWriterScript := preload("res://scripts/session_spool_writer.gd")
-const LivePushWriterScript := preload("res://addons/live-push/live_push_writer.gd")
 const LivePullDenseMapViewScript := preload("res://addons/live-pull/live_pull_dense_map_view.gd")
 const PoseSamplerScript := preload("res://scripts/pose_sampler.gd")
 const DepthSamplerScript := preload("res://scripts/depth_sampler.gd")
@@ -69,6 +67,15 @@ var settings_button
 var record_control
 var status_popup
 var writer: Object
+# WP5: shared canonical-frame fanout (StreamBinding over the sinks below)
+# injected into the samplers so all sensor writes flow through SensorFrames.
+var _frame_sink: Object
+# WP5 sinks. Spool mode: SpatialMp4Sink (SessionSpoolWriter engine) +
+# JsonlSidecarSink. Live mode: LiveStreamSink (LivePushWriter engine).
+var _spatialmp4_sink: SpatialMp4Sink = null
+var _jsonl_sink: JsonlSidecarSink = null
+var _live_stream_sink: LiveStreamSink = null
+var _upload_sink: UploadQueueSink = null
 var pose_sampler: Node
 var _body_pose_debug_provider: Node = null
 var _body_pose_debug_overlay: Node3D = null
@@ -88,6 +95,9 @@ var _upload_popup_timer_armed := false
 var cue_player: AudioStreamPlayer
 var _start_cue: AudioStreamWAV
 var _stop_cue: AudioStreamWAV
+# WP2: platform capability registry — the only sanctioned route to vendor
+# plugin singletons (see xr/scripts/platform/).
+var _platform: PlatformRegistry
 var camera_plugin: Object
 var muxer_plugin: Object
 var pico_openxr_bridge: Object
@@ -125,7 +135,13 @@ var capture_options := {
 	"save_root": DEFAULT_SAVE_ROOT
 }
 
-var _recording := false
+# WP3: the recording lifecycle is owned by CaptureSessionController; the
+# legacy `_recording` boolean is now a read-only view over its state machine
+# so the dozens of existing call sites keep their exact semantics.
+var _capture_controller: CaptureSessionController = null
+var _recording: bool:
+	get:
+		return _capture_controller != null and _capture_controller.is_session_active()
 var _pose_accum := 0.0
 var _capture_started_ticks_us := 0
 var _xr_session_begun := false
@@ -223,7 +239,21 @@ func _ready() -> void:
 	_bind_android_plugin()
 	_setup_audio_cues()
 
-	writer = _create_writer()
+	# WP6: the v2 capture stack (writer engine + sinks + StreamBinding
+	# fanout + upload sink + CaptureSessionController) is built by the
+	# mode's composition root. This scene keeps node lifecycle, intent
+	# parsing, and UI glue only.
+	var io: Dictionary
+	if _is_live_feed_mode():
+		io = LiveFeedComposition.build_io(default_live_server_host, default_live_server_port, default_live_server_auth_token)
+	else:
+		io = EgoCaptureComposition.build_io()
+	writer = io.get("writer")
+	_frame_sink = io.get("frame_sink")
+	_spatialmp4_sink = io.get("spatialmp4_sink")
+	_jsonl_sink = io.get("jsonl_sink")
+	_live_stream_sink = io.get("live_stream_sink")
+	_upload_sink = io.get("upload_sink")
 	# _bind_android_plugin ran above when `writer` was still null, so its own
 	# writer.set_*_plugin attempts were skipped; we re-wire both singletons
 	# here against the freshly-created spool writer. Stage 2b's split moved
@@ -245,12 +275,21 @@ func _ready() -> void:
 	pose_sampler.configure(writer, hmd_camera, left_controller, right_controller, camera_plugin)
 	depth_sampler.configure(writer, camera_plugin)
 	body_motion_sampler.configure(writer, pose_sampler, pico_openxr_bridge)
+	# WP5: samplers emit canonical SensorFrames through a single shared
+	# StreamBinding fanout over the mode's sinks. The sinks call the legacy
+	# writer surfaces with identical args, so output formats are unchanged.
+	pose_sampler.set_frame_sink(_frame_sink)
+	depth_sampler.set_frame_sink(_frame_sink)
+	body_motion_sampler.set_frame_sink(_frame_sink)
+	_setup_capture_controller(io)
 
 	if not _is_live_feed_mode():
 		# EgoUploader drains user://ego_upload_queue.json for ego capture only.
 		# Live Feed is a push-only session and must not resume old local upload
-		# jobs or surface upload progress/errors.
-		ego_uploader = EgoUploaderScript.new()
+		# jobs or surface upload progress/errors. WP5: the uploader node is
+		# owned by UploadQueueSink (same queue file / TUS behavior / signals);
+		# this scene keeps the node's tree lifecycle + UI signal glue.
+		ego_uploader = _upload_sink.uploader()
 		ego_uploader.name = "EgoUploader"
 		add_child(ego_uploader)
 		ego_uploader.upload_started.connect(_on_upload_started)
@@ -618,6 +657,15 @@ func _exit_tree() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_RESUMED:
 		_reset_ui_input_state()
+		# WP3: track transient pause/resume in the capture state machine
+		# (Running <-> Recovering). Bookkeeping only — `_recording` stays true
+		# across Recovering so the legacy pipeline behavior is unchanged, and
+		# request_stop() auto-resumes from Recovering before stopping.
+		if _capture_controller != null:
+			if what == NOTIFICATION_APPLICATION_PAUSED:
+				_capture_controller.notify_pause()
+			else:
+				_capture_controller.notify_resume()
 
 	# Device-test only: when the VR shell pauses the app (e.g. the headset is
 	# doffed during a host-driven adb smoke run), the auto-stop Timer freezes and
@@ -637,21 +685,54 @@ func _reset_ui_input_state() -> void:
 	_release_ui_pointer()
 
 
+## WP3/WP6: builds the CaptureSessionController via the mode's composition
+## root. The stop chain preserves the legacy stop order exactly:
+## body_motion.stop -> live-pull disconnect (non-live-feed only) ->
+## depth.stop -> writer.close.
+func _setup_capture_controller(io: Dictionary) -> void:
+	var deps := {
+		"pose_sampler": pose_sampler,
+		"depth_sampler": depth_sampler,
+		"body_motion_sampler": body_motion_sampler,
+		"permission_check": Callable(self, "_ensure_output_storage_ready"),
+	}
+	if _is_live_feed_mode():
+		_capture_controller = LiveFeedComposition.build_controller(io, deps)
+	else:
+		deps["stop_live_pull"] = Callable(self, "_stop_live_pull")
+		_capture_controller = EgoCaptureComposition.build_controller(io, deps)
+	_capture_controller.session_started.connect(_on_capture_session_started)
+	_capture_controller.session_stopped.connect(_on_capture_session_stopped)
+	_capture_controller.session_error.connect(_on_capture_session_error)
+
+
 func start_capture() -> void:
 	if _recording:
 		return
-
-	if not _ensure_output_storage_ready():
+	if _capture_controller == null:
 		return
+
+	# Normalize save_root before the options snapshot (the storage check —
+	# now run inside the controller's permission phase — used to do this
+	# before _effective_capture_options was computed).
+	if not _is_live_feed_mode():
+		capture_options["save_root"] = _configured_save_root()
 	_active_capture_options = _effective_capture_options(capture_options)
-	if not bool(writer.start_session(_active_capture_options)):
-		push_error("Capture session did not start because its output directory could not be created.")
+	if not _capture_controller.request_start(_active_capture_options):
+		# Storage/permission failures log on their own; a writer failure was
+		# surfaced via session_error. Mirrors the legacy silent return.
 		_active_capture_options = {}
 		return
+	# request_start succeeded; _on_capture_session_started already ran
+	# synchronously via the controller signal.
+
+
+func _on_capture_session_error(message: String) -> void:
+	push_error(message)
+
+
+func _on_capture_session_started(_session_dir: String) -> void:
 	_start_live_pull()
-	pose_sampler.set_capture_options(_active_capture_options)
-	body_motion_sampler.set_capture_options(_active_capture_options)
-	_recording = true
 	_update_operator_interaction_state()
 	_pose_accum = 0.0
 	_capture_started_ticks_us = Time.get_ticks_usec()
@@ -677,7 +758,7 @@ func start_capture() -> void:
 	# has a single drain point, so two consumers would steal each other's
 	# frames. Reachable with the scanner open via the volume-key shortcut.
 	if qr_scanner != null and qr_scanner.has_method("set_external_capture_busy"):
-		qr_scanner.set_external_capture_busy(_capture_provider_name == "pico")
+		qr_scanner.set_external_capture_busy(CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name))
 	if record_control:
 		record_control.set_recording(true)
 	# Park any in-flight upload while we record — see
@@ -696,8 +777,9 @@ func start_capture() -> void:
 func stop_capture() -> void:
 	if not _recording:
 		return
+	if _capture_controller == null:
+		return
 
-	var is_live_feed := _is_live_feed_mode()
 	_stop_camera_plugin()
 	# Snapshot the body-tracking runtime BEFORE stop()/close() so the
 	# manifest rewrite at close() time can record which extension actually
@@ -706,15 +788,15 @@ func stop_capture() -> void:
 	# the data flow obvious — sample → record → manifest.
 	if body_motion_sampler and body_motion_sampler.has_method("get_runtime_info") and writer and writer.has_method("set_body_tracking_runtime_info"):
 		writer.set_body_tracking_runtime_info(body_motion_sampler.get_runtime_info())
-	body_motion_sampler.stop()
-	if not is_live_feed:
-		_stop_live_pull()
-	depth_sampler.stop()
-	writer.close()
-	var saved_session_dir := ""
-	if not is_live_feed:
-		saved_session_dir = writer.get_saved_path() if writer.has_method("get_saved_path") else writer.get_session_dir()
-	_recording = false
+	# Controller runs the stop chain (body_motion.stop -> live-pull
+	# disconnect -> depth.stop) then writer.close(), then emits
+	# session_stopped which drives the UI / upload tail below.
+	_capture_controller.request_stop()
+
+
+func _on_capture_session_stopped(final_path: String) -> void:
+	var is_live_feed := _is_live_feed_mode()
+	var saved_session_dir := final_path
 	_update_operator_interaction_state()
 	_active_capture_options = {}
 	_camera_configured = false
@@ -767,7 +849,7 @@ func stop_capture() -> void:
 		var session_dir_for_upload: String = writer.get_session_dir_absolute() if writer.has_method("get_session_dir_absolute") else writer.get_session_dir()
 		var mp4_for_upload: String = writer.get_output_mp4_path_absolute() if writer.has_method("get_output_mp4_path_absolute") else (saved_session_dir if saved_session_dir.ends_with(".mp4") else "")
 		var session_id_for_upload := mp4_for_upload.get_file().get_basename()
-		var queued := bool(ego_uploader.enqueue(session_dir_for_upload, mp4_for_upload, capture_options))
+		var queued := _upload_sink.enqueue_session(session_dir_for_upload, mp4_for_upload, capture_options) if _upload_sink != null else bool(ego_uploader.enqueue(session_dir_for_upload, mp4_for_upload, capture_options))
 		if queued:
 			_active_upload_session_id = session_id_for_upload
 			if ego_uploader.has_method("prioritize"):
@@ -1037,6 +1119,12 @@ func _set_debug_panel_state() -> void:
 		settings_panel.call("set_h2_debug_visible", _h2_debug_overlay != null)
 
 
+func _platform_registry() -> PlatformRegistry:
+	if _platform == null:
+		_platform = PlatformRegistry.create()
+	return _platform
+
+
 func _setup_pico_openxr_bridge() -> void:
 	if pico_openxr_bridge != null:
 		return
@@ -1046,14 +1134,11 @@ func _setup_pico_openxr_bridge() -> void:
 		if pico_openxr_bridge != null:
 			print("PicoOpenXRExtension bridge bound from autoload")
 			return
-	if Engine.has_singleton("PicoOpenXRBridgeNative"):
-		pico_openxr_bridge = Engine.get_singleton("PicoOpenXRBridgeNative")
-		if pico_openxr_bridge != null:
-			print("PicoOpenXRExtension bridge bound from native singleton")
-			return
-	if not ClassDB.class_exists("PicoOpenXRExtension"):
+	pico_openxr_bridge = _platform_registry().pico_adapter().openxr_bridge_native()
+	if pico_openxr_bridge != null:
+		print("PicoOpenXRExtension bridge bound from native singleton")
 		return
-	pico_openxr_bridge = ClassDB.instantiate("PicoOpenXRExtension")
+	pico_openxr_bridge = _platform_registry().pico_adapter().instantiate_openxr_bridge()
 	if pico_openxr_bridge != null:
 		print("PicoOpenXRExtension bridge instantiated")
 
@@ -1139,12 +1224,8 @@ func _bind_android_plugin() -> void:
 		print("Capture provider singleton bound: %s" % _provider_label())
 
 	if _is_live_feed_mode():
-		if live_server_plugin == null and Engine.has_singleton("LivePushPlugin"):
-			live_server_plugin = Engine.get_singleton("LivePushPlugin")
-		elif live_server_plugin == null and Engine.has_singleton("LiveFeedServerPlugin"):
-			live_server_plugin = Engine.get_singleton("LiveFeedServerPlugin")
-		elif live_server_plugin == null and Engine.has_singleton("LiveCaptureServerPlugin"):
-			live_server_plugin = Engine.get_singleton("LiveCaptureServerPlugin")
+		if live_server_plugin == null:
+			live_server_plugin = _platform_registry().live_server_plugin()
 		if live_server_plugin != null:
 			if live_server_plugin.has_signal("live_feed_error"):
 				live_server_plugin.connect("live_feed_error", Callable(self, "_on_camera_error"))
@@ -1160,10 +1241,11 @@ func _bind_android_plugin() -> void:
 				live_server_plugin.connect("live_capture_disconnected", Callable(self, "_on_live_feed_disconnected"))
 			print("LivePushPlugin singleton bound")
 	else:
-		if muxer_plugin == null and Engine.has_singleton("SpatialMp4MuxerPlugin"):
-			muxer_plugin = Engine.get_singleton("SpatialMp4MuxerPlugin")
-			muxer_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
-			print("SpatialMp4MuxerPlugin singleton bound (contract v%d)" % int(muxer_plugin.call("getMuxerContractVersion")))
+		if muxer_plugin == null:
+			muxer_plugin = _platform_registry().muxer_plugin()
+			if muxer_plugin != null:
+				muxer_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
+				print("SpatialMp4MuxerPlugin singleton bound (contract v%d)" % int(muxer_plugin.call("getMuxerContractVersion")))
 
 	var sink_plugin := _active_sink_plugin()
 	if camera_plugin != null and sink_plugin != null:
@@ -1206,7 +1288,7 @@ func _start_camera_plugin() -> void:
 		str(_capture_option("audio_channel_layout", "stereo"))
 	)
 	var configured_result: Variant
-	if _capture_provider_name == "pico":
+	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
 		configured_result = camera_plugin.call(
 			"configureSpatialMp4SessionWithTime",
 			output_mp4_absolute,
@@ -1332,7 +1414,7 @@ func _try_start_camera_plugin() -> void:
 				print("%s audio permission missing; starting without audio" % _provider_label())
 	_camera_start_attempted = true
 	var started := false
-	if _capture_provider_name == "pico":
+	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
 		started = _start_pico_openxr_camera_image_capture()
 	else:
 		print("%s invoking startCameras" % _provider_label())
@@ -1345,7 +1427,7 @@ func _try_start_camera_plugin() -> void:
 func _stop_camera_plugin() -> void:
 	if camera_plugin != null:
 		camera_plugin.call("stopCameras")
-	if _capture_provider_name == "pico" and pico_openxr_bridge != null and pico_openxr_bridge.has_method("stop_camera_image_capture"):
+	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name) and pico_openxr_bridge != null and pico_openxr_bridge.has_method("stop_camera_image_capture"):
 		pico_openxr_bridge.call("stop_camera_image_capture")
 	_pico_camera_image_started = false
 
@@ -1625,14 +1707,6 @@ func _open_live_feed_settings() -> void:
 		settings_panel.open()
 
 
-func _create_writer() -> Object:
-	if _is_live_feed_mode():
-		var live_writer = LivePushWriterScript.new()
-		live_writer.configure_server(default_live_server_host, default_live_server_port, default_live_server_auth_token)
-		return live_writer
-	return SessionSpoolWriterScript.new()
-
-
 func _is_live_feed_mode() -> bool:
 	return capture_sink == "server"
 
@@ -1651,27 +1725,11 @@ func _capture_option(option: String, fallback: Variant = null) -> Variant:
 
 
 func _effective_capture_options(options: Dictionary) -> Dictionary:
-	var effective := options.duplicate(true)
 	if camera_plugin == null:
 		_bind_android_plugin()
-	if camera_plugin != null:
-		var provider_name := CaptureProviderRegistryScript.provider_name(camera_plugin)
-		if not provider_name.is_empty():
-			effective["capture_provider"] = provider_name
-		if not CaptureProviderRegistryScript.supports_depth(camera_plugin):
-			effective["record_depth"] = false
-		if not CaptureProviderRegistryScript.supports_body_motion(camera_plugin):
-			effective["record_body_tracking"] = false
-			effective["record_motion_trackers"] = false
-		# Motion trackers (PICO XR_PICO_motion_tracking) are PICO-only even
-		# when the provider reports body-motion support — Quest's body data
-		# comes purely from the Meta vendor AAR's XR_FB_body_tracking +
-		# XR_META_body_tracking_full_body extensions, no external trackers.
-		if provider_name != "pico":
-			effective["record_motion_trackers"] = false
-		if provider_name == "pico":
-			effective["record_audio"] = false
-	return effective
+	# WP6: the provider-capability gating moved verbatim to the composition
+	# root so the WP7 harness can exercise it with fake providers.
+	return EgoCaptureComposition.effective_capture_options(options, camera_plugin)
 
 
 func _provider_label() -> String:
@@ -1707,7 +1765,7 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 
 
 func _pump_pico_openxr_camera_frames(delta: float) -> void:
-	if _capture_provider_name != "pico" or not _pico_camera_image_started:
+	if not CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name) or not _pico_camera_image_started:
 		return
 	var bridge := pico_openxr_bridge
 	var plugin := camera_plugin
@@ -1800,7 +1858,7 @@ func _pop_pico_pump_metrics() -> Dictionary:
 
 
 func _push_pico_external_camera_info_if_available() -> void:
-	if _capture_provider_name != "pico" or pico_openxr_bridge == null:
+	if not CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name) or pico_openxr_bridge == null:
 		return
 	if not pico_openxr_bridge.has_method("get_external_camera_info"):
 		return
@@ -1921,7 +1979,7 @@ func _on_tracker_connect_requested() -> void:
 func _pico_tracker_setup_required(options: Dictionary) -> bool:
 	if camera_plugin == null:
 		_bind_android_plugin()
-	if camera_plugin == null or CaptureProviderRegistryScript.provider_name(camera_plugin) != "pico":
+	if camera_plugin == null or not CaptureProviderRegistryScript.provider_uses_pico_bridge(CaptureProviderRegistryScript.provider_name(camera_plugin)):
 		return false
 	return bool(options.get("record_body_tracking", false)) or bool(options.get("record_motion_trackers", false))
 
@@ -2023,7 +2081,7 @@ func _ensure_audio_permission_prompted() -> void:
 	# Pico capture today disables the audio track regardless (see
 	# _effective_capture_options) -- skip the prompt so the operator isn't
 	# asked for a permission the session won't end up using.
-	if CaptureProviderRegistryScript.provider_name(camera_plugin) == "pico":
+	if not CaptureProviderRegistryScript.provider_supports_audio_capture(CaptureProviderRegistryScript.provider_name(camera_plugin)):
 		_audio_permission_prompt_fired = true
 		return
 	# Android plugin singletons sometimes do not reflect @UsedByGodot methods
@@ -2397,9 +2455,9 @@ func _upload_kind_label(kind: String) -> String:
 
 
 func _suppress_boundary_visibility() -> void:
-	if not Engine.has_singleton("OpenXRMetaBoundaryVisibilityExtensionWrapper"):
+	var boundary := _platform_registry().boundary_extension()
+	if boundary == null:
 		return
-	var boundary := Engine.get_singleton("OpenXRMetaBoundaryVisibilityExtensionWrapper")
 	if boundary.has_method("is_boundary_visibility_supported") and bool(boundary.call("is_boundary_visibility_supported")):
 		boundary.call("set_boundary_visible", false)
 		print("Quest boundary visibility suppressed")

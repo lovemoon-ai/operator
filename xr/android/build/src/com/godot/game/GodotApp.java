@@ -126,6 +126,10 @@ public class GodotApp extends GodotActivity {
 		}
 		appendIntentExtraArg(args, EXTRA_MUJOCO_DURATION, "--mujoco-duration");
 		appendIntentExtraArg(args, EXTRA_MUJOCO_MIN_FRAMES, "--mujoco-min-frames");
+		// WP7 module test harness (tests/xr_module_harness.sh): only honored
+		// by APKs exported with operator_feature_test_harness=true.
+		appendIntentExtraArg(args, "operator_test_suite", "--operator-test-suite");
+		appendIntentExtraArg(args, "operator_test_case", "--operator-test-case");
 		return args;
 	}
 

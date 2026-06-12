@@ -14,14 +14,13 @@ func get_bridge() -> Object:
 func _ensure_bridge() -> Object:
 	if bridge != null:
 		return bridge
-	if Engine.has_singleton("PicoOpenXRBridgeNative"):
-		bridge = Engine.get_singleton("PicoOpenXRBridgeNative")
-		if bridge != null:
-			print("PicoOpenXRExtension bridge bound from native singleton")
-			return bridge
-	if not ClassDB.class_exists("PicoOpenXRExtension"):
-		return null
-	bridge = ClassDB.instantiate("PicoOpenXRExtension")
+	# WP2: vendor singleton probing delegated to the platform layer.
+	var adapter := PlatformRegistry.shared().pico_adapter()
+	bridge = adapter.openxr_bridge_native()
+	if bridge != null:
+		print("PicoOpenXRExtension bridge bound from native singleton")
+		return bridge
+	bridge = adapter.instantiate_openxr_bridge()
 	if bridge != null:
 		print("PicoOpenXRExtension bridge instantiated")
 	return bridge

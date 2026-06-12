@@ -35,6 +35,10 @@ const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 
 ## v2 nodes (created programmatically)
 var _session: Session
+## WP5: teleop command emission goes through RobotControlSink (sinks/
+## robot_control). The sink wraps the scene-owned CommandSender by
+## composition — wire JSON, 72 Hz rate, enable prints all unchanged.
+var _robot_control_sink: RobotControlSink
 var _command_sender: CommandSender
 ## TCP video handler — used when the descriptor selects "tcp" or as the
 ## fallback for "auto"-mode descriptors that didn't supply a UDP port.
@@ -202,9 +206,11 @@ func _create_v2_nodes() -> void:
 	_session.tcp_handler = _tcp_handler
 	add_child(_session)
 
-	_command_sender = CommandSender.new()
-	_command_sender.name = "CommandSender"
-	add_child(_command_sender)
+	# WP6: command emission stack built by the teleop composition root
+	# (CommandSender Node + RobotControlSink wrapper, behavior unchanged).
+	var teleop := TeleopComposition.build(self)
+	_command_sender = teleop.get("command_sender")
+	_robot_control_sink = teleop.get("robot_control_sink")
 
 	# Dedicated video stream handler. [issue 005 / item 6] Bumped to
 	# 32 MiB so a freshly connected client surviving a brief WiFi
@@ -380,8 +386,8 @@ func _on_settings_close_requested() -> void:
 func _on_settings_exit_requested() -> void:
 	print("[Operator] Settings exit requested — returning to mode select")
 	_cancel_launch_window()
-	if _command_sender:
-		_command_sender.set_sending(false)
+	if _robot_control_sink:
+		_robot_control_sink.set_sending(false)
 	if _clock_sync:
 		_clock_sync.stop()
 	if _discovery and _discovery.has_method("stop_scan"):
@@ -603,7 +609,7 @@ func _on_connected() -> void:
 
 func _on_disconnected() -> void:
 	_set_status(tr("UI_DISCONNECTED"))
-	_command_sender.set_sending(false)
+	_robot_control_sink.set_sending(false)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	_video_tcp_handler.disconnect_from_robot()
@@ -664,8 +670,8 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 		print("[Operator] Robot type hint (%s) differs from descriptor (%s) — descriptor wins" % [
 			_user_robot_type_hint, device_type,
 		])
-	_command_sender.configure_for_device(descriptor)
-	_command_sender.set_sending(true)
+	_robot_control_sink.configure_for_device(descriptor)
+	_robot_control_sink.set_sending(true)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_update_teleop_controller_panel()
@@ -678,7 +684,7 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 
 
 func _on_device_disconnected() -> void:
-	_command_sender.set_sending(false)
+	_robot_control_sink.set_sending(false)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	if _robot_view and _robot_view.has_method("clear_video_stream"):

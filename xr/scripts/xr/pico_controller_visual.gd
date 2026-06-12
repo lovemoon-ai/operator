@@ -42,13 +42,13 @@ func _process(_delta: float) -> void:
 func _should_enable() -> bool:
 	if not show_only_on_pico:
 		return true
-	if OS.has_feature("pico"):
+	if PicoPlatformAdapter.is_pico_build():
 		return true
 
 	var xr_interface := XRServer.find_interface("OpenXR")
 	if xr_interface:
 		var runtime := str(xr_interface.get("XRRuntimeName")).to_lower()
-		if runtime.contains("pico") or runtime.contains("bytedance"):
+		if PicoPlatformAdapter.is_pico_openxr_runtime_name(runtime):
 			return true
 	return false
 
