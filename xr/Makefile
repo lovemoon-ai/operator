@@ -7,10 +7,14 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
-# ADB=adb -s PB321XKGL4210070B
-ADB=adb
+ADB?=adb
+ADB_BASE:=$(ADB)
+QUEST_SERIAL?=
+PICO_SERIAL?=
+ADB_QUEST=$(if $(QUEST_SERIAL),$(ADB_BASE) -s $(QUEST_SERIAL),$(ADB_BASE))
+ADB_PICO=$(if $(PICO_SERIAL),$(ADB_BASE) -s $(PICO_SERIAL),$(ADB_BASE))
 GRADLE_USER_HOME?=$(HOME)/.gradle
 
 apk_quest=build/quest/Operator.apk
@@ -71,6 +75,9 @@ build-mujoco-pico: setup-vendors prepare-android-libs build-ahb build-godot-mujo
 # ---------------------------------------------------------------------------
 # Device install / run / ship
 # ---------------------------------------------------------------------------
+
+install-quest build-install-quest ship-quest: ADB=$(ADB_QUEST)
+install-pico build-install-pico ship-pico ship-pico-fast: ADB=$(ADB_PICO)
 
 install-quest:
 	$(ADB) install -r -d $(apk_quest)

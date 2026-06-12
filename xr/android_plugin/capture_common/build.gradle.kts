@@ -24,4 +24,5 @@ kotlin {
 
 dependencies {
     api(project(":contract"))
+    testImplementation("junit:junit:4.13.2")
 }

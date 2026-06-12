@@ -14,7 +14,7 @@
 #       │   - broadcasts mDNS `_xrobo._tcp.local.` and UDP discovery on :63900
 #       │   - listens on :12345 (video) + :63901 (pose/cmd) for the headset
 #       │
-#       ▼ Quest 3 (same Wi-Fi) discovers + connects automatically
+#       ▼ Quest 3 / Quest 3S (same Wi-Fi) discovers + connects automatically
 #   Quest app (com.lovemoon.operator)
 #       - MediaCodec decodes H.264 NALs
 #       - AHB zero-copy path renders into the OpenXR swapchain
@@ -24,12 +24,13 @@
 # seconds after the app is up. Default --frame-wait is 20s.
 #
 # Usage:
-#   bash tests/rtsp_test.sh                    # full e2e, requires app already launchable
-#   bash tests/rtsp_test.sh --launch-app       # also start the Quest activity
-#   bash tests/rtsp_test.sh --skip-build       # don't rebuild xr-bridge
-#   bash tests/rtsp_test.sh --frame-wait 30    # wait up to 30s for frames
-#   bash tests/rtsp_test.sh --codec hevc       # publish H.265 (libx265) instead of H.264
-#   bash tests/rtsp_test.sh --keep             # keep mediamtx/ffmpeg/xr-bridge running after test
+#   bash tests/01_rtsp_test.sh                    # full e2e, requires app already launchable
+#   bash tests/01_rtsp_test.sh --launch-app       # also start the Quest activity
+#   bash tests/01_rtsp_test.sh --skip-build       # don't rebuild xr-bridge
+#   bash tests/01_rtsp_test.sh --serial <serial>  # select a Quest adb device
+#   bash tests/01_rtsp_test.sh --frame-wait 30    # wait up to 30s for frames
+#   bash tests/01_rtsp_test.sh --codec hevc       # publish H.265 (libx265) instead of H.264
+#   bash tests/01_rtsp_test.sh --keep             # keep mediamtx/ffmpeg/xr-bridge running after test
 #
 # Requirements (auto-checked at startup):
 #   - ffmpeg (with libx264; libx265 too for --codec hevc)
@@ -38,6 +39,9 @@
 #   - cargo (only if --skip-build is not used)
 #   - Quest and Mac on the same Wi-Fi (mDNS / UDP broadcast discovery)
 #   - Quest app already installed and signed in to handle OpenXR
+#
+# Environment overrides:
+#   ADB, ADB_SERIAL, QUEST_SERIAL
 #
 # Stop with Ctrl-C — every spawned process is killed via the EXIT trap
 # unless --keep is given.
@@ -48,6 +52,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PKG="com.lovemoon.operator"
 ACT="com.godot.game.GodotApp"
+ADB="${ADB:-adb}"
+ADB_SERIAL_OVERRIDE="${ADB_SERIAL:-${QUEST_SERIAL:-}}"
 RTSP_URL="rtsp://127.0.0.1:8554/test"
 LOG_DIR="$ROOT/tests/logs/rtsp-$(date +%Y%m%d-%H%M%S)"
 
@@ -72,6 +78,7 @@ while (("$#")); do
     case "$1" in
     --launch-app) LAUNCH_APP=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
+    --serial) ADB_SERIAL_OVERRIDE="$2"; shift 2 ;;
     --frame-wait) FRAME_WAIT="$2"; shift 2 ;;
     --min-frames) MIN_FRAMES="$2"; shift 2 ;;
     --codec) CODEC="$2"; shift 2 ;;
@@ -99,6 +106,62 @@ ok()   { echo "  ${GREEN}✓${RESET} $*"; }
 warn() { echo "  ${YELLOW}!${RESET} $*"; }
 err()  { echo "  ${RED}✗${RESET} $*" >&2; }
 note() { echo "  ${DIM}$*${RESET}"; }
+
+run_adb() {
+    "$ADB" -s "$DEVICE" "$@"
+}
+
+adb_device_matches_quest() {
+    local serial="$1"
+    local device_line="$2"
+    local props text
+    props=$("$ADB" -s "$serial" shell 'printf "%s %s %s %s %s\n" "$(getprop ro.product.manufacturer)" "$(getprop ro.product.brand)" "$(getprop ro.product.model)" "$(getprop ro.product.device)" "$(getprop ro.product.name)"' </dev/null 2>/dev/null | tr -d '\r' || true)
+    text="$(printf '%s %s\n' "$device_line" "$props" | tr '[:upper:]' '[:lower:]')"
+    grep -Eq 'quest|oculus|meta|eureka|panther|seacliff|hollywood' <<< "$text"
+}
+
+pick_quest_device() {
+    if [ -n "$ADB_SERIAL_OVERRIDE" ]; then
+        echo "$ADB_SERIAL_OVERRIDE"
+        return
+    fi
+    local device_lines
+    device_lines=$("$ADB" devices -l | awk 'NR>1 && $2=="device" {print}' || true)
+    if [ -z "$device_lines" ]; then
+        err "no adb device attached"
+        note "  plug in your Quest 3 / Quest 3S, enable developer mode, allow USB debug"
+        exit 1
+    fi
+    local matches=()
+    local line serial
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        serial="$(awk '{print $1}' <<< "$line")"
+        if adb_device_matches_quest "$serial" "$line"; then
+            matches+=("$serial")
+        fi
+    done <<< "$device_lines"
+
+    if [ "${#matches[@]}" -eq 1 ]; then
+        echo "${matches[0]}"
+        return
+    fi
+    if [ "${#matches[@]}" -gt 1 ]; then
+        err "multiple Quest-like adb devices: ${matches[*]}; pass --serial"
+        exit 1
+    fi
+
+    local device_count
+    device_count="$(wc -l <<< "$device_lines" | tr -d ' ')"
+    if [ "$device_count" = "1" ]; then
+        awk '{print $1}' <<< "$device_lines"
+        return
+    fi
+
+    err "no Quest-like adb device found; pass --serial"
+    printf '%s\n' "$device_lines" >&2
+    exit 1
+}
 
 # --- Process bookkeeping (clean shutdown) -----------------------------------
 declare -a CLEANUP_PIDS=()
@@ -137,8 +200,8 @@ cleanup() {
     # human-started session isn't disturbed. Skip on --keep so the operator
     # can keep playing with the live pipeline after a pass.
     if [ "$LAUNCH_APP" = "1" ]; then
-        if adb shell "pidof $PKG" 2>/dev/null | grep -q '[0-9]'; then
-            adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
+        if [ -n "${DEVICE:-}" ] && run_adb shell "pidof $PKG" 2>/dev/null | grep -q '[0-9]'; then
+            run_adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
             ok "stopped Quest app ($PKG)"
         fi
     fi
@@ -156,7 +219,7 @@ track() {
 # --- Pre-flight -------------------------------------------------------------
 step "Pre-flight"
 
-for tool in ffmpeg mediamtx adb; do
+for tool in ffmpeg mediamtx "$ADB"; do
     if ! command -v "$tool" >/dev/null; then
         err "missing tool: $tool"
         case "$tool" in
@@ -175,18 +238,13 @@ if [ ! -f "$CFG" ]; then
 fi
 ok "config: $CFG"
 
-DEVICE=$(adb devices | awk 'NR>1 && $2=="device"{print $1}' | head -1)
-if [ -z "$DEVICE" ]; then
-    err "no adb device attached"
-    note "  plug in your Quest 3, enable developer mode, allow USB debug"
-    exit 1
-fi
+DEVICE=$(pick_quest_device)
 ok "adb device: $DEVICE"
 
 if [ "$LAUNCH_APP" = "1" ]; then
-    if ! adb shell pm path "$PKG" >/dev/null 2>&1; then
+    if ! run_adb shell pm path "$PKG" >/dev/null 2>&1; then
         err "$PKG not installed on device"
-        note "  cd xr && make build-install"
+        note "  cd xr && make build-install-quest"
         exit 1
     fi
     ok "app installed on $DEVICE"
@@ -309,7 +367,7 @@ step "3/4  xr-bridge --video-only --config $(basename "$CFG")"
 # etc.). To bypass that we sniff the Quest's wlan0 IP via adb and pass it to
 # xr-bridge as a unicast discovery target. The bridge will keep doing
 # broadcast too — unicast is just a belt-and-braces fallback.
-QUEST_IP=$(adb shell ip -4 addr show wlan0 2>/dev/null \
+QUEST_IP=$(run_adb shell ip -4 addr show wlan0 2>/dev/null \
     | awk '/inet /{print $2}' | cut -d/ -f1 | head -1 | tr -d '\r')
 EXTRA_BRIDGE_CFG="$LOG_DIR/bridge_extra.yaml"
 if [ -n "$QUEST_IP" ]; then
@@ -360,24 +418,24 @@ fi
 # Set adb reverse for the TCP ports so a USB-only Quest can also reach the
 # bridge at 127.0.0.1. UDP discovery still needs Wi-Fi, but once the user has
 # picked the bridge in manual mode this lets video/pose flow.
-adb reverse tcp:12345 tcp:12345 >/dev/null
-adb reverse tcp:63901 tcp:63901 >/dev/null
-adb reverse tcp:63903 tcp:63903 >/dev/null 2>&1 || true
+run_adb reverse tcp:12345 tcp:12345 >/dev/null
+run_adb reverse tcp:63901 tcp:63901 >/dev/null
+run_adb reverse tcp:63903 tcp:63903 >/dev/null 2>&1 || true
 ok "adb reverse: 12345 (video), 63901 (pose), 63903 (telemetry)"
 
 # --- 4. Quest app + frame observation --------------------------------------
 step "4/4  Quest app + frame observation"
 
-adb logcat -c >/dev/null
+run_adb logcat -c >/dev/null
 
 if [ "$LAUNCH_APP" = "1" ]; then
-    adb shell am force-stop "$PKG"
+    run_adb shell am force-stop "$PKG"
     sleep 0.3
-    adb shell am start -n "$PKG/$ACT" --es operator.mode "$APP_MODE" >/dev/null
+    run_adb shell am start -n "$PKG/$ACT" --es operator.mode "$APP_MODE" >/dev/null
     ok "app launched (operator.mode=$APP_MODE)"
     sleep 5
 else
-    if adb shell "pidof $PKG" 2>/dev/null | tr -d '\r' | grep -q '[0-9]'; then
+    if run_adb shell "pidof $PKG" 2>/dev/null | tr -d '\r' | grep -q '[0-9]'; then
         ok "app already running"
     else
         warn "app not running; either start it on Quest or rerun with --launch-app"
@@ -395,7 +453,7 @@ LAST_STAT=""
 
 deadline=$(( $(date +%s) + FRAME_WAIT ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    line=$(adb logcat -d -t 200 2>/dev/null | grep -E "\[LiveVideo\] AHB stats: frames=" | tail -1 || true)
+    line=$(run_adb logcat -d -t 200 2>/dev/null | grep -E "\[LiveVideo\] AHB stats: frames=" | tail -1 || true)
     if [ -n "$line" ]; then
         LAST_STAT="$line"
         n=$(echo "$line" | sed -n 's/.*frames=\([0-9][0-9]*\).*/\1/p')
@@ -408,7 +466,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 
 # Capture context for the report file regardless of outcome.
-adb logcat -d -t 2000 2>/dev/null \
+run_adb logcat -d -t 2000 2>/dev/null \
     | grep -E "OpenXR|godot|LiveVideo|TcpHandler|Discovery|AhbVideo|TrackingProvider" \
     > "$LOG_DIR/quest-logcat.txt" 2>&1 || true
 

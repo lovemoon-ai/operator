@@ -50,6 +50,14 @@ make log
 make crash
 ```
 
+Quest 3 and Quest 3S share the Meta Quest APK family. Use `build-quest` /
+`ship-quest`; do not add a Quest 3S export preset unless packaging or store
+targeting changes. To target the Quest 3S currently used for validation:
+
+```bash
+QUEST_SERIAL=340YC10GBF1DS9 make ship-quest
+```
+
 `ship-*` targets build, install, configure `adb reverse` where needed, relaunch
 the app, and tail filtered logs.
 
@@ -81,6 +89,10 @@ bash tests/03_godot_mujoco_device.sh --device quest
 bash tests/03_godot_mujoco_device.sh --device pico
 bash tests/03_godot_mujoco_device.sh --device both
 ```
+
+Quest device E2E scripts accept either `--serial <adb-serial>` or
+`QUEST_SERIAL=<adb-serial>`, including Quest 3S devices such as
+`340YC10GBF1DS9`.
 
 ## XR Tests
 
