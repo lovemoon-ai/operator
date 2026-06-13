@@ -260,19 +260,37 @@ func _on_canonical_frame_ready(frame: Dictionary) -> void:
 	if typeof(joints_v) != TYPE_DICTIONARY:
 		return
 	var joints := joints_v as Dictionary
-	var set_count := 0
+
+	# Collect the world-space positions of the joints the ik_config drives.
+	var wp: Dictionary = {}
 	for gmr_name in JOINT_MAP:
 		var pose := _canonical_pose(joints, JOINT_MAP[gmr_name])
-		if pose.is_empty():
-			continue
-		var p: Vector3 = pose["position"]
-		var q: Quaternion = pose["quat"]
-		# Godot (Y-up, -Z fwd, +X right) -> GMR source (Z-up, X fwd, Y left).
-		var gmr_pos := Vector3(-p.z, -p.x, p.y)
-		_retargeter.call("set_pose_pq", gmr_name, gmr_pos, q)
-		set_count += 1
-	if set_count < JOINT_MAP.size():
+		if not pose.is_empty():
+			wp[gmr_name] = pose["position"]
+	if wp.size() < JOINT_MAP.size():
 		return  # incomplete frame; keep last pose
+
+	# Build a body-relative, yaw-independent frame so the mapping does not depend
+	# on where in the world the operator happens to face: forward/left come from
+	# the shoulder line + world up, and joints are expressed in GMR source
+	# coordinates (X=forward, Y=left, Z=up) relative to the hips.
+	var hips: Vector3 = wp["Hips"]
+	var up := Vector3(0.0, 1.0, 0.0)
+	var lr: Vector3 = wp["LeftShoulder"] - wp["RightShoulder"]
+	var left_h := Vector3(lr.x, 0.0, lr.z)
+	if left_h.length_squared() < 0.0001:
+		return
+	left_h = left_h.normalized()
+	var fwd := left_h.cross(up).normalized()
+
+	for gmr_name in wp:
+		var p: Vector3 = wp[gmr_name]
+		var rel := p - hips
+		# X=forward, Y=left (body-relative horizontal), Z=world height.
+		var gmr_pos := Vector3(rel.dot(fwd), rel.dot(left_h), p.y)
+		# Position-only IK (rot weights are 0), so orientation is irrelevant.
+		_retargeter.call("set_pose_pq", gmr_name, gmr_pos, Quaternion.IDENTITY)
+
 	var qpos: PackedFloat64Array = _retargeter.call("step")
 	if qpos.is_empty():
 		return
@@ -325,8 +343,13 @@ func _apply_qpos(qpos: PackedFloat64Array) -> void:
 		var axis: Vector3 = spec["axis"]
 		if axis.length_squared() < 0.000001:
 			continue
+		# The GLB exporter conjugates every link's local transform by the
+		# URDF->Godot axis matrix S (godot_T = S * urdf_T * S^-1), so a joint
+		# rotation about URDF/MuJoCo axis a becomes a rotation about S*a in the
+		# GLB's local frame. S maps (ax,ay,az) -> (-ay, az, -ax).
+		var godot_axis := Vector3(-axis.y, axis.z, -axis.x).normalized()
 		var angle := float(qpos[qi])
-		node.transform = rest * Transform3D(Basis(axis.normalized(), angle), Vector3.ZERO)
+		node.transform = rest * Transform3D(Basis(godot_axis, angle), Vector3.ZERO)
 
 
 # --- Anchoring -------------------------------------------------------------
