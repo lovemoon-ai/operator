@@ -19,8 +19,11 @@ const GLB_PATH := "res://assets/robots/unitree-g1/g1_29dof.glb"
 const MOCAP_XML := "res://assets/retargeting/g1_mocap_29dof_nomesh.xml"
 const IK_CONFIG := "res://assets/retargeting/quest3_upper_to_g1.json"
 
-## G1: floating base (7) + 12 lower-body joint DoFs are held fixed.
-const LOCKED_QPOS_PREFIX := 19
+## G1: hold the floating base (7) + 12 lower-body joints + 3 waist joints fixed
+## (qpos[0..21]). Freezing the waist keeps the torso upright instead of letting
+## the position-only IK tilt it to help the arms reach (which made the upper body
+## fall backward when the hands were raised). Only the two arms then track.
+const LOCKED_QPOS_PREFIX := 22
 const HUMAN_HEIGHT := 1.75
 
 ## Canonical (Godot XRBodyTracker) joint -> GMR human-joint name. Only the
@@ -224,7 +227,8 @@ func _setup_retargeter() -> void:
 	var rt: Object = ClassDB.instantiate("GMRRetargeter")
 	if rt == null:
 		return
-	var ok: bool = rt.call("configure", "upper_body", robot, ik, HUMAN_HEIGHT, LOCKED_QPOS_PREFIX)
+	# freeze_locked=true: pin base+legs+waist inside the IK so only the arms move.
+	var ok: bool = rt.call("configure", "upper_body", robot, ik, HUMAN_HEIGHT, LOCKED_QPOS_PREFIX, true)
 	if not ok:
 		push_warning("[G1Overlay] retargeter configure failed: %s" % str(rt.call("get_last_error")))
 		return

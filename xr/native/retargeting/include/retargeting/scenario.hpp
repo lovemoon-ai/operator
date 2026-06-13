@@ -41,6 +41,12 @@ struct ScenarioSpec {
   // configure_g1_upper_body_only(); a name-based lock list can be layered on top
   // later as more robots are added.
   int locked_qpos_prefix = 0;
+
+  // Pin the locked region inside the IK QP (not just clamp it afterward) so the
+  // free joints alone reach the targets. For upper-body this keeps the torso
+  // upright instead of letting it tilt to help the arms. Off by default to
+  // preserve the validated reference pipeline behaviour.
+  bool freeze_locked_in_solve = false;
 };
 
 }  // namespace retargeting

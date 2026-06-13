@@ -27,7 +27,8 @@ retargeting::Pose pose_from_pq(const Vector3 &pos, const Quaternion &q) {
 } // namespace
 
 bool GMRRetargeter::configure(const String &scenario, const String &robot_xml,
-		const String &ik_config, double human_height, int locked_qpos_prefix) {
+		const String &ik_config, double human_height, int locked_qpos_prefix,
+		bool freeze_locked) {
 	last_error_ = "";
 	retargeter_.reset();
 
@@ -43,7 +44,8 @@ bool GMRRetargeter::configure(const String &scenario, const String &robot_xml,
 		if (s == "whole_body") {
 			retargeter_ = retargeting::WholeBodyRetargeter::create(cfg);
 		} else if (s == "upper_body") {
-			retargeter_ = retargeting::UpperBodyRetargeter::create(cfg, locked_qpos_prefix);
+			retargeter_ = retargeting::UpperBodyRetargeter::create(
+					cfg, locked_qpos_prefix, "gmr", freeze_locked);
 		} else if (s == "hand") {
 			retargeter_ = retargeting::HandRetargeter::create(cfg);
 		} else {
@@ -116,8 +118,8 @@ String GMRRetargeter::get_scenario() const {
 }
 
 void GMRRetargeter::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("configure", "scenario", "robot_xml", "ik_config", "human_height", "locked_qpos_prefix"),
-			&GMRRetargeter::configure, DEFVAL(1.75), DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("configure", "scenario", "robot_xml", "ik_config", "human_height", "locked_qpos_prefix", "freeze_locked"),
+			&GMRRetargeter::configure, DEFVAL(1.75), DEFVAL(0), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("set_pose", "name", "xform"), &GMRRetargeter::set_pose);
 	ClassDB::bind_method(D_METHOD("set_pose_pq", "name", "pos", "quat"), &GMRRetargeter::set_pose_pq);
 	ClassDB::bind_method(D_METHOD("clear_frame"), &GMRRetargeter::clear_frame);

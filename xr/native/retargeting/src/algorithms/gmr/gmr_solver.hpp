@@ -35,6 +35,9 @@ class GmrSolver {
   void lock_qpos_prefix(int n_qpos);
   void reset_locked_region();                       // restore held values now
   void freeze_locked_region(Eigen::VectorXd& qpos) const;  // restore into qpos
+  // Pin the locked region inside the QP too (not just clamp after), so the free
+  // joints alone satisfy the tasks. Keeps a locked torso upright.
+  void set_freeze_locked_in_solve(bool v) { freeze_locked_in_solve_ = v; }
 
   Eigen::VectorXd retarget(const SkeletonFrame& human_frame,
                            bool offset_to_ground = false);
@@ -88,6 +91,7 @@ class GmrSolver {
 
   double config_gain_ = 0.95;
   int locked_qpos_count_ = 0;
+  bool freeze_locked_in_solve_ = false;
   Eigen::VectorXd locked_qpos_;  // held values of qpos[0:locked_qpos_count_]
 
   int max_iter_ = 10;

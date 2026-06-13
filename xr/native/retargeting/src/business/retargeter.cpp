@@ -35,15 +35,19 @@ std::unique_ptr<WholeBodyRetargeter> WholeBodyRetargeter::create(
 
 UpperBodyRetargeter::UpperBodyRetargeter(std::unique_ptr<RetargetingAlgorithm> algo,
                                          const RetargetConfig& config,
-                                         int locked_qpos_prefix)
+                                         int locked_qpos_prefix,
+                                         bool freeze_locked_in_solve)
     : Retargeter(std::move(algo),
-                 ScenarioSpec{Scenario::UpperBody, locked_qpos_prefix}, config) {}
+                 ScenarioSpec{Scenario::UpperBody, locked_qpos_prefix,
+                              freeze_locked_in_solve},
+                 config) {}
 
 std::unique_ptr<UpperBodyRetargeter> UpperBodyRetargeter::create(
     const RetargetConfig& config, int locked_qpos_prefix,
-    const std::string& algorithm) {
+    const std::string& algorithm, bool freeze_locked_in_solve) {
   return std::unique_ptr<UpperBodyRetargeter>(new UpperBodyRetargeter(
-      make_algorithm(algorithm), config, locked_qpos_prefix));
+      make_algorithm(algorithm), config, locked_qpos_prefix,
+      freeze_locked_in_solve));
 }
 
 // ---- Hand ------------------------------------------------------------------
