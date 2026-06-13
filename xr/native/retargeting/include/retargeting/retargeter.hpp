@@ -70,11 +70,12 @@ class UpperBodyRetargeter : public Retargeter {
  public:
   static std::unique_ptr<UpperBodyRetargeter> create(
       const RetargetConfig& config, int locked_qpos_prefix,
-      const std::string& algorithm = "gmr");
+      const std::string& algorithm = "gmr", bool freeze_locked_in_solve = false);
 
  private:
   UpperBodyRetargeter(std::unique_ptr<RetargetingAlgorithm> algo,
-                      const RetargetConfig& config, int locked_qpos_prefix);
+                      const RetargetConfig& config, int locked_qpos_prefix,
+                      bool freeze_locked_in_solve);
 };
 
 // Finger/hand pose -> dexterous-hand joints. Wired through the same algorithm

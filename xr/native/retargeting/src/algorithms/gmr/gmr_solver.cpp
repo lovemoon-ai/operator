@@ -1,6 +1,7 @@
 #include "gmr_solver.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -220,6 +221,14 @@ void GmrSolver::compute_box_bounds(Eigen::VectorXd& lb, Eigen::VectorXd& ub) con
   // solve_ik as `safety_break`, not `limits`, so it is never applied inside the
   // QP. We replicate that: the locked region is free during the solve and only
   // clamped afterwards by freeze_locked_region(). (See README.)
+  // Optionally pin the locked region DURING the solve (not just clamp it after),
+  // so the IK puts all the work into the free joints. For an upper-body overlay
+  // this keeps the torso/waist upright instead of letting the QP tilt it to help
+  // the arms reach (which made the torso fall back when the hands were raised).
+  if (freeze_locked_in_solve_ && locked_qpos_count_ > 0) {
+    int n_locked_dofs = locked_qpos_count_ - 1;  // one free base joint (7 qpos, 6 dof)
+    for (int d = 0; d < n_locked_dofs && d < nv; ++d) { lb[d] = 0.0; ub[d] = 0.0; }
+  }
 }
 
 Eigen::VectorXd GmrSolver::solve_ik(const std::vector<Task>& tasks) const {

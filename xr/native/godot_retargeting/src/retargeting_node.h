@@ -42,7 +42,8 @@ public:
 	// robot-specific count of leading qpos entries to hold fixed for upper_body
 	// (e.g. 19 for a Unitree G1 = 7 base + 12 leg DoFs); ignored otherwise.
 	bool configure(const String &scenario, const String &robot_xml,
-			const String &ik_config, double human_height, int locked_qpos_prefix);
+			const String &ik_config, double human_height, int locked_qpos_prefix,
+			bool freeze_locked);
 
 	// Accumulate one source joint pose for the next step().
 	void set_pose(const String &name, const Transform3D &xform);
