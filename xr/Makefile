@@ -27,14 +27,19 @@ mode_extra=$(if $(MODE),--es operator.mode $(MODE),)
 release_manifest=android/build/src/release/AndroidManifest.xml
 
 define godot_export_release
-	@tmp_manifest=$$(mktemp); \
+	@set -e; \
+	tmp_manifest=$$(mktemp); \
 	cp $(release_manifest) $$tmp_manifest; \
+	restore_manifest() { \
+		status=$$?; \
+		trap - EXIT INT TERM; \
+		cp $$tmp_manifest $(release_manifest); \
+		rm -f $$tmp_manifest; \
+		exit $$status; \
+	}; \
+	trap restore_manifest EXIT INT TERM; \
 	set +e; \
-	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3); \
-	status=$$?; \
-	cp $$tmp_manifest $(release_manifest); \
-	rm -f $$tmp_manifest; \
-	exit $$status
+	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3)
 endef
 
 # Plugin/library build rules (setup-vendors, prepare-android-libs, build-ahb,
