@@ -11,6 +11,8 @@ void GmrAlgorithm::configure(const RetargetConfig& config, const ScenarioSpec& s
   if (spec_.locked_qpos_prefix > 0)
     solver_->lock_qpos_prefix(spec_.locked_qpos_prefix);
   solver_->set_freeze_locked_in_solve(spec_.freeze_locked_in_solve);
+  if (!spec_.clamp_qpos_indices.empty())
+    solver_->set_clamp_qpos(spec_.clamp_qpos_indices);
 }
 
 void GmrAlgorithm::begin_frame() {

@@ -19,6 +19,7 @@
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float64_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/quaternion.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
@@ -43,7 +44,7 @@ public:
 	// (e.g. 19 for a Unitree G1 = 7 base + 12 leg DoFs); ignored otherwise.
 	bool configure(const String &scenario, const String &robot_xml,
 			const String &ik_config, double human_height, int locked_qpos_prefix,
-			bool freeze_locked);
+			bool freeze_locked, const PackedInt32Array &clamp_qpos_indices);
 
 	// Accumulate one source joint pose for the next step().
 	void set_pose(const String &name, const Transform3D &xform);

@@ -47,6 +47,12 @@ struct ScenarioSpec {
   // upright instead of letting it tilt to help the arms. Off by default to
   // preserve the validated reference pipeline behaviour.
   bool freeze_locked_in_solve = false;
+
+  // Extra individual qpos entries to clamp-after (reset to rest before the solve
+  // and held after), beyond the locked prefix. For the G1 upper-body this is the
+  // waist roll/pitch + wrist joints, so only the arms + waist yaw track — exactly
+  // the GMR spatialmp4 pipeline (keeps the torso upright).
+  std::vector<int> clamp_qpos_indices;
 };
 
 }  // namespace retargeting

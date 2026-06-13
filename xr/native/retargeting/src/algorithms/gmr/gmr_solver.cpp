@@ -124,16 +124,26 @@ void GmrSolver::lock_qpos_prefix(int n_qpos) {
   if (n_qpos > 0) locked_qpos_ = qpos_.head(n_qpos);
 }
 
+void GmrSolver::set_clamp_qpos(const std::vector<int>& qpos_indices) {
+  clamp_qpos_indices_ = qpos_indices;
+  clamp_qpos_values_.resize(static_cast<int>(qpos_indices.size()));
+  for (size_t i = 0; i < qpos_indices.size(); ++i)
+    clamp_qpos_values_[static_cast<int>(i)] = qpos_[qpos_indices[i]];
+}
+
 void GmrSolver::reset_locked_region() {
-  if (locked_qpos_count_ <= 0) return;
+  if (locked_qpos_count_ <= 0 && clamp_qpos_indices_.empty()) return;
   Eigen::VectorXd qpos = qpos_;
-  qpos.head(locked_qpos_count_) = locked_qpos_;
+  if (locked_qpos_count_ > 0) qpos.head(locked_qpos_count_) = locked_qpos_;
+  for (size_t i = 0; i < clamp_qpos_indices_.size(); ++i)
+    qpos[clamp_qpos_indices_[i]] = clamp_qpos_values_[static_cast<int>(i)];
   update_configuration(qpos);
 }
 
 void GmrSolver::freeze_locked_region(Eigen::VectorXd& qpos) const {
-  if (locked_qpos_count_ <= 0) return;
-  qpos.head(locked_qpos_count_) = locked_qpos_;
+  if (locked_qpos_count_ > 0) qpos.head(locked_qpos_count_) = locked_qpos_;
+  for (size_t i = 0; i < clamp_qpos_indices_.size(); ++i)
+    qpos[clamp_qpos_indices_[i]] = clamp_qpos_values_[static_cast<int>(i)];
 }
 
 std::map<std::string, Pose> GmrSolver::scale_human_data(

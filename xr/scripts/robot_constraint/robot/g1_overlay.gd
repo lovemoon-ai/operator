@@ -19,12 +19,22 @@ const GLB_PATH := "res://assets/robots/unitree-g1/g1_29dof.glb"
 const MOCAP_XML := "res://assets/retargeting/g1_mocap_29dof_nomesh.xml"
 const IK_CONFIG := "res://assets/retargeting/quest3_upper_to_g1.json"
 
-## G1: hold the floating base (7) + 12 lower-body joints + 3 waist joints fixed
-## (qpos[0..21]). Freezing the waist keeps the torso upright instead of letting
-## the position-only IK tilt it to help the arms reach (which made the upper body
-## fall backward when the hands were raised). Only the two arms then track.
-const LOCKED_QPOS_PREFIX := 22
+## G1: hold the floating base (7) + 12 lower-body joints fixed (qpos[0..18]).
+const LOCKED_QPOS_PREFIX := 19
 const HUMAN_HEIGHT := 1.75
+## Hips are pinned to this height in GMR coords each frame (Python --pelvis_height).
+const PELVIS_HEIGHT := 0.88
+
+## Additionally clamp these joints to rest each frame (reset before the solve +
+## held after), so the arms + waist-yaw track but the torso stays upright and the
+## wrists stay neutral. This matches the GMR spatialmp4_body_to_g1 pipeline
+## exactly (validated to machine precision), and fixes the upper body falling
+## backward when the hands were raised (the waist roll/pitch are held at 0).
+const CLAMP_JOINT_NAMES := [
+	"waist_roll_joint", "waist_pitch_joint",
+	"left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
+	"right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint",
+]
 
 ## Canonical (Godot XRBodyTracker) joint -> GMR human-joint name. Only the
 ## joints the ik_config drives (position tasks) are needed; fallbacks handle
@@ -59,9 +69,12 @@ var _debug_front_locked: bool = false
 # --- Retargeting ----------------------------------------------------------
 var _retargeter: Object = null              # GMRRetargeter instance (native)
 var _provider: Node = null                  # BodyPoseProvider
-# qpos joint table, in qpos order: [{ "body": String, "axis": Vector3 }, ...]
+# qpos joint table, in qpos order: [{ "name": String, "body": String, "axis": Vector3 }, ...]
 var _qpos_joints: Array = []
+var _clamp_indices: PackedInt32Array = PackedInt32Array()
 var _retarget_active: bool = false
+var _heading_yaw: float = 0.0
+var _heading_computed: bool = false
 
 
 func _ready() -> void:
@@ -191,9 +204,13 @@ func _parse_mocap_joints() -> void:
 			elif el_name == "joint":
 				var jtype := _attr(parser, "type", "hinge")
 				if jtype != "free" and jtype != "ball":
+					var jname := _attr(parser, "name", "")
 					var axis_s := _attr(parser, "axis", "0 0 1")
 					var body_name := "" if body_stack.is_empty() else String(body_stack[body_stack.size() - 1])
-					_qpos_joints.append({"body": body_name, "axis": _parse_vec3(axis_s)})
+					var qi := 7 + _qpos_joints.size()  # qpos index for this hinge joint
+					_qpos_joints.append({"name": jname, "body": body_name, "axis": _parse_vec3(axis_s)})
+					if jname in CLAMP_JOINT_NAMES:
+						_clamp_indices.append(qi)
 		elif t == XMLParser.NODE_ELEMENT_END:
 			if parser.get_node_name() == "body" and not body_stack.is_empty():
 				body_stack.pop_back()
@@ -227,8 +244,9 @@ func _setup_retargeter() -> void:
 	var rt: Object = ClassDB.instantiate("GMRRetargeter")
 	if rt == null:
 		return
-	# freeze_locked=true: pin base+legs+waist inside the IK so only the arms move.
-	var ok: bool = rt.call("configure", "upper_body", robot, ik, HUMAN_HEIGHT, LOCKED_QPOS_PREFIX, true)
+	# locked prefix = base+legs (clamp-after); plus clamp waist roll/pitch + wrists
+	# to rest so only the arms + waist-yaw track (matches the GMR Python pipeline).
+	var ok: bool = rt.call("configure", "upper_body", robot, ik, HUMAN_HEIGHT, LOCKED_QPOS_PREFIX, false, _clamp_indices)
 	if not ok:
 		push_warning("[G1Overlay] retargeter configure failed: %s" % str(rt.call("get_last_error")))
 		return
@@ -265,33 +283,37 @@ func _on_canonical_frame_ready(frame: Dictionary) -> void:
 		return
 	var joints := joints_v as Dictionary
 
-	# Collect the world-space positions of the joints the ik_config drives.
-	var wp: Dictionary = {}
+	# Collect the world-space positions of the joints the ik_config drives, and
+	# convert each to GMR-raw coords with a fixed handedness-preserving axis swap:
+	# Godot (X=right, Y=up, Z=back) -> GMR (X=fwd, Y=left, Z=up).
+	var raw: Dictionary = {}
 	for gmr_name in JOINT_MAP:
 		var pose := _canonical_pose(joints, JOINT_MAP[gmr_name])
-		if not pose.is_empty():
-			wp[gmr_name] = pose["position"]
-	if wp.size() < JOINT_MAP.size():
+		if pose.is_empty():
+			continue
+		var p: Vector3 = pose["position"]
+		raw[gmr_name] = Vector3(-p.z, -p.x, p.y)
+	if raw.size() < JOINT_MAP.size():
 		return  # incomplete frame; keep last pose
 
-	# Build a body-relative, yaw-independent frame so the mapping does not depend
-	# on where in the world the operator happens to face: forward/left come from
-	# the shoulder line + world up, and joints are expressed in GMR source
-	# coordinates (X=forward, Y=left, Z=up) relative to the hips.
-	var hips: Vector3 = wp["Hips"]
-	var up := Vector3(0.0, 1.0, 0.0)
-	var lr: Vector3 = wp["LeftShoulder"] - wp["RightShoulder"]
-	var left_h := Vector3(lr.x, 0.0, lr.z)
-	if left_h.length_squared() < 0.0001:
-		return
-	left_h = left_h.normalized()
-	var fwd := left_h.cross(up).normalized()
+	# Anchor + heading-align exactly like the GMR Python pipeline
+	# (anchor_and_align_frame): remove the INITIAL heading yaw (computed once from
+	# the shoulder line) and pin the hips to (0, 0, PELVIS_HEIGHT). Using a fixed
+	# initial yaw (not per-frame) lets the operator's torso yaw track via waist_yaw.
+	if not _heading_computed:
+		var side0: Vector3 = raw["LeftShoulder"] - raw["RightShoulder"]
+		if Vector2(side0.x, side0.y).length() < 0.0001:
+			return
+		_heading_yaw = PI / 2.0 - atan2(side0.y, side0.x)
+		_heading_computed = true
+	var cz := cos(_heading_yaw)
+	var sz := sin(_heading_yaw)
+	var hips: Vector3 = raw["Hips"]
 
-	for gmr_name in wp:
-		var p: Vector3 = wp[gmr_name]
-		var rel := p - hips
-		# X=forward, Y=left (body-relative horizontal), Z=world height.
-		var gmr_pos := Vector3(rel.dot(fwd), rel.dot(left_h), p.y)
+	for gmr_name in raw:
+		var rel: Vector3 = raw[gmr_name] - hips
+		# rotate horizontal by the initial heading yaw; pin hips height.
+		var gmr_pos := Vector3(rel.x * cz - rel.y * sz, rel.x * sz + rel.y * cz, rel.z + PELVIS_HEIGHT)
 		# Position-only IK (rot weights are 0), so orientation is irrelevant.
 		_retargeter.call("set_pose_pq", gmr_name, gmr_pos, Quaternion.IDENTITY)
 
