@@ -1,0 +1,104 @@
+# Cross-compiled MuJoCo (Android arm64-v8a) for the godot_mujoco addon and the
+# retargeting toolkit's on-device MuJoCo backend.
+#
+# Mirrors Makefile.pinocchio, but MuJoCo vendors its own dependencies through
+# CMake FetchContent, so there is no vcpkg/Boost/Eigen bootstrap. The heavy
+# lifting lives in the mujoco-android wrapper repo:
+#   scripts/fetch-mujoco.sh
+#   scripts/build-android.sh
+# This file layers idempotency, sibling-repo auto-discovery (.deps cache), and a
+# per-ABI git worktree so `make deps` (which runs `git clean -fdx` on the source)
+# never wipes the build artifacts.
+#
+# Targets exposed here:
+#   build-mujoco-android   — build & install (no-op if libmujoco.so is present)
+#   clean-mujoco-android   — nuke the per-ABI worktree, build & install tree
+#   mujoco-android-info    — print where MuJoCo would be built and its status
+#
+# Variables (override on the command line or in the environment):
+#   OPERATOR_DEPS_CACHE_ROOT  default ../.deps — shared dep cache root.
+#   MUJOCO_ANDROID_SOURCE     default $(OPERATOR_DEPS_CACHE_ROOT)/src/mujoco-android
+#   MUJOCO_ANDROID_BUILD_DIR  default $(OPERATOR_DEPS_CACHE_ROOT)/build/mujoco-android
+#   MUJOCO_ANDROID_ABI        default arm64-v8a
+#   MUJOCO_ANDROID_API        default android-29
+#   ANDROID_NDK_HOME / ANDROID_NDK_ROOT / ANDROID_NDK   NDK location.
+
+OPERATOR_DEPS_CACHE_ROOT ?= ../.deps
+MUJOCO_ANDROID_SOURCE    ?= $(abspath $(OPERATOR_DEPS_CACHE_ROOT)/src/mujoco-android)
+MUJOCO_ANDROID_BUILD_DIR ?= $(abspath $(OPERATOR_DEPS_CACHE_ROOT)/build/mujoco-android)
+MUJOCO_ANDROID_ABI       ?= arm64-v8a
+MUJOCO_ANDROID_API       ?= android-29
+
+# Persistent per-ABI worktree. The upstream scripts write into
+# `third_party/mujoco` and `build/android/<abi>` relative to the wrapper root;
+# running them inside a git worktree keeps those byproducts off the pristine
+# $(MUJOCO_ANDROID_SOURCE), so the next `make deps` (`git clean -fdx`) does NOT
+# wipe our build artifacts.
+MUJOCO_ANDROID_WORKTREE := $(MUJOCO_ANDROID_BUILD_DIR)/$(MUJOCO_ANDROID_ABI)/src
+MUJOCO_ANDROID_INSTALL  := $(MUJOCO_ANDROID_WORKTREE)/build/android/$(MUJOCO_ANDROID_ABI)/install
+MUJOCO_ANDROID_LIB      := $(MUJOCO_ANDROID_INSTALL)/lib/libmujoco.so
+
+DEPS_SCRIPT ?= ../scripts/sync_deps.sh
+
+.PHONY: build-mujoco-android clean-mujoco-android mujoco-android-info
+
+build-mujoco-android: $(MUJOCO_ANDROID_LIB)
+
+$(MUJOCO_ANDROID_LIB):
+	@if [ ! -d "$(MUJOCO_ANDROID_SOURCE)/.git" ]; then \
+		echo "[mujoco] mujoco-android source not found at $(MUJOCO_ANDROID_SOURCE)" >&2; \
+		echo "[mujoco] run: $(DEPS_SCRIPT) mujoco-android" >&2; \
+		exit 1; \
+	fi
+	@for s in scripts/fetch-mujoco.sh scripts/build-android.sh; do \
+		if [ ! -x "$(MUJOCO_ANDROID_SOURCE)/$$s" ]; then \
+			echo "[mujoco] upstream script missing or not executable: $(MUJOCO_ANDROID_SOURCE)/$$s" >&2; \
+			echo "[mujoco] try: $(DEPS_SCRIPT) mujoco-android" >&2; \
+			exit 1; \
+		fi; \
+	done
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
+		echo "[mujoco] ANDROID_NDK / ANDROID_NDK_HOME / ANDROID_NDK_ROOT must be set" >&2; \
+		exit 1; \
+	fi
+	@echo "[mujoco] building for $(MUJOCO_ANDROID_ABI) (API $(MUJOCO_ANDROID_API))"
+	@echo "[mujoco] MUJOCO_ANDROID_SOURCE   = $(MUJOCO_ANDROID_SOURCE)"
+	@echo "[mujoco] MUJOCO_ANDROID_WORKTREE = $(MUJOCO_ANDROID_WORKTREE)"
+	@set -e; \
+	mkdir -p "$(dir $(MUJOCO_ANDROID_WORKTREE))"; \
+	if [ ! -d "$(MUJOCO_ANDROID_WORKTREE)/.git" ] && [ ! -f "$(MUJOCO_ANDROID_WORKTREE)/.git" ]; then \
+		head_sha=$$(git -C "$(MUJOCO_ANDROID_SOURCE)" rev-parse HEAD); \
+		echo "[mujoco] git worktree add $(MUJOCO_ANDROID_WORKTREE) @ $$head_sha"; \
+		git -C "$(MUJOCO_ANDROID_SOURCE)" worktree add --detach "$(MUJOCO_ANDROID_WORKTREE)" "$$head_sha"; \
+	fi; \
+	cd "$(MUJOCO_ANDROID_WORKTREE)" && \
+		ANDROID_PLATFORM="$(MUJOCO_ANDROID_API)" ./scripts/fetch-mujoco.sh && \
+		ANDROID_PLATFORM="$(MUJOCO_ANDROID_API)" ./scripts/build-android.sh "$(MUJOCO_ANDROID_ABI)"
+	@test -f "$@" || { echo "[mujoco] build finished but $@ is missing" >&2; exit 1; }
+	@echo "[mujoco] installed $(MUJOCO_ANDROID_INSTALL)"
+
+clean-mujoco-android:
+	@if [ "$(OPERATOR_DEPS_CACHE_ROOT)" != "../.deps" ] && [ "$(FORCE)" != "1" ]; then \
+		echo "[mujoco] REFUSING to clean a shared cache (use FORCE=1)." >&2; \
+		echo "[mujoco]   would rm -rf $(MUJOCO_ANDROID_BUILD_DIR)/$(MUJOCO_ANDROID_ABI)" >&2; \
+		exit 1; \
+	fi
+	@if git -C "$(MUJOCO_ANDROID_SOURCE)" rev-parse --is-inside-work-tree >/dev/null 2>&1; then \
+		git -C "$(MUJOCO_ANDROID_SOURCE)" worktree remove -f "$(MUJOCO_ANDROID_WORKTREE)" >/dev/null 2>&1 || true; \
+		git -C "$(MUJOCO_ANDROID_SOURCE)" worktree prune >/dev/null 2>&1 || true; \
+	fi
+	rm -rf $(MUJOCO_ANDROID_BUILD_DIR)/$(MUJOCO_ANDROID_ABI)
+
+mujoco-android-info:
+	@echo "MUJOCO_ANDROID_SOURCE   = $(MUJOCO_ANDROID_SOURCE)"
+	@echo "MUJOCO_ANDROID_BUILD_DIR= $(MUJOCO_ANDROID_BUILD_DIR)"
+	@echo "MUJOCO_ANDROID_WORKTREE = $(MUJOCO_ANDROID_WORKTREE)"
+	@echo "MUJOCO_ANDROID_ABI      = $(MUJOCO_ANDROID_ABI)"
+	@echo "MUJOCO_ANDROID_API      = $(MUJOCO_ANDROID_API)"
+	@echo "MUJOCO_ANDROID_INSTALL  = $(MUJOCO_ANDROID_INSTALL)"
+	@echo "MUJOCO_ANDROID_LIB      = $(MUJOCO_ANDROID_LIB)"
+	@if [ -f "$(MUJOCO_ANDROID_LIB)" ]; then \
+		echo "STATUS                  = built ($$(du -h $(MUJOCO_ANDROID_LIB) | awk '{print $$1}'))"; \
+	else \
+		echo "STATUS                  = not built — run \`make build-mujoco-android\`"; \
+	fi

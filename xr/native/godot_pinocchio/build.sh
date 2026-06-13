@@ -14,7 +14,7 @@
 #     $OPERATOR_DEPS_CACHE_ROOT/build/pinocchio-android/<abi>/src/build/android/<abi>/install/.
 #
 # Usage:
-#   xr/native/pinocchio/build.sh [Debug|Release]   # default Release
+#   xr/native/godot_pinocchio/build.sh [Debug|Release]   # default Release
 
 set -euo pipefail
 

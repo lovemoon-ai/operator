@@ -1,0 +1,15 @@
+; Godot GDExtension bridge for the retargeting toolkit (GMR). Android-only,
+; matching the standalone XR target. Exposes the GMRRetargeter class.
+
+[configuration]
+entry_symbol = "godot_retargeting_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+android.debug.arm64 = "res://addons/godot_retargeting/bin/libgodot_retargeting.so"
+android.release.arm64 = "res://addons/godot_retargeting/bin/libgodot_retargeting.so"
+
+[dependencies]
+android.debug.arm64 = { "res://addons/godot_retargeting/bin/libmujoco.so" : "" }
+android.release.arm64 = { "res://addons/godot_retargeting/bin/libmujoco.so" : "" }
