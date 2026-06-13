@@ -1,0 +1,224 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="g1_29dof">
+  <compiler angle="radian" />
+  <option timestep="0.008333333" gravity="0 0 -9.81" />
+  <default>
+    <joint damping="0.3" armature="0.01" />
+    <geom friction="0.8 0.01 0.001" density="250" />
+  </default>
+  <worldbody>
+    <geom name="floor" type="plane" size="3 3 0.02" rgba="0.12 0.13 0.14 1" />
+    <body name="pelvis" pos="0 0 1.05">
+      <freejoint name="pelvis_freejoint" />
+      <geom name="pelvis_proxy" type="box" size="0.11 0.08 0.06" rgba="0.55 0.65 0.75 0.55" />
+      <body name="pelvis_contour_link" pos="0 0 0" quat="1 0 0 0">
+        <geom name="pelvis_contour_link_proxy" type="box" size="0.11 0.08 0.06" rgba="0.55 0.65 0.75 0.55" />
+      </body>
+      <body name="left_hip_pitch_link" pos="0 0.064452 -0.1027" quat="1 0 0 0">
+        <joint name="left_hip_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-2.5307 2.8798" />
+        <geom name="left_hip_pitch_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+        <body name="left_hip_roll_link" pos="0 0.052 -0.030465" quat="0.996178685 0 -0.08733858026 0">
+          <joint name="left_hip_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.5236 2.9671" />
+          <geom name="left_hip_roll_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+          <body name="left_hip_yaw_link" pos="0.025001 0 -0.12412" quat="1 0 0 0">
+            <joint name="left_hip_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.7576 2.7576" />
+            <geom name="left_hip_yaw_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+            <body name="left_knee_link" pos="-0.078273 0.0021489 -0.17734" quat="0.996178685 0 0.08733858026 0">
+              <joint name="left_knee_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.087267 2.8798" />
+              <geom name="left_knee_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+              <body name="left_ankle_pitch_link" pos="0 -9.4445e-05 -0.30001" quat="1 0 0 0">
+                <joint name="left_ankle_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.87267 0.5236" />
+                <geom name="left_ankle_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="left_ankle_roll_link" pos="0 0 -0.017558" quat="1 0 0 0">
+                  <joint name="left_ankle_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.2618 0.2618" />
+                  <geom name="left_ankle_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="right_hip_pitch_link" pos="0 -0.064452 -0.1027" quat="1 0 0 0">
+        <joint name="right_hip_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-2.5307 2.8798" />
+        <geom name="right_hip_pitch_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+        <body name="right_hip_roll_link" pos="0 -0.052 -0.030465" quat="0.996178685 0 -0.08733858026 0">
+          <joint name="right_hip_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-2.9671 0.5236" />
+          <geom name="right_hip_roll_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+          <body name="right_hip_yaw_link" pos="0.025001 0 -0.12412" quat="1 0 0 0">
+            <joint name="right_hip_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.7576 2.7576" />
+            <geom name="right_hip_yaw_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+            <body name="right_knee_link" pos="-0.078273 -0.0021489 -0.17734" quat="0.996178685 0 0.08733858026 0">
+              <joint name="right_knee_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.087267 2.8798" />
+              <geom name="right_knee_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+              <body name="right_ankle_pitch_link" pos="0 9.4445e-05 -0.30001" quat="1 0 0 0">
+                <joint name="right_ankle_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.87267 0.5236" />
+                <geom name="right_ankle_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="right_ankle_roll_link" pos="0 0 -0.017558" quat="1 0 0 0">
+                  <joint name="right_ankle_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.2618 0.2618" />
+                  <geom name="right_ankle_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="waist_yaw_link" pos="0 0 0" quat="1 0 0 0">
+        <joint name="waist_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.618 2.618" />
+        <geom name="waist_yaw_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+        <body name="waist_roll_link" pos="-0.0039635 0 0.035" quat="1 0 0 0">
+          <joint name="waist_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.52 0.52" />
+          <geom name="waist_roll_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+          <body name="torso_link" pos="0 0 0.019" quat="1 0 0 0">
+            <joint name="waist_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.52 0.52" />
+            <geom name="torso_link_proxy" type="box" size="0.11 0.07 0.18" rgba="0.55 0.65 0.75 0.55" />
+            <body name="logo_link" pos="0.0039635 0 -0.054" quat="1 0 0 0">
+              <geom name="logo_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="head_link" pos="0.0039635 0 -0.054" quat="1 0 0 0">
+              <geom name="head_link_proxy" type="sphere" size="0.055" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="waist_support_link" pos="0.0039635 0 -0.054" quat="1 0 0 0">
+              <geom name="waist_support_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="imu_in_torso" pos="-0.03959 -0.00224 0.13792" quat="1 0 0 0">
+              <geom name="imu_in_torso_proxy" type="box" size="0.11 0.07 0.18" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="d435_link" pos="0.0576235 0.01753 0.41987" quat="0.9149596678 0 0.4035452964 0">
+              <geom name="d435_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="mid360_link" pos="0.0002835 3e-05 0.40618" quat="0.9997985785 0 0.02006993878 0">
+              <geom name="mid360_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="left_shoulder_pitch_link" pos="0.0039563 0.10022 0.23778" quat="0.9902640744 0.1392014837 1.38722044e-05 -9.868683842e-05">
+              <joint name="left_shoulder_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-3.0892 2.6704" />
+              <geom name="left_shoulder_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+              <body name="left_shoulder_roll_link" pos="0 0.038 -0.013831" quat="0.9902682553 -0.1391717738 0 0">
+                <joint name="left_shoulder_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-1.5882 2.2515" />
+                <geom name="left_shoulder_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="left_shoulder_yaw_link" pos="0 0.00624 -0.1032" quat="1 0 0 0">
+                  <joint name="left_shoulder_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.618 2.618" />
+                  <geom name="left_shoulder_yaw_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                  <body name="left_elbow_link" pos="0.015783 0 -0.080518" quat="1 0 0 0">
+                    <joint name="left_elbow_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-1.0472 2.0944" />
+                    <geom name="left_elbow_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                    <body name="left_wrist_roll_link" pos="0.1 0.00188791 -0.01" quat="1 0 0 0">
+                      <joint name="left_wrist_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-1.972222054 1.972222054" />
+                      <geom name="left_wrist_roll_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                      <body name="left_wrist_pitch_link" pos="0.038 0 0" quat="1 0 0 0">
+                        <joint name="left_wrist_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-1.614429558 1.614429558" />
+                        <geom name="left_wrist_pitch_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                        <body name="left_wrist_yaw_link" pos="0.046 0 0" quat="1 0 0 0">
+                          <joint name="left_wrist_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.614429558 1.614429558" />
+                          <geom name="left_wrist_yaw_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                          <body name="left_rubber_hand" pos="0.0415 0.003 0" quat="1 0 0 0">
+                            <geom name="left_rubber_hand_proxy" type="sphere" size="0.03" rgba="0.55 0.65 0.75 0.55" />
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+            <body name="right_shoulder_pitch_link" pos="0.0039563 -0.10021 0.23778" quat="0.9902640744 -0.1392014837 1.38722044e-05 9.868683842e-05">
+              <joint name="right_shoulder_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-3.0892 2.6704" />
+              <geom name="right_shoulder_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+              <body name="right_shoulder_roll_link" pos="0 -0.038 -0.013831" quat="0.9902682553 0.1391717738 0 0">
+                <joint name="right_shoulder_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-2.2515 1.5882" />
+                <geom name="right_shoulder_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="right_shoulder_yaw_link" pos="0 -0.00624 -0.1032" quat="1 0 0 0">
+                  <joint name="right_shoulder_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.618 2.618" />
+                  <geom name="right_shoulder_yaw_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                  <body name="right_elbow_link" pos="0.015783 0 -0.080518" quat="1 0 0 0">
+                    <joint name="right_elbow_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-1.0472 2.0944" />
+                    <geom name="right_elbow_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                    <body name="right_wrist_roll_link" pos="0.1 -0.00188791 -0.01" quat="1 0 0 0">
+                      <joint name="right_wrist_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-1.972222054 1.972222054" />
+                      <geom name="right_wrist_roll_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                      <body name="right_wrist_pitch_link" pos="0.038 0 0" quat="1 0 0 0">
+                        <joint name="right_wrist_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-1.614429558 1.614429558" />
+                        <geom name="right_wrist_pitch_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                        <body name="right_wrist_yaw_link" pos="0.046 0 0" quat="1 0 0 0">
+                          <joint name="right_wrist_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.614429558 1.614429558" />
+                          <geom name="right_wrist_yaw_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                          <body name="right_rubber_hand" pos="0.0415 -0.003 0" quat="1 0 0 0">
+                            <geom name="right_rubber_hand_proxy" type="sphere" size="0.03" rgba="0.55 0.65 0.75 0.55" />
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="imu_in_pelvis" pos="0.04525 0 -0.08339" quat="1 0 0 0">
+        <geom name="imu_in_pelvis_proxy" type="box" size="0.11 0.08 0.06" rgba="0.55 0.65 0.75 0.55" />
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="left_hip_pitch_joint_position" joint="left_hip_pitch_joint" kp="15" ctrlrange="-2.5307 2.8798" />
+    <position name="left_hip_roll_joint_position" joint="left_hip_roll_joint" kp="15" ctrlrange="-0.5236 2.9671" />
+    <position name="left_hip_yaw_joint_position" joint="left_hip_yaw_joint" kp="15" ctrlrange="-2.7576 2.7576" />
+    <position name="left_knee_joint_position" joint="left_knee_joint" kp="15" ctrlrange="-0.087267 2.8798" />
+    <position name="left_ankle_pitch_joint_position" joint="left_ankle_pitch_joint" kp="15" ctrlrange="-0.87267 0.5236" />
+    <position name="left_ankle_roll_joint_position" joint="left_ankle_roll_joint" kp="15" ctrlrange="-0.2618 0.2618" />
+    <position name="right_hip_pitch_joint_position" joint="right_hip_pitch_joint" kp="15" ctrlrange="-2.5307 2.8798" />
+    <position name="right_hip_roll_joint_position" joint="right_hip_roll_joint" kp="15" ctrlrange="-2.9671 0.5236" />
+    <position name="right_hip_yaw_joint_position" joint="right_hip_yaw_joint" kp="15" ctrlrange="-2.7576 2.7576" />
+    <position name="right_knee_joint_position" joint="right_knee_joint" kp="15" ctrlrange="-0.087267 2.8798" />
+    <position name="right_ankle_pitch_joint_position" joint="right_ankle_pitch_joint" kp="15" ctrlrange="-0.87267 0.5236" />
+    <position name="right_ankle_roll_joint_position" joint="right_ankle_roll_joint" kp="15" ctrlrange="-0.2618 0.2618" />
+    <position name="waist_yaw_joint_position" joint="waist_yaw_joint" kp="15" ctrlrange="-2.618 2.618" />
+    <position name="waist_roll_joint_position" joint="waist_roll_joint" kp="15" ctrlrange="-0.52 0.52" />
+    <position name="waist_pitch_joint_position" joint="waist_pitch_joint" kp="15" ctrlrange="-0.52 0.52" />
+    <position name="left_shoulder_pitch_joint_position" joint="left_shoulder_pitch_joint" kp="15" ctrlrange="-3.0892 2.6704" />
+    <position name="left_shoulder_roll_joint_position" joint="left_shoulder_roll_joint" kp="15" ctrlrange="-1.5882 2.2515" />
+    <position name="left_shoulder_yaw_joint_position" joint="left_shoulder_yaw_joint" kp="15" ctrlrange="-2.618 2.618" />
+    <position name="left_elbow_joint_position" joint="left_elbow_joint" kp="15" ctrlrange="-1.0472 2.0944" />
+    <position name="left_wrist_roll_joint_position" joint="left_wrist_roll_joint" kp="15" ctrlrange="-1.972222054 1.972222054" />
+    <position name="left_wrist_pitch_joint_position" joint="left_wrist_pitch_joint" kp="15" ctrlrange="-1.614429558 1.614429558" />
+    <position name="left_wrist_yaw_joint_position" joint="left_wrist_yaw_joint" kp="15" ctrlrange="-1.614429558 1.614429558" />
+    <position name="right_shoulder_pitch_joint_position" joint="right_shoulder_pitch_joint" kp="15" ctrlrange="-3.0892 2.6704" />
+    <position name="right_shoulder_roll_joint_position" joint="right_shoulder_roll_joint" kp="15" ctrlrange="-2.2515 1.5882" />
+    <position name="right_shoulder_yaw_joint_position" joint="right_shoulder_yaw_joint" kp="15" ctrlrange="-2.618 2.618" />
+    <position name="right_elbow_joint_position" joint="right_elbow_joint" kp="15" ctrlrange="-1.0472 2.0944" />
+    <position name="right_wrist_roll_joint_position" joint="right_wrist_roll_joint" kp="15" ctrlrange="-1.972222054 1.972222054" />
+    <position name="right_wrist_pitch_joint_position" joint="right_wrist_pitch_joint" kp="15" ctrlrange="-1.614429558 1.614429558" />
+    <position name="right_wrist_yaw_joint_position" joint="right_wrist_yaw_joint" kp="15" ctrlrange="-1.614429558 1.614429558" />
+  </actuator>
+  <sensor>
+    <jointpos name="left_hip_pitch_joint_pos" joint="left_hip_pitch_joint" />
+    <jointpos name="left_hip_roll_joint_pos" joint="left_hip_roll_joint" />
+    <jointpos name="left_hip_yaw_joint_pos" joint="left_hip_yaw_joint" />
+    <jointpos name="left_knee_joint_pos" joint="left_knee_joint" />
+    <jointpos name="left_ankle_pitch_joint_pos" joint="left_ankle_pitch_joint" />
+    <jointpos name="left_ankle_roll_joint_pos" joint="left_ankle_roll_joint" />
+    <jointpos name="right_hip_pitch_joint_pos" joint="right_hip_pitch_joint" />
+    <jointpos name="right_hip_roll_joint_pos" joint="right_hip_roll_joint" />
+    <jointpos name="right_hip_yaw_joint_pos" joint="right_hip_yaw_joint" />
+    <jointpos name="right_knee_joint_pos" joint="right_knee_joint" />
+    <jointpos name="right_ankle_pitch_joint_pos" joint="right_ankle_pitch_joint" />
+    <jointpos name="right_ankle_roll_joint_pos" joint="right_ankle_roll_joint" />
+    <jointpos name="waist_yaw_joint_pos" joint="waist_yaw_joint" />
+    <jointpos name="waist_roll_joint_pos" joint="waist_roll_joint" />
+    <jointpos name="waist_pitch_joint_pos" joint="waist_pitch_joint" />
+    <jointpos name="left_shoulder_pitch_joint_pos" joint="left_shoulder_pitch_joint" />
+    <jointpos name="left_shoulder_roll_joint_pos" joint="left_shoulder_roll_joint" />
+    <jointpos name="left_shoulder_yaw_joint_pos" joint="left_shoulder_yaw_joint" />
+    <jointpos name="left_elbow_joint_pos" joint="left_elbow_joint" />
+    <jointpos name="left_wrist_roll_joint_pos" joint="left_wrist_roll_joint" />
+    <jointpos name="left_wrist_pitch_joint_pos" joint="left_wrist_pitch_joint" />
+    <jointpos name="left_wrist_yaw_joint_pos" joint="left_wrist_yaw_joint" />
+    <jointpos name="right_shoulder_pitch_joint_pos" joint="right_shoulder_pitch_joint" />
+    <jointpos name="right_shoulder_roll_joint_pos" joint="right_shoulder_roll_joint" />
+    <jointpos name="right_shoulder_yaw_joint_pos" joint="right_shoulder_yaw_joint" />
+    <jointpos name="right_elbow_joint_pos" joint="right_elbow_joint" />
+    <jointpos name="right_wrist_roll_joint_pos" joint="right_wrist_roll_joint" />
+    <jointpos name="right_wrist_pitch_joint_pos" joint="right_wrist_pitch_joint" />
+    <jointpos name="right_wrist_yaw_joint_pos" joint="right_wrist_yaw_joint" />
+  </sensor>
+</mujoco>
