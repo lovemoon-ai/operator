@@ -151,3 +151,15 @@ if(RETARGETING_BUILD_DEMO)
         "$<TARGET_FILE:retarget_probe>" VERBATIM)
   endif()
 endif()
+
+if(RETARGETING_BUILD_DEMO)
+  add_executable(retarget_align apps/retarget_align.cpp)
+  target_link_libraries(retarget_align PRIVATE retargeting)
+  if(APPLE AND RETARGETING_WITH_MUJOCO)
+    get_filename_component(_mj_name "${MUJOCO_LIB}" NAME)
+    add_custom_command(TARGET retarget_align POST_BUILD
+      COMMAND install_name_tool -change
+        "@rpath/mujoco.framework/Versions/A/${_mj_name}" "${MUJOCO_LIB}"
+        "$<TARGET_FILE:retarget_align>" VERBATIM)
+  endif()
+endif()

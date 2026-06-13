@@ -33,6 +33,11 @@ class GmrSolver {
   // Hold the first n_qpos configuration entries fixed across solves. Snapshots
   // the current values as the held configuration. n_qpos == 0 locks nothing.
   void lock_qpos_prefix(int n_qpos);
+  // Extra individual qpos entries to clamp-after (reset before the solve + held
+  // after), in addition to the locked prefix. Used to hold e.g. waist roll/pitch
+  // and the wrists at rest while the arms are solved freely — matching the GMR
+  // spatialmp4 pipeline. Captures the current values as the held values.
+  void set_clamp_qpos(const std::vector<int>& qpos_indices);
   void reset_locked_region();                       // restore held values now
   void freeze_locked_region(Eigen::VectorXd& qpos) const;  // restore into qpos
   // Pin the locked region inside the QP too (not just clamp after), so the free
@@ -93,6 +98,8 @@ class GmrSolver {
   int locked_qpos_count_ = 0;
   bool freeze_locked_in_solve_ = false;
   Eigen::VectorXd locked_qpos_;  // held values of qpos[0:locked_qpos_count_]
+  std::vector<int> clamp_qpos_indices_;   // extra clamp-after qpos entries
+  Eigen::VectorXd clamp_qpos_values_;     // their held values
 
   int max_iter_ = 10;
   std::map<std::string, Pose> scaled_human_data_;
