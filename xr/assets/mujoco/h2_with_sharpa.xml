@@ -1,0 +1,536 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="h2_with_sharpa">
+  <compiler angle="radian" />
+  <option timestep="0.008333333" gravity="0 0 -9.81" />
+  <default>
+    <joint damping="0.3" armature="0.01" />
+    <geom friction="0.8 0.01 0.001" density="250" />
+  </default>
+  <worldbody>
+    <geom name="floor" type="plane" size="3 3 0.02" rgba="0.12 0.13 0.14 1" />
+    <body name="pelvis" pos="0 0 1.05">
+      <freejoint name="pelvis_freejoint" />
+      <geom name="pelvis_proxy" type="box" size="0.11 0.08 0.06" rgba="0.55 0.65 0.75 0.55" />
+      <body name="left_hip_pitch_link" pos="0 0.08038 -0.046407" quat="0.9659256678 -0.2588196364 0 0">
+        <joint name="left_hip_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-2.4525975 2.7754225" />
+        <geom name="left_hip_pitch_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+        <body name="left_hip_roll_link" pos="0.041774 0.0635 -0.019" quat="0.9659256678 0.2588196364 0 0">
+          <joint name="left_hip_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.467441 2.1688605" />
+          <geom name="left_hip_roll_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+          <body name="left_hip_yaw_link" pos="-0.028187 -0.0095 -0.0737" quat="1 0 0 0">
+            <joint name="left_hip_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.827 2.827" />
+            <geom name="left_hip_yaw_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+            <body name="left_knee_link" pos="-0.010308 0.022549 -0.31959" quat="1 0 0 0">
+              <joint name="left_knee_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.08725 2.53025" />
+              <geom name="left_knee_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+              <body name="left_ankle_roll_link" pos="0.032719 -0.023002 -0.49662" quat="1 0 0 0">
+                <joint name="left_ankle_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.3490658503 0.2967059728" />
+                <geom name="left_ankle_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="left_ankle_pitch_link" pos="-0.014516 -0.0373 0" quat="1 0 0 0">
+                  <joint name="left_ankle_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-1.134464014 0.6108652381" />
+                  <geom name="left_ankle_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="right_hip_pitch_link" pos="0 -0.08038 -0.046407" quat="0.9659256678 0.2588196364 0 0">
+        <joint name="right_hip_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-2.4525975 2.7754225" />
+        <geom name="right_hip_pitch_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+        <body name="right_hip_roll_link" pos="0.041774 -0.0635 -0.019" quat="0.9659256678 -0.2588196364 0 0">
+          <joint name="right_hip_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-2.1688605 0.467441" />
+          <geom name="right_hip_roll_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+          <body name="right_hip_yaw_link" pos="-0.028187 0.0095 -0.0737" quat="1 0 0 0">
+            <joint name="right_hip_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.827 2.827" />
+            <geom name="right_hip_yaw_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+            <body name="right_knee_link" pos="-0.010308 -0.022549 -0.31959" quat="1 0 0 0">
+              <joint name="right_knee_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.08725 2.53025" />
+              <geom name="right_knee_link_proxy" type="sphere" size="0.045" rgba="0.55 0.65 0.75 0.55" />
+              <body name="right_ankle_roll_link" pos="0.032719 0.023002 -0.49662" quat="1 0 0 0">
+                <joint name="right_ankle_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.2967059728 0.3490658503" />
+                <geom name="right_ankle_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="right_ankle_pitch_link" pos="-0.014516 0.0373 0" quat="1 0 0 0">
+                  <joint name="right_ankle_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-1.134464014 0.6108652381" />
+                  <geom name="right_ankle_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="waist_yaw_link" pos="0 0 0.090537" quat="1 0 0 0">
+        <joint name="waist_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.7453 1.7453" />
+        <geom name="waist_yaw_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+        <body name="waist_roll_link" pos="0 0 0.0325" quat="1 0 0 0">
+          <joint name="waist_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.5236 0.5236" />
+          <geom name="waist_roll_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+          <body name="torso_link" pos="0 0 0" quat="1 0 0 0">
+            <joint name="waist_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.43633 0.5236" />
+            <geom name="torso_link_proxy" type="box" size="0.11 0.07 0.18" rgba="0.55 0.65 0.75 0.55" />
+            <body name="head_pitch_link" pos="-0.0001147 -0.0189 0.4218" quat="1 0 0 0">
+              <joint name="head_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.5236 0.83775" />
+              <geom name="head_pitch_link_proxy" type="sphere" size="0.055" rgba="0.55 0.65 0.75 0.55" />
+              <body name="head_yaw_link" pos="0 0.0189 0.1335" quat="1 0 0 0">
+                <joint name="head_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.7453 1.7453" />
+                <geom name="head_yaw_link_proxy" type="sphere" size="0.055" rgba="0.55 0.65 0.75 0.55" />
+              </body>
+            </body>
+            <body name="left_shoulder_pitch_link" pos="0.0030848 0.11 0.36008" quat="0.9909591134 0.134164211 0 0">
+              <joint name="left_shoulder_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-2.618 1.833" />
+              <geom name="left_shoulder_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+              <body name="left_shoulder_roll_link" pos="-0.0032074 0.059938 -0.039865" quat="0.9909591134 -0.134164211 0 0">
+                <joint name="left_shoulder_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-0.517 2.494" />
+                <geom name="left_shoulder_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="left_shoulder_yaw_link" pos="-0.0025601 0.0036752 -0.10421" quat="1 0 0 0">
+                  <joint name="left_shoulder_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.618 2.618" />
+                  <geom name="left_shoulder_yaw_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                  <body name="left_elbow_link" pos="0.016655 0.02211 -0.12792" quat="1 0 0 0">
+                    <joint name="left_elbow_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.986 3.071" />
+                    <geom name="left_elbow_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                    <body name="left_wrist_roll_link" pos="0.13119 -0.021497 -0.013769" quat="1 0 0 0">
+                      <joint name="left_wrist_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-2.618 2.618" />
+                      <geom name="left_wrist_roll_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                      <body name="left_wrist_pitch_link" pos="0.037994 0.031144 0.00045104" quat="1 0 0 0">
+                        <joint name="left_wrist_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.576 0.576" />
+                        <geom name="left_wrist_pitch_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                        <body name="left_wrist_yaw_link" pos="0.069283 -0.031045 -0.0006247" quat="1 0 0 0">
+                          <joint name="left_wrist_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.22 1.22" />
+                          <geom name="left_wrist_yaw_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                          <body name="left_hand_C_MC" pos="0.05771524 0 -0.00014865" quat="0.4995999986 -0.5000016781 0.5003963282 -0.5000016781">
+                            <geom name="left_hand_C_MC_proxy" type="sphere" size="0.03" rgba="0.55 0.65 0.75 0.55" />
+                            <body name="left_thumb_CMC_VL" pos="0.01 -0.026 0.0214" quat="0.7071054825 0 0 -0.7071080799">
+                              <joint name="left_thumb_CMC_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.1745 1.9199" />
+                              <geom name="left_thumb_CMC_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="left_thumb_MC" pos="0 -0.005 0" quat="0.6532800341 0.6532824338 -0.270598153 0.270599147">
+                                <joint name="left_thumb_CMC_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="left_thumb_MC_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="left_thumb_MCP_VL" pos="0.065 -0.006 -0.010392" quat="0.9659256678 -0.2588196364 0 0">
+                                  <joint name="left_thumb_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.5236 1.3963" />
+                                  <geom name="left_thumb_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="left_thumb_PP" pos="0 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                    <joint name="left_thumb_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                    <geom name="left_thumb_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="left_thumb_DP" pos="0.039 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                      <joint name="left_thumb_IP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                      <geom name="left_thumb_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="left_thumb_elastomer" pos="0 0 0" quat="0.5 0.5 -0.5 0.5">
+                                        <geom name="left_thumb_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        <body name="left_thumb_fingertip" pos="0 -0.02761093463 0" quat="-0.5 -0.5 -0.5 0.5">
+                                          <geom name="left_thumb_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        </body>
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="left_index_MCP_VL" pos="0.001 -0.0303 0.0959" quat="-0.4999981634 0.5000018366 0.5 0.5">
+                              <joint name="left_index_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                              <geom name="left_index_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="left_index_PP" pos="0 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                <joint name="left_index_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="left_index_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="left_index_MP" pos="0.047 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                  <joint name="left_index_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                  <geom name="left_index_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="left_index_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                    <joint name="left_index_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                    <geom name="left_index_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="left_index_elastomer" pos="0 0 0" quat="0.5 0.5 -0.5 0.5">
+                                      <geom name="left_index_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="left_index_fingertip" pos="0 -0.02600925743 0" quat="-0.5 -0.5 -0.5 0.5">
+                                        <geom name="left_index_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="left_middle_MCP_VL" pos="0 -0.01 0.0989" quat="-0.4999981634 0.5000018366 0.5 0.5">
+                              <joint name="left_middle_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                              <geom name="left_middle_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="left_middle_PP" pos="0 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                <joint name="left_middle_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="left_middle_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="left_middle_MP" pos="0.047 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                  <joint name="left_middle_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                  <geom name="left_middle_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="left_middle_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                    <joint name="left_middle_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                    <geom name="left_middle_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="left_middle_elastomer" pos="0 0 0" quat="0.5 0.5 -0.5 0.5">
+                                      <geom name="left_middle_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="left_middle_fingertip" pos="0 -0.02600925743 0" quat="-0.5 -0.5 -0.5 0.5">
+                                        <geom name="left_middle_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="left_ring_MCP_VL" pos="0.0015 0.0103 0.0929" quat="-0.4999981634 0.5000018366 0.5 0.5">
+                              <joint name="left_ring_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                              <geom name="left_ring_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="left_ring_PP" pos="0 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                <joint name="left_ring_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="left_ring_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="left_ring_MP" pos="0.047 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                  <joint name="left_ring_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                  <geom name="left_ring_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="left_ring_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                    <joint name="left_ring_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                    <geom name="left_ring_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="left_ring_elastomer" pos="0 0 0" quat="0.4999981634 0.5 -0.5 0.5000018366">
+                                      <geom name="left_ring_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="left_ring_fingertip" pos="0 -0.02600925743 0" quat="-0.5 -0.5 -0.5 0.5">
+                                        <geom name="left_ring_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="left_pinky_MC" pos="0.01136 0.0263 0.0869" quat="-1.349243573e-11 -3.673205103e-06 1 3.673205103e-06">
+                              <joint name="left_pinky_CMC" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 0.2618" />
+                              <geom name="left_pinky_MC_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="left_pinky_MCP_VL" pos="0.00836 0.0048 0" quat="0.4999981634 -0.5 0.5 0.5000018366">
+                                <joint name="left_pinky_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                                <geom name="left_pinky_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="left_pinky_PP" pos="0 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                  <joint name="left_pinky_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                  <geom name="left_pinky_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="left_pinky_MP" pos="0.047 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                    <joint name="left_pinky_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                    <geom name="left_pinky_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="left_pinky_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                      <joint name="left_pinky_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                      <geom name="left_pinky_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="left_pinky_elastomer" pos="0 0 0" quat="0.5 0.5 -0.5 0.5">
+                                        <geom name="left_pinky_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        <body name="left_pinky_fingertip" pos="0 -0.02600925743 0" quat="-0.5 -0.5 -0.5 0.5">
+                                          <geom name="left_pinky_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        </body>
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+            <body name="right_shoulder_pitch_link" pos="0.0030848 -0.11 0.36008" quat="0.9909591134 -0.134164211 0 0">
+              <joint name="right_shoulder_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-2.618 1.833" />
+              <geom name="right_shoulder_pitch_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+              <body name="right_shoulder_roll_link" pos="-0.0032074 -0.059938 -0.039865" quat="0.9909591134 0.134164211 0 0">
+                <joint name="right_shoulder_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-2.494 0.517" />
+                <geom name="right_shoulder_roll_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                <body name="right_shoulder_yaw_link" pos="-0.0025601 -0.0036752 -0.10421" quat="1 0 0 0">
+                  <joint name="right_shoulder_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.618 2.618" />
+                  <geom name="right_shoulder_yaw_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                  <body name="right_elbow_link" pos="0.016655 -0.02211 -0.12792" quat="1 0 0 0">
+                    <joint name="right_elbow_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.986 3.071" />
+                    <geom name="right_elbow_link_proxy" type="sphere" size="0.035" rgba="0.55 0.65 0.75 0.55" />
+                    <body name="right_wrist_roll_link" pos="0.13119 0.021497 -0.013769" quat="1 0 0 0">
+                      <joint name="right_wrist_roll_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" limited="true" range="-2.618 2.618" />
+                      <geom name="right_wrist_roll_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                      <body name="right_wrist_pitch_link" pos="0.037994 -0.031144 0.00045104" quat="1 0 0 0">
+                        <joint name="right_wrist_pitch_joint" type="hinge" axis="0 1 0" damping="0.3" armature="0.01" limited="true" range="-0.576 0.576" />
+                        <geom name="right_wrist_pitch_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                        <body name="right_wrist_yaw_link" pos="0.069283 0.031045 -0.0006247" quat="1 0 0 0">
+                          <joint name="right_wrist_yaw_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.22 1.22" />
+                          <geom name="right_wrist_yaw_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                          <body name="right_hand_C_MC" pos="0.05824125 0 -0.00017221" quat="0.5003981634 0.4999998415 0.4996018366 0.4999998415">
+                            <geom name="right_hand_C_MC_proxy" type="sphere" size="0.03" rgba="0.55 0.65 0.75 0.55" />
+                            <body name="right_thumb_CMC_VL" pos="0.01 0.026 0.0214" quat="-2.597343467e-06 0.7071054825 0.7071080799 -2.597353008e-06">
+                              <joint name="right_thumb_CMC_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.1745 1.9199" />
+                              <geom name="right_thumb_CMC_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="right_thumb_MC" pos="0 -0.005 0" quat="0.6532800341 -0.6532824338 0.270598153 0.270599147">
+                                <joint name="right_thumb_CMC_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="right_thumb_MC_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="right_thumb_MCP_VL" pos="0.065 -0.006 0.010392" quat="0.9659256678 0.2588196364 0 0">
+                                  <joint name="right_thumb_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.5236 1.3963" />
+                                  <geom name="right_thumb_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="right_thumb_PP" pos="0 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                    <joint name="right_thumb_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                    <geom name="right_thumb_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="right_thumb_DP" pos="0.039 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                      <joint name="right_thumb_IP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                      <geom name="right_thumb_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="right_thumb_elastomer" pos="0 0 0" quat="0.4999981634 0.5 -0.5 0.5000018366">
+                                        <geom name="right_thumb_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        <body name="right_thumb_fingertip" pos="0 -0.027611 0" quat="-0.4999981634 -0.5 -0.5 0.5000018366">
+                                          <geom name="right_thumb_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        </body>
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="right_index_MCP_VL" pos="0.001 0.0303 0.0959" quat="-0.4999981634 0.5000018366 0.5 0.5">
+                              <joint name="right_index_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                              <geom name="right_index_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="right_index_PP" pos="0 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                <joint name="right_index_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="right_index_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="right_index_MP" pos="0.047 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                  <joint name="right_index_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                  <geom name="right_index_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="right_index_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                    <joint name="right_index_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                    <geom name="right_index_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="right_index_elastomer" pos="0 0 0" quat="0.4999981634 0.5 -0.5 0.5000018366">
+                                      <geom name="right_index_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="right_index_fingertip" pos="0 -0.026009 0" quat="-0.4999981634 -0.5 -0.5 0.5000018366">
+                                        <geom name="right_index_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="right_middle_MCP_VL" pos="0 0.01 0.0989" quat="-0.4999981634 0.5000018366 0.5 0.5">
+                              <joint name="right_middle_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                              <geom name="right_middle_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="right_middle_PP" pos="0 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                <joint name="right_middle_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="right_middle_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="right_middle_MP" pos="0.047 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                  <joint name="right_middle_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                  <geom name="right_middle_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="right_middle_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                    <joint name="right_middle_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                    <geom name="right_middle_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="right_middle_elastomer" pos="0 0 0" quat="0.5 0.5 -0.5 0.5">
+                                      <geom name="right_middle_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="right_middle_fingertip" pos="0 -0.02600925743 0" quat="-0.5 -0.5 -0.5 0.5">
+                                        <geom name="right_middle_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="right_ring_MCP_VL" pos="0.0015 -0.0103 0.0929" quat="-0.4999981634 0.5000018366 0.5 0.5">
+                              <joint name="right_ring_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                              <geom name="right_ring_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="right_ring_PP" pos="0 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                <joint name="right_ring_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                <geom name="right_ring_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="right_ring_MP" pos="0.047 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                  <joint name="right_ring_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                  <geom name="right_ring_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="right_ring_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                    <joint name="right_ring_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                    <geom name="right_ring_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="right_ring_elastomer" pos="0 0 0" quat="0.4999981634 0.5 -0.5 0.5000018366">
+                                      <geom name="right_ring_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="right_ring_fingertip" pos="0 -0.02600925743 0" quat="-0.5 -0.5 -0.5 0.5">
+                                        <geom name="right_ring_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="right_pinky_MC" pos="0.01136 -0.0263 0.0869" quat="-3.673205103e-06 0 0 1">
+                              <joint name="right_pinky_CMC" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 0.2618" />
+                              <geom name="right_pinky_MC_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="right_pinky_MCP_VL" pos="0.00836 0.0048 0" quat="0.4999981634 0.5 -0.5 0.5000018366">
+                                <joint name="right_pinky_MCP_FE" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.17453293 1.5708" />
+                                <geom name="right_pinky_MCP_VL_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="right_pinky_PP" pos="0 0 0" quat="0.7071054825 -0.7071080799 0 0">
+                                  <joint name="right_pinky_MCP_AA" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.3491 0.3491" />
+                                  <geom name="right_pinky_PP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="right_pinky_MP" pos="0.047 0 0" quat="0.7071054825 0.7071080799 0 0">
+                                    <joint name="right_pinky_PIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.7453" />
+                                    <geom name="right_pinky_MP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="right_pinky_DP" pos="0.0315 0 0" quat="1 0 0 0">
+                                      <joint name="right_pinky_DIP" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 1.3963" />
+                                      <geom name="right_pinky_DP_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="right_pinky_elastomer" pos="0 0 0" quat="0.4999981634 0.5 -0.5 0.5000018366">
+                                        <geom name="right_pinky_elastomer_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        <body name="right_pinky_fingertip" pos="0 -0.026009 0" quat="-0.4999981634 -0.5 -0.5 0.5000018366">
+                                          <geom name="right_pinky_fingertip_proxy" type="sphere" size="0.012" rgba="0.55 0.65 0.75 0.55" />
+                                        </body>
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="left_hip_pitch_joint_position" joint="left_hip_pitch_joint" kp="15" ctrlrange="-2.4525975 2.7754225" />
+    <position name="left_hip_roll_joint_position" joint="left_hip_roll_joint" kp="15" ctrlrange="-0.467441 2.1688605" />
+    <position name="left_hip_yaw_joint_position" joint="left_hip_yaw_joint" kp="15" ctrlrange="-2.827 2.827" />
+    <position name="left_knee_joint_position" joint="left_knee_joint" kp="15" ctrlrange="-0.08725 2.53025" />
+    <position name="left_ankle_roll_joint_position" joint="left_ankle_roll_joint" kp="15" ctrlrange="-0.3490658503 0.2967059728" />
+    <position name="left_ankle_pitch_joint_position" joint="left_ankle_pitch_joint" kp="15" ctrlrange="-1.134464014 0.6108652381" />
+    <position name="right_hip_pitch_joint_position" joint="right_hip_pitch_joint" kp="15" ctrlrange="-2.4525975 2.7754225" />
+    <position name="right_hip_roll_joint_position" joint="right_hip_roll_joint" kp="15" ctrlrange="-2.1688605 0.467441" />
+    <position name="right_hip_yaw_joint_position" joint="right_hip_yaw_joint" kp="15" ctrlrange="-2.827 2.827" />
+    <position name="right_knee_joint_position" joint="right_knee_joint" kp="15" ctrlrange="-0.08725 2.53025" />
+    <position name="right_ankle_roll_joint_position" joint="right_ankle_roll_joint" kp="15" ctrlrange="-0.2967059728 0.3490658503" />
+    <position name="right_ankle_pitch_joint_position" joint="right_ankle_pitch_joint" kp="15" ctrlrange="-1.134464014 0.6108652381" />
+    <position name="waist_yaw_joint_position" joint="waist_yaw_joint" kp="15" ctrlrange="-1.7453 1.7453" />
+    <position name="waist_roll_joint_position" joint="waist_roll_joint" kp="15" ctrlrange="-0.5236 0.5236" />
+    <position name="waist_pitch_joint_position" joint="waist_pitch_joint" kp="15" ctrlrange="-0.43633 0.5236" />
+    <position name="head_pitch_joint_position" joint="head_pitch_joint" kp="15" ctrlrange="-0.5236 0.83775" />
+    <position name="head_yaw_joint_position" joint="head_yaw_joint" kp="15" ctrlrange="-1.7453 1.7453" />
+    <position name="left_shoulder_pitch_joint_position" joint="left_shoulder_pitch_joint" kp="15" ctrlrange="-2.618 1.833" />
+    <position name="left_shoulder_roll_joint_position" joint="left_shoulder_roll_joint" kp="15" ctrlrange="-0.517 2.494" />
+    <position name="left_shoulder_yaw_joint_position" joint="left_shoulder_yaw_joint" kp="15" ctrlrange="-2.618 2.618" />
+    <position name="left_elbow_joint_position" joint="left_elbow_joint" kp="15" ctrlrange="-0.986 3.071" />
+    <position name="left_wrist_roll_joint_position" joint="left_wrist_roll_joint" kp="15" ctrlrange="-2.618 2.618" />
+    <position name="left_wrist_pitch_joint_position" joint="left_wrist_pitch_joint" kp="15" ctrlrange="-0.576 0.576" />
+    <position name="left_wrist_yaw_joint_position" joint="left_wrist_yaw_joint" kp="15" ctrlrange="-1.22 1.22" />
+    <position name="left_thumb_CMC_FE_position" joint="left_thumb_CMC_FE" kp="15" ctrlrange="-0.1745 1.9199" />
+    <position name="left_thumb_CMC_AA_position" joint="left_thumb_CMC_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="left_thumb_MCP_FE_position" joint="left_thumb_MCP_FE" kp="15" ctrlrange="-0.5236 1.3963" />
+    <position name="left_thumb_MCP_AA_position" joint="left_thumb_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="left_thumb_IP_position" joint="left_thumb_IP" kp="15" ctrlrange="0 1.7453" />
+    <position name="left_index_MCP_FE_position" joint="left_index_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="left_index_MCP_AA_position" joint="left_index_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="left_index_PIP_position" joint="left_index_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="left_index_DIP_position" joint="left_index_DIP" kp="15" ctrlrange="0 1.3963" />
+    <position name="left_middle_MCP_FE_position" joint="left_middle_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="left_middle_MCP_AA_position" joint="left_middle_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="left_middle_PIP_position" joint="left_middle_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="left_middle_DIP_position" joint="left_middle_DIP" kp="15" ctrlrange="0 1.3963" />
+    <position name="left_ring_MCP_FE_position" joint="left_ring_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="left_ring_MCP_AA_position" joint="left_ring_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="left_ring_PIP_position" joint="left_ring_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="left_ring_DIP_position" joint="left_ring_DIP" kp="15" ctrlrange="0 1.3963" />
+    <position name="left_pinky_CMC_position" joint="left_pinky_CMC" kp="15" ctrlrange="0 0.2618" />
+    <position name="left_pinky_MCP_FE_position" joint="left_pinky_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="left_pinky_MCP_AA_position" joint="left_pinky_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="left_pinky_PIP_position" joint="left_pinky_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="left_pinky_DIP_position" joint="left_pinky_DIP" kp="15" ctrlrange="0 1.3963" />
+    <position name="right_shoulder_pitch_joint_position" joint="right_shoulder_pitch_joint" kp="15" ctrlrange="-2.618 1.833" />
+    <position name="right_shoulder_roll_joint_position" joint="right_shoulder_roll_joint" kp="15" ctrlrange="-2.494 0.517" />
+    <position name="right_shoulder_yaw_joint_position" joint="right_shoulder_yaw_joint" kp="15" ctrlrange="-2.618 2.618" />
+    <position name="right_elbow_joint_position" joint="right_elbow_joint" kp="15" ctrlrange="-0.986 3.071" />
+    <position name="right_wrist_roll_joint_position" joint="right_wrist_roll_joint" kp="15" ctrlrange="-2.618 2.618" />
+    <position name="right_wrist_pitch_joint_position" joint="right_wrist_pitch_joint" kp="15" ctrlrange="-0.576 0.576" />
+    <position name="right_wrist_yaw_joint_position" joint="right_wrist_yaw_joint" kp="15" ctrlrange="-1.22 1.22" />
+    <position name="right_thumb_CMC_FE_position" joint="right_thumb_CMC_FE" kp="15" ctrlrange="-0.1745 1.9199" />
+    <position name="right_thumb_CMC_AA_position" joint="right_thumb_CMC_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="right_thumb_MCP_FE_position" joint="right_thumb_MCP_FE" kp="15" ctrlrange="-0.5236 1.3963" />
+    <position name="right_thumb_MCP_AA_position" joint="right_thumb_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="right_thumb_IP_position" joint="right_thumb_IP" kp="15" ctrlrange="0 1.7453" />
+    <position name="right_index_MCP_FE_position" joint="right_index_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="right_index_MCP_AA_position" joint="right_index_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="right_index_PIP_position" joint="right_index_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="right_index_DIP_position" joint="right_index_DIP" kp="15" ctrlrange="0 1.3963" />
+    <position name="right_middle_MCP_FE_position" joint="right_middle_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="right_middle_MCP_AA_position" joint="right_middle_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="right_middle_PIP_position" joint="right_middle_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="right_middle_DIP_position" joint="right_middle_DIP" kp="15" ctrlrange="0 1.3963" />
+    <position name="right_ring_MCP_FE_position" joint="right_ring_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="right_ring_MCP_AA_position" joint="right_ring_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="right_ring_PIP_position" joint="right_ring_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="right_ring_DIP_position" joint="right_ring_DIP" kp="15" ctrlrange="0 1.3963" />
+    <position name="right_pinky_CMC_position" joint="right_pinky_CMC" kp="15" ctrlrange="0 0.2618" />
+    <position name="right_pinky_MCP_FE_position" joint="right_pinky_MCP_FE" kp="15" ctrlrange="-0.17453293 1.5708" />
+    <position name="right_pinky_MCP_AA_position" joint="right_pinky_MCP_AA" kp="15" ctrlrange="-0.3491 0.3491" />
+    <position name="right_pinky_PIP_position" joint="right_pinky_PIP" kp="15" ctrlrange="0 1.7453" />
+    <position name="right_pinky_DIP_position" joint="right_pinky_DIP" kp="15" ctrlrange="0 1.3963" />
+  </actuator>
+  <sensor>
+    <jointpos name="left_hip_pitch_joint_pos" joint="left_hip_pitch_joint" />
+    <jointpos name="left_hip_roll_joint_pos" joint="left_hip_roll_joint" />
+    <jointpos name="left_hip_yaw_joint_pos" joint="left_hip_yaw_joint" />
+    <jointpos name="left_knee_joint_pos" joint="left_knee_joint" />
+    <jointpos name="left_ankle_roll_joint_pos" joint="left_ankle_roll_joint" />
+    <jointpos name="left_ankle_pitch_joint_pos" joint="left_ankle_pitch_joint" />
+    <jointpos name="right_hip_pitch_joint_pos" joint="right_hip_pitch_joint" />
+    <jointpos name="right_hip_roll_joint_pos" joint="right_hip_roll_joint" />
+    <jointpos name="right_hip_yaw_joint_pos" joint="right_hip_yaw_joint" />
+    <jointpos name="right_knee_joint_pos" joint="right_knee_joint" />
+    <jointpos name="right_ankle_roll_joint_pos" joint="right_ankle_roll_joint" />
+    <jointpos name="right_ankle_pitch_joint_pos" joint="right_ankle_pitch_joint" />
+    <jointpos name="waist_yaw_joint_pos" joint="waist_yaw_joint" />
+    <jointpos name="waist_roll_joint_pos" joint="waist_roll_joint" />
+    <jointpos name="waist_pitch_joint_pos" joint="waist_pitch_joint" />
+    <jointpos name="head_pitch_joint_pos" joint="head_pitch_joint" />
+    <jointpos name="head_yaw_joint_pos" joint="head_yaw_joint" />
+    <jointpos name="left_shoulder_pitch_joint_pos" joint="left_shoulder_pitch_joint" />
+    <jointpos name="left_shoulder_roll_joint_pos" joint="left_shoulder_roll_joint" />
+    <jointpos name="left_shoulder_yaw_joint_pos" joint="left_shoulder_yaw_joint" />
+    <jointpos name="left_elbow_joint_pos" joint="left_elbow_joint" />
+    <jointpos name="left_wrist_roll_joint_pos" joint="left_wrist_roll_joint" />
+    <jointpos name="left_wrist_pitch_joint_pos" joint="left_wrist_pitch_joint" />
+    <jointpos name="left_wrist_yaw_joint_pos" joint="left_wrist_yaw_joint" />
+    <jointpos name="left_thumb_CMC_FE_pos" joint="left_thumb_CMC_FE" />
+    <jointpos name="left_thumb_CMC_AA_pos" joint="left_thumb_CMC_AA" />
+    <jointpos name="left_thumb_MCP_FE_pos" joint="left_thumb_MCP_FE" />
+    <jointpos name="left_thumb_MCP_AA_pos" joint="left_thumb_MCP_AA" />
+    <jointpos name="left_thumb_IP_pos" joint="left_thumb_IP" />
+    <jointpos name="left_index_MCP_FE_pos" joint="left_index_MCP_FE" />
+    <jointpos name="left_index_MCP_AA_pos" joint="left_index_MCP_AA" />
+    <jointpos name="left_index_PIP_pos" joint="left_index_PIP" />
+    <jointpos name="left_index_DIP_pos" joint="left_index_DIP" />
+    <jointpos name="left_middle_MCP_FE_pos" joint="left_middle_MCP_FE" />
+    <jointpos name="left_middle_MCP_AA_pos" joint="left_middle_MCP_AA" />
+    <jointpos name="left_middle_PIP_pos" joint="left_middle_PIP" />
+    <jointpos name="left_middle_DIP_pos" joint="left_middle_DIP" />
+    <jointpos name="left_ring_MCP_FE_pos" joint="left_ring_MCP_FE" />
+    <jointpos name="left_ring_MCP_AA_pos" joint="left_ring_MCP_AA" />
+    <jointpos name="left_ring_PIP_pos" joint="left_ring_PIP" />
+    <jointpos name="left_ring_DIP_pos" joint="left_ring_DIP" />
+    <jointpos name="left_pinky_CMC_pos" joint="left_pinky_CMC" />
+    <jointpos name="left_pinky_MCP_FE_pos" joint="left_pinky_MCP_FE" />
+    <jointpos name="left_pinky_MCP_AA_pos" joint="left_pinky_MCP_AA" />
+    <jointpos name="left_pinky_PIP_pos" joint="left_pinky_PIP" />
+    <jointpos name="left_pinky_DIP_pos" joint="left_pinky_DIP" />
+    <jointpos name="right_shoulder_pitch_joint_pos" joint="right_shoulder_pitch_joint" />
+    <jointpos name="right_shoulder_roll_joint_pos" joint="right_shoulder_roll_joint" />
+    <jointpos name="right_shoulder_yaw_joint_pos" joint="right_shoulder_yaw_joint" />
+    <jointpos name="right_elbow_joint_pos" joint="right_elbow_joint" />
+    <jointpos name="right_wrist_roll_joint_pos" joint="right_wrist_roll_joint" />
+    <jointpos name="right_wrist_pitch_joint_pos" joint="right_wrist_pitch_joint" />
+    <jointpos name="right_wrist_yaw_joint_pos" joint="right_wrist_yaw_joint" />
+    <jointpos name="right_thumb_CMC_FE_pos" joint="right_thumb_CMC_FE" />
+    <jointpos name="right_thumb_CMC_AA_pos" joint="right_thumb_CMC_AA" />
+    <jointpos name="right_thumb_MCP_FE_pos" joint="right_thumb_MCP_FE" />
+    <jointpos name="right_thumb_MCP_AA_pos" joint="right_thumb_MCP_AA" />
+    <jointpos name="right_thumb_IP_pos" joint="right_thumb_IP" />
+    <jointpos name="right_index_MCP_FE_pos" joint="right_index_MCP_FE" />
+    <jointpos name="right_index_MCP_AA_pos" joint="right_index_MCP_AA" />
+    <jointpos name="right_index_PIP_pos" joint="right_index_PIP" />
+    <jointpos name="right_index_DIP_pos" joint="right_index_DIP" />
+    <jointpos name="right_middle_MCP_FE_pos" joint="right_middle_MCP_FE" />
+    <jointpos name="right_middle_MCP_AA_pos" joint="right_middle_MCP_AA" />
+    <jointpos name="right_middle_PIP_pos" joint="right_middle_PIP" />
+    <jointpos name="right_middle_DIP_pos" joint="right_middle_DIP" />
+    <jointpos name="right_ring_MCP_FE_pos" joint="right_ring_MCP_FE" />
+    <jointpos name="right_ring_MCP_AA_pos" joint="right_ring_MCP_AA" />
+    <jointpos name="right_ring_PIP_pos" joint="right_ring_PIP" />
+    <jointpos name="right_ring_DIP_pos" joint="right_ring_DIP" />
+    <jointpos name="right_pinky_CMC_pos" joint="right_pinky_CMC" />
+    <jointpos name="right_pinky_MCP_FE_pos" joint="right_pinky_MCP_FE" />
+    <jointpos name="right_pinky_MCP_AA_pos" joint="right_pinky_MCP_AA" />
+    <jointpos name="right_pinky_PIP_pos" joint="right_pinky_PIP" />
+    <jointpos name="right_pinky_DIP_pos" joint="right_pinky_DIP" />
+  </sensor>
+</mujoco>
