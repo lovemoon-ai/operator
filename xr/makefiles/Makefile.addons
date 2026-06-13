@@ -33,6 +33,7 @@
 
 include makefiles/Makefile.ffmpeg
 include makefiles/Makefile.pinocchio
+include makefiles/Makefile.mujoco-android
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -87,7 +88,7 @@ PICO_OPENXR_JNI_SO := android/build/libs/arm64-v8a/libpico_openxr.so
 # Pinocchio GDExtension wrapper. Same install layout as AHB / PICO OpenXR;
 # the underlying libpinocchio_default.so comes from build-pinocchio (see
 # Makefile.pinocchio) and is staged alongside the wrapper.
-PINOCCHIO_DIR := native/pinocchio
+PINOCCHIO_DIR := native/godot_pinocchio
 PINOCCHIO_SRC := $(PINOCCHIO_DIR)/CMakeLists.txt $(PINOCCHIO_DIR)/build.sh $(shell find $(PINOCCHIO_DIR)/src -type f 2>/dev/null)
 PINOCCHIO_ADDON_SO := addons/pinocchio/libpinocchio_gd.so
 PINOCCHIO_ADDON_CORE_SO := addons/pinocchio/libpinocchio_default.so
@@ -285,7 +286,7 @@ clean-pico-openxr-loader-stage:
 		$(PICO_OPENXR_LOADER_LEGACY_JNI_SO)
 
 # ---------------------------------------------------------------------------
-# Pinocchio GDExtension wrapper (native/pinocchio)
+# Pinocchio GDExtension wrapper (native/godot_pinocchio)
 # ---------------------------------------------------------------------------
 # The wrapper is a thin Godot binding around stack-of-tasks/pinocchio. The
 # Pinocchio + Eigen3 + Boost build itself is owned by Makefile.pinocchio
@@ -447,7 +448,7 @@ clean-addons:
 		android_plugin/qrscanner/build \
 		native/godot_mujoco/build-* \
 		native/pico_openxr/build-* \
-		native/pinocchio/build-*
+		native/godot_pinocchio/build-*
 		# $(GODOT_CPP_BUILD_DIR)
 	rm -f \
 		addons/ahb_decoder/*.so \

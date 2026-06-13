@@ -1,0 +1,38 @@
+{
+    "robot_root_name": "pelvis",
+    "human_root_name": "Hips",
+    "ground_height": 0.0,
+    "human_height_assumption": 1.75,
+    "use_ik_match_table1": true,
+    "use_ik_match_table2": true,
+    "human_scale_table": {
+        "Hips": 0.9,
+        "Chest": 0.9,
+        "LeftShoulder": 0.8,
+        "LeftArmLower": 0.8,
+        "LeftWrist": 0.8,
+        "RightShoulder": 0.8,
+        "RightArmLower": 0.8,
+        "RightWrist": 0.8
+    },
+    "ik_match_table1": {
+        "pelvis": ["Hips", 5, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "torso_link": ["Chest", 10, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "left_shoulder_yaw_link": ["LeftShoulder", 8, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "left_elbow_link": ["LeftArmLower", 15, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "left_wrist_roll_link": ["LeftWrist", 25, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "right_shoulder_yaw_link": ["RightShoulder", 8, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "right_elbow_link": ["RightArmLower", 15, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "right_wrist_roll_link": ["RightWrist", 25, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
+    },
+    "ik_match_table2": {
+        "pelvis": ["Hips", 10, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "torso_link": ["Chest", 20, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "left_shoulder_yaw_link": ["LeftShoulder", 15, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "left_elbow_link": ["LeftArmLower", 30, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "left_wrist_roll_link": ["LeftWrist", 50, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "right_shoulder_yaw_link": ["RightShoulder", 15, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "right_elbow_link": ["RightArmLower", 30, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+        "right_wrist_roll_link": ["RightWrist", 50, 0.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
+    }
+}
