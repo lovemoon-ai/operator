@@ -5,7 +5,7 @@ extends Node3D
 ## It loads the baked GLB, tints it translucent, and world-locks it one
 ## metre in front of the operator's current view.
 
-const GLB_PATH := "res://assets/robots/h2_with_sharpa.glb"
+const GLB_PATH := "res://assets/robots/h2-plus/h2_with_sharpa.glb"
 
 ## Optional override — pass a Node3D you want to mount the robot under.
 ## Defaults to ``self`` (the overlay node itself).
@@ -41,7 +41,7 @@ var _debug_front_locked: bool = false
 
 func _ready() -> void:
 	if not ResourceLoader.exists(GLB_PATH):
-		push_error("[H2Overlay] GLB not found at %s. Run tools/retargeting/scripts/build_h2_glb.py to produce it." % GLB_PATH)
+		push_error("[H2Overlay] GLB not found at %s. Run scripts/make-robot/make_h2_sharpa.sh to produce it." % GLB_PATH)
 		return
 	_load_glb()
 	if _pelvis_node == null:
