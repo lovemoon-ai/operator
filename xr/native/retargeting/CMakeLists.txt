@@ -163,3 +163,15 @@ if(RETARGETING_BUILD_DEMO)
         "$<TARGET_FILE:retarget_align>" VERBATIM)
   endif()
 endif()
+
+if(RETARGETING_BUILD_DEMO)
+  add_executable(spatialmp4_to_g1 apps/spatialmp4_to_g1.cpp)
+  target_link_libraries(spatialmp4_to_g1 PRIVATE retargeting)
+  if(APPLE AND RETARGETING_WITH_MUJOCO)
+    get_filename_component(_mj_name "${MUJOCO_LIB}" NAME)
+    add_custom_command(TARGET spatialmp4_to_g1 POST_BUILD
+      COMMAND install_name_tool -change
+        "@rpath/mujoco.framework/Versions/A/${_mj_name}" "${MUJOCO_LIB}"
+        "$<TARGET_FILE:spatialmp4_to_g1>" VERBATIM)
+  endif()
+endif()
