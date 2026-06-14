@@ -24,6 +24,12 @@ const LOCKED_QPOS_PREFIX := 19
 const HUMAN_HEIGHT := 1.75
 ## Hips are pinned to this height in GMR coords each frame (Python --pelvis_height).
 const PELVIS_HEIGHT := 0.88
+## Exponential smoothing on the tracked joint positions (0 = frozen, 1 = none).
+## Body tracking jitters a few cm per joint; because every target is computed
+## relative to the (also-jittering) hips and the robot base is frozen, the IK
+## amplifies that noise into flailing/drooping arms. Low-passing the input fixes
+## it. Lower = smoother but laggier.
+const SMOOTH_ALPHA := 0.25
 
 ## Additionally clamp these joints to rest each frame (reset before the solve +
 ## held after), so the arms + waist-yaw track but the torso stays upright and the
@@ -75,6 +81,8 @@ var _clamp_indices: PackedInt32Array = PackedInt32Array()
 var _retarget_active: bool = false
 var _heading_yaw: float = 0.0
 var _heading_computed: bool = false
+var _smooth: Dictionary = {}    # gmr_name -> smoothed raw Vector3 (position)
+var _smooth_q: Dictionary = {}  # gmr_name -> smoothed Quaternion (orientation)
 
 
 func _ready() -> void:
@@ -230,6 +238,16 @@ func _parse_vec3(s: String) -> Vector3:
 	return Vector3(float(parts[0]), float(parts[1]), float(parts[2]))
 
 
+# Hamilton product a (x) b, computed explicitly so it matches the C++ tool's
+# qmul regardless of Godot's operator convention (Quaternion is x,y,z,w).
+func _qmul(a: Quaternion, b: Quaternion) -> Quaternion:
+	return Quaternion(
+		a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+		a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+		a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+		a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z)
+
+
 # --- Retargeter setup ------------------------------------------------------
 
 
@@ -283,39 +301,58 @@ func _on_canonical_frame_ready(frame: Dictionary) -> void:
 		return
 	var joints := joints_v as Dictionary
 
-	# Collect the world-space positions of the joints the ik_config drives, and
-	# convert each to GMR-raw coords with a fixed handedness-preserving axis swap:
-	# Godot (X=right, Y=up, Z=back) -> GMR (X=fwd, Y=left, Z=up).
-	var raw: Dictionary = {}
+	# Collect each driven joint's world pose. Positions convert to GMR with a
+	# fixed handedness-preserving axis swap (Godot X=right,Y=up,Z=back ->
+	# GMR X=fwd,Y=left,Z=up). Orientations are carried too: the SE3 IK error
+	# couples the position tangent to the target rotation, so feeding identity
+	# quats gives visibly wrong arm angles (verified offline vs the Python ref).
+	var raw: Dictionary = {}       # gmr_name -> Vector3 (GMR-swapped position)
+	var raw_q: Dictionary = {}     # gmr_name -> Quaternion (canonical orientation)
 	for gmr_name in JOINT_MAP:
 		var pose := _canonical_pose(joints, JOINT_MAP[gmr_name])
 		if pose.is_empty():
 			continue
 		var p: Vector3 = pose["position"]
 		raw[gmr_name] = Vector3(-p.z, -p.x, p.y)
+		raw_q[gmr_name] = pose["quat"]
 	if raw.size() < JOINT_MAP.size():
 		return  # incomplete frame; keep last pose
+
+	# Low-pass positions (and orientations) to reject body-tracking jitter before
+	# the frozen-base IK amplifies it.
+	for gmr_name in raw:
+		if _smooth.has(gmr_name):
+			_smooth[gmr_name] = (_smooth[gmr_name] as Vector3).lerp(raw[gmr_name], SMOOTH_ALPHA)
+			_smooth_q[gmr_name] = (_smooth_q[gmr_name] as Quaternion).slerp(raw_q[gmr_name], SMOOTH_ALPHA)
+		else:
+			_smooth[gmr_name] = raw[gmr_name]
+			_smooth_q[gmr_name] = raw_q[gmr_name]
 
 	# Anchor + heading-align exactly like the GMR Python pipeline
 	# (anchor_and_align_frame): remove the INITIAL heading yaw (computed once from
 	# the shoulder line) and pin the hips to (0, 0, PELVIS_HEIGHT). Using a fixed
 	# initial yaw (not per-frame) lets the operator's torso yaw track via waist_yaw.
 	if not _heading_computed:
-		var side0: Vector3 = raw["LeftShoulder"] - raw["RightShoulder"]
+		var side0: Vector3 = (_smooth["LeftShoulder"] as Vector3) - (_smooth["RightShoulder"] as Vector3)
 		if Vector2(side0.x, side0.y).length() < 0.0001:
 			return
 		_heading_yaw = PI / 2.0 - atan2(side0.y, side0.x)
 		_heading_computed = true
 	var cz := cos(_heading_yaw)
 	var sz := sin(_heading_yaw)
-	var hips: Vector3 = raw["Hips"]
+	var hips: Vector3 = _smooth["Hips"]
 
-	for gmr_name in raw:
-		var rel: Vector3 = raw[gmr_name] - hips
+	# Combined orientation transform: Rz(heading) * OPENXR_TO_GMR, applied to each
+	# joint quat (mirrors the Python adapter + anchor; wxyz [0.5,0.5,-0.5,-0.5]).
+	var rz_q := Quaternion(0.0, 0.0, sin(_heading_yaw / 2.0), cos(_heading_yaw / 2.0))
+	var combined_q := _qmul(rz_q, Quaternion(0.5, -0.5, -0.5, 0.5))
+
+	for gmr_name in _smooth:
+		var rel: Vector3 = (_smooth[gmr_name] as Vector3) - hips
 		# rotate horizontal by the initial heading yaw; pin hips height.
 		var gmr_pos := Vector3(rel.x * cz - rel.y * sz, rel.x * sz + rel.y * cz, rel.z + PELVIS_HEIGHT)
-		# Position-only IK (rot weights are 0), so orientation is irrelevant.
-		_retargeter.call("set_pose_pq", gmr_name, gmr_pos, Quaternion.IDENTITY)
+		var gmr_quat := _qmul(combined_q, _smooth_q[gmr_name])
+		_retargeter.call("set_pose_pq", gmr_name, gmr_pos, gmr_quat)
 
 	var qpos: PackedFloat64Array = _retargeter.call("step")
 	if qpos.is_empty():
