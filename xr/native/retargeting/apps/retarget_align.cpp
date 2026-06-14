@@ -7,6 +7,7 @@
 //   retarget_align <gmr_input.jsonl> <robot_solution.jsonl> <robot_xml>
 //                  <ik_config.json> [human_height] [locked_prefix] [freeze]
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -44,6 +45,30 @@ int main(int argc, char** argv) {
   if (freeze) clamp = {20, 21, 26, 27, 28, 33, 34, 35};
   auto rt = retargeting::UpperBodyRetargeter::create(cfg, locked_prefix, "gmr", false, clamp);
   printf("human_height=%.3f locked_prefix=%d extra_clamp=%d\n", human_height, locked_prefix, freeze);
+
+  // Drift test: env CONST_FRAME=N feeds frame N repeatedly 400 times and prints
+  // how the arm joints evolve, to see if a STATIC input drifts.
+  if (const char* cf = std::getenv("CONST_FRAME")) {
+    int target = std::atoi(cf);
+    std::ifstream gi(gmr_path);
+    std::string line; int idx = 0; json jg;
+    while (std::getline(gi, line)) { if (idx++ == target) { jg = json::parse(line); break; } }
+    SkeletonFrame f;
+    for (auto& [name, rec] : jg["joints"].items()) {
+      Pose p; auto pos = rec["position"]; auto rot = rec["rotation"];
+      p.pos = Eigen::Vector3d(pos[0], pos[1], pos[2]);
+      p.quat = Eigen::Vector4d(rot[0], rot[1], rot[2], rot[3]);
+      f[name] = p;
+    }
+    printf("CONST drift test (frame %d fed repeatedly):\n", target);
+    for (int k = 0; k < 400; ++k) {
+      Eigen::VectorXd q = rt->step(f);
+      if (k == 0 || k == 1 || k == 5 || k == 20 || k == 100 || k == 399)
+        printf("  iter %3d: L_sh_pitch[22]=%+.5f L_sh_roll[23]=%+.5f L_elbow[25]=%+.5f R_sh_pitch[29]=%+.5f\n",
+               k, q[22], q[23], q[25], q[29]);
+    }
+    return 0;
+  }
 
   std::ifstream gmr_in(gmr_path), sol_in(sol_path);
   if (!gmr_in || !sol_in) { fprintf(stderr, "cannot open input files\n"); return 2; }
