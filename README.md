@@ -54,7 +54,7 @@ flowchart LR
   Pico --> Client
   AndroidXR --> Client
 
-  Client --> Ego["Ego data<br/>SpatialMP4 + sidecars"]
+  Client --> Ego["Ego data<br/>SpatialMP4 + manifest"]
   Client --> Teleop["Teleop<br/>commands + video"]
   Client --> Live["Live algorithms<br/>RGB/depth/pose in, results out"]
   Client --> Sim["Simulation<br/>MuJoCo SO-101"]
@@ -90,15 +90,15 @@ flowchart TB
 
 ### 1. Record Ego Data
 
-Capture sessions can write SpatialMP4 artifacts, timed metadata, JSONL sidecars,
-and upload them into the local review app. That gives you inspectable headset
-episodes instead of loose videos.
+Capture sessions write SpatialMP4 artifacts with timed metadata plus a
+`manifest.json` for file inventory and hashes. Debug sidecars can still be
+exported, but the raw MP4 is the canonical replay artifact.
 
 ```mermaid
 flowchart LR
   Sensors["Headset sensors<br/>RGB, depth, pose, hands, controllers"]
   Session["Capture session"]
-  Artifact["SpatialMP4<br/>+ metadata sidecars"]
+  Artifact["SpatialMP4<br/>+ manifest"]
   Upload["TUS upload"]
   Review["Web review<br/>preview + Rerun"]
 

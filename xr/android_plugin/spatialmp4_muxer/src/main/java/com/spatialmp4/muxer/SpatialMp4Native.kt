@@ -5,6 +5,13 @@ import android.util.Log
 object SpatialMp4Native {
     private const val TAG = "SpatialMp4Native"
 
+    const val TRACK_OPERATOR_STATIC: Int = 8
+    const val TRACK_RGB_FRAME_INDEX_LEFT: Int = 9
+    const val TRACK_RGB_FRAME_INDEX_RIGHT: Int = 10
+    const val TRACK_DEPTH_FRAME_META: Int = 11
+    const val TRACK_BODY_FRAME_META: Int = 12
+    const val TRACK_MOTION_TRACKERS: Int = 13
+
     val isLoaded: Boolean = try {
         System.loadLibrary("spatialmp4_writer")
         true

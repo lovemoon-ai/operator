@@ -88,6 +88,9 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
     // the encoder; zero proves the audio gate (recordAudio + audioConfigured)
     // is suppressing writes when expected.
     private val metricNativeWriteAudio = AtomicLong(0L)
+    private val metricNativeWriteOperatorStatic = AtomicLong(0L)
+    private val metricNativeWriteRgbFrameIndex = AtomicLong(0L)
+    private val metricNativeWriteJsonMetadata = AtomicLong(0L)
 
     // =======================================================================
     // SpatialDataSink (contract)
@@ -327,6 +330,47 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         Log.w(TAG, "audio disabled for active session: $reason")
     }
 
+    override fun onOperatorStaticMetadata(payload: ByteArray) {
+        val handle = nativeWriterHandle
+        if (handle == 0L || payload.isEmpty()) return
+        val ok = SpatialMp4Native.nativeWriteTimedMetadata(
+            handle,
+            SpatialMp4Native.TRACK_OPERATOR_STATIC,
+            payload,
+            0L,
+            DEFAULT_OPERATOR_STATIC_DURATION_US
+        )
+        if (!ok) {
+            emitError("Failed to write operator_static packet: ${SpatialMp4Native.nativeGetLastError(handle)}")
+            return
+        }
+        metricNativeWriteOperatorStatic.incrementAndGet()
+    }
+
+    override fun onRgbFrameIndex(
+        eye: String,
+        payload: ByteArray,
+        ptsNs: Long,
+        durationNs: Long
+    ) {
+        val handle = nativeWriterHandle
+        if (handle == 0L || payload.isEmpty()) return
+        val trackId = rgbFrameIndexTrackId(eye) ?: return
+        val durationUs = if (durationNs > 0L) durationNs / 1000L else DEFAULT_RGB_FRAME_INDEX_DURATION_US
+        val ok = SpatialMp4Native.nativeWriteTimedMetadata(
+            handle,
+            trackId,
+            payload,
+            ptsNs / 1000L,
+            durationUs
+        )
+        if (!ok) {
+            emitError("Failed to write rgb_frame_index packet: ${SpatialMp4Native.nativeGetLastError(handle)}")
+            return
+        }
+        metricNativeWriteRgbFrameIndex.incrementAndGet()
+    }
+
     override fun onError(message: String) {
         emitError(message)
     }
@@ -467,6 +511,36 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
     }
 
     @UsedByGodot
+    fun writeDepthFrameMetadataJson(timestampNs: Long, json: String): Boolean {
+        return writeJsonMetadata(
+            SpatialMp4Native.TRACK_DEPTH_FRAME_META,
+            timestampNs,
+            json,
+            "depth_frame_meta"
+        )
+    }
+
+    @UsedByGodot
+    fun writeBodyFrameMetadataJson(timestampNs: Long, json: String): Boolean {
+        return writeJsonMetadata(
+            SpatialMp4Native.TRACK_BODY_FRAME_META,
+            timestampNs,
+            json,
+            "body_frame_meta"
+        )
+    }
+
+    @UsedByGodot
+    fun writeMotionTrackerMetadataJson(timestampNs: Long, json: String): Boolean {
+        return writeJsonMetadata(
+            SpatialMp4Native.TRACK_MOTION_TRACKERS,
+            timestampNs,
+            json,
+            "motion_trackers"
+        )
+    }
+
+    @UsedByGodot
     fun writeControllerInput(
         controller: String,
         timestampNs: Long,
@@ -517,6 +591,9 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             .put("native_body_writes", metricNativeWriteBody.getAndSet(0L))
             .put("native_input_writes", metricNativeWriteControllerInput.getAndSet(0L))
             .put("native_audio_writes", metricNativeWriteAudio.getAndSet(0L))
+            .put("native_operator_static_writes", metricNativeWriteOperatorStatic.getAndSet(0L))
+            .put("native_rgb_frame_index_writes", metricNativeWriteRgbFrameIndex.getAndSet(0L))
+            .put("native_json_metadata_writes", metricNativeWriteJsonMetadata.getAndSet(0L))
         return payload.toString()
     }
 
@@ -573,6 +650,30 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         else -> null
     }
 
+    private fun rgbFrameIndexTrackId(eye: String): Int? = when (eye) {
+        "left", "left_eye" -> SpatialMp4Native.TRACK_RGB_FRAME_INDEX_LEFT
+        "right", "right_eye" -> SpatialMp4Native.TRACK_RGB_FRAME_INDEX_RIGHT
+        else -> null
+    }
+
+    private fun writeJsonMetadata(trackId: Int, timestampNs: Long, json: String, label: String): Boolean {
+        val handle = nativeWriterHandle
+        if (handle == 0L || json.isBlank()) return false
+        val ok = SpatialMp4Native.nativeWriteTimedMetadata(
+            handle,
+            trackId,
+            json.toByteArray(Charsets.UTF_8),
+            timestampNs / 1000L,
+            DEFAULT_JSON_METADATA_DURATION_US
+        )
+        if (!ok) {
+            emitError("Failed to write $label metadata: ${SpatialMp4Native.nativeGetLastError(handle)}")
+            return false
+        }
+        metricNativeWriteJsonMetadata.incrementAndGet()
+        return true
+    }
+
     private fun emitError(message: String) {
         Log.e(TAG, message)
         emitSignal("camera_error", message)
@@ -609,6 +710,9 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         // the GDScript side; mirror it as the default packet duration.
         private const val DEFAULT_BODY_DURATION_US: Long = 33_333L
         private const val DEFAULT_INPUT_DURATION_US: Long = 1_000L
+        private const val DEFAULT_OPERATOR_STATIC_DURATION_US: Long = 1L
+        private const val DEFAULT_RGB_FRAME_INDEX_DURATION_US: Long = 33_333L
+        private const val DEFAULT_JSON_METADATA_DURATION_US: Long = 1_000L
 
         private const val TRACK_HEAD_POSE = 0
         private const val TRACK_LEFT_CONTROLLER_POSE = 1

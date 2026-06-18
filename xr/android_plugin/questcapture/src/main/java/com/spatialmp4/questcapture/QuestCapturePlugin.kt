@@ -51,6 +51,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import com.spatialmp4.contract.SpatialDataSink
 import com.spatialmp4.contract.SpatialDataSinkRegistry
 
 class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
@@ -640,7 +641,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         } else {
             File(root, "right_camera_characteristics.json").delete()
         }
-        try {
+        val androidTimebase = try {
             writeAndroidTimebase(
                 root,
                 leftTimestampSource = leftConfig.timestampSource,
@@ -648,9 +649,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             )
         } catch (error: Exception) {
             Log.w(TAG, "Failed to refresh android_timebase.json with camera sources: ${error.message}")
+            null
         }
 
-        if (!startNativeWriter(root, leftConfig, rightConfig)) {
+        if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase)) {
             return false
         }
 
@@ -901,7 +903,12 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return result
     }
 
-    private fun startNativeWriter(root: File, leftConfig: CameraConfig, rightConfig: CameraConfig?): Boolean {
+    private fun startNativeWriter(
+        root: File,
+        leftConfig: CameraConfig,
+        rightConfig: CameraConfig?,
+        androidTimebase: JSONObject?
+    ): Boolean {
         // Prefer the explicitly-bound sink (bindMuxer) so a test can inject a
         // mock; otherwise fall back to the muxer plugin's static registry,
         // which the SpatialMp4MuxerPlugin populates from its init { } block.
@@ -985,6 +992,8 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             // sink already logged + emitted; nothing more to do.
             return false
         }
+        val operatorStatic = buildOperatorStaticMetadata(leftConfig, rightConfig, androidTimebase)
+        sink.onOperatorStaticMetadata(operatorStatic.toString().toByteArray(Charsets.UTF_8))
 
         // RGB encoder writes packets via the sink contract. Stage 2c removed
         // the StereoHevcEncoder's nativeHandle reference -- the encoder now
@@ -1308,7 +1317,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         width: Int,
         height: Int
     ) {
-        val writer = frameIndexWriters[eye] ?: return
         val counter = frameIndexCounters[eye] ?: return
         val index = counter.getAndIncrement()
         val record = JSONObject()
@@ -1322,14 +1330,28 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("height", height)
             .put("raw_path", "")
             .put("planes", JSONArray())
+        val recordText = record.toString()
+        val writer = frameIndexWriters[eye]
         try {
-            synchronized(writer) {
-                writer.write(record.toString())
-                writer.write("\n")
+            if (writer != null) {
+                synchronized(writer) {
+                    writer.write(recordText)
+                    writer.write("\n")
+                }
+                metricFrameIndexWrites.incrementAndGet()
             }
-            metricFrameIndexWrites.incrementAndGet()
         } catch (error: Exception) {
             Log.w(TAG, "Failed to append ${eye}_camera_frames.jsonl: ${error.message}")
+        }
+        try {
+            activeDataSink()?.onRgbFrameIndex(
+                eye,
+                recordText.toByteArray(Charsets.UTF_8),
+                godotTicksNs,
+                0L
+            )
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to embed ${eye} rgb_frame_index metadata: ${error.message}")
         }
     }
 
@@ -1367,7 +1389,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         dir: File,
         leftTimestampSource: Int?,
         rightTimestampSource: Int?
-    ) {
+    ): JSONObject {
         val configureGodotTicksNs = configureGodotTicksUs * 1000L
         val monoToGodotOffsetNs = if (configureClockMonotonicNs > 0L) {
             configureGodotTicksNs - configureClockMonotonicNs
@@ -1403,7 +1425,28 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("openxr_xr_time_to_godot_ticks_ns_offset", monoToGodotOffsetNs)
             .put("rgb_sensor_timestamp_sources", rgbSources)
         writeText(File(dir, "android_timebase.json"), record.toString(2))
+        return record
     }
+
+    private fun buildOperatorStaticMetadata(
+        leftConfig: CameraConfig,
+        rightConfig: CameraConfig?,
+        androidTimebase: JSONObject?
+    ): JSONObject {
+        val cameras = JSONObject()
+            .put("left", JSONObject(leftConfig.metadata.toString()))
+        if (rightConfig != null) {
+            cameras.put("right", JSONObject(rightConfig.metadata.toString()))
+        }
+        return JSONObject()
+            .put("schema", "spatialmp4.operator_static.session.v1")
+            .put("provider", "quest")
+            .put("camera2_characteristics", cameras)
+            .put("android_timebase", androidTimebase ?: JSONObject())
+    }
+
+    private fun activeDataSink(): SpatialDataSink? =
+        muxerSink ?: SpatialDataSinkRegistry.getActiveSink() ?: SpatialMp4MuxerPlugin.activeSink
 
     private fun requireContext(): Context {
         return mainActivity ?: throw IllegalStateException("Godot activity is not available")

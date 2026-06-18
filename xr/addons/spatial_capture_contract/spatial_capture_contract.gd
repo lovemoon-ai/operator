@@ -18,7 +18,7 @@ extends Object
 # Contract revision. Mirrors com.spatialmp4.contract.CONTRACT_VERSION so the
 # GDScript and Kotlin sides advance in lockstep. Host code should sanity-check
 # this matches the provider's reported version at startup.
-const VERSION: int = 1
+const VERSION: int = 5
 
 # Canonical timebase for every `pts_ns` value crossing the contract.
 # Provider plugins are responsible for folding XR / sensor clocks into this

@@ -70,7 +70,8 @@ mode intent extras, and routes to mode scenes.
 `scripts/app/composition/` builds feature-specific dependency graphs:
 
 - `teleop_composition.gd` wires command output and robot control.
-- `ego_capture_composition.gd` wires SpatialMP4, sidecars, upload, and sensors.
+- `ego_capture_composition.gd` wires SpatialMP4, manifest/upload artifacts,
+  optional sidecars, and sensors.
 - `live_feed_composition.gd` wires live-push writers and live-stream sinks.
 
 ## Core Modules
@@ -116,6 +117,52 @@ Mode-specific composition chooses the sink chain:
 
 - Ego capture writes local SpatialMP4 artifacts and can upload through TUS.
 - Live Feed streams selected sensor/video data to a server through OLCP.
+
+## Ego Recording Container Contract
+
+Raw ego recordings should converge on a self-contained SpatialMP4 as the
+canonical replay artifact. A consumer that only has `media.mp4` must be able to
+recover the sensor payloads and metadata required for spatial interpretation:
+RGB/depth pixels, audio, head/controller/hand/body tracks, Camera2 calibration,
+RGB frame timing, depth frame metadata, body frame extras, and motion trackers.
+JSONL sidecars may still exist for debug, export, or legacy compatibility, but
+they must not be required to correctly parse a new raw MP4.
+
+`manifest.json` remains a first-class upload artifact. Its role is file and
+session inventory, not sensor interpretation. It records artifact filenames,
+kinds, sizes, hashes such as `sha256`, upload status, derivation status, optional
+debug sidecars, and any file-level metadata that cannot live inside the MP4
+without creating circular dependencies. In particular, `media.mp4` cannot embed
+its own final hash; that belongs in `manifest.json` or the ingest database.
+
+The MP4 container contract uses media tracks for high-volume samples and `mett`
+timed-metadata tracks for structured metadata:
+
+| Track | Payload | Timing |
+| --- | --- | --- |
+| RGB / depth / audio | Encoded media samples and existing ICAM/ECAM/DSTR side-data. | Per media sample. |
+| head / controllers / hands / body joints | Existing pose and joint `mett` payloads. | Per sensor sample. |
+| `operator_static` | Static replay metadata: schema, capture options needed for parsing, device/provider identity, Camera2 characteristics, and Android timebase. | Single packet at PTS 0. |
+| `rgb_frame_index` | Eye, frame index, Camera2 sensor timestamp, timestamp source, camera id, dimensions. | Per RGB frame. |
+| `depth_frame_meta` | OpenXR depth metadata such as timestamp source, runtime display time, projection/inverse-projection columns, near/far range, FOV tangents, and `local_from_depth_eye`. | Per depth frame. |
+| `body_frame_meta` | Frame-level `body_flags` and provider-specific body extras that do not fit the compact body-joints payload. | Per body frame. |
+| `motion_trackers` | PICO motion tracker pose samples, velocities, accelerations, battery state, and power-key events. | Per tracker sample/event. |
+
+Readers should use this precedence:
+
+1. Prefer embedded MP4 metadata tracks.
+2. Fall back to uploaded sidecars for old recordings.
+3. Treat `manifest.json` as artifact inventory and integrity metadata, not as
+   the source of geometry or timing needed to render the recording.
+
+Migration should be incremental. First embed `operator_static` and
+`rgb_frame_index` so Quest hand-to-RGB projection no longer depends on external
+Camera2 sidecars. Then embed `depth_frame_meta`, `body_frame_meta`, and
+`motion_trackers`. During migration, keep writing the current sidecars and keep
+reader fallback paths so existing recordings remain usable. Once the reader and
+ingest paths prefer embedded metadata, default uploads should only require
+`manifest.json` and `media.mp4`; debug sidecars become opt-in artifacts listed by
+the manifest.
 
 ## Platform Registry
 

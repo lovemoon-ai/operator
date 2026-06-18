@@ -50,16 +50,23 @@ import java.nio.ByteBuffer
 // per-frame payload still flows through GDScript (low rate, ~30 Hz) -- only
 // the session flag crosses this contract.
 //
+// Bumped to 5 alongside self-contained ego MP4 Phase 1: providers can embed
+// one-shot operator static JSON (Camera2 characteristics + Android timebase)
+// and per-RGB-frame index JSON into `mett` tracks while keeping legacy sidecar
+// files unchanged.
+//
 // Compatibility matrix:
 //   * v2 provider <-> v2 muxer: audio absent on both sides, unchanged.
 //   * v3 provider <-> v3 muxer: audio packets flow over onAudioCsd /
 //     onAudioPacket when SessionConfig.audioExpected is true.
 //   * v4 provider <-> v4 muxer: a body-joints mett track is created when
 //     SessionConfig.bodyJointsExpected is true.
+//   * v5 provider <-> v5 muxer: operator_static and rgb_frame_index JSON
+//     payloads are embedded in MP4 timed metadata tracks.
 //   * Mixed AARs with different embedded contract.jar revisions are unsupported;
 //     rebuild the plugins together instead of relying on Kotlin data-class
 //     constructor compatibility.
-const val CONTRACT_VERSION: Int = 4
+const val CONTRACT_VERSION: Int = 5
 
 /**
  * Per-camera intrinsics + extrinsics + lens distortion, used both for RGB
@@ -403,6 +410,29 @@ interface SpatialDataSink {
      * audio gate so the rest of the session can continue writing.
      */
     fun onAudioUnavailable(reason: String) {}
+
+    // ---- v5 self-contained ego metadata ----------------------------------
+    //
+    // Default no-ops keep older sinks bind-compatible. Providers still write
+    // sidecar JSON files as before; these hooks mirror the same data into MP4
+    // `mett` tracks so a raw MP4 can stand alone.
+
+    /**
+     * One-shot session-static JSON. The muxer writes it to the
+     * `spatialmp4:operator_static:session` track at MP4 PTS=0.
+     */
+    fun onOperatorStaticMetadata(payload: ByteArray) {}
+
+    /**
+     * One RGB frame-index JSON payload for `eye` ("left" or "right"). ptsNs
+     * is the Godot-ticks timestamp used for the corresponding MP4 RGB frame.
+     */
+    fun onRgbFrameIndex(
+        eye: String,
+        payload: ByteArray,
+        ptsNs: Long,
+        durationNs: Long
+    ) {}
 
     // ---- optional hooks ----------------------------------------------------
 

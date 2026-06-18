@@ -19,11 +19,11 @@ class_name EgoUploader
 ##     Pico eMMC + Wi-Fi cannot sustain a 24 Mbps HEVC write AND a
 ##     TUS PATCH stream simultaneously without dropping recording
 ##     frames (see claw/issues/010-ego-data-upload.md, "Trip-wires").
-##   - For PR-2 we upload two artifacts per session: `manifest.json`
-##     and `{session_id}.mp4`. Sidecar JSONL upload is deferred to a
-##     follow-up — the muxed mp4 tracks (`mett:head`, `mett:hand`,
-##     etc.) carry the same data, and the sidecars are documented
-##     as debug-only mirrors in `session_spool_writer.gd:86-91`.
+##   - We upload `manifest.json`, optional legacy/debug calibration sidecars,
+##     and `{session_id}.mp4`. Frame JSONL sidecar upload is deferred — the
+##     muxed mp4 tracks (`mett:head`, `mett:hand`, etc.) carry the same data,
+##     and those sidecars are documented as debug-only mirrors in
+##     `session_spool_writer.gd`.
 ##
 ## Signals are emitted via call_deferred from the worker thread so
 ## listeners always see them on the main thread.
@@ -59,6 +59,24 @@ const MAX_TRANSIENT_ATTEMPTS_PER_JOB := 20
 # server can route each artifact to the right slot.
 const ARTIFACT_MANIFEST := "manifest"
 const ARTIFACT_MEDIA := "media"
+const ARTIFACT_LEFT_CAMERA_CHARACTERISTICS := "left_camera_characteristics"
+const ARTIFACT_RIGHT_CAMERA_CHARACTERISTICS := "right_camera_characteristics"
+const CAMERA_CHARACTERISTICS_UPLOADS := [
+	{
+		"kind": ARTIFACT_LEFT_CAMERA_CHARACTERISTICS,
+		"filename": "left_camera_characteristics.json"
+	},
+	{
+		"kind": ARTIFACT_RIGHT_CAMERA_CHARACTERISTICS,
+		"filename": "right_camera_characteristics.json"
+	},
+]
+const ARTIFACT_UPLOAD_ORDER := [
+	ARTIFACT_MANIFEST,
+	ARTIFACT_LEFT_CAMERA_CHARACTERISTICS,
+	ARTIFACT_RIGHT_CAMERA_CHARACTERISTICS,
+	ARTIFACT_MEDIA,
+]
 
 var _thread: Thread
 var _mutex: Mutex
@@ -126,6 +144,21 @@ func enqueue(session_dir: String, mp4_path: String, options: Dictionary) -> bool
 		return false
 
 	var session_id := mp4_path.get_file().get_basename()
+	var artifacts := {
+		ARTIFACT_MANIFEST: {"path": manifest_path, "tus_location": "", "offset": 0, "done": false},
+		ARTIFACT_MEDIA:    {"path": mp4_path,      "tus_location": "", "offset": 0, "done": false},
+	}
+	for sidecar in CAMERA_CHARACTERISTICS_UPLOADS:
+		var filename := str(sidecar.get("filename", ""))
+		var path := session_dir.path_join(filename)
+		if filename.is_empty() or not FileAccess.file_exists(path):
+			continue
+		artifacts[str(sidecar.get("kind", filename.get_basename()))] = {
+			"path": path,
+			"tus_location": "",
+			"offset": 0,
+			"done": false
+		}
 	var job := {
 		"session_id": session_id,
 		"session_dir": session_dir,
@@ -135,10 +168,7 @@ func enqueue(session_dir: String, mp4_path: String, options: Dictionary) -> bool
 		"upload_token": str(options.get("upload_token", "")),
 		"keep_local_after_upload": bool(options.get("keep_local_after_upload", true)),
 		"allow_metered_upload": bool(options.get("allow_metered_upload", false)),
-		"artifacts": {
-			ARTIFACT_MANIFEST: {"path": manifest_path, "tus_location": "", "offset": 0, "done": false},
-			ARTIFACT_MEDIA:    {"path": mp4_path,      "tus_location": "", "offset": 0, "done": false},
-		},
+		"artifacts": artifacts,
 		"attempt": 0,
 	}
 
@@ -346,8 +376,10 @@ func _process_job(job: Dictionary) -> bool:
 		return false
 	var artifacts: Dictionary = job.get("artifacts", {})
 	# Manifest first so the server can allocate the session record before
-	# the (much larger) mp4 arrives.
-	for kind in [ARTIFACT_MANIFEST, ARTIFACT_MEDIA]:
+	# optional legacy sidecars and the much larger mp4 arrive. Keep sidecars
+	# ahead of media so older ingest workers that still consult them have the
+	# fallback files before media completion starts preview/Rerun work.
+	for kind in _artifact_upload_order(artifacts):
 		if not artifacts.has(kind):
 			continue
 		var artifact: Dictionary = artifacts[kind]
@@ -365,6 +397,17 @@ func _process_job(job: Dictionary) -> bool:
 		call_deferred("emit_signal", "upload_finished", session_id, kind, {"offset": artifact.get("offset", 0)})
 	job["artifacts"] = artifacts
 	return true
+
+
+func _artifact_upload_order(artifacts: Dictionary) -> Array:
+	var ordered: Array = []
+	for kind in ARTIFACT_UPLOAD_ORDER:
+		if artifacts.has(kind):
+			ordered.append(kind)
+	for kind in artifacts.keys():
+		if not ordered.has(kind):
+			ordered.append(kind)
+	return ordered
 
 
 func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bool:
