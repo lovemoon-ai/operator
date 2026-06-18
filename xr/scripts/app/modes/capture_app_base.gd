@@ -99,6 +99,20 @@ var _h2_debug_overlay: Node3D = null
 var _g1_debug_tracking_provider: Node = null
 var _g1_debug_provider: Node = null
 var _g1_debug_overlay: Node3D = null
+## DEBUG toggles for diagnosing the G1 retarget overlay (see g1_overlay.gd #1/#3).
+## DUMP_FRAMES > 0  -> write user://g1_debug.jsonl (per-stage capture for offline diff).
+## REPLAY_QPOS true -> drive the GLB from the bundled known-good qpos sequence,
+##                     bypassing live retargeting (isolates GLB render from input).
+## Both default OFF; flip one, `make ship-quest`, run the G1 overlay, then pull.
+const G1_DEBUG_DUMP_FRAMES := 0
+const G1_DEBUG_REPLAY_QPOS := false
+## DUMP_GLB_REST -> write user://g1_glb_rest.json once (imported link rest
+## transforms) to check Godot's runtime node frames vs the raw glTF the FK was
+## validated against. Safe to combine with REPLAY_QPOS.
+const G1_DEBUG_DUMP_GLB_REST := false
+## Drive a fixed symmetric rest pose (heading seeds to 0) to inspect whether the
+## upper-body yaw offset is downstream of the input. Set false for live use.
+const G1_DEBUG_FIXED_REST := false
 var depth_sampler: Node
 var body_motion_sampler: Node
 var ego_uploader: Node
@@ -219,6 +233,7 @@ var _tracker_last_request_ticks_us := 0
 var _tracker_setup_opened_ticks_us := 0
 var _last_capture_interaction_mode := ""
 var _auto_show_body_pose_debug := false
+var _auto_show_g1_debug := false  # --operator-g1-debug: auto-start G1 overlay (device verification)
 var _motion_tracker_supported_pushed := false
 var _motion_tracker_provider_known := false
 var _depth_supported_pushed := false
@@ -350,6 +365,8 @@ func _ready() -> void:
 		call_deferred("_open_live_feed_settings")
 	if _auto_show_body_pose_debug:
 		call_deferred("_start_body_pose_debug_overlay_from_args")
+	if _auto_show_g1_debug:
+		call_deferred("_start_g1_debug_overlay_from_args")
 
 
 func _apply_automation_args() -> void:
@@ -372,6 +389,15 @@ func _apply_automation_args() -> void:
 			_auto_show_body_pose_debug = _truthy_string(arg.substr("operator.body_pose_debug=".length()))
 		elif arg == "operator.body_pose_debug" and i + 1 < args.size():
 			_auto_show_body_pose_debug = _truthy_string(String(args[i + 1]))
+			i += 1
+		elif arg == "--operator-g1-debug":
+			_auto_show_g1_debug = true
+		elif arg.begins_with("--operator-g1-debug="):
+			_auto_show_g1_debug = _truthy_string(arg.substr("--operator-g1-debug=".length()))
+		elif arg.begins_with("operator.g1_debug="):
+			_auto_show_g1_debug = _truthy_string(arg.substr("operator.g1_debug=".length()))
+		elif arg == "operator.g1_debug" and i + 1 < args.size():
+			_auto_show_g1_debug = _truthy_string(String(args[i + 1]))
 			i += 1
 		i += 1
 
@@ -464,6 +490,11 @@ func _xr_head_pose_confident() -> bool:
 func _start_body_pose_debug_overlay_from_args() -> void:
 	await get_tree().create_timer(1.0).timeout
 	_start_body_pose_debug_overlay_when_xr_tracking_ready("body pose debug launch args")
+
+
+func _start_g1_debug_overlay_from_args() -> void:
+	await get_tree().create_timer(1.0).timeout
+	_start_g1_debug_overlay_when_xr_tracking_ready("g1 debug launch args")
 
 
 func _start_body_pose_debug_overlay_when_xr_tracking_ready(reason: String) -> void:
@@ -1277,6 +1308,14 @@ func _start_g1_debug_overlay() -> void:
 	var overlay: Node3D = G1OverlayScript.new()
 	overlay.name = "DebugG1RetargetOverlay"
 	overlay.set("debug_place_in_front_of_view", true)
+	if G1_DEBUG_DUMP_FRAMES > 0:
+		overlay.set("debug_dump_frames", G1_DEBUG_DUMP_FRAMES)
+	if G1_DEBUG_REPLAY_QPOS:
+		overlay.set("debug_replay_qpos", true)
+	if G1_DEBUG_DUMP_GLB_REST:
+		overlay.set("debug_dump_glb_rest", true)
+	if G1_DEBUG_FIXED_REST:
+		overlay.set("debug_fixed_rest_pose", true)
 	overlay.call("set_head_camera", hmd_camera)
 	add_child(overlay)
 	overlay.call("set_body_pose_provider", provider)

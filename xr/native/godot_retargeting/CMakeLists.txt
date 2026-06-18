@@ -34,13 +34,22 @@ set_target_properties(godot-cpp PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${GODOT_CPP_BUILD_DIR}/bin")
 
 # --- retargeting toolkit (static) ------------------------------------------
-# MuJoCo-only on Android (the android Pinocchio build lacks the MJCF parser);
-# no demo. MUJOCO_ROOT/MUJOCO_LIB are honored by retargeting/CMakeLists.txt.
+# Standalone DuinoDu/retargeting repo, synced into .deps/src/retargeting and
+# symlinked here as ./retargeting (scripts/sync_deps.sh retargeting). The CMake
+# source is under app/; app/CMakeLists.txt includes ../cmake/nlohmann_json.cmake,
+# so we point at retargeting/app and the relative include resolves via the
+# whole-repo symlink. MuJoCo-only on Android (the android Pinocchio build lacks
+# the MJCF parser); no demo. MUJOCO_ROOT/MUJOCO_LIB honored by app/CMakeLists.
+set(RETARGETING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/retargeting" CACHE PATH
+    "Path to the retargeting toolkit source tree (symlink to .deps/src/retargeting)")
+if(NOT EXISTS "${RETARGETING_DIR}/app/CMakeLists.txt")
+    message(FATAL_ERROR "retargeting toolkit not found at ${RETARGETING_DIR}. Run: make -C xr deps  (or scripts/sync_deps.sh retargeting)")
+endif()
 set(RETARGETING_WITH_PINOCCHIO OFF CACHE BOOL "" FORCE)
 set(RETARGETING_WITH_MUJOCO ON CACHE BOOL "" FORCE)
 set(RETARGETING_BUILD_DEMO OFF CACHE BOOL "" FORCE)
 set(MUJOCO_LIB "${MUJOCO_ROOT}/lib/libmujoco.so" CACHE FILEPATH "" FORCE)
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../retargeting"
+add_subdirectory("${RETARGETING_DIR}/app"
     "${CMAKE_CURRENT_BINARY_DIR}/retargeting" EXCLUDE_FROM_ALL)
 
 # --- GDExtension shared library --------------------------------------------

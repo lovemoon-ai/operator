@@ -64,6 +64,28 @@ if [[ ! -f "$GODOT_CPP_SOURCE/SConstruct" ]]; then
 fi
 ensure_godot_cpp_link
 
+# Standalone retargeting toolkit (DuinoDu/retargeting). sync_deps.sh clones it
+# into $DEPS_ROOT/src/retargeting and creates the ./retargeting symlink used by
+# CMakeLists. Re-run the sync if the source is missing.
+RETARGETING_SOURCE="$DEPS_ROOT/src/retargeting"
+RETARGETING_LINK="$SCRIPT_DIR/retargeting"
+if [[ "$DEPS_ROOT" == "$REPO_ROOT/.deps" ]]; then
+    RETARGETING_LINK_TARGET="../../../.deps/src/retargeting"
+else
+    RETARGETING_LINK_TARGET="$RETARGETING_SOURCE"
+fi
+if [[ ! -f "$RETARGETING_SOURCE/app/CMakeLists.txt" ]]; then
+    OPERATOR_DEPS_CACHE_ROOT="$OPERATOR_DEPS_CACHE_ROOT" "$DEPS_SCRIPT" retargeting
+fi
+# Always (re)point the symlink at the current cache root so switching
+# OPERATOR_DEPS_CACHE_ROOT never leaves a stale-but-resolvable link. Fail loudly
+# if the path is occupied by a real file/dir rather than the expected symlink.
+if [[ -e "$RETARGETING_LINK" && ! -L "$RETARGETING_LINK" ]]; then
+    echo "ERROR: $RETARGETING_LINK exists and is not a symlink. Remove it and re-run." >&2; exit 1
+fi
+rm -f "$RETARGETING_LINK"; ln -s "$RETARGETING_LINK_TARGET" "$RETARGETING_LINK"
+[[ -f "$RETARGETING_LINK/app/CMakeLists.txt" ]] || { echo "ERROR: retargeting toolkit missing at $RETARGETING_LINK" >&2; exit 1; }
+
 GODOT_CPP_DIR_REAL="$(cd "$GODOT_CPP_LINK" && pwd -P)"
 [[ -n "$GODOT_CPP_DIR_REAL" ]] || { echo "ERROR: cannot resolve $GODOT_CPP_LINK" >&2; exit 1; }
 
