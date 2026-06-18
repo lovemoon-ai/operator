@@ -34,12 +34,14 @@ interface SeedFile {
 
 // Files we ship if present. `manifest.json` and `media.mp4` are the
 // minimum the rest of the pipeline (preview / rerun workers, review,
-// playback) is built around; the derived `preview.mp4` and
-// `session.rrd` are optional so the seed can either ship pre-baked
-// derivations or let the in-process workers regenerate them.
+// playback) is built around; Quest camera calibration sidecars and the
+// derived `preview.mp4` / `session.rrd` are optional so the seed can either
+// ship pre-baked derivations or let the in-process workers regenerate them.
 const KNOWN_KINDS: { kind: string; filename: string }[] = [
   { kind: "manifest", filename: "manifest.json" },
   { kind: "media", filename: "media.mp4" },
+  { kind: "left_camera_characteristics", filename: "left_camera_characteristics.json" },
+  { kind: "right_camera_characteristics", filename: "right_camera_characteristics.json" },
   { kind: "preview", filename: "preview.mp4" },
   { kind: "rrd", filename: "session.rrd" },
 ];

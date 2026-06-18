@@ -8,7 +8,7 @@
  *     - 1× HEVC video track (RGB stereo)
  *     - 1× FFV1 lossless track (depth)
  *     - 1× AAC track (audio, optional)
- *     - 7× 'mett' timed-metadata tracks (head/controller/hand/input)
+ *     - 'mett' timed-metadata tracks (pose, input, body, replay metadata)
  *
  *   No browser will accept that moov box. `<video src=media.mp4>` either
  *   refuses to parse it or hangs on the first 'mett' sample description.

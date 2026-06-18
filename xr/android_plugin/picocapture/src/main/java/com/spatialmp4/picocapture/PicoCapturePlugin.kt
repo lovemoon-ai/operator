@@ -34,6 +34,7 @@ import com.spatialmp4.capturecommon.StereoHevcEncoder
 import com.spatialmp4.capturecommon.YuvPlaneCapture
 import com.spatialmp4.contract.SessionConfig
 import com.spatialmp4.contract.SpatialDataSink
+import com.spatialmp4.contract.SpatialDataSinkRegistry
 import com.spatialmp4.muxer.SpatialMp4MuxerPlugin
 import com.spatialmp4.muxer.SpatialMp4SideDataPacker
 import org.godotengine.godot.Godot
@@ -450,9 +451,9 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         } else {
             File(root, "right_camera_characteristics.json").delete()
         }
-        writeAndroidTimebase(root, leftConfig.timestampSource, rightConfig?.timestampSource)
+        val androidTimebase = writeAndroidTimebase(root, leftConfig.timestampSource, rightConfig?.timestampSource)
 
-        if (!startNativeWriter(root, leftConfig, rightConfig)) {
+        if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase)) {
             return false
         }
 
@@ -512,9 +513,9 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         } else {
             File(root, "right_camera_characteristics.json").delete()
         }
-        writeAndroidTimebase(root, leftTimestampSource = null, rightTimestampSource = null)
+        val androidTimebase = writeAndroidTimebase(root, leftTimestampSource = null, rightTimestampSource = null)
 
-        if (!startNativeWriter(root, leftConfig, rightConfig)) {
+        if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase)) {
             return false
         }
 
@@ -746,8 +747,13 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return null
     }
 
-    private fun startNativeWriter(root: File, leftConfig: CameraConfig, rightConfig: CameraConfig?): Boolean {
-        val sink = muxerSink ?: SpatialMp4MuxerPlugin.activeSink
+    private fun startNativeWriter(
+        root: File,
+        leftConfig: CameraConfig,
+        rightConfig: CameraConfig?,
+        androidTimebase: JSONObject?
+    ): Boolean {
+        val sink = activeDataSink()
         if (sink == null) {
             emitSignal("camera_error", "SpatialMp4MuxerPlugin singleton not installed; add the spatialmp4_muxer addon AAR")
             return false
@@ -803,6 +809,8 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         if (!sink.startSession(sessionConfig)) {
             return false
         }
+        val operatorStatic = buildOperatorStaticMetadata(leftConfig, rightConfig, androidTimebase)
+        sink.onOperatorStaticMetadata(operatorStatic.toString().toByteArray(Charsets.UTF_8))
 
         val cameraIntrinsics = mutableListOf<com.spatialmp4.contract.Intrinsics>()
         cameraIntrinsics += SpatialMp4SideDataPacker.extractIntrinsics(
@@ -1059,7 +1067,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         width: Int,
         height: Int
     ) {
-        val writer = frameIndexWriters[eye] ?: return
         val counter = frameIndexCounters[eye] ?: return
         val index = counter.getAndIncrement()
         val record = JSONObject()
@@ -1073,14 +1080,28 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("height", height)
             .put("raw_path", "")
             .put("planes", JSONArray())
+        val recordText = record.toString()
+        val writer = frameIndexWriters[eye]
         try {
-            synchronized(writer) {
-                writer.write(record.toString())
-                writer.write("\n")
+            if (writer != null) {
+                synchronized(writer) {
+                    writer.write(recordText)
+                    writer.write("\n")
+                }
+                metricFrameIndexWrites.incrementAndGet()
             }
-            metricFrameIndexWrites.incrementAndGet()
         } catch (error: Exception) {
             Log.w(TAG, "Failed to append ${eye}_camera_frames.jsonl: ${error.message}")
+        }
+        try {
+            activeDataSink()?.onRgbFrameIndex(
+                eye,
+                recordText.toByteArray(Charsets.UTF_8),
+                godotTicksNs,
+                0L
+            )
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to embed ${eye} rgb_frame_index metadata: ${error.message}")
         }
     }
 
@@ -1122,7 +1143,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
     }
 
-    private fun writeAndroidTimebase(dir: File, leftTimestampSource: Int?, rightTimestampSource: Int?) {
+    private fun writeAndroidTimebase(dir: File, leftTimestampSource: Int?, rightTimestampSource: Int?): JSONObject {
         val configureGodotTicksNs = configureGodotTicksUs * 1000L
         val monoToGodotOffsetNs = if (configureClockMonotonicNs > 0L) configureGodotTicksNs - configureClockMonotonicNs else 0L
         val boottimeToGodotOffsetNs = if (configureElapsedRealtimeNs > 0L) configureGodotTicksNs - configureElapsedRealtimeNs else 0L
@@ -1150,7 +1171,28 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("openxr_xr_time_to_godot_ticks_ns_offset", monoToGodotOffsetNs)
             .put("rgb_sensor_timestamp_sources", rgbSources)
         writeText(File(dir, "android_timebase.json"), record.toString(2))
+        return record
     }
+
+    private fun buildOperatorStaticMetadata(
+        leftConfig: CameraConfig,
+        rightConfig: CameraConfig?,
+        androidTimebase: JSONObject?
+    ): JSONObject {
+        val cameras = JSONObject()
+            .put("left", JSONObject(leftConfig.metadata.toString()))
+        if (rightConfig != null) {
+            cameras.put("right", JSONObject(rightConfig.metadata.toString()))
+        }
+        return JSONObject()
+            .put("schema", "spatialmp4.operator_static.session.v1")
+            .put("provider", "pico")
+            .put("camera2_characteristics", cameras)
+            .put("android_timebase", androidTimebase ?: JSONObject())
+    }
+
+    private fun activeDataSink(): SpatialDataSink? =
+        muxerSink ?: SpatialDataSinkRegistry.getActiveSink() ?: SpatialMp4MuxerPlugin.activeSink
 
     private fun openXrCameraConfig(info: JSONObject, eye: String): CameraConfig? {
         val metadata = info.optJSONObject(eye) ?: return null

@@ -66,7 +66,7 @@ After a session's `media` artifact lands, two derivation workers run
 sequentially (see `app/lib/workers/`):
 
 1. **preview** — `ffmpeg -map 0:v:0 -map 0:a? -c copy -movflags +faststart`
-   strips the FFV1 depth track and the seven `mett` timed-metadata
+   strips the FFV1 depth track and all `mett` timed-metadata
    tracks out of the SpatialMP4, leaving a clean RGB-only MP4 the
    browser can `<video>` inline. Set `PREVIEW_TRANSCODE=1` to swap the
    stream-copy for an H.264 re-encode (slower, but plays on Firefox /

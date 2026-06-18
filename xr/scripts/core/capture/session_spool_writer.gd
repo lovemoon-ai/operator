@@ -3,6 +3,16 @@ class_name SessionSpoolWriter
 
 const DEFAULT_CAPTURE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const HAND_JOINTS_MAGIC := 0x544E4A48 # "HJNT" in little-endian bytes.
+const CAMERA_CHARACTERISTICS_ARTIFACTS := [
+	{
+		"kind": "left_camera_characteristics",
+		"filename": "left_camera_characteristics.json"
+	},
+	{
+		"kind": "right_camera_characteristics",
+		"filename": "right_camera_characteristics.json"
+	},
+]
 
 var session_id := ""
 var session_dir := ""
@@ -37,6 +47,7 @@ var _depth_sidecar_frame_count := 0
 var _depth_mp4_write_count := 0
 var _depth_mp4_write_failed_count := 0
 var _depth_last_mp4_write_error := ""
+var _muxer_contract_version_cache := -1
 
 
 func start_session(options: Dictionary = {}) -> bool:
@@ -52,6 +63,7 @@ func start_session(options: Dictionary = {}) -> bool:
 	_depth_mp4_write_count = 0
 	_depth_mp4_write_failed_count = 0
 	_depth_last_mp4_write_error = ""
+	_muxer_contract_version_cache = -1
 	session_start_unix_us = Time.get_unix_time_from_system() * 1000000
 	session_start_ticks_us = Time.get_ticks_usec()
 	session_id = _make_session_id()
@@ -104,7 +116,7 @@ func start_session(options: Dictionary = {}) -> bool:
 			"joint_count": 0
 		}
 	if _capture_enabled("record_motion_trackers"):
-		sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored as body_motion/motion_trackers.jsonl sidecar"
+		sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored in the mp4 `motion_trackers` metadata track with optional body_motion/motion_trackers.jsonl debug mirror"
 	# v3 spatial audio. The audio path is provider-driven (AudioRecord ->
 	# MediaCodec AAC-LC -> SpatialDataSink), so GDScript never sees a frame;
 	# we just record the configured shape in the manifest. The same fields
@@ -203,6 +215,15 @@ func _compute_file_sha256(path: String) -> String:
 	return ctx.finish().hex_encode()
 
 
+func _file_length(path: String) -> int:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return 0
+	var length := int(f.get_length())
+	f.close()
+	return length
+
+
 # Rewrite manifest.json in place to add finalize-time media integrity and
 # per-stream confirmations. We keep the original top-level fields untouched
 # so any v3 reader that doesn't know these additive fields keeps working.
@@ -219,22 +240,32 @@ func _rewrite_manifest_after_finalize(media_path: String, media_sha256: String) 
 		push_warning("session_spool_writer: manifest at %s is not a JSON object; skipping finalize rewrite" % manifest_path)
 		return
 	var manifest: Dictionary = parsed
+	var artifacts_field: Variant = manifest.get("artifacts", {})
+	var artifacts: Dictionary = artifacts_field if artifacts_field is Dictionary else {}
 	if not media_path.is_empty():
-		var media_bytes := 0
-		var size_probe := FileAccess.open(media_path, FileAccess.READ)
-		if size_probe != null:
-			media_bytes = int(size_probe.get_length())
-			size_probe.close()
-		var artifacts_field: Variant = manifest.get("artifacts", {})
-		var artifacts: Dictionary = artifacts_field if artifacts_field is Dictionary else {}
 		var media_artifact := {
 			"filename": media_path.get_file(),
-			"bytes": media_bytes
+			"bytes": _file_length(media_path)
 		}
 		if not media_sha256.is_empty():
 			media_artifact["sha256"] = media_sha256
 			media_artifact["hash_algo"] = "sha256"
 		artifacts["media"] = media_artifact
+	for sidecar in CAMERA_CHARACTERISTICS_ARTIFACTS:
+		var filename := str(sidecar.get("filename", ""))
+		var sidecar_path := session_dir.path_join(filename)
+		if filename.is_empty() or not FileAccess.file_exists(sidecar_path):
+			continue
+		var sidecar_hash := _compute_file_sha256(sidecar_path)
+		var sidecar_artifact := {
+			"filename": filename,
+			"bytes": _file_length(sidecar_path)
+		}
+		if not sidecar_hash.is_empty():
+			sidecar_artifact["sha256"] = sidecar_hash
+			sidecar_artifact["hash_algo"] = "sha256"
+		artifacts[str(sidecar.get("kind", filename.get_basename()))] = sidecar_artifact
+	if not artifacts.is_empty():
 		manifest["artifacts"] = artifacts
 	# Patch in the body-tracking runtime info collected at close() so the
 	# offline viewer can pick the right skeleton table for the joint ids it
@@ -403,6 +434,11 @@ func write_depth_frame(
 		var mp4_write_ok := bool(result)
 		if mp4_write_ok:
 			_depth_mp4_write_count += 1
+			_write_muxer_metadata_json(
+				"writeDepthFrameMetadataJson",
+				timestamp_ns,
+				_depth_metadata_record(timestamp_ns, eye, image_path, width, height, metadata)
+			)
 		else:
 			_depth_mp4_write_failed_count += 1
 			_depth_last_mp4_write_error = "writeDepthFrame returned false"
@@ -424,24 +460,52 @@ func write_depth_frame(
 	_depth_sidecar_frame_count += 1
 
 
-func write_body_joints(timestamp_ns: int, body_flags: int, joints: Array, _metadata: Dictionary = {}) -> bool:
+func write_body_joints(timestamp_ns: int, body_flags: int, joints: Array, metadata: Dictionary = {}) -> bool:
 	if joints.is_empty():
 		return false
-	# The mp4 `mett:body_joints` track is the primary store: the joint dicts
-	# share the {joint, flags, radius_m, position, rotation} shape with hand
-	# joints, so the HJNT packer is reused verbatim. The opt-in JSONL sidecar
-	# (save_body_sidecar; the only place frame-level body_flags + PICO
-	# velocity/acceleration extras survive) lives in JsonlSidecarSink since
-	# WP5 — StreamBinding ORs the two sinks' results to preserve the legacy
-	# `wrote` return.
+	# The mp4 `mett:body_joints` track is the compact primary joint store:
+	# the joint dicts share the {joint, flags, radius_m, position, rotation}
+	# shape with hand joints, so the HJNT packer is reused verbatim. Frame-level
+	# body_flags and provider extras are mirrored into the JSON metadata track.
+	# The opt-in JSONL sidecar lives in JsonlSidecarSink as a debug/export mirror
+	# since WP5; StreamBinding ORs the two sinks' results to preserve the
+	# legacy `wrote` return.
 	if muxer_plugin == null:
 		return false
 	muxer_plugin.call("writeBodyJointsPayload", timestamp_ns, _pack_hand_joints_payload(joints))
+	_write_muxer_metadata_json(
+		"writeBodyFrameMetadataJson",
+		timestamp_ns,
+		_body_metadata_record(timestamp_ns, body_flags, joints, metadata)
+	)
 	return true
 
 
-# WP5: write_motion_tracker_pose / write_motion_tracker_event moved to
-# JsonlSidecarSink — motion trackers are a JSONL-only stream (no mp4 track).
+func write_motion_tracker_pose(
+	tracker_index: int,
+	source: String,
+	timestamp_ns: int,
+	transform: Transform3D,
+	tracking_valid: bool,
+	metadata: Dictionary = {}
+) -> bool:
+	var record := _motion_tracker_pose_record(
+		tracker_index,
+		source,
+		timestamp_ns,
+		transform,
+		tracking_valid,
+		metadata
+	)
+	return _write_muxer_metadata_json("writeMotionTrackerMetadataJson", timestamp_ns, record)
+
+
+func write_motion_tracker_event(timestamp_ns: int, event_type: String, event: Dictionary) -> bool:
+	return _write_muxer_metadata_json(
+		"writeMotionTrackerMetadataJson",
+		timestamp_ns,
+		_motion_tracker_event_record(timestamp_ns, event_type, event)
+	)
 
 
 func ticks_us_to_session_us(ticks_us: int) -> int:
@@ -532,6 +596,142 @@ func _pack_hand_joints_payload(joints: Array) -> PackedByteArray:
 		payload.encode_float(offset, float(rotation.get("w", 1.0)))
 		offset += 4
 	return payload
+
+
+func _write_muxer_metadata_json(method_name: String, timestamp_ns: int, record: Dictionary) -> bool:
+	if muxer_plugin == null or _muxer_contract_version() < 5:
+		return false
+	var result: Variant = muxer_plugin.call(method_name, timestamp_ns, JSON.stringify(record))
+	return true if result == null else bool(result)
+
+
+func _muxer_contract_version() -> int:
+	if muxer_plugin == null:
+		return 0
+	if _muxer_contract_version_cache >= 0:
+		return _muxer_contract_version_cache
+	# Do not use has_method() here: Godot 4's Android singleton reflection can
+	# fail to enumerate @UsedByGodot methods even though direct call() works.
+	var version: Variant = muxer_plugin.call("getMuxerContractVersion")
+	_muxer_contract_version_cache = int(version) if (typeof(version) == TYPE_INT or typeof(version) == TYPE_FLOAT) else 0
+	return _muxer_contract_version_cache
+
+
+func _depth_metadata_record(
+	timestamp_ns: int,
+	eye: String,
+	image_path: String,
+	width: int,
+	height: int,
+	metadata: Dictionary
+) -> Dictionary:
+	return {
+		"timestamp_ns": timestamp_ns,
+		"eye": eye,
+		"image_path": image_path,
+		"width": width,
+		"height": height,
+		"metadata": _json_safe_value(metadata)
+	}
+
+
+func _body_metadata_record(timestamp_ns: int, body_flags: int, joints: Array, metadata: Dictionary) -> Dictionary:
+	var json_joints: Array = []
+	for joint in joints:
+		if typeof(joint) == TYPE_DICTIONARY:
+			json_joints.append(_json_safe_joint_record(joint))
+	var record := {
+		"timestamp_ns": timestamp_ns,
+		"body_flags": body_flags,
+		"joint_count": json_joints.size(),
+		"joints": json_joints
+	}
+	for key in metadata.keys():
+		if key == "joints" or key == "transform":
+			continue
+		record[key] = _json_safe_value(metadata[key])
+	return record
+
+
+func _motion_tracker_pose_record(
+	tracker_index: int,
+	source: String,
+	timestamp_ns: int,
+	transform: Transform3D,
+	tracking_valid: bool,
+	metadata: Dictionary = {}
+) -> Dictionary:
+	var record := _pose_record(timestamp_ns, source, transform, tracking_valid)
+	record["tracker_index"] = tracker_index
+	for key in metadata.keys():
+		if key == "transform" or key == "position" or key == "rotation" or key == "tracker_index":
+			continue
+		record[key] = _json_safe_value(metadata[key])
+	return record
+
+
+func _motion_tracker_event_record(timestamp_ns: int, event_type: String, event: Dictionary) -> Dictionary:
+	return {
+		"timestamp_ns": timestamp_ns,
+		"event_type": event_type,
+		"event": _json_safe_value(event)
+	}
+
+
+func _pose_record(timestamp_ns: int, source: String, transform: Transform3D, tracking_valid: bool) -> Dictionary:
+	var q := transform.basis.get_rotation_quaternion()
+	var p := transform.origin
+	return {
+		"timestamp_ns": timestamp_ns,
+		"source": source,
+		"tracking_valid": tracking_valid,
+		"position": {"x": p.x, "y": p.y, "z": p.z},
+		"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
+	}
+
+
+func _json_safe_joint_record(joint_record: Dictionary) -> Dictionary:
+	var out := {}
+	for key in joint_record.keys():
+		if key == "transform":
+			continue
+		out[key] = _json_safe_value(joint_record[key])
+	return out
+
+
+func _json_safe_value(value: Variant) -> Variant:
+	match typeof(value):
+		TYPE_DICTIONARY:
+			var out := {}
+			var dict := value as Dictionary
+			for key in dict.keys():
+				out[key] = _json_safe_value(dict[key])
+			return out
+		TYPE_ARRAY:
+			var out: Array = []
+			for item in value:
+				out.append(_json_safe_value(item))
+			return out
+		TYPE_PACKED_BYTE_ARRAY:
+			return "<bytes:%d>" % (value as PackedByteArray).size()
+		TYPE_VECTOR2:
+			var v2 := value as Vector2
+			return {"x": v2.x, "y": v2.y}
+		TYPE_VECTOR3:
+			var v3 := value as Vector3
+			return {"x": v3.x, "y": v3.y, "z": v3.z}
+		TYPE_QUATERNION:
+			var q := value as Quaternion
+			return {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
+		TYPE_TRANSFORM3D:
+			var t := value as Transform3D
+			var q := t.basis.get_rotation_quaternion()
+			return {
+				"position": {"x": t.origin.x, "y": t.origin.y, "z": t.origin.z},
+				"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
+			}
+		_:
+			return value
 
 
 func _write_json(path: String, value: Dictionary) -> void:

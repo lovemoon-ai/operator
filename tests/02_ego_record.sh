@@ -4,7 +4,8 @@
 # The script builds a temporary CI APK with capture_app.gd's device-test
 # auto-start harness enabled, installs it on the attached headset, launches
 # the app in ego mode, waits for a recording to finalize, pulls the captured
-# SpatialMP4 session, and validates both sidecar data and the final MP4.
+# SpatialMP4 session, and validates the self-contained MP4 plus manifest.
+# Legacy/debug sidecars are checked when present but are not required.
 #
 # Usage:
 #   bash tests/02_ego_record.sh
@@ -220,10 +221,10 @@ resolve_ffprobe() {
   done
   if command -v ffprobe >/dev/null 2>&1; then
     FFPROBE="$(command -v ffprobe)"
-    warn "using system ffprobe; patched SpatialMP4 metadata tags may be absent"
+    warn "using system ffprobe; MP4 packet payloads will be validated through generic demuxing"
   else
     FFPROBE=""
-    warn "ffprobe not found; MP4 stream validation will be skipped"
+    warn "ffprobe not found; self-contained MP4 metadata validation cannot run"
   fi
 }
 
@@ -774,6 +775,7 @@ validate_capture() {
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -791,6 +793,7 @@ dense_start_limit_us = 750_000 if expected_device_prefix == "pico" else 500_000
 dense_start_limit_ms = dense_start_limit_us // 1000
 
 checks: list[tuple[str, str, str]] = []
+_FFPROBE_HEXDUMP_OFFSET_RE = re.compile(r"^\s*[0-9a-fA-F]+$")
 
 
 def add(status: str, name: str, detail: str = "") -> None:
@@ -860,6 +863,142 @@ def run_ffprobe(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def run_ffprobe_json(path: Path, args: list[str], context: str) -> dict[str, Any] | None:
+    if not ffprobe:
+        failed(f"ffprobe reads {context}", "ffprobe unavailable")
+        return None
+    try:
+        out = subprocess.run(
+            [ffprobe, "-v", "error", *args, "-of", "json", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        return json.loads(out.stdout or "{}")
+    except Exception as exc:
+        failed(f"ffprobe reads {context}", str(exc))
+        return None
+
+
+def bytes_from_ffprobe_hexdump(dump: str) -> bytes:
+    raw = bytearray()
+    for line in dump.splitlines():
+        if ":" not in line:
+            continue
+        offset, rest = line.split(":", 1)
+        if _FFPROBE_HEXDUMP_OFFSET_RE.match(offset) is None:
+            continue
+        if rest.startswith(" "):
+            rest = rest[1:]
+        hex_columns = rest.split("  ", 1)[0]
+        hex_text = re.sub(r"[^0-9a-fA-F]", "", hex_columns)
+        if len(hex_text) % 2 == 1:
+            hex_text = hex_text[:-1]
+        if hex_text:
+            raw.extend(bytes.fromhex(hex_text))
+    return bytes(raw)
+
+
+def decode_json_packet(raw: bytes) -> dict[str, Any] | None:
+    text = raw.decode("utf-8-sig", errors="replace").strip("\x00 \t\r\n")
+    if not text:
+        return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        decoded = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def stream_labels(stream: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+    for key in ("handler_name", "metadata_kind", "track_id", "payload_schema", "mime_type", "title", "comment"):
+        value = tags.get(key)
+        if value is not None:
+            labels.append(str(value))
+    for value in tags.values():
+        if value is not None:
+            labels.append(str(value))
+    for key in ("codec_tag_string", "codec_name"):
+        value = stream.get(key)
+        if value is not None:
+            labels.append(str(value))
+    return labels
+
+
+def looks_like_metadata_kind(stream: dict[str, Any], kind: str) -> bool:
+    needle = kind.strip().lower()
+    for label in stream_labels(stream):
+        normalized = label.strip().lower()
+        if normalized.startswith(f"spatialmp4:{needle}:"):
+            return True
+        if normalized == needle:
+            return True
+        if needle in normalized and ("spatialmp4" in normalized or "operator" in normalized):
+            return True
+    return False
+
+
+def metadata_streams(mp4_info: dict[str, Any] | None, kind: str) -> list[tuple[int, str]]:
+    result: list[tuple[int, str]] = []
+    streams = (mp4_info or {}).get("streams") or []
+    for stream in streams:
+        if not isinstance(stream, dict) or not looks_like_metadata_kind(stream, kind):
+            continue
+        tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+        handler = str(tags.get("handler_name", ""))
+        track_id = kind
+        if handler.startswith("spatialmp4:"):
+            parts = handler.split(":", 2)
+            if len(parts) == 3 and parts[2]:
+                track_id = parts[2]
+        elif tags.get("track_id") is not None:
+            track_id = str(tags.get("track_id"))
+        try:
+            result.append((int(stream["index"]), track_id))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return result
+
+
+def load_json_metadata_frames(mp4: Path, mp4_info: dict[str, Any] | None, kind: str) -> dict[str, list[dict[str, Any]]]:
+    frames_by_track: dict[str, list[dict[str, Any]]] = {}
+    streams = metadata_streams(mp4_info, kind)
+    if not streams:
+        return frames_by_track
+    for stream_index, track_id in streams:
+        packets_json = run_ffprobe_json(
+            mp4,
+            ["-select_streams", str(stream_index), "-show_packets", "-show_data"],
+            f"{kind} packets",
+        )
+        packets = packets_json.get("packets", []) if isinstance(packets_json, dict) else []
+        frames: list[dict[str, Any]] = []
+        for packet in packets:
+            if not isinstance(packet, dict):
+                continue
+            data = packet.get("data")
+            if not isinstance(data, str):
+                continue
+            decoded = decode_json_packet(bytes_from_ffprobe_hexdump(data))
+            if decoded is None:
+                continue
+            try:
+                decoded["_packet_pts_time"] = float(packet.get("pts_time", "0"))
+            except (TypeError, ValueError):
+                decoded["_packet_pts_time"] = 0.0
+            frames.append(decoded)
+        if frames:
+            frames_by_track[track_id] = frames
+    return frames_by_track
+
+
 def stream_start_us(stream: dict[str, Any]) -> int:
     raw_time = stream.get("start_time")
     if raw_time not in (None, "N/A"):
@@ -927,22 +1066,28 @@ def wants_head_pose(options: dict[str, Any]) -> bool:
 
 
 def check_required_files(session_dir: Path, mp4: Path, options: dict[str, Any]) -> None:
-    required = [
-        "manifest.json",
+    required = ["manifest.json"]
+    optional = [
         "android_timebase.json",
         "left_camera_characteristics.json",
         "left_camera_frames.jsonl",
     ]
     if wants_stereo_rgb(options):
-        required += ["right_camera_characteristics.json", "right_camera_frames.jsonl"]
+        optional += ["right_camera_characteristics.json", "right_camera_frames.jsonl"]
     if wants_depth(options):
-        required += ["depth/frames.jsonl"]
+        optional += ["depth/frames.jsonl"]
     for rel in required:
         path = session_dir / rel
         if path.exists() and path.stat().st_size > 0:
             passed(f"file present: {rel}")
         else:
             failed(f"file present: {rel}", str(path))
+    for rel in optional:
+        path = session_dir / rel
+        if path.exists() and path.stat().st_size > 0:
+            passed(f"optional legacy sidecar present: {rel}")
+        else:
+            warned(f"optional legacy sidecar absent: {rel}", "self-contained MP4 metadata should cover this")
     if mp4.exists() and mp4.stat().st_size >= min_mp4_bytes:
         passed("final MP4 size", f"{mp4.stat().st_size:,} bytes")
     elif mp4.exists():
@@ -1044,7 +1189,7 @@ def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     return options
 
 
-def check_timebase(timebase: dict[str, Any]) -> None:
+def check_timebase(timebase: dict[str, Any], label: str = "android_timebase") -> None:
     required = [
         "session_start_unix_us",
         "session_start_godot_ticks_us",
@@ -1062,33 +1207,31 @@ def check_timebase(timebase: dict[str, Any]) -> None:
     ]
     for key in required:
         if key in timebase:
-            passed(f"android_timebase has {key}")
+            passed(f"{label} has {key}")
         else:
-            failed(f"android_timebase has {key}")
+            failed(f"{label} has {key}")
     if timebase.get("rgb_timestamp_domain") != "godot_ticks_ns":
-        failed("rgb timestamp domain", repr(timebase.get("rgb_timestamp_domain")))
+        failed(f"{label} rgb timestamp domain", repr(timebase.get("rgb_timestamp_domain")))
     if timebase.get("openxr_xr_time_domain") != "clock_monotonic_ns":
-        failed("OpenXR time domain", repr(timebase.get("openxr_xr_time_domain")))
+        failed(f"{label} OpenXR time domain", repr(timebase.get("openxr_xr_time_domain")))
 
 
-def check_rgb_index(session_dir: Path, eye: str, timebase: dict[str, Any]) -> list[dict[str, Any]]:
-    path = session_dir / f"{eye}_camera_frames.jsonl"
-    rows = safe_jsonl(path)
+def check_rgb_index_rows(rows: list[dict[str, Any]], eye: str, timebase: dict[str, Any], label: str) -> None:
     if len(rows) >= min_rgb_frames:
-        passed(f"{eye} RGB frame index count", f"{len(rows)} >= {min_rgb_frames}")
+        passed(f"{label} count", f"{len(rows)} >= {min_rgb_frames}")
     else:
-        failed(f"{eye} RGB frame index count", f"{len(rows)} < {min_rgb_frames}")
-        return rows
+        failed(f"{label} count", f"{len(rows)} < {min_rgb_frames}")
+        return
     indices = [r.get("frame_index") for r in rows]
     if indices == list(range(len(rows))):
-        passed(f"{eye} frame_index is contiguous")
+        passed(f"{label} frame_index is contiguous")
     else:
-        failed(f"{eye} frame_index is contiguous")
+        failed(f"{label} frame_index is contiguous")
     timestamps = [int(r["timestamp_ns"]) for r in rows if "timestamp_ns" in r]
     if len(timestamps) == len(rows) and all(b >= a for a, b in zip(timestamps, timestamps[1:])):
-        passed(f"{eye} timestamp_ns is monotonic")
+        passed(f"{label} timestamp_ns is monotonic")
     else:
-        failed(f"{eye} timestamp_ns is monotonic")
+        failed(f"{label} timestamp_ns is monotonic")
     sensors = [int(r["camera_sensor_timestamp_ns"]) for r in rows if "camera_sensor_timestamp_ns" in r]
     if len(sensors) == len(rows) and len(timestamps) == len(rows):
         deltas = {s - t for s, t in zip(sensors, timestamps)}
@@ -1099,23 +1242,32 @@ def check_rgb_index(session_dir: Path, eye: str, timebase: dict[str, Any]) -> li
         else:
             expected = -int(timebase.get("clock_monotonic_to_godot_ticks_ns_offset", 0))
         if len(deltas) == 1 and next(iter(deltas)) == expected:
-            passed(f"{eye} sensor-to-Godot offset matches timebase")
+            passed(f"{label} sensor-to-Godot offset matches timebase")
         else:
-            failed(f"{eye} sensor-to-Godot offset matches timebase", f"deltas={sorted(deltas)[:3]} expected={expected}")
+            failed(f"{label} sensor-to-Godot offset matches timebase", f"deltas={sorted(deltas)[:3]} expected={expected}")
+
+
+def check_rgb_index_sidecar(session_dir: Path, eye: str, timebase: dict[str, Any]) -> list[dict[str, Any]]:
+    path = session_dir / f"{eye}_camera_frames.jsonl"
+    rows = safe_jsonl(path)
+    if not rows:
+        warned(f"{eye} legacy RGB frame-index sidecar absent", str(path))
+        return rows
+    check_rgb_index_rows(rows, eye, timebase, f"{eye} legacy RGB frame-index sidecar")
     return rows
 
 
 def check_depth(session_dir: Path) -> list[dict[str, Any]]:
     rows = safe_jsonl(session_dir / "depth/frames.jsonl")
     if rows:
-        passed("depth frame index non-empty", f"{len(rows)} records")
+        passed("legacy depth frame-index sidecar non-empty", f"{len(rows)} records")
         timestamps = [int(r["timestamp_ns"]) for r in rows if "timestamp_ns" in r]
         if len(timestamps) == len(rows) and all(b >= a for a, b in zip(timestamps, timestamps[1:])):
-            passed("depth timestamp_ns is monotonic")
+            passed("legacy depth sidecar timestamp_ns is monotonic")
         else:
-            failed("depth timestamp_ns is monotonic")
+            failed("legacy depth sidecar timestamp_ns is monotonic")
     else:
-        failed("depth frame index non-empty")
+        warned("legacy depth frame-index sidecar absent", "depth MP4 stream + depth_frame_meta should cover this")
     return rows
 
 
@@ -1347,14 +1499,14 @@ def check_mp4_device_tags(mp4: Path, device: dict[str, Any]) -> None:
             )
 
 
-def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
+def check_mp4(mp4: Path, options: dict[str, Any]) -> dict[str, Any] | None:
     data = run_ffprobe(mp4)
     if data is None:
         if options.get("record_audio") is True:
             failed("MP4 audio stream inspection requires ffprobe", "record_audio=true")
         else:
             warned("MP4 stream inspection skipped", "ffprobe unavailable or failed")
-        return
+        return None
     if not any(status == "FAIL" and name == "ffprobe parses MP4" for status, name, _ in checks):
         passed("ffprobe parses MP4")
     streams = data.get("streams", [])
@@ -1481,6 +1633,152 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> None:
             passed(check_name, f"worst={worst} us")
         else:
             failed(check_name, f"starts={dense_starts} worst={worst} us")
+    return data
+
+
+def first_metadata_payload(frames_by_track: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
+    for rows in frames_by_track.values():
+        if rows:
+            return rows[0]
+    return None
+
+
+def rows_for_eye(frames_by_track: dict[str, list[dict[str, Any]]], eye: str) -> list[dict[str, Any]]:
+    if eye in frames_by_track:
+        return frames_by_track[eye]
+    for rows in frames_by_track.values():
+        filtered = [r for r in rows if str(r.get("eye", "")).lower() == eye]
+        if filtered:
+            return filtered
+    return []
+
+
+def check_timestamp_rows(rows: list[dict[str, Any]], label: str, required: bool) -> None:
+    if not rows:
+        if required:
+            failed(f"{label} metadata non-empty")
+        else:
+            warned(f"{label} metadata absent")
+        return
+    passed(f"{label} metadata non-empty", f"{len(rows)} record(s)")
+    timestamps = []
+    for row in rows:
+        value = row.get("timestamp_ns")
+        if value is None:
+            value = int(float(row.get("_packet_pts_time", 0.0)) * 1_000_000_000)
+        try:
+            timestamps.append(int(value))
+        except (TypeError, ValueError):
+            pass
+    if len(timestamps) == len(rows) and all(b >= a for a, b in zip(timestamps, timestamps[1:])):
+        passed(f"{label} timestamp_ns is monotonic")
+    else:
+        failed(f"{label} timestamp_ns is monotonic")
+
+
+def check_operator_static_metadata(
+    mp4: Path,
+    mp4_info: dict[str, Any] | None,
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    frames = load_json_metadata_frames(mp4, mp4_info, "operator_static")
+    payload = first_metadata_payload(frames)
+    if payload is None:
+        failed("MP4 contains operator_static metadata", "no JSON packet decoded")
+        return {}
+    passed("MP4 contains operator_static metadata")
+    pts = float(payload.get("_packet_pts_time", 0.0))
+    if abs(pts) <= 0.001:
+        passed("operator_static PTS is zero", f"{pts:.6f}s")
+    else:
+        failed("operator_static PTS is zero", f"{pts:.6f}s")
+    if payload.get("schema") == "spatialmp4.operator_static.session.v1":
+        passed("operator_static schema", str(payload.get("schema")))
+    else:
+        failed("operator_static schema", repr(payload.get("schema")))
+    provider = str(payload.get("provider", "")).strip()
+    if provider:
+        passed("operator_static provider set", provider)
+    else:
+        failed("operator_static provider set")
+    cameras = payload.get("camera2_characteristics")
+    if not isinstance(cameras, dict):
+        cameras = payload.get("cameras")
+    if isinstance(cameras, dict) and isinstance(cameras.get("left"), dict):
+        passed("operator_static has left Camera2 characteristics")
+    else:
+        failed("operator_static has left Camera2 characteristics", repr(cameras))
+    if wants_stereo_rgb(options):
+        if isinstance(cameras, dict) and isinstance(cameras.get("right"), dict):
+            passed("operator_static has right Camera2 characteristics")
+        else:
+            failed("operator_static has right Camera2 characteristics", repr(cameras))
+    if isinstance(payload.get("android_timebase"), dict):
+        passed("operator_static has android_timebase")
+    else:
+        failed("operator_static has android_timebase", repr(payload.get("android_timebase")))
+    return payload
+
+
+def check_self_contained_mp4_metadata(
+    mp4: Path,
+    mp4_info: dict[str, Any] | None,
+    options: dict[str, Any],
+    manifest: dict[str, Any],
+    timebase: dict[str, Any],
+) -> None:
+    if mp4_info is None:
+        failed("self-contained MP4 metadata validation requires ffprobe")
+        return
+
+    operator_static = check_operator_static_metadata(mp4, mp4_info, options)
+    embedded_timebase = operator_static.get("android_timebase") if isinstance(operator_static, dict) else None
+    if isinstance(embedded_timebase, dict):
+        check_timebase(embedded_timebase, "operator_static.android_timebase")
+
+    rgb_frames = load_json_metadata_frames(mp4, mp4_info, "rgb_frame_index")
+    check_rgb_index_rows(
+        rows_for_eye(rgb_frames, "left"),
+        "left",
+        timebase,
+        "MP4 left rgb_frame_index",
+    )
+    if wants_stereo_rgb(options):
+        check_rgb_index_rows(
+            rows_for_eye(rgb_frames, "right"),
+            "right",
+            timebase,
+            "MP4 right rgb_frame_index",
+        )
+
+    depth_frames = load_json_metadata_frames(mp4, mp4_info, "depth_frame_meta")
+    check_timestamp_rows(
+        rows_for_eye(depth_frames, "left") or [r for rows in depth_frames.values() for r in rows],
+        "MP4 depth_frame_meta",
+        wants_depth(options),
+    )
+
+    body_frames = load_json_metadata_frames(mp4, mp4_info, "body_frame_meta")
+    body_rows = [r for rows in body_frames.values() for r in rows]
+    sources = manifest.get("sources") if isinstance(manifest.get("sources"), dict) else {}
+    body_source = sources.get("body_tracking") if isinstance(sources, dict) else None
+    observed_body = str(body_source.get("observed_runtime", "")).strip() if isinstance(body_source, dict) else ""
+    check_timestamp_rows(
+        body_rows,
+        "MP4 body_frame_meta",
+        options.get("record_body_tracking") is True and observed_body != "",
+    )
+
+    motion_frames = load_json_metadata_frames(mp4, mp4_info, "motion_trackers")
+    motion_rows = [r for rows in motion_frames.values() for r in rows]
+    if options.get("record_motion_trackers") is True:
+        if motion_rows:
+            passed("MP4 motion_trackers metadata non-empty", f"{len(motion_rows)} record(s)")
+        else:
+            warned(
+                "MP4 motion_trackers metadata absent",
+                "tracker runtime may be unavailable or disabled by body-tracking mode",
+            )
 
 
 def print_summary() -> int:
@@ -1509,26 +1807,34 @@ print(f"[validate] session={session_dir.name} mp4={mp4.name}")
 
 manifest_path = session_dir / "manifest.json"
 timebase_path = session_dir / "android_timebase.json"
-if not manifest_path.exists() or not timebase_path.exists():
-    if not manifest_path.exists():
-        failed("manifest.json exists", str(manifest_path))
-    if not timebase_path.exists():
-        failed("android_timebase.json exists", str(timebase_path))
+if not manifest_path.exists():
+    failed("manifest.json exists", str(manifest_path))
     sys.exit(print_summary())
 
 manifest = safe_json(manifest_path)
-timebase = safe_json(timebase_path)
 options = check_manifest(manifest)
 check_body_tracking_source(manifest, options)
 device = check_device_block(manifest)
-check_timebase(timebase)
 check_required_files(session_dir, mp4, options)
-check_rgb_index(session_dir, "left", timebase)
+mp4_info = check_mp4(mp4, options)
+operator_static = first_metadata_payload(load_json_metadata_frames(mp4, mp4_info, "operator_static"))
+embedded_timebase = operator_static.get("android_timebase") if isinstance(operator_static, dict) else None
+sidecar_timebase = safe_json(timebase_path) if timebase_path.exists() else None
+if isinstance(sidecar_timebase, dict):
+    check_timebase(sidecar_timebase, "legacy android_timebase sidecar")
+else:
+    warned("legacy android_timebase sidecar absent", "operator_static.android_timebase should cover this")
+if isinstance(embedded_timebase, dict):
+    timebase = embedded_timebase
+else:
+    timebase = sidecar_timebase if isinstance(sidecar_timebase, dict) else {}
+    failed("operator_static.android_timebase usable", repr(embedded_timebase))
+check_self_contained_mp4_metadata(mp4, mp4_info, options, manifest, timebase)
+check_rgb_index_sidecar(session_dir, "left", timebase)
 if wants_stereo_rgb(options):
-    check_rgb_index(session_dir, "right", timebase)
+    check_rgb_index_sidecar(session_dir, "right", timebase)
 if wants_depth(options):
     check_depth(session_dir)
-check_mp4(mp4, options)
 check_mp4_device_tags(mp4, device)
 
 sys.exit(print_summary())
@@ -1541,8 +1847,8 @@ main() {
   step "Pre-flight"
   require_tool "$PYTHON"
   resolve_ffprobe
-  if [ "$EXPECT_AUDIO" = "1" ] && [ -z "${FFPROBE:-}" ]; then
-    err "ffprobe is required when EXPECT_AUDIO=1 so the MP4 audio track can be validated"
+  if [ -z "${FFPROBE:-}" ]; then
+    err "ffprobe is required to validate self-contained MP4 metadata tracks"
     exit 1
   fi
   if [ "$SKIP_DEVICE" = "1" ]; then

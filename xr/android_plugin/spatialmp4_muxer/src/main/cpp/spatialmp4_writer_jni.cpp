@@ -59,7 +59,13 @@ constexpr int kTrackRightHandJoints = 4;
 constexpr int kTrackLeftControllerInput = 5;
 constexpr int kTrackRightControllerInput = 6;
 constexpr int kTrackBodyJoints = 7;
-constexpr int kTimedTrackCount = 8;
+constexpr int kTrackOperatorStatic = 8;
+constexpr int kTrackRgbFrameIndexLeft = 9;
+constexpr int kTrackRgbFrameIndexRight = 10;
+constexpr int kTrackDepthFrameMeta = 11;
+constexpr int kTrackBodyFrameMeta = 12;
+constexpr int kTrackMotionTrackers = 13;
+constexpr int kTimedTrackCount = 14;
 
 std::string AvError(int errnum) {
   char buffer[AV_ERROR_MAX_STRING_SIZE] = {0};
@@ -618,10 +624,14 @@ class LiveSpatialMp4Writer {
         // io thread can converge on a quiet queue and signal drained_.
         return false;
       }
-      // Track the earliest pts across all streams; the io thread snapshots
-      // this when it writes the header so track_base_time stays accurate
-      // even if a depth packet arrives first.
-      if (first_pts_us_ == INT64_MIN || pts_us < first_pts_us_) {
+      // Track the earliest pts across timeline-bearing streams; the io thread
+      // snapshots this when it writes the header so track_base_time stays
+      // accurate even if a depth packet arrives first. operator_static is
+      // intentionally authored at MP4 PTS=0 and must not shift RGB/audio PTS
+      // into the absolute Godot-ticks range.
+      const bool affects_timeline =
+          kind != PacketKind::kTimedMetadata || timed_track_id != kTrackOperatorStatic;
+      if (affects_timeline && (first_pts_us_ == INT64_MIN || pts_us < first_pts_us_)) {
         first_pts_us_ = pts_us;
       }
       io_queue_.push_back(std::move(packet));
@@ -841,6 +851,23 @@ class LiveSpatialMp4Writer {
       AddTimedMetadataStream(kTrackBodyJoints, "body", "body_joints",
                              "spatialmp4.body_joints.v1", "application/x-spatialmp4-body-joints", "body");
     }
+    // Replay-critical JSON metadata tracks. These make a raw SpatialMP4
+    // self-contained while the external manifest stays responsible for file
+    // inventory, hashes, and optional debug sidecars.
+    AddTimedMetadataStream(kTrackOperatorStatic, "session", "operator_static",
+                           "spatialmp4.operator_static.session.v1", "application/json", "session");
+    AddTimedMetadataStream(kTrackRgbFrameIndexLeft, "left", "rgb_frame_index",
+                           "spatialmp4.rgb_frame_index.v1", "application/json", "left");
+    if (rgb_camera_count_ == 2) {
+      AddTimedMetadataStream(kTrackRgbFrameIndexRight, "right", "rgb_frame_index",
+                             "spatialmp4.rgb_frame_index.v1", "application/json", "right");
+    }
+    AddTimedMetadataStream(kTrackDepthFrameMeta, "left", "depth_frame_meta",
+                           "operator.depth_frame_meta.v1", "application/json", "left");
+    AddTimedMetadataStream(kTrackBodyFrameMeta, "body", "body_frame_meta",
+                           "operator.body_frame_meta.v1", "application/json", "body");
+    AddTimedMetadataStream(kTrackMotionTrackers, "pico", "motion_trackers",
+                           "operator.motion_trackers.v1", "application/json", "pico");
     // Create head last so simple stream-order readers still have the best
     // chance of picking head when they only support one pose stream.
     if (head_pose_expected_) {

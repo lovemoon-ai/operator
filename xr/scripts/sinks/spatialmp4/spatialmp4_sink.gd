@@ -31,7 +31,12 @@ func accepted_frame_types() -> Array:
 		SensorFrameType.HAND,
 		SensorFrameType.BODY,
 		SensorFrameType.DEPTH,
+		SensorFrameType.MOTION_TRACKER,
 	]
+
+
+func supports_motion_tracker_events() -> bool:
+	return _writer != null and _writer.has_method("write_motion_tracker_event")
 
 
 func start(options: Dictionary) -> bool:
@@ -128,6 +133,25 @@ func on_frame(frame: SensorFrame) -> Variant:
 				int(p.get("height", 0)),
 				p.get("metadata", {}) as Dictionary,
 				p.get("depth_u16_mm", PackedByteArray()) as PackedByteArray
+			)
+		SensorFrameType.MOTION_TRACKER:
+			if MotionTrackerFrame.is_event(frame):
+				if not _writer.has_method("write_motion_tracker_event"):
+					return false
+				return _writer.write_motion_tracker_event(
+					frame.timestamp_ns,
+					str(p.get("event_type", "")),
+					p.get("event", {}) as Dictionary
+				)
+			if not _writer.has_method("write_motion_tracker_pose"):
+				return false
+			return _writer.write_motion_tracker_pose(
+				int(p.get("tracker_index", 0)),
+				frame.source_id,
+				frame.timestamp_ns,
+				p.get("transform", Transform3D.IDENTITY) as Transform3D,
+				bool(p.get("tracking_valid", false)),
+				p.get("metadata", {}) as Dictionary
 			)
 	push_warning("SpatialMp4Sink: unsupported frame type %d" % frame.frame_type)
 	return null

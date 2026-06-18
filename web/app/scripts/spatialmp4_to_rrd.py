@@ -25,14 +25,15 @@ with the local viewer translates 1-for-1 to the embedded Rerun web
 viewer in the dashboard.
 
 Differences from the reference (deliberate):
-  * **Ingest only ships ``media.mp4`` + ``manifest.json``**, no
-    ``depth/frames.jsonl`` / ``*_camera_characteristics.json`` spool
-    sidecars (see ``xr/scripts/ego_uploader.gd:22-26``). So the
-    reference's "depth on RGB overlay via Camera2-to-Unity" path is
-    skipped here — we use ``T_W_Srgb = T_W_H @ T_I_Srgb`` straight
-    out of the mp4's RGB extrinsics and accept the live-writer's
-    documented ~10° X-axis bias rather than reconstruct the
-    correction without the sidecar inputs.
+  * **Ingest ships ``media.mp4`` + ``manifest.json``**. Camera2
+    calibration and Android timebase are preferred from MP4 embedded
+    ``operator_static`` metadata, with old sidecar layouts kept as fallback.
+    Operator-specific JSON ``mett`` tracks such as ``motion_trackers`` are
+    read directly from the MP4 with ffprobe until the SDK exposes typed APIs.
+    Depth spool sidecars (``depth/frames.jsonl``) are still skipped here.
+    When Quest Camera2 metadata is missing, we use ``T_W_Srgb = T_W_H @
+    T_I_Srgb`` straight out of the mp4's RGB extrinsics and accept the
+    live-writer's documented ~10° X-axis bias.
   * No typer dep — argparse is enough for a non-interactive worker
     and shaves one wheel off uv's first-run resolve.
   * Always ``rr.save()``; never spawns the viewer. The Node-side
@@ -568,42 +569,29 @@ def godot_transform_to_unity(transform_godot: np.ndarray) -> np.ndarray:
     return UNITY_FROM_GODOT_4 @ transform_godot @ UNITY_FROM_GODOT_4
 
 
-def load_camera2_projection_calibration(
-    input_path: Path,
-    profile: DeviceProfile,
-    eye: str = "left",
+def _camera2_projection_from_characteristics(
+    char: Dict[str, Any],
+    source_label: str,
 ) -> Optional[Camera2ProjectionCalibration]:
-    """Load Quest sidecar Camera2 calibration for accurate RGB image projection.
-
-    Mirrors SpatialMP4's `godot_depth_rgb_align._openquest_head_from_camera`.
-    This is intentionally Quest-only; Pico has different axis conventions and
-    currently no validated sidecar path in this web converter.
-    """
-    if profile.name != "quest":
-        return None
-    sidecar_path = input_path.with_suffix("") / f"{eye}_camera_characteristics.json"
-    if not sidecar_path.exists():
-        return None
     try:
-        char: Dict[str, Any] = json.loads(sidecar_path.read_text())
         translation = char.get("lens_pose_translation") or [0.0, 0.0, 0.0]
         raw_rotation = char.get("lens_pose_rotation") or [0.0, 0.0, 0.0, 1.0]
         intrinsics = char.get("lens_intrinsic_calibration") or []
         if len(intrinsics) < 4:
-            info(f"Camera2 sidecar missing intrinsics: {sidecar_path}")
+            info(f"Camera2 calibration missing intrinsics: {source_label}")
             return None
         fx, fy, cx, cy = (float(v) for v in intrinsics[:4])
         size = char.get("sensor_active_array_size") or char.get("sensor_pixel_array_size") or {}
         width = int(size.get("width") or (int(size["right"]) - int(size.get("left", 0))))
         height = int(size.get("height") or (int(size["bottom"]) - int(size.get("top", 0))))
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError) as exc:
-        info(f"Camera2 sidecar read failed ({sidecar_path}): {exc}; falling back to mp4 ecam projection")
+    except (KeyError, TypeError, ValueError) as exc:
+        info(f"Camera2 calibration read failed ({source_label}): {exc}; falling back to mp4 ecam projection")
         return None
 
     raw_quat = np.asarray(raw_rotation, dtype=np.float64)
     raw_norm = np.linalg.norm(raw_quat)
     if not np.isfinite(raw_norm) or raw_norm <= 0.0:
-        info(f"Camera2 sidecar has invalid rotation: {sidecar_path}; falling back to mp4 ecam projection")
+        info(f"Camera2 calibration has invalid rotation: {source_label}; falling back to mp4 ecam projection")
         return None
     converted_quat = np.array(
         [-raw_quat[0], -raw_quat[1], raw_quat[2], raw_quat[3]],
@@ -624,16 +612,115 @@ def load_camera2_projection_calibration(
         [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
         dtype=np.float64,
     )
-    info(
-        f"loaded Quest Camera2 sidecar projection calibration: {sidecar_path} "
-        "(RGB hand overlay uses OpenQuest Camera2 conversion)"
-    )
     return Camera2ProjectionCalibration(
         head_from_camera_unity=head_from_camera_unity,
         K_rgb=K_rgb,
         width=width,
         height=height,
     )
+
+
+def _extract_camera2_characteristics(
+    operator_static: Optional[Dict[str, Any]],
+    eye: str,
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(operator_static, dict):
+        return None
+    eye_keys = (eye, f"{eye}_camera_characteristics", f"{eye}_camera2_characteristics")
+    for key in eye_keys:
+        value = operator_static.get(key)
+        if isinstance(value, dict):
+            return value
+
+    container_keys = (
+        "camera2",
+        "camera2_characteristics",
+        "camera_characteristics",
+        "camera2_calibration",
+        "cameras",
+    )
+    for container_key in container_keys:
+        container = operator_static.get(container_key)
+        if isinstance(container, dict):
+            for eye_key in eye_keys:
+                value = container.get(eye_key)
+                if isinstance(value, dict):
+                    return value
+            for nested_key in ("characteristics", "camera_characteristics", "camera2_characteristics"):
+                nested = container.get(nested_key)
+                if not isinstance(nested, dict):
+                    continue
+                for eye_key in eye_keys:
+                    value = nested.get(eye_key)
+                    if isinstance(value, dict):
+                        return value
+        elif isinstance(container, list):
+            for item in container:
+                if not isinstance(item, dict):
+                    continue
+                item_eye = str(item.get("eye") or item.get("camera") or item.get("camera_id") or "").lower()
+                if item_eye == eye:
+                    for nested_key in ("characteristics", "camera_characteristics", "camera2_characteristics"):
+                        nested = item.get(nested_key)
+                        if isinstance(nested, dict):
+                            return nested
+                    return item
+    return None
+
+
+def load_camera2_projection_calibration(
+    input_path: Path,
+    profile: DeviceProfile,
+    eye: str = "left",
+    operator_static: Optional[Dict[str, Any]] = None,
+) -> Optional[Camera2ProjectionCalibration]:
+    """Load Quest Camera2 calibration for accurate RGB image projection.
+
+    Mirrors SpatialMP4's `godot_depth_rgb_align._openquest_head_from_camera`.
+    This is intentionally Quest-only; Pico has different axis conventions and
+    currently no validated sidecar path in this web converter.
+    """
+    if profile.name != "quest":
+        return None
+
+    embedded_char = _extract_camera2_characteristics(operator_static, eye)
+    if embedded_char is not None:
+        projection = _camera2_projection_from_characteristics(
+            embedded_char,
+            f"MP4 operator_static {eye} Camera2 characteristics",
+        )
+        if projection is not None:
+            info(
+                "loaded Quest Camera2 projection calibration from MP4 "
+                f"operator_static ({eye})"
+            )
+            return projection
+
+    sidecar_filename = f"{eye}_camera_characteristics.json"
+    sidecar_candidates = [
+        # On-device/local layout: <capture_root>/<session>.mp4 plus
+        # <capture_root>/<session>/<eye>_camera_characteristics.json.
+        input_path.with_suffix("") / sidecar_filename,
+        # Uploaded layout: <data>/<session>/media.mp4 plus sidecars stored as
+        # sibling artifacts in the same session directory.
+        input_path.parent / sidecar_filename,
+    ]
+    sidecar_path = next((p for p in sidecar_candidates if p.exists()), None)
+    if sidecar_path is None:
+        return None
+    try:
+        sidecar_char: Dict[str, Any] = json.loads(sidecar_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        info(f"Camera2 sidecar read failed ({sidecar_path}): {exc}; falling back to mp4 ecam projection")
+        return None
+    projection = _camera2_projection_from_characteristics(sidecar_char, str(sidecar_path))
+    if projection is None:
+        return None
+    info(
+        f"loaded Quest Camera2 sidecar projection calibration: {sidecar_path} "
+        "(RGB hand overlay uses OpenQuest Camera2 conversion)"
+    )
+    return projection
 
 
 def device_native_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.ndarray:
@@ -1329,6 +1416,13 @@ class _TimedJointFrame:
     joints: List[_TimedJoint]
 
 
+@dataclass
+class _TimedJsonFrame:
+    timestamp: float
+    track_id: str
+    payload: Dict[str, Any]
+
+
 def _find_ffprobe() -> Optional[str]:
     env = os.environ.get("FFPROBE")
     if env:
@@ -1345,18 +1439,23 @@ def _find_ffprobe() -> Optional[str]:
     return None
 
 
-def _ffprobe_json(ffprobe: str, args: Sequence[str], input_path: Path) -> Optional[dict]:
+def _ffprobe_json(
+    ffprobe: str,
+    args: Sequence[str],
+    input_path: Path,
+    context: str = "metadata",
+) -> Optional[dict]:
     cmd = [ffprobe, "-v", "error", *args, "-of", "json", str(input_path)]
     try:
         proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)
-        info(f"ffprobe failed while reading body metadata: {detail.strip()}")
+        info(f"ffprobe failed while reading {context}: {detail.strip()}")
         return None
     try:
         return json.loads(proc.stdout or "{}")
     except json.JSONDecodeError as exc:
-        info(f"ffprobe returned invalid JSON while reading body metadata: {exc}")
+        info(f"ffprobe returned invalid JSON while reading {context}: {exc}")
         return None
 
 
@@ -1371,9 +1470,224 @@ def _bytes_from_ffprobe_hexdump(dump: str) -> bytes:
         if rest.startswith(" "):
             rest = rest[1:]
         hex_columns = rest.split("  ", 1)[0]
-        for group in re.findall(r"[0-9a-fA-F]{4}", hex_columns):
-            raw.extend(bytes.fromhex(group))
+        hex_text = re.sub(r"[^0-9a-fA-F]", "", hex_columns)
+        if len(hex_text) % 2 == 1:
+            hex_text = hex_text[:-1]
+        if hex_text:
+            raw.extend(bytes.fromhex(hex_text))
     return bytes(raw)
+
+
+def _stream_metadata_labels(stream: Dict[str, Any]) -> List[str]:
+    labels: List[str] = []
+    tags = stream.get("tags", {}) if isinstance(stream.get("tags"), dict) else {}
+    for key in (
+        "handler_name",
+        "metadata_kind",
+        "track_id",
+        "payload_schema",
+        "mime_type",
+        "title",
+        "comment",
+        "tag",
+    ):
+        value = tags.get(key)
+        if value is not None:
+            labels.append(str(value))
+    for value in tags.values():
+        if value is not None:
+            labels.append(str(value))
+    for key in ("codec_tag_string", "codec_name"):
+        value = stream.get(key)
+        if value is not None:
+            labels.append(str(value))
+    return labels
+
+
+def _looks_like_metadata_stream_kind(stream: Dict[str, Any], kind: str) -> bool:
+    needle = kind.strip().lower()
+    if not needle:
+        return False
+    for label in _stream_metadata_labels(stream):
+        normalized = label.strip().lower()
+        if normalized.startswith(f"spatialmp4:{needle}:"):
+            return True
+        if normalized == needle:
+            return True
+        if needle in normalized and ("spatialmp4" in normalized or "operator" in normalized):
+            return True
+    return False
+
+
+def _looks_like_operator_static_stream(stream: Dict[str, Any]) -> bool:
+    return _looks_like_metadata_stream_kind(stream, "operator_static")
+
+
+def _decode_json_packet(raw: bytes) -> Optional[Dict[str, Any]]:
+    text = raw.decode("utf-8-sig", errors="replace").strip("\x00 \t\r\n")
+    if not text:
+        return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        decoded = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _json_metadata_streams(input_path: Path, kind: str) -> List[Tuple[int, str]]:
+    ffprobe = _find_ffprobe()
+    if ffprobe is None:
+        info(f"ffprobe not found; MP4 {kind} metadata disabled")
+        return []
+
+    streams_json = _ffprobe_json(ffprobe, ["-show_streams"], input_path, f"{kind} streams")
+    streams = streams_json.get("streams", []) if isinstance(streams_json, dict) else []
+    result: List[Tuple[int, str]] = []
+    for stream in streams:
+        if not isinstance(stream, dict) or not _looks_like_metadata_stream_kind(stream, kind):
+            continue
+        tags = stream.get("tags", {}) if isinstance(stream.get("tags"), dict) else {}
+        handler = str(tags.get("handler_name", ""))
+        track_id = kind
+        if handler.startswith("spatialmp4:"):
+            parts = handler.split(":", 2)
+            if len(parts) == 3 and parts[2]:
+                track_id = parts[2]
+        elif tags.get("track_id") is not None:
+            track_id = str(tags.get("track_id"))
+        try:
+            result.append((int(stream["index"]), track_id))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return result
+
+
+def load_json_metadata_frames_from_mp4(input_path: Path, kind: str) -> Dict[str, List[_TimedJsonFrame]]:
+    """Read Operator JSON `mett` packets by metadata kind.
+
+    This local ffprobe path keeps web ingest compatible with new Operator
+    tracks before the external SpatialMP4 Python binding grows first-class
+    accessors for every custom metadata stream.
+    """
+    ffprobe = _find_ffprobe()
+    if ffprobe is None:
+        info(f"ffprobe not found; MP4 {kind} metadata disabled")
+        return {}
+
+    frames_by_track: Dict[str, List[_TimedJsonFrame]] = {}
+    for stream_index, track_id in _json_metadata_streams(input_path, kind):
+        packets_json = _ffprobe_json(
+            ffprobe,
+            ["-select_streams", str(stream_index), "-show_packets", "-show_data"],
+            input_path,
+            f"{kind} packets",
+        )
+        packets = packets_json.get("packets", []) if isinstance(packets_json, dict) else []
+        frames: List[_TimedJsonFrame] = []
+        for packet in packets:
+            if not isinstance(packet, dict):
+                continue
+            data = packet.get("data")
+            if not isinstance(data, str):
+                continue
+            decoded = _decode_json_packet(_bytes_from_ffprobe_hexdump(data))
+            if decoded is None:
+                continue
+            try:
+                timestamp = float(packet.get("pts_time", "0"))
+            except (TypeError, ValueError):
+                timestamp = 0.0
+            frames.append(_TimedJsonFrame(timestamp=timestamp, track_id=track_id, payload=decoded))
+        if frames:
+            frames_by_track[track_id] = frames
+    if frames_by_track:
+        summary = ", ".join(f"{tid}={len(frames)}" for tid, frames in frames_by_track.items())
+        info(f"decoded {kind} JSON metadata from MP4 via ffprobe: {summary}")
+    return frames_by_track
+
+
+def load_operator_static_metadata(input_path: Path) -> Optional[Dict[str, Any]]:
+    """Read the MP4 operator_static timed-metadata JSON packet, if present."""
+    ffprobe = _find_ffprobe()
+    if ffprobe is None:
+        info("ffprobe not found; MP4 operator_static metadata disabled")
+        return None
+
+    streams_json = _ffprobe_json(ffprobe, ["-show_streams"], input_path, "operator_static streams")
+    streams = streams_json.get("streams", []) if isinstance(streams_json, dict) else []
+    operator_stream_indexes: List[int] = []
+    for stream in streams:
+        if not isinstance(stream, dict) or not _looks_like_operator_static_stream(stream):
+            continue
+        try:
+            operator_stream_indexes.append(int(stream["index"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    for stream_index in operator_stream_indexes:
+        packets_json = _ffprobe_json(
+            ffprobe,
+            ["-select_streams", str(stream_index), "-show_packets", "-show_data"],
+            input_path,
+            "operator_static packets",
+        )
+        packets = packets_json.get("packets", []) if isinstance(packets_json, dict) else []
+        for packet in packets:
+            if not isinstance(packet, dict):
+                continue
+            data = packet.get("data")
+            if not isinstance(data, str):
+                continue
+            decoded = _decode_json_packet(_bytes_from_ffprobe_hexdump(data))
+            if decoded is not None:
+                info(f"loaded MP4 operator_static metadata from stream {stream_index}")
+                return decoded
+
+    if operator_stream_indexes:
+        info("MP4 operator_static track found, but no valid JSON packet decoded")
+    return None
+
+
+def _extract_android_timebase(operator_static: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(operator_static, dict):
+        return None
+    for key in ("android_timebase", "timebase"):
+        value = operator_static.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def load_android_timebase_metadata(
+    input_path: Path,
+    operator_static: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    embedded = _extract_android_timebase(operator_static)
+    if embedded is not None:
+        info("loaded android_timebase from MP4 operator_static")
+        return embedded
+
+    sidecar_candidates = [
+        input_path.with_suffix("") / "android_timebase.json",
+        input_path.parent / "android_timebase.json",
+    ]
+    sidecar_path = next((p for p in sidecar_candidates if p.exists()), None)
+    if sidecar_path is None:
+        return None
+    try:
+        decoded = json.loads(sidecar_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        info(f"android_timebase sidecar read failed ({sidecar_path}): {exc}")
+        return None
+    if not isinstance(decoded, dict):
+        info(f"android_timebase sidecar is not a JSON object: {sidecar_path}")
+        return None
+    info(f"loaded android_timebase sidecar: {sidecar_path}")
+    return decoded
 
 
 def _parse_hjnt_packet(raw: bytes, timestamp: float, track_id: str) -> Optional[_TimedJointFrame]:
@@ -1423,7 +1737,7 @@ def load_body_joint_frames_from_mp4(input_path: Path) -> Dict[str, List[_TimedJo
         info("ffprobe not found; body_joints MP4 fallback disabled")
         return {}
 
-    streams_json = _ffprobe_json(ffprobe, ["-show_streams"], input_path)
+    streams_json = _ffprobe_json(ffprobe, ["-show_streams"], input_path, "body metadata streams")
     streams = streams_json.get("streams", []) if isinstance(streams_json, dict) else []
     body_streams: List[Tuple[int, str]] = []
     for stream in streams:
@@ -1447,6 +1761,7 @@ def load_body_joint_frames_from_mp4(input_path: Path) -> Dict[str, List[_TimedJo
             ffprobe,
             ["-select_streams", str(stream_index), "-show_packets", "-show_data"],
             input_path,
+            "body metadata packets",
         )
         packets = packets_json.get("packets", []) if isinstance(packets_json, dict) else []
         frames: List[_TimedJointFrame] = []
@@ -1611,6 +1926,172 @@ def log_all_controller_input_tracks(reader, track_ids: Sequence[str]) -> None:
             rr.log(f"plots/{tid}/grip", rr.Scalars(float(frame.grip_value)))
             rr.log(f"plots/{tid}/thumbstick_x", rr.Scalars(float(frame.thumbstick_x)))
             rr.log(f"plots/{tid}/thumbstick_y", rr.Scalars(float(frame.thumbstick_y)))
+
+
+def _entity_token(value: Any, fallback: str) -> str:
+    raw = str(value if value not in (None, "") else fallback)
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("_")
+    return token or fallback
+
+
+def _dict_vec3(value: Any) -> Optional[np.ndarray]:
+    if not isinstance(value, dict):
+        return None
+    try:
+        return np.array(
+            [float(value["x"]), float(value["y"]), float(value["z"])],
+            dtype=np.float64,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _dict_quat_xyzw(value: Any) -> Optional[np.ndarray]:
+    if not isinstance(value, dict):
+        return None
+    try:
+        quat = np.array(
+            [float(value["x"]), float(value["y"]), float(value["z"]), float(value["w"])],
+            dtype=np.float64,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    norm = float(np.linalg.norm(quat))
+    if not np.isfinite(norm) or norm <= 0.0:
+        return None
+    return quat / norm
+
+
+def _timed_joint_from_json(record: Dict[str, Any]) -> Optional[_TimedJoint]:
+    try:
+        position = record.get("position", {})
+        rotation = record.get("rotation", {})
+        return _TimedJoint(
+            joint_id=int(record.get("joint", record.get("joint_id", 0))),
+            flags=int(record.get("flags", 0)),
+            radius_m=float(record.get("radius_m", 0.0)),
+            x=float(position.get("x", 0.0)),
+            y=float(position.get("y", 0.0)),
+            z=float(position.get("z", 0.0)),
+            qx=float(rotation.get("x", 0.0)),
+            qy=float(rotation.get("y", 0.0)),
+            qz=float(rotation.get("z", 0.0)),
+            qw=float(rotation.get("w", 1.0)),
+        )
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def body_frames_from_json_metadata(
+    frames_by_track: Dict[str, List[_TimedJsonFrame]],
+) -> Dict[str, List[_TimedJointFrame]]:
+    result: Dict[str, List[_TimedJointFrame]] = {}
+    for track_id, frames in frames_by_track.items():
+        body_frames: List[_TimedJointFrame] = []
+        for frame in frames:
+            raw_joints = frame.payload.get("joints", [])
+            if not isinstance(raw_joints, list):
+                continue
+            joints = [
+                joint
+                for joint in (_timed_joint_from_json(item) for item in raw_joints if isinstance(item, dict))
+                if joint is not None
+            ]
+            if joints:
+                body_frames.append(_TimedJointFrame(timestamp=frame.timestamp, track_id=track_id, joints=joints))
+        if body_frames:
+            result[track_id] = body_frames
+    if result:
+        summary = ", ".join(f"{tid}={len(frames)}" for tid, frames in result.items())
+        info(f"decoded body frames from body_frame_meta JSON metadata: {summary}")
+    return result
+
+
+def _motion_tracker_pose_matrix(payload: Dict[str, Any]) -> Optional[np.ndarray]:
+    position = _dict_vec3(payload.get("position"))
+    rotation = _dict_quat_xyzw(payload.get("rotation"))
+    if position is None or rotation is None:
+        return None
+    mat = np.eye(4, dtype=np.float64)
+    mat[:3, :3] = Rotation.from_quat(rotation).as_matrix()
+    mat[:3, 3] = position
+    return mat
+
+
+def _motion_tracker_label(track_id: str, payload: Dict[str, Any]) -> str:
+    source = payload.get("source")
+    tracker_id = payload.get("id")
+    tracker_index = payload.get("tracker_index")
+    if source not in (None, ""):
+        return _entity_token(source, track_id)
+    if tracker_id not in (None, ""):
+        return _entity_token(f"tracker_{tracker_id}", track_id)
+    return _entity_token(f"tracker_{tracker_index}", track_id)
+
+
+def log_all_motion_tracker_tracks(
+    frames_by_track: Dict[str, List[_TimedJsonFrame]],
+    profile: DeviceProfile,
+) -> None:
+    pose_count = 0
+    event_count = 0
+    for track_id, frames in frames_by_track.items():
+        for frame in frames:
+            payload = frame.payload
+            event_type = payload.get("event_type")
+            if event_type is not None:
+                set_time_seconds("time", frame.timestamp)
+                rr.log(
+                    "controller_input/motion_trackers/events",
+                    rr.TextLog(json.dumps(payload, sort_keys=True)),
+                )
+                event_count += 1
+                continue
+            if not bool(payload.get("tracking_valid", True)):
+                continue
+            pose = _motion_tracker_pose_matrix(payload)
+            if pose is None:
+                continue
+            label = _motion_tracker_label(track_id, payload)
+            logged_pose = device_logged_capture_pose(pose, profile)
+            logged_pose[:3, :3] = ensure_right_handed_rotation(logged_pose[:3, :3])
+            translation = logged_pose[:3, 3]
+            quat = Rotation.from_matrix(logged_pose[:3, :3]).as_quat()
+            set_time_seconds("time", frame.timestamp)
+            path = f"world/motion_trackers/{label}"
+            log_transform3d(path, translation, quat, axis_len=0.08)
+            rr.log(
+                f"{path}/marker",
+                rr.Points3D(
+                    positions=[translation],
+                    colors=[[190, 120, 255]],
+                    radii=[0.018],
+                    labels=[label],
+                ),
+            )
+            linear_velocity = _dict_vec3(payload.get("linear_velocity"))
+            if linear_velocity is not None:
+                logged_velocity = device_logged_capture_points(linear_velocity.reshape(1, 3), profile)[0]
+                rr.log(
+                    f"{path}/linear_velocity",
+                    rr.Arrows3D(
+                        origins=[translation],
+                        vectors=[logged_velocity],
+                        colors=[[190, 120, 255]],
+                        radii=0.008,
+                    ),
+                )
+            if payload.get("battery_level") is not None:
+                try:
+                    rr.log(
+                        f"plots/motion_trackers/{label}/battery",
+                        rr.Scalars(float(payload["battery_level"])),
+                    )
+                except (TypeError, ValueError):
+                    pass
+            pose_count += 1
+    if pose_count or event_count:
+        info(f"logged motion tracker metadata: poses={pose_count}, events={event_count}")
 
 
 # ---------------------------------------------------------------------------
@@ -2428,6 +2909,12 @@ def run(args: argparse.Namespace) -> int:
         guess = input_path.parent / "manifest.json"
         if guess.exists():
             manifest_path = guess
+    operator_static = load_operator_static_metadata(input_path)
+    _android_timebase = load_android_timebase_metadata(input_path, operator_static)
+    json_metadata_tracks = {
+        kind: load_json_metadata_frames_from_mp4(input_path, kind)
+        for kind in ("rgb_frame_index", "depth_frame_meta", "body_frame_meta", "motion_trackers")
+    }
     profile = detect_device_profile(args.device_type, manifest_path)
     # Profile wins over CLI default for camera_xyz (the user almost
     # never wants Quest's RDF on a Pico capture); explicit non-default
@@ -2488,6 +2975,10 @@ def run(args: argparse.Namespace) -> int:
     tracks = collect_tracks(reader)
     if not tracks["body_joints"]:
         body_frames_by_track = load_body_joint_frames_from_mp4(input_path)
+        if not body_frames_by_track:
+            body_frames_by_track = body_frames_from_json_metadata(
+                json_metadata_tracks.get("body_frame_meta", {})
+            )
         if body_frames_by_track:
             tracks = collect_tracks(reader, body_frames_by_track)
     info("timed-metadata tracks: " + ", ".join(
@@ -2565,7 +3056,7 @@ def run(args: argparse.Namespace) -> int:
     K_rgb = reader.get_rgb_intrinsics_left() if has_rgb else None
     T_I_Srgb = reader.get_rgb_extrinsics_left().as_se3() if has_rgb else None
     camera2_projection = (
-        load_camera2_projection_calibration(input_path, profile, "left") if has_rgb else None
+        load_camera2_projection_calibration(input_path, profile, "left", operator_static) if has_rgb else None
     )
 
     depth_w = reader.get_depth_width() if has_depth else 0
@@ -2662,6 +3153,7 @@ def run(args: argparse.Namespace) -> int:
         body_to_hand_bridges,
     )
     log_all_controller_input_tracks(reader, tracks["controller_input"])
+    log_all_motion_tracker_tracks(json_metadata_tracks.get("motion_trackers", {}), profile)
 
     # ---- RFC-003 H2 robot ------------------------------------------------
     if not args.no_robot:
