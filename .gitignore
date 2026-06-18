@@ -23,6 +23,7 @@ xr/native/godot_mujoco/godot-cpp
 xr/addons/godot_retargeting/bin/*.so
 xr/native/godot_retargeting/build-*/
 xr/native/godot_retargeting/godot-cpp
+xr/native/godot_retargeting/retargeting
 *.import
 *.uid
 

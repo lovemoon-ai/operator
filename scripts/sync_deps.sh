@@ -17,10 +17,11 @@ FFMPEG_TAG="n8.1.1"
 PINOCCHIO_ANDROID_COMMIT="74b44aff2fd00f66adb15d348f401b1579cc4126"
 MUJOCO_ANDROID_COMMIT="f26b7cde4643b1b223e94f25c740b5cf13c6aab3"
 SPATIALMP4_COMMIT="7b2549eb6b2b0b281510b375d7e3f8967b438f49"
+RETARGETING_COMMIT="600b3573587c4b9025422397440495b408d7b275"
 
 usage() {
     cat <<EOF
-Usage: $0 [all|web|godot-xr-tools|godot-cpp|ffmpeg|pinocchio-android|mujoco-android|spatialmp4]...
+Usage: $0 [all|web|godot-xr-tools|godot-cpp|ffmpeg|pinocchio-android|mujoco-android|retargeting|spatialmp4]...
 
 Environment:
   OPERATOR_DEPS_CACHE_ROOT  Dependency root (default: $DEFAULT_OPERATOR_DEPS_CACHE_ROOT)
@@ -253,6 +254,29 @@ sync_mujoco_android() {
         "main"
 }
 
+sync_retargeting() {
+    # Standalone two-layer retargeting toolkit (DuinoDu/retargeting). The CMake
+    # source lives under app/ and app/CMakeLists.txt includes ../cmake/
+    # nlohmann_json.cmake, so godot_retargeting symlinks the whole repo root and
+    # add_subdirectory(retargeting/app). MuJoCo-only on Android (the toolkit's
+    # CMake honors RETARGETING_WITH_PINOCCHIO/MUJOCO + MUJOCO_ROOT/MUJOCO_LIB).
+    sync_repo \
+        "retargeting" \
+        "${RETARGETING_URL:-https://github.com/DuinoDu/retargeting.git}" \
+        "refs/heads/main" \
+        "refs/remotes/origin/main" \
+        "$RETARGETING_COMMIT" \
+        "main"
+
+    local link_target=""
+    if [ "$OPERATOR_DEPS_CACHE_ROOT" = "$DEFAULT_OPERATOR_DEPS_CACHE_ROOT" ]; then
+        link_target="../../../.deps/src/retargeting"
+    else
+        link_target="$DEPS_SRC_DIR/retargeting"
+    fi
+    ensure_symlink "$REPO_ROOT/xr/native/godot_retargeting/retargeting" "$link_target"
+}
+
 sync_spatialmp4() {
     sync_repo \
         "SpatialMP4" \
@@ -278,6 +302,7 @@ for dep in "$@"; do
             sync_ffmpeg
             sync_pinocchio_android
             sync_mujoco_android
+            sync_retargeting
             ;;
         web)
             sync_spatialmp4
@@ -296,6 +321,9 @@ for dep in "$@"; do
             ;;
         mujoco-android)
             sync_mujoco_android
+            ;;
+        retargeting)
+            sync_retargeting
             ;;
         spatialmp4|SpatialMP4)
             sync_spatialmp4
