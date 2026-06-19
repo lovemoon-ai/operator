@@ -77,7 +77,7 @@ xr/addons/pinocchio/
 ├── libpinocchio_gd.so         wrapper (built artifact, gitignored)
 └── libpinocchio_default.so    core   (built artifact, gitignored)
 
-xr/native/pinocchio/
+xr/native/godot_pinocchio/
 ├── CMakeLists.txt             builds libpinocchio_gd.so
 ├── build.sh                   thin wrapper that calls cmake
 └── src/
@@ -490,7 +490,7 @@ Common idioms:
 | `Eigen::VectorXd → PackedFloat64Array` | `to_godot(v)` |
 | `Eigen::MatrixXd → row-major PackedFloat64Array` | `to_godot_rowmajor(M)` |
 
-All in `xr/native/pinocchio/src/eigen_godot.h`.
+All in `xr/native/godot_pinocchio/src/eigen_godot.h`.
 
 Pitfall: if you reach for `<pinocchio/algorithm/joint-configuration.hpp>`,
 note that we deliberately don't include it — the `tangentMapProduct`
@@ -515,14 +515,14 @@ For 1-DoF scalar joints, `neutral()` is zero and `integrate(q, v)` is
 | Later | CRBA-based mass matrix inverse cache | `aba()` already gives this; rarely worth re-caching |
 
 When you ship a feature that doesn't fit the V1 surface, update both
-this README and `xr/native/pinocchio/src/pinocchio_data.h` so the API
+this README and `xr/native/godot_pinocchio/src/pinocchio_data.h` so the API
 stays self-describing.
 
 ---
 
 ## 11. License
 
-The wrapper code (`xr/native/pinocchio/src/*`) is under the operator
+The wrapper code (`xr/native/godot_pinocchio/src/*`) is under the operator
 project's license. Pinocchio itself is BSD-2-Clause; Eigen is MPL-2.0;
 Boost is BSL-1.0. The shipped `.so` bundles whatever the upstream
 `DuinoDu/pinocchio-android` install + vcpkg cross-builds produce.

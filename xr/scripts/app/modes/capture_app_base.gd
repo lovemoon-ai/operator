@@ -7,6 +7,7 @@ const BodyMotionSamplerScript := preload("res://scripts/core/sensors/body_motion
 const BodyPoseProviderScript := preload("res://scripts/robot_constraint/body_pose_provider.gd")
 const BodyPoseDebugOverlayScript := preload("res://scripts/robot_constraint/body_pose_debug_overlay.gd")
 const H2OverlayScript := preload("res://scripts/robot_constraint/robot/h2_overlay.gd")
+const G1OverlayScript := preload("res://scripts/robot_constraint/robot/g1_overlay.gd")
 const TrackingProviderScript := preload("res://scripts/xr/tracking_provider.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/ui/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/ui/view_locked_record_control.gd")
@@ -95,6 +96,23 @@ var _body_pose_debug_provider: Node = null
 var _body_pose_debug_overlay: Node3D = null
 var _h2_debug_provider: Node = null
 var _h2_debug_overlay: Node3D = null
+var _g1_debug_tracking_provider: Node = null
+var _g1_debug_provider: Node = null
+var _g1_debug_overlay: Node3D = null
+## DEBUG toggles for diagnosing the G1 retarget overlay (see g1_overlay.gd #1/#3).
+## DUMP_FRAMES > 0  -> write user://g1_debug.jsonl (per-stage capture for offline diff).
+## REPLAY_QPOS true -> drive the GLB from the bundled known-good qpos sequence,
+##                     bypassing live retargeting (isolates GLB render from input).
+## Both default OFF; flip one, `make ship-quest`, run the G1 overlay, then pull.
+const G1_DEBUG_DUMP_FRAMES := 0
+const G1_DEBUG_REPLAY_QPOS := false
+## DUMP_GLB_REST -> write user://g1_glb_rest.json once (imported link rest
+## transforms) to check Godot's runtime node frames vs the raw glTF the FK was
+## validated against. Safe to combine with REPLAY_QPOS.
+const G1_DEBUG_DUMP_GLB_REST := false
+## Drive a fixed symmetric rest pose (heading seeds to 0) to inspect whether the
+## upper-body yaw offset is downstream of the input. Set false for live use.
+const G1_DEBUG_FIXED_REST := false
 var depth_sampler: Node
 var body_motion_sampler: Node
 var ego_uploader: Node
@@ -215,6 +233,7 @@ var _tracker_last_request_ticks_us := 0
 var _tracker_setup_opened_ticks_us := 0
 var _last_capture_interaction_mode := ""
 var _auto_show_body_pose_debug := false
+var _auto_show_g1_debug := false  # --operator-g1-debug: auto-start G1 overlay (device verification)
 var _motion_tracker_supported_pushed := false
 var _motion_tracker_provider_known := false
 var _depth_supported_pushed := false
@@ -346,6 +365,8 @@ func _ready() -> void:
 		call_deferred("_open_live_feed_settings")
 	if _auto_show_body_pose_debug:
 		call_deferred("_start_body_pose_debug_overlay_from_args")
+	if _auto_show_g1_debug:
+		call_deferred("_start_g1_debug_overlay_from_args")
 
 
 func _apply_automation_args() -> void:
@@ -368,6 +389,15 @@ func _apply_automation_args() -> void:
 			_auto_show_body_pose_debug = _truthy_string(arg.substr("operator.body_pose_debug=".length()))
 		elif arg == "operator.body_pose_debug" and i + 1 < args.size():
 			_auto_show_body_pose_debug = _truthy_string(String(args[i + 1]))
+			i += 1
+		elif arg == "--operator-g1-debug":
+			_auto_show_g1_debug = true
+		elif arg.begins_with("--operator-g1-debug="):
+			_auto_show_g1_debug = _truthy_string(arg.substr("--operator-g1-debug=".length()))
+		elif arg.begins_with("operator.g1_debug="):
+			_auto_show_g1_debug = _truthy_string(arg.substr("operator.g1_debug=".length()))
+		elif arg == "operator.g1_debug" and i + 1 < args.size():
+			_auto_show_g1_debug = _truthy_string(String(args[i + 1]))
 			i += 1
 		i += 1
 
@@ -460,6 +490,11 @@ func _xr_head_pose_confident() -> bool:
 func _start_body_pose_debug_overlay_from_args() -> void:
 	await get_tree().create_timer(1.0).timeout
 	_start_body_pose_debug_overlay_when_xr_tracking_ready("body pose debug launch args")
+
+
+func _start_g1_debug_overlay_from_args() -> void:
+	await get_tree().create_timer(1.0).timeout
+	_start_g1_debug_overlay_when_xr_tracking_ready("g1 debug launch args")
 
 
 func _start_body_pose_debug_overlay_when_xr_tracking_ready(reason: String) -> void:
@@ -1053,6 +1088,8 @@ func _setup_xr_scene() -> void:
 		settings_panel.body_pose_debug_toggled.connect(_on_body_pose_debug_toggled)
 	if settings_panel.has_signal("h2_debug_toggled"):
 		settings_panel.h2_debug_toggled.connect(_on_h2_debug_toggled)
+	if settings_panel.has_signal("g1_debug_toggled"):
+		settings_panel.g1_debug_toggled.connect(_on_g1_debug_toggled)
 	origin.add_child(settings_panel)
 
 	# QR scanner overlay (Camera2 + ZXing). Sits in the same scene tree as
@@ -1235,8 +1272,79 @@ func _stop_h2_debug_overlay() -> void:
 	_set_debug_panel_state()
 
 
+func _on_g1_debug_toggled() -> void:
+	if _g1_debug_overlay != null:
+		_stop_g1_debug_overlay()
+	else:
+		_start_g1_debug_overlay_when_xr_tracking_ready("g1 debug toggle")
+		_hide_settings_for_debug_overlay()
+	_set_debug_panel_state()
+
+
+func _start_g1_debug_overlay_when_xr_tracking_ready(_reason: String) -> void:
+	if _g1_debug_overlay != null:
+		return
+	_start_g1_debug_overlay()
+
+
+func _start_g1_debug_overlay() -> void:
+	if _g1_debug_overlay != null:
+		return
+	# Stand up a body-pose source so the overlay is driven by live VR body pose
+	# (same source the body-pose debug overlay uses); retargeting maps it to G1.
+	_prepare_body_pose_debug_sources()
+	var tracking_provider: Node = TrackingProviderScript.new()
+	tracking_provider.name = "G1BodyPoseTrackingProvider"
+	add_child(tracking_provider)
+
+	var provider: Node = BodyPoseProviderScript.new()
+	provider.name = "G1BodyPoseProvider"
+	provider.call("configure", tracking_provider, pico_openxr_bridge)
+	provider.set("source_mode", _body_pose_debug_source_mode())
+	provider.set("sample_rate_hz", 60.0)
+	add_child(provider)
+	provider.call("set_enabled", true)
+
+	var overlay: Node3D = G1OverlayScript.new()
+	overlay.name = "DebugG1RetargetOverlay"
+	overlay.set("debug_place_in_front_of_view", true)
+	if G1_DEBUG_DUMP_FRAMES > 0:
+		overlay.set("debug_dump_frames", G1_DEBUG_DUMP_FRAMES)
+	if G1_DEBUG_REPLAY_QPOS:
+		overlay.set("debug_replay_qpos", true)
+	if G1_DEBUG_DUMP_GLB_REST:
+		overlay.set("debug_dump_glb_rest", true)
+	if G1_DEBUG_FIXED_REST:
+		overlay.set("debug_fixed_rest_pose", true)
+	overlay.call("set_head_camera", hmd_camera)
+	add_child(overlay)
+	overlay.call("set_body_pose_provider", provider)
+
+	_g1_debug_tracking_provider = tracking_provider
+	_g1_debug_provider = provider
+	_g1_debug_overlay = overlay
+	print("[CaptureApp] G1 retarget overlay on")
+
+
+func _stop_g1_debug_overlay() -> void:
+	var had_overlay := _g1_debug_overlay != null or _g1_debug_provider != null
+	if _g1_debug_overlay != null:
+		_g1_debug_overlay.queue_free()
+		_g1_debug_overlay = null
+	if _g1_debug_provider != null:
+		_g1_debug_provider.call("set_enabled", false)
+		_g1_debug_provider.queue_free()
+		_g1_debug_provider = null
+	if _g1_debug_tracking_provider != null:
+		_g1_debug_tracking_provider.queue_free()
+		_g1_debug_tracking_provider = null
+	if had_overlay:
+		print("[CaptureApp] G1 retarget overlay off")
+	_set_debug_panel_state()
+
+
 func _any_debug_overlay_visible() -> bool:
-	return _body_pose_debug_overlay != null or _h2_debug_overlay != null
+	return _body_pose_debug_overlay != null or _h2_debug_overlay != null or _g1_debug_overlay != null
 
 
 func _hide_settings_for_debug_overlay() -> void:
@@ -1273,6 +1381,7 @@ func _hide_debug_settings_button() -> void:
 func _on_debug_settings_button_pressed() -> void:
 	_stop_body_pose_debug_overlay()
 	_stop_h2_debug_overlay()
+	_stop_g1_debug_overlay()
 	_hide_debug_settings_button()
 	_on_settings_requested()
 
@@ -1282,6 +1391,8 @@ func _set_debug_panel_state() -> void:
 		settings_panel.call("set_body_pose_debug_visible", _body_pose_debug_overlay != null)
 	if settings_panel != null and settings_panel.has_method("set_h2_debug_visible"):
 		settings_panel.call("set_h2_debug_visible", _h2_debug_overlay != null)
+	if settings_panel != null and settings_panel.has_method("set_g1_debug_visible"):
+		settings_panel.call("set_g1_debug_visible", _g1_debug_overlay != null)
 
 
 func _platform_registry() -> PlatformRegistry:
