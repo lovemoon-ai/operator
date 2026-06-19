@@ -15,11 +15,13 @@ GODOT_XR_TOOLS_COMMIT="5570cc7560eece651eb6eeea47311c96535ec712"
 GODOT_CPP_COMMIT="60b5a4196de8442b43b32ba68ebe1e79cfcb762f"
 FFMPEG_TAG="n8.1.1"
 PINOCCHIO_ANDROID_COMMIT="74b44aff2fd00f66adb15d348f401b1579cc4126"
+MUJOCO_ANDROID_COMMIT="f26b7cde4643b1b223e94f25c740b5cf13c6aab3"
 SPATIALMP4_COMMIT="7b2549eb6b2b0b281510b375d7e3f8967b438f49"
+RETARGETING_COMMIT="447ef38eb082ed95fa02273790d3e1c4518757e2"
 
 usage() {
     cat <<EOF
-Usage: $0 [all|web|godot-xr-tools|godot-cpp|ffmpeg|pinocchio-android|spatialmp4]...
+Usage: $0 [all|web|godot-xr-tools|godot-cpp|ffmpeg|pinocchio-android|mujoco-android|retargeting|spatialmp4]...
 
 Environment:
   OPERATOR_DEPS_CACHE_ROOT  Dependency root (default: $DEFAULT_OPERATOR_DEPS_CACHE_ROOT)
@@ -204,7 +206,7 @@ sync_godot_cpp() {
     fi
 
     local addon=""
-    for addon in ahb_decoder pico_openxr godot_mujoco pinocchio; do
+    for addon in ahb_decoder pico_openxr godot_mujoco godot_pinocchio godot_retargeting; do
         ensure_symlink \
             "$REPO_ROOT/xr/native/$addon/godot-cpp" \
             "$link_target"
@@ -236,6 +238,45 @@ sync_pinocchio_android() {
         "main"
 }
 
+sync_mujoco_android() {
+    # Android build wrapper for google-deepmind/mujoco. Mirrors
+    # sync_pinocchio_android: the pristine checkout lives in
+    # .deps/src/mujoco-android and the actual build is driven by
+    # xr/makefiles/Makefile.mujoco-android against a per-ABI git worktree under
+    # .deps/build/mujoco-android/<abi>/src so that `git clean -fdx` (run by
+    # sync_repo) never wipes build artifacts.
+    sync_repo \
+        "mujoco-android" \
+        "${MUJOCO_ANDROID_URL:-https://github.com/DuinoDu/mujoco-android.git}" \
+        "refs/heads/main" \
+        "refs/remotes/origin/main" \
+        "$MUJOCO_ANDROID_COMMIT" \
+        "main"
+}
+
+sync_retargeting() {
+    # Standalone two-layer retargeting toolkit (DuinoDu/retargeting). The CMake
+    # source lives under app/ and app/CMakeLists.txt includes ../cmake/
+    # nlohmann_json.cmake, so godot_retargeting symlinks the whole repo root and
+    # add_subdirectory(retargeting/app). MuJoCo-only on Android (the toolkit's
+    # CMake honors RETARGETING_WITH_PINOCCHIO/MUJOCO + MUJOCO_ROOT/MUJOCO_LIB).
+    sync_repo \
+        "retargeting" \
+        "${RETARGETING_URL:-https://github.com/DuinoDu/retargeting.git}" \
+        "refs/heads/main" \
+        "refs/remotes/origin/main" \
+        "$RETARGETING_COMMIT" \
+        "main"
+
+    local link_target=""
+    if [ "$OPERATOR_DEPS_CACHE_ROOT" = "$DEFAULT_OPERATOR_DEPS_CACHE_ROOT" ]; then
+        link_target="../../../.deps/src/retargeting"
+    else
+        link_target="$DEPS_SRC_DIR/retargeting"
+    fi
+    ensure_symlink "$REPO_ROOT/xr/native/godot_retargeting/retargeting" "$link_target"
+}
+
 sync_spatialmp4() {
     sync_repo \
         "SpatialMP4" \
@@ -260,6 +301,8 @@ for dep in "$@"; do
             sync_godot_cpp
             sync_ffmpeg
             sync_pinocchio_android
+            sync_mujoco_android
+            sync_retargeting
             ;;
         web)
             sync_spatialmp4
@@ -275,6 +318,12 @@ for dep in "$@"; do
             ;;
         pinocchio-android)
             sync_pinocchio_android
+            ;;
+        mujoco-android)
+            sync_mujoco_android
+            ;;
+        retargeting)
+            sync_retargeting
             ;;
         spatialmp4|SpatialMP4)
             sync_spatialmp4

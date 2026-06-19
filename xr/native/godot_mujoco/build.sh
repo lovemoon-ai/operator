@@ -19,7 +19,13 @@ else
 fi
 GODOT_CPP_BUILD="$DEPS_ROOT/build/godot-cpp"
 DEPS_SCRIPT="$REPO_ROOT/scripts/sync_deps.sh"
-MUJOCO_ANDROID_ROOT="${MUJOCO_ANDROID_ROOT:-/home/duino/opt/mujoco_android}"
+# Default to the install produced by `make -C xr build-mujoco-android`
+# (xr/makefiles/Makefile.mujoco-android), mirroring how the pinocchio addon
+# consumes the pinocchio-android install. Override MUJOCO_ANDROID_ROOT to point
+# at any other prebuilt MuJoCo Android tree.
+MUJOCO_ANDROID_ABI="${MUJOCO_ANDROID_ABI:-arm64-v8a}"
+MUJOCO_ANDROID_INSTALL_DEFAULT="$DEPS_ROOT/build/mujoco-android/$MUJOCO_ANDROID_ABI/src/build/android/$MUJOCO_ANDROID_ABI/install"
+MUJOCO_ANDROID_ROOT="${MUJOCO_ANDROID_ROOT:-$MUJOCO_ANDROID_INSTALL_DEFAULT}"
 
 cd "$SCRIPT_DIR"
 
