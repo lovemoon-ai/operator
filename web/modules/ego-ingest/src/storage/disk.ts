@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, rename, rmdir, stat, unlink } from "node:fs/promises";
+import { mkdir, rename, rmdir, stat, truncate, unlink } from "node:fs/promises";
 import path from "node:path";
-import { PassThrough, type Writable } from "node:stream";
+import type { Writable } from "node:stream";
 
 import type { ArtifactWriteHandle, FinalizedLocator, StorageDriver } from "./index.js";
 import type { UploadMetadata } from "../types.js";
@@ -37,7 +37,6 @@ const PARTIAL_DIR = ".partial";
 export class DiskStorage implements StorageDriver {
   private readonly root: string;
   private readonly computeHashes: boolean;
-  private readonly hashers = new Map<string, ReturnType<typeof createHash>>();
 
   constructor(opts: DiskStorageOptions) {
     this.root = path.resolve(opts.root);
@@ -112,16 +111,12 @@ export class DiskStorage implements StorageDriver {
 
   private handle(resourceId: string): ArtifactWriteHandle {
     const partial = this.partialPath(resourceId);
-    let hasher: ReturnType<typeof createHash> | undefined;
-    if (this.computeHashes) {
-      hasher = this.hashers.get(resourceId) ?? createHash("sha256");
-      this.hashers.set(resourceId, hasher);
-    }
 
     // Each chunk gets a fresh append stream — Node's streams complete
     // their lifecycle per request, and reusing a Writable across two
     // PATCH bodies invites half-flushed state on disconnect.
     const fileStream = createWriteStream(partial, { flags: "a" });
+    let fileClosed = false;
     const fileDone = new Promise<void>((resolve, reject) => {
       const cleanup = () => {
         fileStream.off("error", onError);
@@ -138,34 +133,26 @@ export class DiskStorage implements StorageDriver {
       fileStream.once("error", onError);
       fileStream.once("finish", onFinish);
     });
-    // fs.WriteStream is write-only and does NOT emit 'data', so we can't
-    // attach a hasher to it directly. Wrap with a PassThrough so the
-    // middleware writes through us, we tap each chunk into the hash,
-    // and then forward to the underlying file. The PassThrough is what
-    // we hand back as `appendStream`.
-    let appendStream: Writable;
-    if (hasher) {
-      const tap = new PassThrough();
-      const h = hasher;
-      tap.on("data", (chunk: Buffer) => h.update(chunk));
-      tap.pipe(fileStream);
-      // Forward finish/error from the file back up so callers awaiting
-      // 'finish' on `appendStream` still see flush completion.
-      fileStream.on("error", (err) => tap.destroy(err));
-      appendStream = tap;
-    } else {
-      appendStream = fileStream;
-    }
+    const fileClosedDone = new Promise<void>((resolve) => {
+      fileStream.once("close", () => {
+        fileClosed = true;
+        resolve();
+      });
+    });
+    const appendStream: Writable = fileStream;
 
     return {
       resourceId,
       appendStream,
       commitChunk: async (_newOffset: number) => {
-        // The middleware waits for appendStream.finish. With hashing enabled
-        // appendStream is a PassThrough, so finish only proves the request body
-        // entered the pipe; wait for the underlying fs.WriteStream too before
-        // publishing a new TUS offset or finalizing the resource.
+        // The middleware waits for appendStream.finish; keep the storage
+        // contract explicit here before publishing a new TUS offset.
         await fileDone;
+      },
+      abortChunk: async (committedOffset: number) => {
+        if (!fileClosed) fileStream.destroy();
+        await Promise.allSettled([fileDone, fileClosedDone]);
+        await truncate(partial, committedOffset);
       },
       finalize: async (metadata: UploadMetadata, totalBytes: number): Promise<FinalizedLocator> => {
         const sessionDir = path.join(this.root, sanitizeSegment(metadata.session_id || resourceId));
@@ -181,12 +168,12 @@ export class DiskStorage implements StorageDriver {
         if (sz.size !== totalBytes) {
           throw new Error(`Disk size mismatch for ${target}: expected ${totalBytes}, got ${sz.size}`);
         }
-        const sha256 = hasher ? hasher.digest("hex") : undefined;
-        this.hashers.delete(resourceId);
+        const sha256 = this.computeHashes ? await sha256File(target) : undefined;
         return { uri: target, bytes: sz.size, sha256 };
       },
       dispose: async () => {
-        this.hashers.delete(resourceId);
+        if (!fileClosed) fileStream.destroy();
+        await Promise.allSettled([fileDone, fileClosedDone]);
         try {
           await unlink(partial);
         } catch (err) {
@@ -234,4 +221,17 @@ async function createEmptyIfMissing(p: string): Promise<void> {
     const fh = await import("node:fs/promises").then((m) => m.open(p, "a"));
     await fh.close();
   }
+}
+
+async function sha256File(p: string): Promise<string> {
+  const hasher = createHash("sha256");
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(p);
+    stream.on("data", (chunk) => {
+      hasher.update(chunk);
+    });
+    stream.once("error", reject);
+    stream.once("end", resolve);
+  });
+  return hasher.digest("hex");
 }

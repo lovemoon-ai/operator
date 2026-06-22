@@ -136,6 +136,42 @@ async fn stop_triggers_emergency_stop() {
 }
 
 #[tokio::test]
+async fn peer_disconnect_triggers_emergency_stop() {
+    let (endpoint, handle) = spawn_server().await;
+
+    let conn = timeout(T, connect(&endpoint)).await.unwrap().unwrap();
+    let mut framed = Framed::new(conn, BridgeCodec::default());
+
+    assert_eq!(handle.estop_count(), 0);
+
+    framed.send(BridgeToAdapter::Hello).await.unwrap();
+    let mut got_descriptor = false;
+    for _ in 0..20 {
+        let item = timeout(T, framed.next()).await.unwrap().unwrap().unwrap();
+        if matches!(item, AdapterToBridge::Descriptor(_)) {
+            got_descriptor = true;
+            break;
+        }
+    }
+    assert!(got_descriptor, "did not receive a Descriptor");
+
+    drop(framed);
+
+    timeout(T, async {
+        loop {
+            if handle.estop_count() >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("emergency_stop was never triggered after peer disconnect");
+
+    assert_eq!(handle.estop_count(), 1);
+}
+
+#[tokio::test]
 async fn shutdown_closes_connection() {
     let (endpoint, _handle) = spawn_server().await;
 

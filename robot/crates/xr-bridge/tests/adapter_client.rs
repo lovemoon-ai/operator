@@ -117,6 +117,46 @@ async fn spawn_mock_adapter(descriptor: DeviceDescriptor) -> MockAdapter {
     }
 }
 
+async fn spawn_bursting_adapter(descriptor: DeviceDescriptor, frames: u64) -> Endpoint {
+    let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+        .await
+        .expect("bind mock adapter");
+    let endpoint = listener.endpoint();
+
+    tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        let mut framed = Framed::new(conn, AdapterCodec);
+
+        while let Some(item) = framed.next().await {
+            let msg = match item {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            match msg {
+                BridgeToAdapter::Hello => {
+                    framed
+                        .send(AdapterToBridge::Descriptor(descriptor.clone()))
+                        .await
+                        .expect("send descriptor");
+                    for timestamp_ns in 0..frames {
+                        framed
+                            .send(AdapterToBridge::Telemetry(DeviceTelemetry {
+                                values: HashMap::new(),
+                                timestamp_ns,
+                            }))
+                            .await
+                            .expect("send telemetry");
+                    }
+                }
+                BridgeToAdapter::Stop { .. } | BridgeToAdapter::Shutdown => break,
+                BridgeToAdapter::Command(_) => {}
+            }
+        }
+    });
+
+    endpoint
+}
+
 #[tokio::test]
 async fn connect_handshake_returns_descriptor() {
     let desc = test_descriptor();
@@ -212,6 +252,28 @@ async fn events_receiver_sees_full_messages() {
         AdapterToBridge::Telemetry(t) => assert_eq!(t.timestamp_ns, 12345),
         other => panic!("expected Telemetry, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn telemetry_watch_does_not_depend_on_unread_events_receiver() {
+    let desc = test_descriptor();
+    let endpoint = spawn_bursting_adapter(desc, 400).await;
+
+    let mut client = AdapterClient::connect(&endpoint).await.unwrap();
+    let mut telemetry = client.telemetry();
+    let _ = client.handshake().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            telemetry.changed().await.expect("telemetry channel closed");
+            let latest = telemetry.borrow_and_update().clone().expect("telemetry");
+            if latest.timestamp_ns >= 399 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("telemetry reader stalled behind unread events receiver");
 }
 
 /// Poll the mock's received-command buffer until at least one command lands.

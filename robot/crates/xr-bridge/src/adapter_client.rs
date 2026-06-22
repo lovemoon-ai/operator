@@ -7,8 +7,8 @@
 //!
 //! * a `watch::Receiver<Option<DeviceTelemetry>>` holding the latest telemetry
 //!   (drop-old semantics — callers only care about the freshest sample), and
-//! * an `mpsc::Receiver<AdapterToBridge>` carrying every inbound message
-//!   (telemetry, events) for callers that want the full stream.
+//! * an `mpsc::Receiver<AdapterToBridge>` carrying a best-effort stream of
+//!   inbound messages (telemetry, events) for diagnostics.
 //!
 //! Lifecycle: [`connect`](AdapterClient::connect) →
 //! [`handshake`](AdapterClient::handshake) (sends `Hello`, awaits
@@ -50,7 +50,7 @@ pub struct AdapterClient {
     telemetry_tx: watch::Sender<Option<DeviceTelemetry>>,
     /// Kept alive so the watch channel never closes from the receiver side.
     telemetry_rx: watch::Receiver<Option<DeviceTelemetry>>,
-    /// Inbound message fan-out sender (cloned into the reader task).
+    /// Best-effort inbound message fan-out sender (cloned into the reader task).
     events_tx: mpsc::Sender<AdapterToBridge>,
     /// The receiving end, handed out once via [`take_events`].
     events_rx: Option<mpsc::Receiver<AdapterToBridge>>,
@@ -161,10 +161,11 @@ impl AdapterClient {
         self.telemetry_rx.clone()
     }
 
-    /// Take the full inbound-message receiver. Returns `None` if already taken.
+    /// Take the best-effort inbound-message receiver. Returns `None` if already
+    /// taken.
     ///
-    /// Callers that want every `AdapterToBridge` (events as well as telemetry)
-    /// use this; callers that only want the latest telemetry use
+    /// Callers that want diagnostic access to inbound `AdapterToBridge`
+    /// messages use this; callers that only want the latest telemetry use
     /// [`telemetry`](Self::telemetry).
     pub fn take_events(&mut self) -> Option<mpsc::Receiver<AdapterToBridge>> {
         self.events_rx.take()
@@ -181,7 +182,7 @@ impl AdapterClient {
     }
 
     /// Move the read half into a background task that forwards inbound messages
-    /// to the telemetry watch (latest) and the events mpsc (all).
+    /// to the telemetry watch (latest) and the events mpsc (best effort).
     fn spawn_reader(&mut self, mut stream: Stream) {
         let telemetry_tx = self.telemetry_tx.clone();
         let events_tx = self.events_tx.clone();
@@ -192,12 +193,17 @@ impl AdapterClient {
                         if let AdapterToBridge::Telemetry(t) = &msg {
                             let _ = telemetry_tx.send(Some(t.clone()));
                         }
-                        // Forward the full message; drop if no one is listening.
-                        if events_tx.send(msg).await.is_err() {
-                            // Events receiver gone — keep updating telemetry
-                            // watch only, since that path has no backpressure.
-                            tracing::trace!("events receiver dropped; telemetry-only mode");
-                            // Continue draining so telemetry stays fresh.
+                        // The events channel is diagnostic. It must never
+                        // backpressure the reader because that would also stall
+                        // the telemetry watch used by the production bridge.
+                        match events_tx.try_send(msg) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                tracing::trace!("events receiver lagging; dropping adapter event");
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                tracing::trace!("events receiver dropped; telemetry-only mode");
+                            }
                         }
                     }
                     Err(e) => {

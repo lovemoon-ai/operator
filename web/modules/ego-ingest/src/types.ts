@@ -5,7 +5,7 @@
 // out of this file.
 
 export const TUS_VERSION = "1.0.0" as const;
-export const SCHEMA_VERSION = "spatialmp4.quest_capture.spool.v2" as const;
+export const SCHEMA_VERSION = "spatialmp4.quest_capture.spool.v3" as const;
 
 export type ArtifactKind = "manifest" | "media" | (string & {});
 
