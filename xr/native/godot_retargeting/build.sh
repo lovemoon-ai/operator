@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Build libgodot_retargeting.so for Android arm64 and stage it with libmujoco.so
-# for both Godot's GDExtension loader and APK packaging. Mirrors
-# native/godot_mujoco/build.sh.
+# for both Godot's GDExtension loader and APK packaging.
 
 set -euo pipefail
 

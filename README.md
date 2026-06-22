@@ -33,6 +33,8 @@ Quest, and Android XR-class devices.
   </tr>
 </table>
 
+Warning: pico neo3 or older version, and quest2 or older version is not supported.
+
 ## Why Operator
 
 | Points | What it unlocks |
@@ -163,31 +165,23 @@ flowchart LR
   Sim --> Dataset
 ```
 
-## Repository Map
-
-| Path | Owns |
-| --- | --- |
-| `xr/` | Godot 4.5 Android XR client, launcher modes, vendor integrations, capture, teleop UI, live feed, device test harness. |
-| `robot/` | Rust `teleop-protocol`, `xr-bridge`, `robot-adapter`, safety, discovery, video relay, and robot drivers. |
-| `web/` | Local ingest, session review, upload tokens, preview generation, and Rerun visualization. |
-| `examples/` | MuJoCo SO-101 simulation and live-feed algorithm server prototypes. |
-| `tests/` | Static validation plus real-device smoke and E2E scripts. |
-| `claw/architecture/` | Current architecture docs and protocol details. |
-
 ## Quick Start
 
-XR builds run from `xr/` and require Godot 4.5.1 stable, matching Android export
-templates, Android platform tools, and a real Android XR device for runtime
-tests.
+XR builds run from `xr/` and require [Godot 4.5.1 stable](https://godotengine.org/download/archive/4.5.1-stable/), matching Android export
+templates, Android platform tools, and a real Android XR device for runtime tests.
 
 ```bash
 cd xr
 make deps
+
+# for quest
 make build-quest
-make build-pico
 make install-quest
-make install-pico
 make ship-quest
+
+# for pico
+make build-pico
+make install-pico
 make ship-pico
 ```
 
@@ -215,37 +209,10 @@ make env
 make run-sim
 ```
 
-## Validation
+## Join group
 
-Static checks that do not launch the XR runtime:
+We are active in XHS, please join us:
 
-```bash
-python3 tests/validate_xr_features.py
-python3 tests/validate_xr_test_manifests.py
-bash tests/03_godot_mujoco_static.sh
-```
+![](docs/figures/xhs-operator-group-qrcode.jpeg)
 
-Device tests run only with the target headset attached:
-
-```bash
-bash tests/01_rtsp_test.sh
-bash tests/02_ego_record.sh
-bash tests/03_godot_mujoco_device.sh --device quest
-bash tests/03_godot_mujoco_device.sh --device pico
-bash tests/04_live_feed_e2e.sh
-bash tests/xr_module_harness.sh --suite capture.pipeline --serial <serial>
-```
-
-Do not use desktop `godot --headless` as a runtime substitute. The XR client
-depends on Android XR device APIs; headless Godot is used for export tooling
-only.
-
-## Docs
-
-- Architecture index: `claw/CLAW.md`
-- System overview: `claw/architecture/overview.md`
-- XR client: `claw/architecture/xr-client.md`
-- Build and deploy: `claw/architecture/build-and-deploy.md`
-- Wire protocols: `claw/architecture/wire-protocol.md`
-- Live Feed: `claw/architecture/live-feed-cloud.md`
-- Robot side: `claw/architecture/rust-agent.md`
+If qr code is out of date, please [create an issue](https://github.com/lovemoon-ai/operator/issues/new) for a new one.
