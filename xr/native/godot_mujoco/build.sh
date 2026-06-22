@@ -40,7 +40,15 @@ fi
 
 if [[ ! -f "$MUJOCO_ANDROID_ROOT/include/mujoco/mujoco.h" || ! -s "$MUJOCO_ANDROID_ROOT/lib/libmujoco.so" ]]; then
     echo "ERROR: MuJoCo Android install not found under $MUJOCO_ANDROID_ROOT" >&2
-    echo "Set MUJOCO_ANDROID_ROOT to a directory containing include/mujoco/mujoco.h and lib/libmujoco.so." >&2
+    echo "       (expected include/mujoco/mujoco.h and lib/libmujoco.so)" >&2
+    echo >&2
+    echo "To fix, do ONE of the following:" >&2
+    echo "  1. Build the MuJoCo Android dependency (recommended):" >&2
+    echo "       make -C $REPO_ROOT/xr build-mujoco-android" >&2
+    echo "     then re-run this script." >&2
+    echo "  2. Point at an existing prebuilt MuJoCo Android tree:" >&2
+    echo "       MUJOCO_ANDROID_ROOT=/path/to/install $0 ${1:-Release}" >&2
+    echo "     where that dir contains include/mujoco/mujoco.h and lib/libmujoco.so." >&2
     exit 1
 fi
 
