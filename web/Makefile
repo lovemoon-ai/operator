@@ -10,8 +10,12 @@ RERUN_BIND ?= 127.0.0.1
 RERUN_SETUP_SPATIALMP4 ?= auto
 OPERATOR_DEPS_CACHE_ROOT ?= $(abspath ../.deps)
 SPATIALMP4_HOME ?= $(OPERATOR_DEPS_CACHE_ROOT)/src/SpatialMP4
-# RERUN_SCRIPT ?= app/scripts/spatialmp4_to_rrd.py
-RERUN_SCRIPT ?= app/scripts/spatialmp4_to_rrd_pico.py
+# Single converter; the device profile (quest/pico) is auto-detected from the
+# mp4's embedded operator_static `provider`, falling back to the manifest's
+# device.device_type, then quest. Force one with DEVICE=pico / --device-type.
+# The old spatialmp4_to_rrd_pico.py wrapper hard-forced --device-type pico,
+# which mis-projected quest captures (skipped the Quest-only Camera2 overlay).
+RERUN_SCRIPT ?= app/scripts/spatialmp4_to_rrd.py
 
 RRD ?= $(basename $(MP4)).rrd
 
