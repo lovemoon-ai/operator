@@ -61,10 +61,6 @@ const DEFAULT_SCRIPT_PATH = fileURLToPath(
   // `app/lib/workers/rerun.ts` → `app/scripts/spatialmp4_to_rrd.py`
   new URL("../../scripts/spatialmp4_to_rrd.py", import.meta.url),
 );
-const PICO_SCRIPT_PATH = fileURLToPath(
-  // Pico captures use the SDK's Pico coordinate profile.
-  new URL("../../scripts/spatialmp4_to_rrd_pico.py", import.meta.url),
-);
 const UV_BIN = process.env.UV_BIN ?? "uv";
 // Escape hatch: if someone really wants to bypass uv and run with a
 // pre-built venv on $PATH, set RERUN_PYTHON_BIN=/path/to/python and we
@@ -153,7 +149,7 @@ export async function runRerunWorker(
   } catch {
     return { status: "error", reason: `media file missing on disk: ${media.uri}` };
   }
-  const scriptPath = selectRerunScript(session);
+  const scriptPath = DEFAULT_SCRIPT_PATH;
   try {
     await stat(scriptPath);
   } catch {
@@ -168,6 +164,11 @@ export async function runRerunWorker(
     "--output", rrdPath,
   ];
   if (TOPK_FRAMES) scriptArgs.push("--topk", TOPK_FRAMES);
+  // The converter auto-detects quest/pico from the mp4's embedded
+  // operator_static provider (and the manifest), but pass --device-type
+  // explicitly for Pico sessions so detection is robust even for older
+  // captures that predate the embedded provider metadata.
+  if (isPicoSession(session)) scriptArgs.push("--device-type", "pico");
 
   const { bin, args } = PYTHON_BIN
     ? { bin: PYTHON_BIN, args: [scriptPath, ...scriptArgs] }
@@ -243,10 +244,6 @@ export async function runRerunWorker(
   });
 
   return { status: "ok", artifactPath: rrdPath, durationMs };
-}
-
-function selectRerunScript(session: SessionRecord): string {
-  return isPicoSession(session) ? PICO_SCRIPT_PATH : DEFAULT_SCRIPT_PATH;
 }
 
 function isPicoSession(session: SessionRecord): boolean {

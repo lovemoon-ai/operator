@@ -516,31 +516,77 @@ PROFILE_PICO = DeviceProfile(
 )
 
 
+# Tokens that mark an Android XR / Glass XR capture. This converter only has
+# Quest and Pico camera profiles, and an Android XR capture silently projects
+# wrong if forced through the Quest profile, so we abort on these instead of
+# guessing. (Today Android XR rides the Quest capture provider, so its only
+# distinguishing signal is an explicit --device-type or a manifest
+# device.device_type slug — operator_static.provider still reports "quest".)
+ANDROIDXR_TOKENS: Tuple[str, ...] = (
+    "androidxr", "android_xr", "android-xr", "glassxr", "glass_xr", "glass xr",
+)
+
+
 def detect_device_profile(
     explicit: Optional[str],
     manifest_path: Optional[Path],
+    operator_static: Optional[Dict[str, Any]] = None,
 ) -> DeviceProfile:
     """Resolve which profile to use, with these priorities:
       1. explicit ``--device-type`` CLI value (``quest`` / ``pico``)
-      2. manifest's ``device.device_type`` field, normalised
-      3. fall back to Quest (the ingest's primary target hardware)
+      2. mp4-embedded ``operator_static.provider`` (self-contained, so this
+         works even when the manifest sidecar is absent — the whole point of
+         the raw-mp4 metadata. ``provider`` is ``quest``/``pico``.)
+      3. manifest's ``device.device_type`` field, normalised
+
+    An explicit/embedded/manifest hint that resolves to Android XR (or to any
+    other recognized-but-unsupported device) is a hard error: we exit rather
+    than silently mis-projecting it as Quest. A genuinely empty hint (old
+    pre-operator_static captures with no manifest) still defaults to Quest,
+    the ingest's primary target — there is nothing there to flag.
     """
-    candidate = (explicit or "").strip().lower()
-    if not candidate and manifest_path is not None and manifest_path.exists():
+    explicit_norm = (explicit or "").strip().lower()
+    provider = ""
+    if isinstance(operator_static, dict):
+        provider = str(operator_static.get("provider", "")).strip().lower()
+    manifest_device_type = ""
+    if manifest_path is not None and manifest_path.exists():
         try:
             mf = json.loads(manifest_path.read_text())
-            candidate = str(mf.get("device", {}).get("device_type", "")).strip().lower()
+            manifest_device_type = str(mf.get("device", {}).get("device_type", "")).strip().lower()
         except (json.JSONDecodeError, OSError) as exc:
-            info(f"manifest read failed ({manifest_path}): {exc}; defaulting to quest")
-            candidate = ""
+            info(f"manifest read failed ({manifest_path}): {exc}")
 
+    # Android XR / Glass XR guard. Scan every hint, not just the winning one,
+    # so a manifest device_type slug still trips this even though Android XR's
+    # operator_static.provider currently masquerades as "quest".
+    hint_blob = " ".join((explicit_norm, provider, manifest_device_type))
+    if any(tok in hint_blob for tok in ANDROIDXR_TOKENS):
+        fatal(
+            "detected an Android XR / Glass XR capture "
+            f"(hint='{hint_blob.strip()}'). This converter only supports the "
+            "Quest and Pico camera profiles; refusing to mis-project it as "
+            "Quest. Add an Android XR device profile before visualizing this "
+            "capture."
+        )
+
+    # explicit CLI flag wins, then embedded provider, then manifest device_type.
+    candidate = explicit_norm or provider or manifest_device_type
     if candidate.startswith("pico"):
         info("device profile: PICO (T_W_S = T_W_H @ T_I_S, sensor RDF, view-space extrinsic)")
         return PROFILE_PICO
     if candidate.startswith("quest"):
         info("device profile: QUEST (head==IMU, RDF camera, no axis perm)")
         return PROFILE_QUEST
-    info(f"device profile: defaulting to QUEST (manifest hint='{candidate}')")
+    if candidate:
+        # A real device hint that is neither quest nor pico (vive, an
+        # unrecognized slug, …). Don't silently fall back to Quest.
+        fatal(
+            f"unsupported device hint '{candidate}'. This converter only has "
+            "Quest and Pico camera profiles; pass --device-type quest|pico to "
+            "override if this device is actually one of them."
+        )
+    info("device profile: defaulting to QUEST (no device hint found)")
     return PROFILE_QUEST
 
 
@@ -1566,6 +1612,32 @@ def _json_metadata_streams(input_path: Path, kind: str) -> List[Tuple[int, str]]
     return result
 
 
+# JSON `mett` tracks added by the self-contained raw-mp4 work. They carry
+# session calibration / per-frame index / event payloads, NOT poses. Some
+# SpatialMP4 SDK builds still return non-empty get_rigid_pose_frames() for
+# them, which mislabels operator_static / rgb_frame_index / ... as camera-pose
+# tracks and logs garbage 3D transforms (huge values -> float32 overflow and
+# blown-up view bounds). Their track ids must be excluded from pose/hand/body
+# classification in collect_tracks().
+JSON_METADATA_KINDS: Tuple[str, ...] = (
+    "operator_static",
+    "rgb_frame_index",
+    "depth_frame_meta",
+    "body_frame_meta",
+    "motion_trackers",
+)
+
+
+def json_metadata_track_ids(input_path: Path) -> set:
+    """Track ids of every JSON `mett` stream, for collect_tracks() exclusion."""
+    ids: set = set()
+    for kind in JSON_METADATA_KINDS:
+        for _stream_index, track_id in _json_metadata_streams(input_path, kind):
+            if track_id:
+                ids.add(track_id)
+    return ids
+
+
 def load_json_metadata_frames_from_mp4(input_path: Path, kind: str) -> Dict[str, List[_TimedJsonFrame]]:
     """Read Operator JSON `mett` packets by metadata kind.
 
@@ -1810,13 +1882,21 @@ def _body_frames_for_track(
 def collect_tracks(
     reader,
     fallback_body_frames: Optional[Dict[str, List[_TimedJointFrame]]] = None,
+    exclude_track_ids: Optional[set] = None,
 ) -> Dict[str, List[str]]:
     fallback_body_frames = fallback_body_frames or {}
+    exclude_track_ids = exclude_track_ids or set()
     rigid: List[str] = []
     hands: List[str] = []
     bodies: List[str] = []
     inputs: List[str] = []
     for tid in reader.list_timed_metadata_tracks():
+        # JSON `mett` tracks (operator_static / rgb_frame_index / ...) are not
+        # poses; skip them so a permissive SDK getter can't mislabel them as
+        # rigid poses. The real body_joints:body track shares its id with
+        # body_frame_meta but is recovered via fallback_body_frames below.
+        if tid in exclude_track_ids:
+            continue
         # Prefer typed body-joint reads before rigid-pose reads. The body
         # track id is literally "body", and older SDK builds can expose that
         # same track through get_rigid_pose_frames even though its handler is
@@ -2915,7 +2995,7 @@ def run(args: argparse.Namespace) -> int:
         kind: load_json_metadata_frames_from_mp4(input_path, kind)
         for kind in ("rgb_frame_index", "depth_frame_meta", "body_frame_meta", "motion_trackers")
     }
-    profile = detect_device_profile(args.device_type, manifest_path)
+    profile = detect_device_profile(args.device_type, manifest_path, operator_static)
     # Profile wins over CLI default for camera_xyz (the user almost
     # never wants Quest's RDF on a Pico capture); explicit non-default
     # CLI flag still wins over profile.
@@ -2972,7 +3052,8 @@ def run(args: argparse.Namespace) -> int:
         fatal("input has neither RGB nor depth — nothing to visualize")
 
     body_frames_by_track: Dict[str, List[_TimedJointFrame]] = {}
-    tracks = collect_tracks(reader)
+    exclude_track_ids = json_metadata_track_ids(input_path)
+    tracks = collect_tracks(reader, exclude_track_ids=exclude_track_ids)
     if not tracks["body_joints"]:
         body_frames_by_track = load_body_joint_frames_from_mp4(input_path)
         if not body_frames_by_track:
@@ -2980,7 +3061,9 @@ def run(args: argparse.Namespace) -> int:
                 json_metadata_tracks.get("body_frame_meta", {})
             )
         if body_frames_by_track:
-            tracks = collect_tracks(reader, body_frames_by_track)
+            tracks = collect_tracks(
+                reader, body_frames_by_track, exclude_track_ids=exclude_track_ids
+            )
     info("timed-metadata tracks: " + ", ".join(
         f"{k}={v}" for k, v in tracks.items()
     ))
@@ -3306,28 +3389,42 @@ def run(args: argparse.Namespace) -> int:
                         pts_world_ov = pts_world[::args.depth_overlay_stride]
                     else:
                         pts_world_ov = pts_world
-                    _, _, T_W_Srgb_camera_at_depth_ts = compose_world_sensor_pose(
-                        head_pose,
-                        T_I_Srgb,
-                        profile,
-                    )
-                    uv_rgb, mask_rgb = project_world_points_to_image(
-                        pts_world_ov,
-                        T_W_Srgb_camera_at_depth_ts,
-                        K_rgb,
-                        rgb_w,
-                        rgb_h,
-                        camera_view_coord=profile.camera_view_coord,
-                        image_rdf_from_camera=profile.image_rdf_from_camera,
-                    )
-                    visible_rgb = int(mask_rgb.sum())
-                    if visible_rgb > 0:
-                        # Colour by distance in the RGB camera's frame
-                        # (not the depth camera's) so blue-near /
-                        # red-far reads relative to what the viewer is
-                        # actually looking at.
+                    if camera2_projection is not None:
+                        # Match the hand overlay: project through the validated
+                        # Quest Camera2 calibration instead of the SDK ecam
+                        # extrinsic (which carries a documented ~10° X-axis
+                        # bias), so depth-on-RGB lines up with the video.
+                        uv_rgb, mask_rgb = project_world_points_to_camera2_image(
+                            pts_world_ov, T_W_root, camera2_projection
+                        )
+                        T_W_C_unity = (
+                            godot_transform_to_unity(T_W_root)
+                            @ camera2_projection.head_from_camera_unity
+                        )
+                        T_C_W_unity = np.linalg.inv(T_W_C_unity)
+                        pts_unity_ov = (UNITY_FROM_GODOT_3 @ pts_world_ov.T).T
+                        z_rgb = (T_C_W_unity[:3, :3] @ pts_unity_ov.T).T[:, 2] + T_C_W_unity[2, 3]
+                    else:
+                        _, _, T_W_Srgb_camera_at_depth_ts = compose_world_sensor_pose(
+                            head_pose,
+                            T_I_Srgb,
+                            profile,
+                        )
+                        uv_rgb, mask_rgb = project_world_points_to_image(
+                            pts_world_ov,
+                            T_W_Srgb_camera_at_depth_ts,
+                            K_rgb,
+                            rgb_w,
+                            rgb_h,
+                            camera_view_coord=profile.camera_view_coord,
+                            image_rdf_from_camera=profile.image_rdf_from_camera,
+                        )
                         T_Srgb_W = np.linalg.inv(T_W_Srgb_camera_at_depth_ts)
                         z_rgb = (T_Srgb_W[:3, :3] @ pts_world_ov.T).T[:, 2] + T_Srgb_W[2, 3]
+                    visible_rgb = int(mask_rgb.sum())
+                    if visible_rgb > 0:
+                        # Colour by distance along the RGB camera axis so
+                        # blue-near / red-far reads relative to the view.
                         ov_colors = depth_colormap_jet(
                             np.abs(z_rgb[mask_rgb]),
                             args.depth_min,
