@@ -4,6 +4,7 @@ import type { Request, RequestHandler, Response } from "express";
 import express from "express";
 
 import { IngestEvents } from "../events.js";
+import type { ArtifactWriteHandle } from "../storage/index.js";
 import type { SessionDeletionTargets } from "../store/index.js";
 import type {
   AuthFn,
@@ -303,11 +304,11 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
     try {
       await done;
     } catch (err) {
-      await handle.dispose().catch(() => {});
+      if (!(await rollbackChunkOrFail(res, handle, storageOffset))) return;
       return tusError(res, 500, `write failed: ${(err as Error).message}`);
     }
     if (written !== contentLength) {
-      await handle.dispose().catch(() => {});
+      if (!(await rollbackChunkOrFail(res, handle, storageOffset))) return;
       return tusError(res, 400, `short body: expected ${contentLength} got ${written}`);
     }
 
@@ -316,7 +317,7 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
     try {
       await handle.commitChunk(newOffset);
     } catch (err) {
-      await handle.dispose().catch(() => {});
+      if (!(await rollbackChunkOrFail(res, handle, storageOffset))) return;
       return tusError(res, 500, `commit failed: ${(err as Error).message}`);
     }
     await opts.store.setResourceOffset(id, newOffset, now);
@@ -550,6 +551,33 @@ async function cleanupSessionStorage(
 
 function tusError(res: Response, status: number, message: string): void {
   res.status(status).type("text/plain").end(message + "\n");
+}
+
+async function rollbackChunkOrFail(
+  res: Response,
+  handle: ArtifactWriteHandle,
+  committedOffset: number,
+): Promise<boolean> {
+  try {
+    await rollbackChunk(handle, committedOffset);
+    return true;
+  } catch (err) {
+    tusError(res, 500, `rollback failed: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+async function rollbackChunk(handle: ArtifactWriteHandle, committedOffset: number): Promise<void> {
+  if (handle.abortChunk) {
+    try {
+      await handle.abortChunk(committedOffset);
+    } catch (err) {
+      await handle.dispose().catch(() => {});
+      throw err;
+    }
+    return;
+  }
+  await handle.dispose();
 }
 
 function newResourceId(): string {

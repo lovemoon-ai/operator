@@ -21,6 +21,12 @@ export interface ArtifactWriteHandle {
    * client-supplied body has fully drained into `appendStream`.
    */
   commitChunk(newOffset: number): Promise<void>;
+  /**
+   * Roll back a failed append to the last committed offset while keeping the
+   * upload resource resumable. Drivers without rollback support may omit this;
+   * callers will fall back to dispose().
+   */
+  abortChunk?(committedOffset: number): Promise<void>;
   /** Final close + (driver-specific) rename-into-place. */
   finalize(metadata: UploadMetadata, totalBytes: number): Promise<FinalizedLocator>;
   /** Abort + cleanup. Safe to call after finalize. */

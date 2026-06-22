@@ -7,7 +7,8 @@
 //! * forwards `Command` frames to [`Device::send_command`] (errors become an
 //!   `Event{kind:"error"}`),
 //! * triggers [`Device::emergency_stop`] on `Stop`,
-//! * exits the connection loop on `Shutdown` or EOF,
+//! * exits the connection loop on `Shutdown`,
+//! * triggers [`Device::emergency_stop`] on EOF or transport failure,
 //! * pushes [`Telemetry`](AdapterToBridge::Telemetry) at ~10 Hz.
 //!
 //! Only one connection is served at a time (single robot). When it closes the
@@ -27,6 +28,12 @@ use crate::device::Device;
 
 /// Telemetry push interval (~10 Hz).
 const TELEMETRY_PERIOD: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionEnd {
+    ShutdownRequested,
+    PeerClosed,
+}
 
 /// Run the adapter server until the listener errors.
 ///
@@ -50,16 +57,24 @@ pub async fn serve(listener: Listener, mut device: Box<dyn Device>) -> Result<()
         };
         tracing::info!("bridge connected");
 
-        if let Err(e) = handle_conn(conn, device.as_mut()).await {
-            tracing::warn!("connection ended with error: {e}");
-        } else {
-            tracing::info!("bridge disconnected");
+        match handle_conn(conn, device.as_mut()).await {
+            Ok(ConnectionEnd::ShutdownRequested) => {
+                tracing::info!("bridge requested shutdown");
+            }
+            Ok(ConnectionEnd::PeerClosed) => {
+                tracing::warn!("bridge disconnected without Shutdown; emergency-stopping device");
+                emergency_stop_after_disconnect(device.as_mut(), "bridge EOF").await;
+            }
+            Err(e) => {
+                tracing::warn!("connection ended with error: {e}");
+                emergency_stop_after_disconnect(device.as_mut(), "connection error").await;
+            }
         }
     }
 }
 
 /// Handle a single bridge connection to completion.
-async fn handle_conn(conn: Conn, device: &mut dyn Device) -> Result<()> {
+async fn handle_conn(conn: Conn, device: &mut dyn Device) -> Result<ConnectionEnd> {
     let mut framed = Framed::new(conn, AdapterCodec::default());
 
     let mut tick = interval(TELEMETRY_PERIOD);
@@ -74,7 +89,7 @@ async fn handle_conn(conn: Conn, device: &mut dyn Device) -> Result<()> {
                     Some(Ok(msg)) => {
                         if handle_message(msg, device, &mut framed).await? {
                             // Shutdown requested.
-                            break;
+                            return Ok(ConnectionEnd::ShutdownRequested);
                         }
                     }
                     Some(Err(e)) => {
@@ -83,7 +98,7 @@ async fn handle_conn(conn: Conn, device: &mut dyn Device) -> Result<()> {
                     }
                     None => {
                         // EOF — bridge closed the connection.
-                        break;
+                        return Ok(ConnectionEnd::PeerClosed);
                     }
                 }
             }
@@ -104,8 +119,12 @@ async fn handle_conn(conn: Conn, device: &mut dyn Device) -> Result<()> {
             }
         }
     }
+}
 
-    Ok(())
+async fn emergency_stop_after_disconnect(device: &mut dyn Device, reason: &str) {
+    if let Err(e) = device.emergency_stop().await {
+        tracing::error!("emergency_stop after {reason} failed: {e}");
+    }
 }
 
 /// Process one inbound message. Returns `Ok(true)` if the connection should

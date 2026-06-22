@@ -38,7 +38,7 @@ signal queue_changed(pending_count: int)
 
 const QUEUE_PATH := "user://ego_upload_queue.json"
 const TUS_VERSION := "1.0.0"
-const SCHEMA_VERSION := "spatialmp4.quest_capture.spool.v2"
+const SCHEMA_VERSION := "spatialmp4.quest_capture.spool.v3"
 const CHUNK_SIZE := 8 * 1024 * 1024            # 8 MB
 const MAX_BACKOFF_SECONDS := 30.0
 const INITIAL_BACKOFF_SECONDS := 1.0

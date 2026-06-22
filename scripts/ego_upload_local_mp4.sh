@@ -76,7 +76,7 @@ echo "  clip.mp4 = $SIZE bytes"
 # Helper: TUS POST (returns Location path)
 tus_create() {
   local upload_len="$1" filename="$2" kind="$3"
-  local meta="session_id $(printf '%s' "$SESS" | base64),artifact_kind $(printf '%s' "$kind" | base64),filename $(printf '%s' "$filename" | base64),schema $(printf 'spatialmp4.quest_capture.spool.v2' | base64)"
+  local meta="session_id $(printf '%s' "$SESS" | base64),artifact_kind $(printf '%s' "$kind" | base64),filename $(printf '%s' "$filename" | base64),schema $(printf 'spatialmp4.quest_capture.spool.v3' | base64)"
   curl_auth -s -i -X POST "${BASE}/api/ingest" \
     -H 'Tus-Resumable: 1.0.0' \
     -H "Upload-Length: $upload_len" \
@@ -87,7 +87,7 @@ tus_create() {
 # --- 2. manifest ---
 echo
 echo "▶ uploading manifest.json"
-MANIFEST_BODY="{\"schema\":\"spatialmp4.quest_capture.spool.v2\",\"session_id\":\"$SESS\",\"local_smoke\":true,\"source\":\"ego_upload_local_mp4.sh\"}"
+MANIFEST_BODY="{\"schema\":\"spatialmp4.quest_capture.spool.v3\",\"session_id\":\"$SESS\",\"local_smoke\":true,\"source\":\"ego_upload_local_mp4.sh\"}"
 MSIZE=${#MANIFEST_BODY}
 MLOC=$(tus_create "$MSIZE" "manifest.json" "manifest")
 [ -n "$MLOC" ] || { echo "✗ manifest POST failed" >&2; exit 2; }
