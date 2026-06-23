@@ -17,7 +17,8 @@ FFMPEG_TAG="n8.1.1"
 PINOCCHIO_ANDROID_COMMIT="74b44aff2fd00f66adb15d348f401b1579cc4126"
 MUJOCO_ANDROID_COMMIT="f26b7cde4643b1b223e94f25c740b5cf13c6aab3"
 SPATIALMP4_COMMIT="7b2549eb6b2b0b281510b375d7e3f8967b438f49"
-RETARGETING_COMMIT="447ef38eb082ed95fa02273790d3e1c4518757e2"
+RETARGETING_TAG="v0.1.0"
+RETARGETING_COMMIT="073c7df024524f950b78d1730561d9aea89743f6"
 
 usage() {
     cat <<EOF
@@ -263,10 +264,10 @@ sync_retargeting() {
     sync_repo \
         "retargeting" \
         "${RETARGETING_URL:-https://github.com/DuinoDu/retargeting.git}" \
-        "refs/heads/main" \
-        "refs/remotes/origin/main" \
+        "refs/tags/$RETARGETING_TAG" \
+        "refs/tags/$RETARGETING_TAG" \
         "$RETARGETING_COMMIT" \
-        "main"
+        ""
 
     local link_target=""
     if [ "$OPERATOR_DEPS_CACHE_ROOT" = "$DEFAULT_OPERATOR_DEPS_CACHE_ROOT" ]; then
