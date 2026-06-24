@@ -16,7 +16,7 @@ GODOT_CPP_COMMIT="60b5a4196de8442b43b32ba68ebe1e79cfcb762f"
 FFMPEG_TAG="n8.1.1"
 PINOCCHIO_ANDROID_COMMIT="74b44aff2fd00f66adb15d348f401b1579cc4126"
 MUJOCO_ANDROID_COMMIT="f26b7cde4643b1b223e94f25c740b5cf13c6aab3"
-SPATIALMP4_COMMIT="7b2549eb6b2b0b281510b375d7e3f8967b438f49"
+SPATIALMP4_COMMIT="da721695829a0e947930f9b7f1a254dd695fb794"
 RETARGETING_TAG="v0.1.0"
 RETARGETING_COMMIT="073c7df024524f950b78d1730561d9aea89743f6"
 
@@ -115,7 +115,7 @@ fetch_ref() {
     if [ "$GIT_DEPTH" != "0" ]; then
         args+=(--depth "$GIT_DEPTH")
     fi
-    args+=(origin "$fetch_ref:$local_ref")
+    args+=(origin "+$fetch_ref:$local_ref")
 
     git -C "$dir" fetch "${args[@]}"
 }

@@ -74,34 +74,12 @@ find_spatialmp4_so() {
     find "$root" -path '*/python/spatialmp4*.so' -type f -print -quit 2>/dev/null || true
 }
 
-patch_spatialmp4_build_ffmpeg() {
-    local script="$SPATIALMP4_HOME/scripts/build_ffmpeg.sh"
-    local tmp=""
-
-    [ -f "$script" ] || die "SpatialMP4 ffmpeg build script missing: $script"
-    if grep -q -- "--pkg-config-flags=--static" "$script"; then
-        return
-    fi
-
-    tmp="$(mktemp)"
-    sed \
-        's/--enable-static --disable-shared --enable-pic --disable-x86asm --disable-asm/--enable-static --disable-shared --enable-pic --disable-x86asm --disable-asm --pkg-config-flags=--static/' \
-        "$script" > "$tmp"
-    cat "$tmp" > "$script"
-    rm -f "$tmp"
-
-    if ! grep -q -- "--pkg-config-flags=--static" "$script"; then
-        die "failed to patch $script for static pkg-config dependency resolution"
-    fi
-    log "patched SpatialMP4 ffmpeg build to use pkg-config --static"
-}
-
 log "sync source checkout"
 "$SCRIPT_DIR/sync_deps.sh" spatialmp4
 
 [ -d "$SPATIALMP4_HOME" ] || die "SpatialMP4 checkout missing: $SPATIALMP4_HOME"
 [ -f "$SPATIALMP4_HOME/CMakeLists.txt" ] || die "not a SpatialMP4 checkout: $SPATIALMP4_HOME"
-patch_spatialmp4_build_ffmpeg
+SOURCE_REVISION="$(git -C "$SPATIALMP4_HOME" rev-parse HEAD)"
 
 PYTHON_BIN="$(python_bin)"
 PY_ABI="$($PYTHON_BIN - <<'PY'
@@ -112,11 +90,13 @@ PY
 BUILD_DIR="$DEPS_BUILD_DIR/spatialmp4/python$PY_ABI"
 HOST_DEPS_DIR="$DEPS_BUILD_DIR/spatialmp4/host_deps"
 HOST_DEPS_LINK="$SPATIALMP4_HOME/scripts/build_ffmpeg"
+SOURCE_REVISION_STAMP="$DEPS_BUILD_DIR/spatialmp4/.source-revision"
 
 if [ "$CLEAN" = "1" ]; then
     log "clean $BUILD_DIR"
     rm -rf "$BUILD_DIR"
 fi
+mkdir -p "$DEPS_BUILD_DIR/spatialmp4"
 mkdir -p "$BUILD_DIR"
 mkdir -p "$HOST_DEPS_DIR"
 
@@ -135,7 +115,7 @@ rm -f "$HOST_DEPS_LINK"
 ln -s "$HOST_DEPS_DIR" "$HOST_DEPS_LINK"
 
 if [ "$BUILD_FFMPEG" = "1" ]; then
-    log "build SpatialMP4 patched ffmpeg"
+    log "build SpatialMP4 ffmpeg"
     (cd "$SPATIALMP4_HOME" && bash scripts/build_ffmpeg.sh)
 else
     log "skip ffmpeg build"
@@ -159,10 +139,12 @@ cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
 
 SO_PATH="$(find_spatialmp4_so "$BUILD_DIR")"
 [ -n "$SO_PATH" ] || die "spatialmp4 Python extension not found under $BUILD_DIR"
+printf '%s\n' "$SOURCE_REVISION" > "$SOURCE_REVISION_STAMP"
 
 cat <<EOF_DONE
 [spatialmp4] ready
   SPATIALMP4_HOME=$SPATIALMP4_HOME
+  source_revision=$SOURCE_REVISION
   build=$BUILD_DIR
   host_deps=$HOST_DEPS_DIR
   module=$SO_PATH

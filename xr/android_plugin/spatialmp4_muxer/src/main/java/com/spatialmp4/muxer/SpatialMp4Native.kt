@@ -53,6 +53,7 @@ object SpatialMp4Native {
         audioChannelLayoutCode: Int
     ): Long
 
+    external fun nativeConfigureRgb(handle: Long, codec: String, csd: ByteArray): Boolean
     external fun nativeConfigureHevc(handle: Long, csd: ByteArray): Boolean
     external fun nativeConfigureDepth(
         handle: Long,
@@ -79,6 +80,14 @@ object SpatialMp4Native {
     // configure AAC after SessionConfig.audioExpected=true. This lets RGB,
     // depth, and timed metadata continue without waiting forever for CSD.
     external fun nativeDisableAudio(handle: Long): Boolean
+
+    external fun nativeWriteRgbPacket(
+        handle: Long,
+        data: ByteArray,
+        ptsUs: Long,
+        durationUs: Long,
+        flags: Int
+    ): Boolean
 
     external fun nativeWriteHevcPacket(
         handle: Long,

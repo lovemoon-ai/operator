@@ -1,6 +1,6 @@
 // Cross-plugin contract for high-rate spatial capture data.
 //
-// Why this exists: RGB packets (HEVC at ~30 fps stereo) and depth frames (raw
+// Why this exists: encoded RGB packets (~30 fps stereo) and depth frames (raw
 // GRAY16LE at ~5 fps, ~200 KB each) need to flow from the provider plugin to
 // the muxer plugin without round-tripping through GDScript Variants on every
 // frame. The contract is a tiny Kotlin/JVM jar that both AARs depend on, so a
@@ -55,6 +55,10 @@ import java.nio.ByteBuffer
 // and per-RGB-frame index JSON into `mett` tracks while keeping legacy sidecar
 // files unchanged.
 //
+// Bumped to 6 alongside selectable RGB video codecs: RgbStreamConfig gains a
+// `codec` tag ("hevc" or "h264") so muxers can tag the MP4 video track with
+// the actual MediaCodec output family.
+//
 // Compatibility matrix:
 //   * v2 provider <-> v2 muxer: audio absent on both sides, unchanged.
 //   * v3 provider <-> v3 muxer: audio packets flow over onAudioCsd /
@@ -63,10 +67,28 @@ import java.nio.ByteBuffer
 //     SessionConfig.bodyJointsExpected is true.
 //   * v5 provider <-> v5 muxer: operator_static and rgb_frame_index JSON
 //     payloads are embedded in MP4 timed metadata tracks.
+//   * v6 provider <-> v6 muxer: RGB packets may be HEVC or H.264; the codec
+//     tag travels with the RGB CSD config.
 //   * Mixed AARs with different embedded contract.jar revisions are unsupported;
 //     rebuild the plugins together instead of relying on Kotlin data-class
 //     constructor compatibility.
-const val CONTRACT_VERSION: Int = 5
+const val CONTRACT_VERSION: Int = 6
+
+enum class RgbVideoCodec(val tag: String) {
+    HEVC("hevc"),
+    H264("h264");
+
+    companion object {
+        fun normalize(raw: String?): String {
+            val normalized = raw.orEmpty().trim().lowercase()
+            return when (normalized) {
+                "h264", "h.264", "avc", "video/avc" -> H264.tag
+                "hevc", "h265", "h.265", "video/hevc" -> HEVC.tag
+                else -> HEVC.tag
+            }
+        }
+    }
+}
 
 /**
  * Per-camera intrinsics + extrinsics + lens distortion, used both for RGB
@@ -109,7 +131,7 @@ data class Intrinsics(
 
 /**
  * Whole-session description handed to [SpatialDataSink.startSession] once per
- * capture. Provider-side code (Camera2 + HEVC encoder + storage helper) is
+ * capture. Provider-side code (Camera2 + RGB encoder + storage helper) is
  * responsible for resolving the output paths, the per-camera intrinsics, and
  * the master clock anchors before invoking; the muxer treats this as an
  * opaque "start the writer with these parameters" message and never reads
@@ -276,7 +298,7 @@ data class AudioStreamConfig(
 
 /**
  * One-shot RGB stream description, emitted as soon as the encoder produces its
- * codec-specific data (HEVC vps/sps/pps blob in `csd`). `cameras` carries one
+ * codec-specific data. `codec` is "hevc" or "h264"; `cameras` carries one
  * Intrinsics per camera, in stereo SBS order (left, right).
  */
 data class RgbStreamConfig(
@@ -284,7 +306,8 @@ data class RgbStreamConfig(
     val height: Int,
     val fps: Int,
     val cameras: List<Intrinsics>,
-    val csd: ByteArray
+    val csd: ByteArray,
+    val codec: String = RgbVideoCodec.HEVC.tag
 ) {
     val camCount: Int get() = cameras.size
 
@@ -297,6 +320,7 @@ data class RgbStreamConfig(
             height == other.height &&
             fps == other.fps &&
             cameras == other.cameras &&
+            codec == other.codec &&
             csd.contentEquals(other.csd)
     }
 
@@ -305,6 +329,7 @@ data class RgbStreamConfig(
         result = 31 * result + height
         result = 31 * result + fps
         result = 31 * result + cameras.hashCode()
+        result = 31 * result + codec.hashCode()
         result = 31 * result + csd.contentHashCode()
         return result
     }

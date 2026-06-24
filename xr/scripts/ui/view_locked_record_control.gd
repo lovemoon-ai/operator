@@ -7,6 +7,7 @@ signal settings_requested
 
 const VIEWPORT_SIZE := Vector2i(250, 370)
 const START_HOLD_SECONDS := 1.0
+const STOP_HOLD_SECONDS := 0.75
 const LONG_HOLD_SECONDS := 2.0
 const PRIMARY_DIAMETER := 122.0
 const SETTINGS_DIAMETER := 76.0
@@ -322,12 +323,21 @@ func _update_controls() -> void:
 	_settings_button.get_parent().visible = not _recording
 	_primary_button.get_parent().visible = _mode != "head"
 	_primary_button.text = tr("UI_STOP") if _recording else tr("UI_START")
+	if _primary_ring != null:
+		_primary_ring.visible = _recording and _mode != "head"
+	if _settings_ring != null:
+		_settings_ring.visible = false
 
 func _requires_hold(action: String) -> bool:
-	return action == "start" or action == "stop" or (action == "settings" and _mode == "hands")
+	return action == "stop"
 
 func _hold_duration(action: String) -> float:
-	return START_HOLD_SECONDS if action == "start" else LONG_HOLD_SECONDS
+	match action:
+		"start":
+			return START_HOLD_SECONDS
+		"stop":
+			return STOP_HOLD_SECONDS
+	return LONG_HOLD_SECONDS
 
 func _begin_hold(action: String) -> void:
 	_cancel_hold()
@@ -354,14 +364,12 @@ func _on_primary_button_down() -> void:
 		_suppress_primary_pressed = false
 	var action := "stop" if _recording else "start"
 	if _requires_hold(action):
-		# 仅在用户真正按住开始停止采集时，播放与按住时长同步的持续倒计时音效。
-		# start 仍沿用短促的 exit_charging，避免误触发时太刺耳。
-		var feedback_event := "stop_countdown" if action == "stop" else "exit_charging"
-		_play_feedback(feedback_event, -4.0)
+		# 仅在用户真正按住停止采集时，播放与按住时长同步的持续倒计时音效。
+		_play_feedback("stop_countdown", -4.0)
 		_begin_hold(action)
 
 func _on_primary_button_up() -> void:
-	if _hold_action == "start" or _hold_action == "stop":
+	if _hold_action == "stop":
 		_cancel_hold()
 		_stop_feedback("stop_countdown")
 
@@ -373,7 +381,7 @@ func _on_primary_mouse_entered() -> void:
 	_play_feedback("hover", -5.0)
 
 func _on_primary_mouse_exited() -> void:
-	if _hold_action == "start" or _hold_action == "stop":
+	if _hold_action == "stop":
 		_cancel_hold()
 		_stop_feedback("stop_countdown")
 

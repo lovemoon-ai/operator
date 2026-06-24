@@ -186,6 +186,7 @@ STRIP="$TOOLCHAIN/bin/llvm-strip"
     --disable-everything \
     --enable-muxer=mp4 \
     --enable-protocol=file \
+    --enable-parser=h264 \
     --enable-parser=hevc \
     --enable-encoder=ffv1
 

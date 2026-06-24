@@ -24,6 +24,8 @@ const QR_TARGET_LIVE_SERVER := "live_server"
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
 const DEFAULT_RGB_FPS := 30
+const DEFAULT_RGB_CODEC := "hevc"
+const PICO_DEFAULT_RGB_RESOLUTION := Vector2i(640, 480)
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -0.86))
@@ -164,6 +166,12 @@ var capture_options := {
 	"audio_channel_layout": "stereo",
 	"audio_sample_rate_hz": 48000,
 	"audio_bitrate_bps": 128000,
+	"rgb_bitrate": DEFAULT_RGB_BITRATE,
+	"rgb_fps": DEFAULT_RGB_FPS,
+	"rgb_width": 0,
+	"rgb_height": 0,
+	"rgb_resolution": "",
+	"rgb_codec": DEFAULT_RGB_CODEC,
 	"server_host": "127.0.0.1",
 	"server_port": 63910,
 	"server_result_port": 63912,
@@ -246,6 +254,7 @@ var _motion_tracker_supported_pushed := false
 var _motion_tracker_provider_known := false
 var _depth_supported_pushed := false
 var _depth_provider_known := false
+var _rgb_recording_provider_pushed := ""
 # Tracks whether we've already fired an up-front requestAudioPermission()
 # prompt for this app session. Audio defaults to ON now, so we surface the
 # system prompt as soon as the capture provider binds -- otherwise the
@@ -630,6 +639,7 @@ func _process(delta: float) -> void:
 	_update_pico_tracker_setup_status(delta)
 	_update_motion_tracker_support_flag()
 	_update_depth_support_flag()
+	_update_rgb_recording_provider()
 	_ensure_audio_permission_prompted()
 
 	if _recording and record_control:
@@ -1582,6 +1592,7 @@ func _start_camera_plugin() -> void:
 	)
 	var configured_result: Variant
 	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
+		camera_plugin.call("setRgbVideoCodec", str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)))
 		configured_result = camera_plugin.call(
 			"configureSpatialMp4SessionWithTime",
 			output_mp4_absolute,
@@ -1615,6 +1626,10 @@ func _start_camera_plugin() -> void:
 			"stereo_rgb": bool(_capture_option("stereo_rgb", true)),
 			"rgb_bitrate": int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
 			"rgb_fps": int(_capture_option("rgb_fps", DEFAULT_RGB_FPS)),
+			"rgb_width": int(_capture_option("rgb_width", 0)),
+			"rgb_height": int(_capture_option("rgb_height", 0)),
+			"rgb_resolution": str(_capture_option("rgb_resolution", "")),
+			"rgb_codec": str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)),
 			"record_audio": want_audio,
 			"audio_channel_layout_code": layout_code,
 			"audio_sample_rate_hz": int(_capture_option("audio_sample_rate_hz", 48000)),
@@ -2056,7 +2071,14 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 		return false
 	var stereo := bool(_capture_option("stereo_rgb", true))
 	var fps := int(_capture_option("rgb_fps", DEFAULT_RGB_FPS))
-	var info: Variant = pico_openxr_bridge.call("start_camera_image_capture", stereo, 640, 480, fps)
+	var resolution := _rgb_resolution_from_capture_options(PICO_DEFAULT_RGB_RESOLUTION)
+	var info: Variant = pico_openxr_bridge.call(
+		"start_camera_image_capture",
+		stereo,
+		resolution.x,
+		resolution.y,
+		fps
+	)
 	if typeof(info) != TYPE_DICTIONARY:
 		push_error("XR_PICO_camera_image start returned invalid info")
 		return false
@@ -2073,6 +2095,25 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 	print("%s startOpenXrCameraImageCapture returned: %s" % [_provider_label(), started])
 	_pico_camera_image_started = started
 	return started
+
+
+func _rgb_resolution_from_capture_options(fallback: Vector2i) -> Vector2i:
+	var width := int(_capture_option("rgb_width", fallback.x))
+	var height := int(_capture_option("rgb_height", fallback.y))
+	if width > 0 and height > 0:
+		return Vector2i(width, height)
+	var resolution := str(_capture_option("rgb_resolution", "")).strip_edges().to_lower()
+	var parts := resolution.split("x", false, 2)
+	if parts.size() == 2:
+		width = int(parts[0])
+		height = int(parts[1])
+		if width > 0 and height > 0:
+			return Vector2i(width, height)
+	return fallback
+
+
+func _rgb_resolution_text(resolution: Vector2i) -> String:
+	return "%dx%d" % [resolution.x, resolution.y]
 
 
 func _pump_pico_openxr_camera_frames(delta: float) -> void:
@@ -2429,6 +2470,26 @@ func _update_depth_support_flag() -> void:
 		# Force the in-memory option off so the configure path / manifest
 		# never claims a depth stream the device cannot produce.
 		capture_options["record_depth"] = false
+
+
+## Push the active capture provider into the RGB recording settings so the
+## resolution / FPS dropdowns expose the runtime-backed choices for PICO or
+## Quest. The panel owns clamping stale saved values to its provider defaults;
+## after that we merge its current snapshot back into capture_options.
+func _update_rgb_recording_provider() -> void:
+	if settings_panel == null or not settings_panel.has_method("set_capture_provider_name"):
+		return
+	if camera_plugin == null:
+		_bind_android_plugin()
+	if camera_plugin == null:
+		return
+	var provider := CaptureProviderRegistryScript.provider_name(camera_plugin)
+	if provider.is_empty() or provider == _rgb_recording_provider_pushed:
+		return
+	_rgb_recording_provider_pushed = provider
+	settings_panel.call("set_capture_provider_name", provider)
+	if settings_panel.has_method("get_options"):
+		_merge_capture_options(settings_panel.get_options())
 
 
 ## Audio defaults to ON, so we proactively request the RECORD_AUDIO runtime

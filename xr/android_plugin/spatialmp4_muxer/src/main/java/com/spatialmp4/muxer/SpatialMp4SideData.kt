@@ -14,7 +14,21 @@ data class SpatialMp4SideData(
 
 object SpatialMp4SideDataPacker {
     fun packRgb(left: JSONObject, right: JSONObject?): SpatialMp4SideData {
-        val cameras = listOfNotNull(normalizeCamera(left), right?.let(::normalizeCamera))
+        return packRgb(left, 0, 0, right, 0, 0)
+    }
+
+    fun packRgb(
+        left: JSONObject,
+        leftWidth: Int,
+        leftHeight: Int,
+        right: JSONObject?,
+        rightWidth: Int,
+        rightHeight: Int
+    ): SpatialMp4SideData {
+        val cameras = listOfNotNull(
+            normalizeCamera(left, leftWidth, leftHeight),
+            right?.let { normalizeCamera(it, rightWidth, rightHeight) }
+        )
         return SpatialMp4SideData(
             icam = packDoubles(cameras.flatMap { listOf(it.fx, it.fy, it.cx, it.cy) }),
             ecam = packDoubles(cameras.flatMap { it.extrinsics }),
@@ -53,7 +67,7 @@ object SpatialMp4SideDataPacker {
         width: Int,
         height: Int
     ): com.spatialmp4.contract.Intrinsics {
-        val side = normalizeCamera(metadata)
+        val side = normalizeCamera(metadata, width, height)
         return com.spatialmp4.contract.Intrinsics(
             fx = side.fx,
             fy = side.fy,
@@ -66,12 +80,12 @@ object SpatialMp4SideDataPacker {
         )
     }
 
-    private fun normalizeCamera(metadata: JSONObject): CameraSideData {
+    private fun normalizeCamera(metadata: JSONObject, outputWidth: Int = 0, outputHeight: Int = 0): CameraSideData {
         val intrinsics = metadata.optJSONArray("lens_intrinsic_calibration").toDoubleList()
         val distortion = metadata.optJSONArray("lens_distortion").toDoubleList()
         val translation = metadata.optJSONArray("lens_pose_translation").toDoubleList()
         val rotation = metadata.optJSONArray("lens_pose_rotation").toDoubleList()
-        return CameraSideData(
+        val raw = CameraSideData(
             fx = intrinsics.getOrElse(0) { 0.0 },
             fy = intrinsics.getOrElse(1) { 0.0 },
             cx = intrinsics.getOrElse(2) { 0.0 },
@@ -79,6 +93,74 @@ object SpatialMp4SideDataPacker {
             distortion = distortion,
             extrinsics = quatTranslationTo3x4(rotation, translation)
         )
+        return scaleIntrinsicsToOutput(raw, metadata, outputWidth, outputHeight)
+    }
+
+    private fun scaleIntrinsicsToOutput(
+        side: CameraSideData,
+        metadata: JSONObject,
+        outputWidth: Int,
+        outputHeight: Int
+    ): CameraSideData {
+        if (outputWidth <= 0 || outputHeight <= 0 || side.fx <= 0.0 || side.fy <= 0.0) {
+            return side
+        }
+        val source = sourceFrame(metadata) ?: return side
+        if (source.width <= 0.0 || source.height <= 0.0) {
+            return side
+        }
+        val crop = source.centerCropFor(outputWidth, outputHeight)
+        val scaleX = outputWidth.toDouble() / crop.width
+        val scaleY = outputHeight.toDouble() / crop.height
+        return side.copy(
+            fx = side.fx * scaleX,
+            fy = side.fy * scaleY,
+            cx = (side.cx - crop.left) * scaleX,
+            cy = (side.cy - crop.top) * scaleY
+        )
+    }
+
+    private fun sourceFrame(metadata: JSONObject): CameraFrame? {
+        metadata.optJSONObject("sensor_active_array_size")?.let { rect ->
+            val width = rect.optDouble("width", rect.optDouble("right", 0.0) - rect.optDouble("left", 0.0))
+            val height = rect.optDouble("height", rect.optDouble("bottom", 0.0) - rect.optDouble("top", 0.0))
+            if (width > 0.0 && height > 0.0) {
+                return CameraFrame(
+                    left = rect.optDouble("left", 0.0),
+                    top = rect.optDouble("top", 0.0),
+                    width = width,
+                    height = height
+                )
+            }
+        }
+        metadata.optJSONObject("sensor_pixel_array_size")?.let { size ->
+            val width = size.optDouble("width", 0.0)
+            val height = size.optDouble("height", 0.0)
+            if (width > 0.0 && height > 0.0) {
+                return CameraFrame(left = 0.0, top = 0.0, width = width, height = height)
+            }
+        }
+        return null
+    }
+
+    private fun CameraFrame.centerCropFor(outputWidth: Int, outputHeight: Int): CameraFrame {
+        val outputAspect = outputWidth.toDouble() / outputHeight.toDouble()
+        val sourceAspect = width / height
+        if (sourceAspect > outputAspect) {
+            val cropWidth = height * outputAspect
+            return copy(
+                left = left + ((width - cropWidth) * 0.5),
+                width = cropWidth
+            )
+        }
+        if (sourceAspect < outputAspect) {
+            val cropHeight = width / outputAspect
+            return copy(
+                top = top + ((height - cropHeight) * 0.5),
+                height = cropHeight
+            )
+        }
+        return this
     }
 
     private fun quatTranslationTo3x4(rotation: List<Double>, translation: List<Double>): List<Double> {
@@ -140,6 +222,13 @@ object SpatialMp4SideDataPacker {
         val cy: Double,
         val distortion: List<Double>,
         val extrinsics: List<Double>
+    )
+
+    private data class CameraFrame(
+        val left: Double,
+        val top: Double,
+        val width: Double,
+        val height: Double
     )
 }
 

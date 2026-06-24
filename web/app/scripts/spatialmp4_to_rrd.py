@@ -373,6 +373,22 @@ class PoseLookup:
         return self._frames
 
 
+def reader_duration_seconds(reader, pose_lookup: PoseLookup) -> float:
+    """Return reader duration in seconds.
+
+    Current SpatialMP4 bindings report frame timestamps in seconds but
+    get_duration() in microseconds for Android captures. Normalize the display
+    value using the pose timestamp range as a unit sanity check.
+    """
+    raw = float(reader.get_duration())
+    if raw <= 0.0 or pose_lookup.empty():
+        return raw
+    max_pose_ts = max(float(f.timestamp) for f in pose_lookup.frames)
+    if max_pose_ts > 0.0 and raw > max_pose_ts * 1000.0:
+        return raw / 1_000_000.0
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # Device profile (Quest vs Pico)
 # ---------------------------------------------------------------------------
@@ -446,6 +462,14 @@ class Camera2ProjectionCalibration:
     K_rgb: np.ndarray
     width: int
     height: int
+
+
+@dataclass(frozen=True)
+class ResolvedIntrinsics:
+    fx: float
+    fy: float
+    cx: float
+    cy: float
 
 
 UNITY_FROM_GODOT_3 = np.diag([1.0, 1.0, -1.0])
@@ -624,6 +648,67 @@ def godot_transform_to_unity(transform_godot: np.ndarray) -> np.ndarray:
     return UNITY_FROM_GODOT_4 @ transform_godot @ UNITY_FROM_GODOT_4
 
 
+def _camera2_characteristic_size(char: Dict[str, Any]) -> Tuple[int, int]:
+    size = char.get("sensor_active_array_size") or char.get("sensor_pixel_array_size") or {}
+    if not isinstance(size, dict):
+        raise TypeError("sensor_active_array_size/sensor_pixel_array_size is not an object")
+    width = size.get("width")
+    height = size.get("height")
+    if width is None:
+        width = int(size["right"]) - int(size.get("left", 0))
+    if height is None:
+        height = int(size["bottom"]) - int(size.get("top", 0))
+    return int(width), int(height)
+
+
+def _valid_intrinsics_from_obj(
+    obj: Any,
+    image_width: int = 0,
+    image_height: int = 0,
+) -> Optional[ResolvedIntrinsics]:
+    if obj is None:
+        return None
+    try:
+        fx, fy, cx, cy = (
+            float(obj.fx),
+            float(obj.fy),
+            float(obj.cx),
+            float(obj.cy),
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
+    values = np.asarray([fx, fy, cx, cy], dtype=np.float64)
+    if not np.all(np.isfinite(values)) or fx <= 0.0 or fy <= 0.0:
+        return None
+    if image_width > 0 and image_height > 0:
+        max_dim = float(max(image_width, image_height))
+        if fx < 1e-3 or fy < 1e-3 or fx > max_dim * 10.0 or fy > max_dim * 10.0:
+            return None
+        if cx < -float(image_width) or cx > float(image_width) * 2.0:
+            return None
+        if cy < -float(image_height) or cy > float(image_height) * 2.0:
+            return None
+    return ResolvedIntrinsics(fx=fx, fy=fy, cx=cx, cy=cy)
+
+
+def _intrinsics_from_camera2(
+    calibration: Camera2ProjectionCalibration,
+    target_width: int,
+    target_height: int,
+) -> Optional[ResolvedIntrinsics]:
+    if calibration.width <= 0 or calibration.height <= 0 or target_width <= 0 or target_height <= 0:
+        return None
+    sx = float(target_width) / float(calibration.width)
+    sy = float(target_height) / float(calibration.height)
+    candidate = ResolvedIntrinsics(
+        fx=float(calibration.K_rgb[0, 0]) * sx,
+        fy=float(calibration.K_rgb[1, 1]) * sy,
+        cx=float(calibration.K_rgb[0, 2]) * sx,
+        cy=float(calibration.K_rgb[1, 2]) * sy,
+    )
+    return _valid_intrinsics_from_obj(candidate, target_width, target_height)
+
+
 def _camera2_projection_from_characteristics(
     char: Dict[str, Any],
     source_label: str,
@@ -631,14 +716,28 @@ def _camera2_projection_from_characteristics(
     try:
         translation = char.get("lens_pose_translation") or [0.0, 0.0, 0.0]
         raw_rotation = char.get("lens_pose_rotation") or [0.0, 0.0, 0.0, 1.0]
-        intrinsics = char.get("lens_intrinsic_calibration") or []
+        recording_intrinsics = char.get("recording_intrinsics")
+        if isinstance(recording_intrinsics, dict):
+            intrinsics = [
+                recording_intrinsics.get("fx"),
+                recording_intrinsics.get("fy"),
+                recording_intrinsics.get("cx"),
+                recording_intrinsics.get("cy"),
+            ]
+            width = int(recording_intrinsics.get("width") or char.get("recording_width"))
+            height = int(recording_intrinsics.get("height") or char.get("recording_height"))
+        else:
+            intrinsics = char.get("recording_lens_intrinsic_calibration") or []
+            if intrinsics:
+                width = int(char.get("recording_width"))
+                height = int(char.get("recording_height"))
+            else:
+                intrinsics = char.get("lens_intrinsic_calibration") or []
+                width, height = _camera2_characteristic_size(char)
         if len(intrinsics) < 4:
             info(f"Camera2 calibration missing intrinsics: {source_label}")
             return None
         fx, fy, cx, cy = (float(v) for v in intrinsics[:4])
-        size = char.get("sensor_active_array_size") or char.get("sensor_pixel_array_size") or {}
-        width = int(size.get("width") or (int(size["right"]) - int(size.get("left", 0))))
-        height = int(size.get("height") or (int(size["bottom"]) - int(size.get("top", 0))))
     except (KeyError, TypeError, ValueError) as exc:
         info(f"Camera2 calibration read failed ({source_label}): {exc}; falling back to mp4 ecam projection")
         return None
@@ -2863,6 +2962,8 @@ def log_hand_joints_on_image(
         uv, mask = project_world_points_to_camera2_image(
             positions, T_W_H_godot, camera2_projection
         )
+    elif K_rgb is None:
+        return 0
     else:
         uv, mask = project_capture_points_to_image(
             positions,
@@ -3206,13 +3307,10 @@ def maybe_log_robot(
 def build_blueprint(has_depth_panel: bool) -> "rrb.ContainerLike":
     """Reference layout minus the spool-only rgb_depth_overlay tab.
 
-    Originally we restricted the RGB tab to `world/camera/image/rgb`
-    because the only other child was the always-empty pinhole gizmo.
-    Now we ship two image-plane overlays as additional children
-    (`world/camera/image/hands/*` from the RGB pass, and
-    `world/camera/image/depth_overlay` from the depth pass), so the
-    tab's contents have to be an inclusive glob — `"**"` matches the
-    image itself plus every child entity.
+    The RGB image is logged on the same entity as the Pinhole
+    (`world/camera/image`). Overlays such as `hands/*` and
+    `depth_overlay` live below it, so the tab includes the origin plus
+    its descendants.
     """
     left = rrb.Vertical(
         rrb.Spatial3DView(name="3D World", origin="world"),
@@ -3405,11 +3503,21 @@ def run(args: argparse.Namespace) -> int:
     # ---- cameras / intrinsics --------------------------------------------
     rgb_w = reader.get_rgb_width() if has_rgb else 0
     rgb_h = reader.get_rgb_height() if has_rgb else 0
-    K_rgb = reader.get_rgb_intrinsics_left() if has_rgb else None
+    K_rgb_raw = reader.get_rgb_intrinsics_left() if has_rgb else None
     T_I_Srgb = reader.get_rgb_extrinsics_left().as_se3() if has_rgb else None
     camera2_projection = (
         load_camera2_projection_calibration(input_path, profile, "left", operator_static) if has_rgb else None
     )
+    K_rgb = _valid_intrinsics_from_obj(K_rgb_raw, rgb_w, rgb_h) if has_rgb else None
+    if has_rgb and K_rgb is None and camera2_projection is not None:
+        K_rgb = _intrinsics_from_camera2(camera2_projection, rgb_w, rgb_h)
+        if K_rgb is not None:
+            info(
+                "RGB ecam intrinsics are missing/invalid; using Quest "
+                "Camera2 recording intrinsics for Rerun Pinhole"
+            )
+    if has_rgb and K_rgb is None:
+        info("RGB intrinsics are missing/invalid; skipping RGB Pinhole and ecam 2D projection fallback")
 
     depth_w = reader.get_depth_width() if has_depth else 0
     depth_h = reader.get_depth_height() if has_depth else 0
@@ -3462,11 +3570,11 @@ def run(args: argparse.Namespace) -> int:
     info(
         f"RGB {rgb_w}x{rgb_h} @ {reader.get_rgb_fps():.1f}fps  "
         f"Depth {depth_w}x{depth_h} @ {reader.get_depth_fps():.1f}fps  "
-        f"duration={reader.get_duration():.2f}s"
+        f"duration={reader_duration_seconds(reader, head_lookup):.2f}s"
     )
 
     # ---- static pinholes -------------------------------------------------
-    if has_rgb:
+    if has_rgb and K_rgb is not None:
         rr.log(
             "world/camera/image",
             rr.Pinhole(
@@ -3713,6 +3821,12 @@ def run(args: argparse.Namespace) -> int:
                         T_C_W_unity = np.linalg.inv(T_W_C_unity)
                         pts_unity_ov = (UNITY_FROM_GODOT_3 @ pts_world_ov.T).T
                         z_rgb = (T_C_W_unity[:3, :3] @ pts_unity_ov.T).T[:, 2] + T_C_W_unity[2, 3]
+                    elif K_rgb is None:
+                        rr.log(
+                            "world/camera/image/depth_overlay",
+                            rr.Points2D(positions=np.zeros((0, 2), dtype=np.float32)),
+                        )
+                        continue
                     else:
                         _, _, T_W_Srgb_camera_at_depth_ts = compose_world_sensor_pose(
                             head_pose,
@@ -3810,7 +3924,7 @@ def run(args: argparse.Namespace) -> int:
             )
             rgb_bgr = frame_rgb.left_rgb
             rr.log(
-                "world/camera/image/rgb",
+                "world/camera/image",
                 rr.Image(rgb_bgr, color_model="BGR").compress(jpeg_quality=args.jpeg_quality),
             )
 

@@ -99,7 +99,11 @@ func start_session(options: Dictionary = {}) -> bool:
 	var sources := {}
 	var capture_provider := str(capture_options.get("capture_provider", ""))
 	# WP6: provider-keyed source text lives in the manifest contract.
-	sources["rgb"] = SpatialMp4ManifestContract.rgb_source_description(capture_provider, _capture_enabled("stereo_rgb"))
+	sources["rgb"] = SpatialMp4ManifestContract.rgb_source_description(
+		capture_provider,
+		_capture_enabled("stereo_rgb"),
+		str(capture_options.get("rgb_codec", "hevc"))
+	)
 	if _capture_enabled("record_depth"):
 		sources["depth"] = "OpenXRMetaEnvironmentDepthExtension converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
@@ -152,9 +156,11 @@ func start_session(options: Dictionary = {}) -> bool:
 		"media_pts_clock": "clock_monotonic_ns",
 		"depth_timestamp_source_priority": ["openxr_runtime_display_time", "godot_async_callback_ticks"],
 		"capture_options": capture_options,
+		"resolved_capture_options": capture_options.duplicate(true),
 		"sources": sources,
 		"depth_saved_in_mp4": false,
 		"stream_confirmations": {
+			"rgb": _rgb_confirmation_record(false, "", capture_options, {}),
 			"depth": _depth_confirmation_record(false, "")
 		},
 		"device": _resolve_device_identity()
@@ -267,6 +273,9 @@ func _rewrite_manifest_after_finalize(media_path: String, media_sha256: String) 
 		artifacts[str(sidecar.get("kind", filename.get_basename()))] = sidecar_artifact
 	if not artifacts.is_empty():
 		manifest["artifacts"] = artifacts
+	var rgb_actual := _actual_rgb_recording_geometry()
+	var resolved_capture_options := _resolved_capture_options_with_actual_rgb(manifest, rgb_actual)
+	manifest["resolved_capture_options"] = resolved_capture_options
 	# Patch in the body-tracking runtime info collected at close() so the
 	# offline viewer can pick the right skeleton table for the joint ids it
 	# finds in `spatialmp4:body_joints:body`. If the sampler never observed a
@@ -287,9 +296,133 @@ func _rewrite_manifest_after_finalize(media_path: String, media_sha256: String) 
 	manifest["depth_saved_in_mp4"] = bool(depth_confirmation.get("saved_in_mp4", false))
 	var confirmations_field: Variant = manifest.get("stream_confirmations", {})
 	var confirmations: Dictionary = confirmations_field if confirmations_field is Dictionary else {}
+	confirmations["rgb"] = _rgb_confirmation_record(true, media_path, resolved_capture_options, rgb_actual)
 	confirmations["depth"] = depth_confirmation
 	manifest["stream_confirmations"] = confirmations
 	_write_json(manifest_path, manifest)
+
+
+func _resolved_capture_options_with_actual_rgb(manifest: Dictionary, rgb_actual: Dictionary) -> Dictionary:
+	var capture_options_field: Variant = manifest.get("capture_options", capture_options)
+	var source_options: Dictionary = capture_options_field if capture_options_field is Dictionary else capture_options
+	var resolved := source_options.duplicate(true)
+	if rgb_actual.is_empty():
+		return resolved
+	var left_width := int(rgb_actual.get("left_width", 0))
+	var left_height := int(rgb_actual.get("left_height", 0))
+	if left_width <= 0 or left_height <= 0:
+		return resolved
+	resolved["rgb_width"] = left_width
+	resolved["rgb_height"] = left_height
+	resolved["rgb_resolution"] = "%dx%d" % [left_width, left_height]
+	resolved["rgb_encoded_width"] = int(rgb_actual.get("encoded_width", left_width))
+	resolved["rgb_encoded_height"] = int(rgb_actual.get("encoded_height", left_height))
+	resolved["rgb_camera_count"] = int(rgb_actual.get("camera_count", 1))
+	return resolved
+
+
+func _rgb_confirmation_record(
+	finalized: bool,
+	media_path: String,
+	resolved_options: Dictionary,
+	rgb_actual: Dictionary
+) -> Dictionary:
+	var requested_width := int(capture_options.get("rgb_width", 0))
+	var requested_height := int(capture_options.get("rgb_height", 0))
+	var actual_width := int(rgb_actual.get("left_width", 0))
+	var actual_height := int(rgb_actual.get("left_height", 0))
+	var actual_camera_count := int(rgb_actual.get("camera_count", 0))
+	var saved_in_mp4 := finalized and not media_path.is_empty() and actual_width > 0 and actual_height > 0
+	var status := "pending"
+	var reason := ""
+	if finalized:
+		if saved_in_mp4:
+			status = "saved"
+		elif media_path.is_empty():
+			status = "missing"
+			reason = "mp4 finalize failed"
+		else:
+			status = "unknown"
+			reason = "camera recording metadata missing"
+	return {
+		"requested": true,
+		"saved_in_mp4": saved_in_mp4,
+		"status": status,
+		"reason": reason,
+		"finalized": finalized,
+		"mp4_path": media_path,
+		"requested_width": requested_width,
+		"requested_height": requested_height,
+		"requested_resolution": str(capture_options.get("rgb_resolution", "")),
+		"requested_fps": int(capture_options.get("rgb_fps", 0)),
+		"requested_codec": str(capture_options.get("rgb_codec", "hevc")),
+		"actual_width": actual_width,
+		"actual_height": actual_height,
+		"actual_resolution": "%dx%d" % [actual_width, actual_height] if actual_width > 0 and actual_height > 0 else "",
+		"actual_encoded_width": int(rgb_actual.get("encoded_width", 0)),
+		"actual_encoded_height": int(rgb_actual.get("encoded_height", 0)),
+		"actual_camera_count": actual_camera_count,
+		"actual_stereo": actual_camera_count >= 2,
+		"fps": int(resolved_options.get("rgb_fps", capture_options.get("rgb_fps", 0))),
+		"codec": str(resolved_options.get("rgb_codec", capture_options.get("rgb_codec", "hevc")))
+	}
+
+
+func _actual_rgb_recording_geometry() -> Dictionary:
+	var left := _camera_recording_size("left_camera_characteristics.json")
+	if left.is_empty():
+		return {}
+	var right := _camera_recording_size("right_camera_characteristics.json")
+	var left_width := int(left.get("width", 0))
+	var left_height := int(left.get("height", 0))
+	var camera_count := 1
+	var encoded_width := left_width
+	if bool(capture_options.get("stereo_rgb", true)) and not right.is_empty():
+		var right_width := int(right.get("width", 0))
+		var right_height := int(right.get("height", 0))
+		if right_width > 0 and right_height > 0:
+			camera_count = 2
+			encoded_width += right_width
+	return {
+		"left_width": left_width,
+		"left_height": left_height,
+		"right_width": int(right.get("width", 0)) if not right.is_empty() else 0,
+		"right_height": int(right.get("height", 0)) if not right.is_empty() else 0,
+		"encoded_width": encoded_width,
+		"encoded_height": left_height,
+		"camera_count": camera_count
+	}
+
+
+func _camera_recording_size(filename: String) -> Dictionary:
+	var path := session_dir.path_join(filename)
+	if not FileAccess.file_exists(path):
+		return {}
+	var reader := FileAccess.open(path, FileAccess.READ)
+	if reader == null:
+		return {}
+	var parsed: Variant = JSON.parse_string(reader.get_as_text())
+	reader.close()
+	if not (parsed is Dictionary):
+		return {}
+	var metadata: Dictionary = parsed
+	var intrinsics_field: Variant = metadata.get("recording_intrinsics", {})
+	var width := 0
+	var height := 0
+	if intrinsics_field is Dictionary:
+		var intrinsics: Dictionary = intrinsics_field
+		width = int(intrinsics.get("width", 0))
+		height = int(intrinsics.get("height", 0))
+	if width <= 0:
+		width = int(metadata.get("recording_width", 0))
+	if height <= 0:
+		height = int(metadata.get("recording_height", 0))
+	if width <= 0 or height <= 0:
+		return {}
+	return {
+		"width": width,
+		"height": height
+	}
 
 
 func _depth_confirmation_record(finalized: bool, media_path: String) -> Dictionary:

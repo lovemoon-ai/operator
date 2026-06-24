@@ -5,6 +5,7 @@ import android.util.Log
 import com.spatialmp4.contract.CONTRACT_VERSION
 import com.spatialmp4.contract.Intrinsics
 import com.spatialmp4.contract.RgbStreamConfig
+import com.spatialmp4.contract.RgbVideoCodec
 import com.spatialmp4.contract.SessionConfig
 import com.spatialmp4.contract.SpatialDataSink
 import com.spatialmp4.contract.SpatialDataSinkRegistry
@@ -168,12 +169,13 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
     }
 
     override fun onRgbCsd(config: RgbStreamConfig) {
+        val codec = RgbVideoCodec.normalize(config.codec)
         val payload = JSONObject()
             .put("width", config.width)
             .put("height", config.height)
             .put("fps", config.fps)
-            .put("codec", "hevc")
-            .put("bitstream_format", "hevc_annexb")
+            .put("codec", codec)
+            .put("bitstream_format", "${codec}_annexb")
             .put("packet_format", "access_unit")
             .put("stereo_layout", if (config.camCount > 1) "side_by_side" else "mono")
             .put("camera_count", config.camCount)
