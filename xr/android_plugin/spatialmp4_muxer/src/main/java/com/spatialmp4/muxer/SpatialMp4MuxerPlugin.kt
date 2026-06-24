@@ -10,7 +10,7 @@
 //     switch from QuestCapturePlugin to this singleton.
 //   * SpatialDataSink::onRgbCsd / onRgbPacket   -- the RGB hot path. The
 //     provider's StereoHevcEncoder now writes through these instead of
-//     calling SpatialMp4Native.nativeWriteHevcPacket itself.
+//     calling SpatialMp4Native.nativeWriteRgbPacket itself.
 //
 // Threading: the same native writer's IO thread serialises every packet
 // write, so this class only needs to forward; concurrent calls from the
@@ -24,6 +24,7 @@ import com.spatialmp4.contract.AudioStreamConfig
 import com.spatialmp4.contract.CONTRACT_VERSION
 import com.spatialmp4.contract.Intrinsics
 import com.spatialmp4.contract.RgbStreamConfig
+import com.spatialmp4.contract.RgbVideoCodec
 import com.spatialmp4.contract.SessionConfig
 import com.spatialmp4.contract.SpatialDataSink
 import com.spatialmp4.contract.SpatialDataSinkRegistry
@@ -182,8 +183,9 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
             return
         }
         if (rgbConfigured) return
-        if (!SpatialMp4Native.nativeConfigureHevc(handle, config.csd)) {
-            emitError("nativeConfigureHevc failed: ${SpatialMp4Native.nativeGetLastError(handle)}")
+        val codec = RgbVideoCodec.normalize(config.codec)
+        if (!SpatialMp4Native.nativeConfigureRgb(handle, codec, config.csd)) {
+            emitError("nativeConfigureRgb($codec) failed: ${SpatialMp4Native.nativeGetLastError(handle)}")
             return
         }
         rgbConfigured = true
@@ -199,20 +201,20 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         if (handle == 0L) return
         // The contract documents `data` as potentially a direct MediaCodec
         // ByteBuffer whose memory dies after this method returns. The current
-        // JNI surface (nativeWriteHevcPacket) wants a ByteArray, so we copy
+        // JNI surface (nativeWriteRgbPacket) wants a ByteArray, so we copy
         // through one. A future contract revision can add a direct-buffer
         // variant on the JNI side; that change is mechanical and isolated.
         val bytes = ByteArray(data.remaining())
         data.get(bytes)
         val flags = if (isKeyframe) AV_PKT_FLAG_KEY else 0
-        // Contract is in Godot ticks ns; nativeWriteHevcPacket wants µs. The
+        // Contract is in Godot ticks ns; nativeWriteRgbPacket wants µs. The
         // depth + pose write paths already convert; this one had been
-        // forwarding ns straight through, shifting HEVC PTS by 3 decades.
-        val ok = SpatialMp4Native.nativeWriteHevcPacket(
+        // forwarding ns straight through, shifting RGB PTS by 3 decades.
+        val ok = SpatialMp4Native.nativeWriteRgbPacket(
             handle, bytes, ptsNs / 1000L, durationNs / 1000L, flags
         )
         if (!ok) {
-            emitError("nativeWriteHevcPacket failed: ${SpatialMp4Native.nativeGetLastError(handle)}")
+            emitError("nativeWriteRgbPacket failed: ${SpatialMp4Native.nativeGetLastError(handle)}")
             return
         }
         metricNativeWriteRgb.incrementAndGet()
@@ -304,7 +306,7 @@ class SpatialMp4MuxerPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink 
         // ByteBuffer whose backing memory dies after this method returns;
         // copy through a ByteArray for the JNI hand-off. The encoder's
         // output buffer is small (≤ a few KB per AAC frame) so the copy
-        // cost is negligible vs the HEVC packet path.
+        // cost is negligible vs the RGB packet path.
         val bytes = ByteArray(data.remaining())
         data.get(bytes)
         val flags = if (isKeyframe) AV_PKT_FLAG_KEY else 0

@@ -7,6 +7,7 @@ import android.media.MediaFormat
 import android.util.Log
 import com.spatialmp4.contract.Intrinsics
 import com.spatialmp4.contract.RgbStreamConfig
+import com.spatialmp4.contract.RgbVideoCodec
 import com.spatialmp4.contract.SpatialDataSink
 import java.nio.ByteBuffer
 import kotlin.math.abs
@@ -45,6 +46,7 @@ class StereoHevcEncoder(
     // construction so the encoder can hand them to the sink as part of
     // RgbStreamConfig when MediaCodec emits codec-specific data.
     private val cameraIntrinsics: List<Intrinsics>,
+    private val rgbCodec: String = RgbVideoCodec.HEVC.tag,
     private val onError: (String) -> Unit,
     // Lightweight counters surfaced by provider popMetricsJson hooks so
     // the 1Hz GDScript ticker can spot stereo-pair / encoder-output backlogs.
@@ -53,6 +55,9 @@ class StereoHevcEncoder(
     private val onPacketEmitted: () -> Unit = {}
 ) {
     private val frameDurationUs = 1_000_000L / max(fps, 1)
+    private val normalizedCodec = RgbVideoCodec.normalize(rgbCodec)
+    private val codecMimeType = mimeTypeForCodec(normalizedCodec)
+    private val codecLabel = labelForCodec(normalizedCodec)
     private val encodedWidth = if (stereo) eyeWidth * 2 else eyeWidth
     private val encodedHeight = eyeHeight
     private val bufferInfo = MediaCodec.BufferInfo()
@@ -64,10 +69,10 @@ class StereoHevcEncoder(
 
     fun start(): Boolean {
         return try {
-            val codecInfo = chooseHevcEncoder()
-            colorFormat = chooseColorFormat(codecInfo)
+            val codecInfo = chooseVideoEncoder(codecMimeType)
+            colorFormat = chooseColorFormat(codecInfo, codecMimeType)
             val format = MediaFormat.createVideoFormat(
-                MediaFormat.MIMETYPE_VIDEO_HEVC,
+                codecMimeType,
                 encodedWidth,
                 encodedHeight
             )
@@ -84,10 +89,10 @@ class StereoHevcEncoder(
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 start()
             }
-            Log.i(TAG, "started HEVC encoder ${codecInfo.name} ${encodedWidth}x$encodedHeight stereo=$stereo fps=$fps bitrate=$bitrate color=$colorFormat colorspace=bt709/sdr/limited")
+            Log.i(TAG, "started $codecLabel encoder ${codecInfo.name} ${encodedWidth}x$encodedHeight stereo=$stereo fps=$fps bitrate=$bitrate color=$colorFormat colorspace=bt709/sdr/limited")
             true
         } catch (error: Exception) {
-            onError("Failed to start HEVC encoder: ${error.message}")
+            onError("Failed to start $codecLabel encoder: ${error.message}")
             false
         }
     }
@@ -130,7 +135,7 @@ class StereoHevcEncoder(
             }
             drainEncoder(true)
         } catch (error: Exception) {
-            onError("Failed to drain HEVC encoder: ${error.message}")
+            onError("Failed to drain $codecLabel encoder: ${error.message}")
         } finally {
             try {
                 localCodec.stop()
@@ -171,16 +176,16 @@ class StereoHevcEncoder(
         drainEncoder(false)
         val inputIndex = localCodec.dequeueInputBuffer(10_000)
         if (inputIndex < 0) {
-            onError("HEVC encoder input buffer was not available; dropping $label")
+            onError("$codecLabel encoder input buffer was not available; dropping $label")
             return
         }
         val inputBuffer = localCodec.getInputBuffer(inputIndex) ?: run {
-            onError("HEVC encoder returned null input buffer")
+            onError("$codecLabel encoder returned null input buffer")
             return
         }
         inputBuffer.clear()
         if (payload.size > inputBuffer.remaining()) {
-            onError("HEVC input buffer too small: ${inputBuffer.remaining()} < ${payload.size}")
+            onError("$codecLabel input buffer too small: ${inputBuffer.remaining()} < ${payload.size}")
             localCodec.queueInputBuffer(inputIndex, 0, 0, timestampNs / 1000L, 0)
             return
         }
@@ -198,7 +203,7 @@ class StereoHevcEncoder(
                     }
                 }
                 MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    configureNativeHevc(localCodec.outputFormat)
+                    configureNativeRgb(localCodec.outputFormat)
                 }
                 MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
                     continue
@@ -239,10 +244,10 @@ class StereoHevcEncoder(
         }
     }
 
-    private fun configureNativeHevc(format: MediaFormat) {
+    private fun configureNativeRgb(format: MediaFormat) {
         val csd = collectCodecConfig(format)
         if (csd.isEmpty()) {
-            onError("HEVC encoder output format did not include codec config")
+            onError("$codecLabel encoder output format did not include codec config")
             return
         }
         // Hand the codec config through the SpatialDataSink contract. The
@@ -253,7 +258,8 @@ class StereoHevcEncoder(
             height = encodedHeight,
             fps = fps,
             cameras = cameraIntrinsics,
-            csd = csd
+            csd = csd,
+            codec = normalizedCodec
         )
         dataSink.onRgbCsd(config)
     }
@@ -522,15 +528,15 @@ class StereoHevcEncoder(
         }
     }
 
-    private fun chooseHevcEncoder(): MediaCodecInfo {
+    private fun chooseVideoEncoder(mimeType: String): MediaCodecInfo {
         val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
         return codecList.codecInfos.firstOrNull { info ->
-            info.isEncoder && info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_HEVC, ignoreCase = true) }
-        } ?: throw IllegalStateException("No HEVC encoder is available")
+            info.isEncoder && info.supportedTypes.any { it.equals(mimeType, ignoreCase = true) }
+        } ?: throw IllegalStateException("No $codecLabel encoder is available")
     }
 
-    private fun chooseColorFormat(info: MediaCodecInfo): Int {
-        val capabilities = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_HEVC)
+    private fun chooseColorFormat(info: MediaCodecInfo, mimeType: String): Int {
+        val capabilities = info.getCapabilitiesForType(mimeType)
         val preferred = listOf(
             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar,
             MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar,
@@ -552,5 +558,15 @@ class StereoHevcEncoder(
         private const val TAG = "StereoHevcEncoder"
         private const val MAX_PAIR_DELTA_NS = 10_000_000L
         private const val AV_PKT_FLAG_KEY = 0x0001
+
+        private fun mimeTypeForCodec(codec: String): String =
+            if (codec == RgbVideoCodec.H264.tag) {
+                MediaFormat.MIMETYPE_VIDEO_AVC
+            } else {
+                MediaFormat.MIMETYPE_VIDEO_HEVC
+            }
+
+        private fun labelForCodec(codec: String): String =
+            if (codec == RgbVideoCodec.H264.tag) "H.264" else "HEVC"
     }
 }

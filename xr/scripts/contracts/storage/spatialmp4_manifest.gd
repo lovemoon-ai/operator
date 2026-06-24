@@ -26,16 +26,23 @@ const BODY_RUNTIME_PICO_BD := "pico_bd"
 
 ## Manifest `sources.rgb` description text, keyed by the capture provider
 ## (WP6: moved from session_spool_writer.gd so vendor-name comparisons stay
-## out of the writer engine). Strings are byte-identical to the historical
-## manifest output — offline tooling matches on them.
-static func rgb_source_description(capture_provider: String, stereo_rgb: bool) -> String:
+## out of the writer engine).
+static func rgb_source_description(capture_provider: String, stereo_rgb: bool, rgb_codec: String = "hevc") -> String:
+	var codec_label := _rgb_codec_label(rgb_codec)
 	if capture_provider == "pico":
 		if stereo_rgb:
-			return "PICO OpenXR XR_PICO_camera_image stereo side-by-side raw RGBA + HEVC MediaCodec"
-		return "PICO OpenXR XR_PICO_camera_image left camera raw RGBA + HEVC MediaCodec"
+			return "PICO OpenXR XR_PICO_camera_image stereo raw RGBA -> GPU Surface side-by-side + %s MediaCodec" % codec_label
+		return "PICO OpenXR XR_PICO_camera_image left camera raw RGBA -> GPU Surface + %s MediaCodec" % codec_label
 	if stereo_rgb:
-		return "Android Camera2 stereo side-by-side + HEVC MediaCodec"
-	return "Android Camera2 left camera + HEVC MediaCodec"
+		return "Android Camera2 stereo side-by-side + %s MediaCodec" % codec_label
+	return "Android Camera2 left camera + %s MediaCodec" % codec_label
+
+
+static func _rgb_codec_label(rgb_codec: String) -> String:
+	var normalized := rgb_codec.strip_edges().to_lower()
+	if normalized in ["h264", "h.264", "avc", "video/avc"]:
+		return "H.264"
+	return "HEVC"
 
 
 static func validate(manifest: Dictionary) -> Array[String]:

@@ -22,6 +22,10 @@ const KNOWN_KEYS := [
 	"audio_bitrate_bps",
 	"rgb_bitrate",
 	"rgb_fps",
+	"rgb_width",
+	"rgb_height",
+	"rgb_resolution",
+	"rgb_codec",
 	"server_host",
 	"server_port",
 	"server_result_port",
@@ -50,6 +54,10 @@ var audio_sample_rate_hz: int = 48000
 var audio_bitrate_bps: int = 128000
 var rgb_bitrate: int = 0
 var rgb_fps: int = 0
+var rgb_width: int = 0
+var rgb_height: int = 0
+var rgb_resolution: String = ""
+var rgb_codec: String = "hevc"
 var server_host: String = ""
 var server_port: int = 0
 var server_result_port: int = 0
@@ -124,6 +132,10 @@ func _assign(key: String, value: Variant) -> void:
 		"audio_bitrate_bps": audio_bitrate_bps = int(value)
 		"rgb_bitrate": rgb_bitrate = int(value)
 		"rgb_fps": rgb_fps = int(value)
+		"rgb_width": rgb_width = int(value)
+		"rgb_height": rgb_height = int(value)
+		"rgb_resolution": rgb_resolution = str(value)
+		"rgb_codec": rgb_codec = str(value)
 		"server_host": server_host = str(value)
 		"server_port": server_port = int(value)
 		"server_result_port": server_result_port = int(value)
@@ -154,6 +166,10 @@ func _read(key: String) -> Variant:
 		"audio_bitrate_bps": return audio_bitrate_bps
 		"rgb_bitrate": return rgb_bitrate
 		"rgb_fps": return rgb_fps
+		"rgb_width": return rgb_width
+		"rgb_height": return rgb_height
+		"rgb_resolution": return rgb_resolution
+		"rgb_codec": return rgb_codec
 		"server_host": return server_host
 		"server_port": return server_port
 		"server_result_port": return server_result_port

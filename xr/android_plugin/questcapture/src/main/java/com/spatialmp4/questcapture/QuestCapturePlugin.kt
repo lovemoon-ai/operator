@@ -53,6 +53,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import com.spatialmp4.contract.SpatialDataSink
 import com.spatialmp4.contract.SpatialDataSinkRegistry
+import com.spatialmp4.contract.RgbVideoCodec
 
 class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private val mainActivity: Activity?
@@ -103,6 +104,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var stereoRgb = true
     private var rgbBitrate = DEFAULT_RGB_BITRATE
     private var rgbFps = DEFAULT_RGB_FPS
+    private var rgbCodec = RgbVideoCodec.HEVC.tag
+    private var rgbWidth = 0
+    private var rgbHeight = 0
     // depthStreamConfigured + lastDepthPtsUs migrated to SpatialMp4MuxerPlugin
     // alongside the writer handle (Stage 2b).
     @Volatile private var acceptingFrames = false
@@ -322,6 +326,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             TAG,
             "configureSpatialMp4SessionFromJson audio=$recordAudio layout=$layoutCode sampleRate=${config.optInt("audio_sample_rate_hz", AudioCapture.DEFAULT_SAMPLE_RATE_HZ)}"
         )
+        val requestedRgbSize = requestedRgbSizeFromConfig(config)
 
         return configureSessionInternal(
             sidecarPath,
@@ -341,7 +346,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             recordAudio,
             layoutCode,
             config.optInt("audio_sample_rate_hz", AudioCapture.DEFAULT_SAMPLE_RATE_HZ),
-            config.optInt("audio_bitrate_bps", AudioCapture.DEFAULT_AAC_BITRATE_BPS)
+            config.optInt("audio_bitrate_bps", AudioCapture.DEFAULT_AAC_BITRATE_BPS),
+            rgbWidth = requestedRgbSize.width,
+            rgbHeight = requestedRgbSize.height,
+            rgbCodec = config.optString("rgb_codec", RgbVideoCodec.HEVC.tag)
         )
     }
 
@@ -363,7 +371,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         recordAudio: Boolean = false,
         audioChannelLayoutCode: Int = com.spatialmp4.contract.AudioChannelLayout.STEREO.code,
         audioSampleRateHz: Int = AudioCapture.DEFAULT_SAMPLE_RATE_HZ,
-        audioBitrateBps: Int = AudioCapture.DEFAULT_AAC_BITRATE_BPS
+        audioBitrateBps: Int = AudioCapture.DEFAULT_AAC_BITRATE_BPS,
+        rgbWidth: Int = 0,
+        rgbHeight: Int = 0,
+        rgbCodec: String = RgbVideoCodec.HEVC.tag
     ): Boolean {
         val dir = File(path)
         try {
@@ -397,6 +408,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         this.stereoRgb = stereoRgb
         this.rgbBitrate = if (rgbBitrate > 0) rgbBitrate else DEFAULT_RGB_BITRATE
         this.rgbFps = if (rgbFps > 0) rgbFps else DEFAULT_RGB_FPS
+        this.rgbWidth = if (rgbWidth > 0) rgbWidth else 0
+        this.rgbHeight = if (rgbHeight > 0) rgbHeight else 0
+        this.rgbCodec = RgbVideoCodec.normalize(rgbCodec)
         this.recordAudio = recordAudio
         this.audioChannelLayout =
             com.spatialmp4.contract.AudioChannelLayout.fromCode(audioChannelLayoutCode)
@@ -633,8 +647,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
 
         val leftConfig = cameras["left"] ?: return false
         val rightConfig = if (stereoRgb) cameras["right"] else null
-        leftMetadata = leftConfig.metadata.toString()
-        rightMetadata = rightConfig?.metadata?.toString() ?: "{}"
+        val leftRecordingMetadata = recordingCameraMetadata(leftConfig)
+        val rightRecordingMetadata = rightConfig?.let { recordingCameraMetadata(it) }
+        leftMetadata = leftRecordingMetadata.toString()
+        rightMetadata = rightRecordingMetadata?.toString() ?: "{}"
         writeText(File(root, "left_camera_characteristics.json"), leftMetadata)
         if (rightConfig != null) {
             writeText(File(root, "right_camera_characteristics.json"), rightMetadata)
@@ -895,7 +911,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
 
             result[eye] = CameraConfig(
                 cameraId = cameraId,
-                size = chooseYuvSize(characteristics),
+                size = chooseYuvSize(characteristics, rgbWidth, rgbHeight),
                 timestampSource = characteristics.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE),
                 metadata = cameraMetadataJson(cameraId, eye, characteristics)
             )
@@ -935,7 +951,14 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         finalMp4Path = finalPath
         partialMp4Path = partialPath
 
-        val rgbSideData = SpatialMp4SideDataPacker.packRgb(leftConfig.metadata, rightConfig?.metadata)
+        val rgbSideData = SpatialMp4SideDataPacker.packRgb(
+            leftConfig.metadata,
+            leftConfig.size.width,
+            leftConfig.size.height,
+            rightConfig?.metadata,
+            rightConfig?.size?.width ?: 0,
+            rightConfig?.size?.height ?: 0
+        )
         val rgbWidth = leftConfig.size.width + (rightConfig?.size?.width ?: 0)
         val rgbCameraCount = if (rightConfig == null) 1 else 2
         val deviceIdentity = DeviceIdentity.detect()
@@ -1016,6 +1039,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             bitrate = rgbBitrate,
             stereo = rightConfig != null,
             cameraIntrinsics = cameraIntrinsics,
+            rgbCodec = rgbCodec,
             onError = { message -> emitSignal("camera_error", message) },
             onPairEncoded = { metricEncoderPairsOffered.incrementAndGet() },
             onMonoEncoded = { metricEncoderMonoOffered.incrementAndGet() },
@@ -1205,14 +1229,72 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
     }
 
-    private fun chooseYuvSize(characteristics: CameraCharacteristics): Size {
+    private fun chooseYuvSize(
+        characteristics: CameraCharacteristics,
+        preferredWidth: Int,
+        preferredHeight: Int
+    ): Size {
         val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             as StreamConfigurationMap?
         val sizes = map?.getOutputSizes(ImageFormat.YUV_420_888)
-        return sizes?.maxByOrNull { it.width * it.height }
-            ?: characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+        if (!sizes.isNullOrEmpty()) {
+            val safeSizes = sizes.filter { isSafeQuestRgbSize(it) }
+            if (preferredWidth > 0 && preferredHeight > 0) {
+                if (!isSafeQuestRgbSize(preferredWidth, preferredHeight)) {
+                    Log.w(
+                        TAG,
+                        "requested RGB YUV size ${preferredWidth}x${preferredHeight} is not 4:3; " +
+                            "Quest byte-buffer encoding currently records corrupted chroma for non-4:3 sizes"
+                    )
+                    return largestSafeQuestRgbSize(safeSizes, sizes)
+                }
+                val requested = sizes.firstOrNull {
+                    it.width == preferredWidth && it.height == preferredHeight
+                }
+                if (requested != null) {
+                    return requested
+                }
+                Log.w(
+                    TAG,
+                    "requested RGB YUV size ${preferredWidth}x${preferredHeight} unsupported; " +
+                        "using largest safe supported size from ${formatSizes(safeSizes.ifEmpty { sizes.toList() })}"
+                )
+            }
+            return largestSafeQuestRgbSize(safeSizes, sizes)
+        }
+        return characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
             ?: Size(1280, 960)
     }
+
+    private fun isSafeQuestRgbSize(size: Size): Boolean =
+        isSafeQuestRgbSize(size.width, size.height)
+
+    private fun isSafeQuestRgbSize(width: Int, height: Int): Boolean =
+        width > 0 && height > 0 && width * QUEST_SAFE_RGB_ASPECT_HEIGHT == height * QUEST_SAFE_RGB_ASPECT_WIDTH
+
+    private fun largestSafeQuestRgbSize(safeSizes: List<Size>, allSizes: Array<Size>): Size =
+        (safeSizes.ifEmpty { allSizes.toList() }).maxByOrNull { it.width.toLong() * it.height.toLong() }!!
+
+    private fun requestedRgbSizeFromConfig(config: JSONObject): Size {
+        val width = config.optInt("rgb_width", 0)
+        val height = config.optInt("rgb_height", 0)
+        if (width > 0 && height > 0) {
+            return Size(width, height)
+        }
+        val resolution = config.optString("rgb_resolution", "").trim().lowercase()
+        val parts = resolution.split("x", limit = 2)
+        if (parts.size == 2) {
+            val parsedWidth = parts[0].toIntOrNull() ?: 0
+            val parsedHeight = parts[1].toIntOrNull() ?: 0
+            if (parsedWidth > 0 && parsedHeight > 0) {
+                return Size(parsedWidth, parsedHeight)
+            }
+        }
+        return Size(0, 0)
+    }
+
+    private fun formatSizes(sizes: Collection<Size>): String =
+        sizes.joinToString(prefix = "[", postfix = "]") { "${it.width}x${it.height}" }
 
     private fun cameraMetadataJson(
         cameraId: String,
@@ -1434,15 +1516,49 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         androidTimebase: JSONObject?
     ): JSONObject {
         val cameras = JSONObject()
-            .put("left", JSONObject(leftConfig.metadata.toString()))
+            .put("left", recordingCameraMetadata(leftConfig))
         if (rightConfig != null) {
-            cameras.put("right", JSONObject(rightConfig.metadata.toString()))
+            cameras.put("right", recordingCameraMetadata(rightConfig))
         }
         return JSONObject()
             .put("schema", "spatialmp4.operator_static.session.v1")
             .put("provider", "quest")
             .put("camera2_characteristics", cameras)
             .put("android_timebase", androidTimebase ?: JSONObject())
+    }
+
+    private fun recordingCameraMetadata(config: CameraConfig): JSONObject {
+        val intrinsics = SpatialMp4SideDataPacker.extractIntrinsics(
+            config.metadata,
+            config.size.width,
+            config.size.height
+        )
+        return JSONObject(config.metadata.toString())
+            .put("recording_width", config.size.width)
+            .put("recording_height", config.size.height)
+            .put("recording_lens_intrinsic_calibration", JSONArray()
+                .put(intrinsics.fx)
+                .put(intrinsics.fy)
+                .put(intrinsics.cx)
+                .put(intrinsics.cy))
+            .put("recording_intrinsics", intrinsics.toJsonObject())
+    }
+
+    private fun com.spatialmp4.contract.Intrinsics.toJsonObject(): JSONObject =
+        JSONObject()
+            .put("fx", fx)
+            .put("fy", fy)
+            .put("cx", cx)
+            .put("cy", cy)
+            .put("width", width)
+            .put("height", height)
+            .put("extrinsics3x4", doubleArrayJson(extrinsics3x4))
+            .put("distortion", doubleArrayJson(distortion))
+
+    private fun doubleArrayJson(values: List<Double>): JSONArray {
+        val array = JSONArray()
+        values.forEach { array.put(it) }
+        return array
     }
 
     private fun activeDataSink(): SpatialDataSink? =
@@ -1493,6 +1609,8 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         private const val TAG = "QuestCapturePlugin"
         private const val DEFAULT_RGB_BITRATE = 24_000_000
         private const val DEFAULT_RGB_FPS = 30
+        private const val QUEST_SAFE_RGB_ASPECT_WIDTH = 4
+        private const val QUEST_SAFE_RGB_ASPECT_HEIGHT = 3
         private const val DEFAULT_DEPTH_DURATION_US = 200_000L
         private const val DEFAULT_POSE_DURATION_US = 11_111L
         private const val DEFAULT_HAND_DURATION_US = 33_333L

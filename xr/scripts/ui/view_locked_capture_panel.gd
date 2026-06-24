@@ -52,6 +52,34 @@ const MAX_LOCAL_STORAGE_SESSIONS := 0
 const LOCAL_UPLOAD_PREVIEW_BUTTON_WIDTH := 116
 const LOCAL_FILE_MODE_UPLOAD := "upload"
 const LOCAL_FILE_MODE_DELETE := "delete"
+const RGB_PROVIDER_DEFAULT := "quest"
+const RGB_RESOLUTIONS := {
+	"pico": [
+		Vector2i(640, 480),
+		Vector2i(800, 600),
+		Vector2i(960, 720),
+		Vector2i(1280, 960),
+		Vector2i(1600, 1200),
+	],
+	"quest": [
+		Vector2i(640, 480),
+		Vector2i(800, 600),
+		Vector2i(1280, 960),
+	],
+}
+const RGB_DEFAULT_RESOLUTION := {
+	"pico": Vector2i(640, 480),
+	"quest": Vector2i(1280, 960),
+}
+const RGB_FPS_VALUES := {
+	"pico": [30, 60],
+	"quest": [15, 30, 60],
+}
+const DEFAULT_RGB_FPS := 30
+const RGB_CODEC_HEVC := "hevc"
+const RGB_CODEC_H264 := "h264"
+const RGB_CODEC_VALUES := [RGB_CODEC_HEVC, RGB_CODEC_H264]
+const DEFAULT_RGB_CODEC := RGB_CODEC_HEVC
 
 # Auto-detected input source ("hands" or "controllers") used for the title-bar
 # indicator + record-stream defaults. The current pointer mode is still owned
@@ -106,6 +134,17 @@ var _storage_refresh_accum := STORAGE_REFRESH_SECONDS
 var _storage_plugin: Object
 var _storage_plugin_checked := false
 var _live_server_mode := false
+var _capture_provider_name := RGB_PROVIDER_DEFAULT
+var _rgb_resolution_button: Button
+var _rgb_resolution_menu: VBoxContainer
+var _rgb_fps_button: Button
+var _rgb_fps_menu: VBoxContainer
+var _rgb_codec_button: Button
+var _rgb_codec_menu: VBoxContainer
+var _requested_rgb_resolution := ""
+var _requested_rgb_fps := DEFAULT_RGB_FPS
+var _requested_rgb_codec := DEFAULT_RGB_CODEC
+var _refreshing_rgb_selects := false
 # Mirror of the live-server connection state reported by capture_app via
 # set_live_server_connectivity_status(). Used by _on_confirm_requested to
 # gate the Save button in live-feed mode.
@@ -204,6 +243,12 @@ func get_options() -> Dictionary:
 		# the mic without the operator explicitly enabling it.
 		"record_audio": _toggle_enabled("record_audio")
 	}
+	var rgb_resolution := _selected_rgb_resolution()
+	options["rgb_width"] = rgb_resolution.x
+	options["rgb_height"] = rgb_resolution.y
+	options["rgb_resolution"] = _resolution_text(rgb_resolution)
+	options["rgb_fps"] = _selected_rgb_fps()
+	options["rgb_codec"] = _selected_rgb_codec()
 	if _live_server_mode:
 		options["server_host"] = _configured_server_host()
 		options["server_port"] = _configured_server_port()
@@ -248,6 +293,10 @@ func set_options(options: Dictionary) -> void:
 		else:
 			toggle.button_pressed = value
 	_enforce_input_source_mutex_from_loaded_state()
+	_requested_rgb_resolution = _resolution_from_options(options)
+	_requested_rgb_fps = int(options.get("rgb_fps", DEFAULT_RGB_FPS))
+	_requested_rgb_codec = _normalize_rgb_codec(str(options.get("rgb_codec", DEFAULT_RGB_CODEC)))
+	_refresh_rgb_selects()
 	if _save_root != null:
 		var save_root := str(options.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
 		_save_root.text = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
@@ -392,6 +441,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	# --- Outputs group -----------------------------------------------------
 	var outputs := register_group("outputs", "UI_OUTPUTS", "check")
+	_add_rgb_recording_controls(outputs)
 	# Controller/hand poses always go into the MP4 mett tracks. This toggle only
 	# controls whether they are ALSO written as separate JSONL sidecar files for
 	# debugging. Default off to avoid the extra main-thread JSON cost.
@@ -724,6 +774,287 @@ func _set_depth_row_visible(visible_for_capture: bool) -> void:
 	var slot := _depth_toggle.get_parent()
 	if slot is Control:
 		(slot as Control).visible = visible_for_capture
+
+
+func set_capture_provider_name(provider: String) -> void:
+	var normalized := provider.strip_edges().to_lower()
+	if normalized != "pico" and normalized != "quest":
+		normalized = RGB_PROVIDER_DEFAULT
+	if _capture_provider_name == normalized:
+		return
+	_capture_provider_name = normalized
+	_refresh_rgb_selects()
+
+
+func _rgb_provider_key() -> String:
+	return "pico" if _capture_provider_name == "pico" else "quest"
+
+
+func _refresh_rgb_selects() -> void:
+	_refreshing_rgb_selects = true
+	_rebuild_rgb_resolution_select()
+	_rebuild_rgb_fps_select()
+	_rebuild_rgb_codec_select()
+	_refreshing_rgb_selects = false
+
+
+func _rebuild_rgb_resolution_select() -> void:
+	if _rgb_resolution_button == null:
+		return
+	var provider := _rgb_provider_key()
+	var selected_text := _requested_rgb_resolution
+	var fallback: Vector2i = RGB_DEFAULT_RESOLUTION.get(provider, RGB_DEFAULT_RESOLUTION[RGB_PROVIDER_DEFAULT])
+	var fallback_text := _resolution_text(fallback)
+	if selected_text.is_empty():
+		selected_text = fallback_text
+	_clear_rgb_menu(_rgb_resolution_menu)
+	var choices: Array = RGB_RESOLUTIONS.get(provider, RGB_RESOLUTIONS[RGB_PROVIDER_DEFAULT])
+	var selected_found := false
+	for i in range(choices.size()):
+		var resolution := choices[i] as Vector2i
+		var text := _resolution_text(resolution)
+		if text == selected_text:
+			selected_found = true
+		_add_rgb_menu_option(
+			_rgb_resolution_menu,
+			text,
+			_on_rgb_resolution_option_pressed.bind(text)
+		)
+	if not selected_found:
+		selected_text = fallback_text
+	_requested_rgb_resolution = selected_text
+	_rgb_resolution_button.text = selected_text
+	if _rgb_resolution_menu != null:
+		_rgb_resolution_menu.visible = false
+
+
+func _rebuild_rgb_fps_select() -> void:
+	if _rgb_fps_button == null:
+		return
+	var provider := _rgb_provider_key()
+	var requested_fps := _requested_rgb_fps if _requested_rgb_fps > 0 else DEFAULT_RGB_FPS
+	_clear_rgb_menu(_rgb_fps_menu)
+	var fps_values: Array = RGB_FPS_VALUES.get(provider, RGB_FPS_VALUES[RGB_PROVIDER_DEFAULT])
+	var selected_found := false
+	for i in range(fps_values.size()):
+		var fps := int(fps_values[i])
+		if fps == requested_fps:
+			selected_found = true
+		_add_rgb_menu_option(
+			_rgb_fps_menu,
+			tr("UI_RGB_RECORDING_FPS_VALUE") % fps,
+			_on_rgb_fps_option_pressed.bind(fps)
+		)
+	if not selected_found:
+		requested_fps = DEFAULT_RGB_FPS
+		if not fps_values.has(DEFAULT_RGB_FPS) and fps_values.size() > 0:
+			requested_fps = int(fps_values[0])
+	_requested_rgb_fps = requested_fps
+	_rgb_fps_button.text = tr("UI_RGB_RECORDING_FPS_VALUE") % requested_fps
+	if _rgb_fps_menu != null:
+		_rgb_fps_menu.visible = false
+
+
+func _rebuild_rgb_codec_select() -> void:
+	if _rgb_codec_button == null:
+		return
+	var selected_codec := _normalize_rgb_codec(_requested_rgb_codec)
+	_clear_rgb_menu(_rgb_codec_menu)
+	for codec in RGB_CODEC_VALUES:
+		var codec_text := str(codec)
+		_add_rgb_menu_option(
+			_rgb_codec_menu,
+			_rgb_codec_label(codec_text),
+			_on_rgb_codec_option_pressed.bind(codec_text)
+		)
+	_requested_rgb_codec = selected_codec
+	_rgb_codec_button.text = _rgb_codec_label(selected_codec)
+	if _rgb_codec_menu != null:
+		_rgb_codec_menu.visible = false
+
+
+func _add_rgb_recording_controls(parent: VBoxContainer) -> void:
+	_add_field_label(parent, tr("UI_RGB_RECORDING_RESOLUTION"))
+	_rgb_resolution_button = _make_rgb_dropdown_button()
+	_rgb_resolution_button.pressed.connect(_on_rgb_resolution_button_pressed)
+	add_interactive(parent, _rgb_resolution_button)
+	_rgb_resolution_menu = _make_rgb_dropdown_menu()
+	parent.add_child(_rgb_resolution_menu)
+
+	_add_field_label(parent, tr("UI_RGB_RECORDING_FPS"))
+	_rgb_fps_button = _make_rgb_dropdown_button()
+	_rgb_fps_button.pressed.connect(_on_rgb_fps_button_pressed)
+	add_interactive(parent, _rgb_fps_button)
+	_rgb_fps_menu = _make_rgb_dropdown_menu()
+	parent.add_child(_rgb_fps_menu)
+
+	_add_field_label(parent, tr("UI_RGB_RECORDING_CODEC"))
+	_rgb_codec_button = _make_rgb_dropdown_button()
+	_rgb_codec_button.pressed.connect(_on_rgb_codec_button_pressed)
+	add_interactive(parent, _rgb_codec_button)
+	_rgb_codec_menu = _make_rgb_dropdown_menu()
+	parent.add_child(_rgb_codec_menu)
+	_refresh_rgb_selects()
+
+
+func _make_rgb_dropdown_button() -> Button:
+	var button := Button.new()
+	button.custom_minimum_size.y = 55
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.clip_text = true
+	button.add_theme_font_size_override("font_size", 21)
+	return button
+
+
+func _make_rgb_dropdown_menu() -> VBoxContainer:
+	var menu := VBoxContainer.new()
+	menu.visible = false
+	menu.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	menu.add_theme_constant_override("separation", 4)
+	return menu
+
+
+func _add_rgb_menu_option(parent: VBoxContainer, text: String, callback: Callable) -> void:
+	if parent == null:
+		return
+	var button := Button.new()
+	button.text = text
+	button.custom_minimum_size.y = 47
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.clip_text = true
+	button.add_theme_font_size_override("font_size", 20)
+	button.pressed.connect(callback)
+	add_interactive(parent, button)
+
+
+func _clear_rgb_menu(menu: VBoxContainer) -> void:
+	if menu == null:
+		return
+	for child in menu.get_children():
+		menu.remove_child(child)
+		child.queue_free()
+
+
+func _on_rgb_resolution_button_pressed() -> void:
+	if _refreshing_rgb_selects or _rgb_resolution_menu == null:
+		return
+	_rgb_resolution_menu.visible = not _rgb_resolution_menu.visible
+	if _rgb_fps_menu != null:
+		_rgb_fps_menu.visible = false
+	if _rgb_codec_menu != null:
+		_rgb_codec_menu.visible = false
+
+
+func _on_rgb_fps_button_pressed() -> void:
+	if _refreshing_rgb_selects or _rgb_fps_menu == null:
+		return
+	_rgb_fps_menu.visible = not _rgb_fps_menu.visible
+	if _rgb_resolution_menu != null:
+		_rgb_resolution_menu.visible = false
+	if _rgb_codec_menu != null:
+		_rgb_codec_menu.visible = false
+
+
+func _on_rgb_codec_button_pressed() -> void:
+	if _refreshing_rgb_selects or _rgb_codec_menu == null:
+		return
+	_rgb_codec_menu.visible = not _rgb_codec_menu.visible
+	if _rgb_resolution_menu != null:
+		_rgb_resolution_menu.visible = false
+	if _rgb_fps_menu != null:
+		_rgb_fps_menu.visible = false
+
+
+func _on_rgb_resolution_option_pressed(text: String) -> void:
+	if _refreshing_rgb_selects:
+		return
+	_requested_rgb_resolution = text
+	if _rgb_resolution_button != null:
+		_rgb_resolution_button.text = text
+	if _rgb_resolution_menu != null:
+		_rgb_resolution_menu.visible = false
+
+
+func _on_rgb_fps_option_pressed(fps: int) -> void:
+	if _refreshing_rgb_selects:
+		return
+	_requested_rgb_fps = fps
+	if _rgb_fps_button != null:
+		_rgb_fps_button.text = tr("UI_RGB_RECORDING_FPS_VALUE") % fps
+	if _rgb_fps_menu != null:
+		_rgb_fps_menu.visible = false
+
+
+func _on_rgb_codec_option_pressed(codec: String) -> void:
+	if _refreshing_rgb_selects:
+		return
+	_requested_rgb_codec = _normalize_rgb_codec(codec)
+	if _rgb_codec_button != null:
+		_rgb_codec_button.text = _rgb_codec_label(_requested_rgb_codec)
+	if _rgb_codec_menu != null:
+		_rgb_codec_menu.visible = false
+
+
+func _selected_rgb_resolution() -> Vector2i:
+	return _parse_resolution_text(_selected_rgb_resolution_text())
+
+
+func _selected_rgb_resolution_text() -> String:
+	if not _requested_rgb_resolution.is_empty():
+		return _requested_rgb_resolution
+	var provider := _rgb_provider_key()
+	return _resolution_text(RGB_DEFAULT_RESOLUTION.get(provider, RGB_DEFAULT_RESOLUTION[RGB_PROVIDER_DEFAULT]))
+
+
+func _selected_rgb_fps() -> int:
+	return _requested_rgb_fps if _requested_rgb_fps > 0 else DEFAULT_RGB_FPS
+
+
+func _selected_rgb_codec() -> String:
+	return _normalize_rgb_codec(_requested_rgb_codec)
+
+
+func _rgb_codec_label(codec: String) -> String:
+	if _normalize_rgb_codec(codec) == RGB_CODEC_H264:
+		return tr("UI_RGB_CODEC_H264")
+	return tr("UI_RGB_CODEC_HEVC")
+
+
+func _normalize_rgb_codec(codec: String) -> String:
+	var normalized := codec.strip_edges().to_lower()
+	if normalized in ["h265", "h.265", "video/hevc"]:
+		return RGB_CODEC_HEVC
+	if normalized in ["avc", "h.264", "video/avc"]:
+		return RGB_CODEC_H264
+	if RGB_CODEC_VALUES.has(normalized):
+		return normalized
+	return DEFAULT_RGB_CODEC
+
+
+func _resolution_from_options(options: Dictionary) -> String:
+	var explicit := str(options.get("rgb_resolution", "")).strip_edges()
+	if not explicit.is_empty():
+		return explicit
+	var width := int(options.get("rgb_width", 0))
+	var height := int(options.get("rgb_height", 0))
+	if width > 0 and height > 0:
+		return "%dx%d" % [width, height]
+	return ""
+
+
+func _resolution_text(resolution: Vector2i) -> String:
+	return "%dx%d" % [resolution.x, resolution.y]
+
+
+func _parse_resolution_text(text: String) -> Vector2i:
+	var normalized := text.strip_edges().to_lower()
+	var parts := normalized.split("x", false, 2)
+	if parts.size() != 2:
+		var provider := _rgb_provider_key()
+		return RGB_DEFAULT_RESOLUTION.get(provider, RGB_DEFAULT_RESOLUTION[RGB_PROVIDER_DEFAULT])
+	return Vector2i(maxi(1, int(parts[0])), maxi(1, int(parts[1])))
 
 
 func _force_stream_default(key: String, value: bool) -> void:
@@ -1344,6 +1675,11 @@ static func _default_options() -> Dictionary:
 		"audio_channel_layout": "stereo",
 		"audio_sample_rate_hz": 48000,
 		"audio_bitrate_bps": 128000,
+		"rgb_width": 0,
+		"rgb_height": 0,
+		"rgb_resolution": "",
+		"rgb_fps": DEFAULT_RGB_FPS,
+		"rgb_codec": DEFAULT_RGB_CODEC,
 		"server_host": DEFAULT_LIVE_SERVER_HOST,
 		"server_port": DEFAULT_LIVE_SERVER_PORT,
 		"server_result_port": DEFAULT_LIVE_RESULT_PORT,

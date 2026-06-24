@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -84,6 +85,24 @@ std::string JStringToString(JNIEnv* env, jstring value) {
   std::string out(chars);
   env->ReleaseStringUTFChars(value, chars);
   return out;
+}
+
+std::string NormalizeRgbCodec(std::string codec) {
+  std::transform(codec.begin(), codec.end(), codec.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (codec == "h264" || codec == "h.264" || codec == "avc" || codec == "video/avc") {
+    return "h264";
+  }
+  return "hevc";
+}
+
+AVCodecID RgbCodecId(const std::string& codec) {
+  return codec == "h264" ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC;
+}
+
+const char* RgbCodecLabel(const std::string& codec) {
+  return codec == "h264" ? "H.264" : "HEVC";
 }
 
 std::vector<uint8_t> JByteArrayToVector(JNIEnv* env, jbyteArray value) {
@@ -221,15 +240,17 @@ class LiveSpatialMp4Writer {
     CloseUnlocked();
   }
 
-  bool ConfigureHevc(const std::vector<uint8_t>& csd) {
+  bool ConfigureRgb(std::string codec, const std::vector<uint8_t>& csd) {
     std::lock_guard<std::mutex> lock(format_mutex_);
     try {
       EnsureContext();
       if (rgb_stream_) {
         return true;
       }
+      codec = NormalizeRgbCodec(std::move(codec));
+      const char* codec_label = RgbCodecLabel(codec);
       if (csd.empty()) {
-        return Fail("HEVC codec config is empty");
+        return Fail(std::string(codec_label) + " codec config is empty");
       }
 
       rgb_stream_ = avformat_new_stream(format_context_, nullptr);
@@ -242,7 +263,8 @@ class LiveSpatialMp4Writer {
 
       AVCodecParameters* codecpar = rgb_stream_->codecpar;
       codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
-      codecpar->codec_id = AV_CODEC_ID_HEVC;
+      codecpar->codec_id = RgbCodecId(codec);
+      codecpar->codec_tag = 0;
       codecpar->format = AV_PIX_FMT_YUV420P;
       codecpar->width = rgb_width_;
       codecpar->height = rgb_height_;
@@ -253,13 +275,14 @@ class LiveSpatialMp4Writer {
       codecpar->chroma_location = AVCHROMA_LOC_LEFT;
       codecpar->extradata = static_cast<uint8_t*>(av_mallocz(csd.size() + AV_INPUT_BUFFER_PADDING_SIZE));
       if (!codecpar->extradata) {
-        return Fail("failed to allocate HEVC extradata");
+        return Fail(std::string("failed to allocate ") + codec_label + " extradata");
       }
       std::memcpy(codecpar->extradata, csd.data(), csd.size());
       codecpar->extradata_size = static_cast<int>(csd.size());
 
       av_dict_set(&rgb_stream_->metadata, "camera_model", "pinhole", 0);
       av_dict_set(&rgb_stream_->metadata, "distortion_model", "brown", 0);
+      av_dict_set(&rgb_stream_->metadata, "codec", codec.c_str(), 0);
       av_dict_set_int(&rgb_stream_->metadata, "cam_count", rgb_camera_count_, 0);
       // track_base_time is finalised inside the io thread (via
       // PopulateTrackBaseTimeMetadata in WriteHeader_Locked) once the first
@@ -270,7 +293,7 @@ class LiveSpatialMp4Writer {
       SetSideData(rgb_stream_, AV_PKT_DATA_ECAM, rgb_side_data_.ecam);
       SetSideData(rgb_stream_, AV_PKT_DATA_DISTORTION_COEFFICIENTS, rgb_side_data_.dstr);
 
-      hevc_configured_ = true;
+      rgb_configured_ = true;
       WakeIoThread();
       return true;
     } catch (const std::exception& error) {
@@ -380,7 +403,7 @@ class LiveSpatialMp4Writer {
   }
 
   // v3: configure the AAC audio stream once, when the MediaCodec encoder
-  // emits its first codec-config blob. Mirrors ConfigureHevc shape -- creates
+  // emits its first codec-config blob. Mirrors ConfigureRgb shape -- creates
   // the AVStream, copies CSD into extradata, tags the channel layout in
   // stream metadata so a downstream reader can disambiguate FOA vs stereo,
   // and wakes the io thread so the deferred header write can proceed.
@@ -546,8 +569,8 @@ class LiveSpatialMp4Writer {
       if (!format_context_) {
         return Fail("writer was not started");
       }
-      if (!hevc_configured_) {
-        return Fail("HEVC stream was never configured");
+      if (!rgb_configured_) {
+        return Fail("RGB video stream was never configured");
       }
       if (audio_expected_ && !audio_configured_) {
         // Same shape as the depth fall-through: a recording that never saw a
@@ -737,7 +760,7 @@ class LiveSpatialMp4Writer {
   }
 
   bool CanWriteHeader_Locked(int64_t first_pts_snapshot) const {
-    if (!format_context_ || !hevc_configured_) {
+    if (!format_context_ || !rgb_configured_) {
       return false;
     }
     if (depth_expected_ && !depth_configured_) {
@@ -769,6 +792,7 @@ class LiveSpatialMp4Writer {
 
   bool WriteHeader_Locked() {
     PopulateTrackBaseTimeMetadata();
+    NormalizeStreamDispositions();
     const int open_ret = avio_open(&format_context_->pb, partial_path_.c_str(), AVIO_FLAG_WRITE);
     if (open_ret < 0) {
       return Fail("failed to open output mp4: " + AvError(open_ret));
@@ -789,6 +813,23 @@ class LiveSpatialMp4Writer {
     }
     header_written_ = true;
     return true;
+  }
+
+  void NormalizeStreamDispositions() {
+    if (rgb_stream_) {
+      rgb_stream_->disposition |= AV_DISPOSITION_DEFAULT;
+    }
+    if (depth_stream_) {
+      depth_stream_->disposition &= ~AV_DISPOSITION_DEFAULT;
+    }
+    if (audio_stream_) {
+      audio_stream_->disposition |= AV_DISPOSITION_DEFAULT;
+    }
+    for (AVStream* stream : timed_streams_) {
+      if (stream) {
+        stream->disposition &= ~AV_DISPOSITION_DEFAULT;
+      }
+    }
   }
 
   void EnsureContext() {
@@ -1172,7 +1213,7 @@ class LiveSpatialMp4Writer {
   bool hand_joints_expected_ = false;
   bool controller_input_expected_ = false;
   bool body_joints_expected_ = false;
-  bool hevc_configured_ = false;
+  bool rgb_configured_ = false;
   bool depth_configured_ = false;
   bool audio_expected_ = false;
   bool audio_configured_ = false;
@@ -1276,6 +1317,22 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeStart(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeConfigureRgb(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jstring codec,
+    jbyteArray csd) {
+  auto* writer = FromHandle(handle);
+  if (!writer) {
+    return JNI_FALSE;
+  }
+  return writer->ConfigureRgb(JStringToString(env, codec), JByteArrayToVector(env, csd))
+             ? JNI_TRUE
+             : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_spatialmp4_muxer_SpatialMp4Native_nativeConfigureHevc(
     JNIEnv* env,
     jclass,
@@ -1285,7 +1342,7 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeConfigureHevc(
   if (!writer) {
     return JNI_FALSE;
   }
-  return writer->ConfigureHevc(JByteArrayToVector(env, csd)) ? JNI_TRUE : JNI_FALSE;
+  return writer->ConfigureRgb("hevc", JByteArrayToVector(env, csd)) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -1360,6 +1417,22 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteAudioPacket(
   return writer->WriteAudio(JByteArrayToVector(env, data), pts_us, duration_us, flags)
              ? JNI_TRUE
              : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_spatialmp4_muxer_SpatialMp4Native_nativeWriteRgbPacket(
+    JNIEnv* env,
+    jclass,
+    jlong handle,
+    jbyteArray data,
+    jlong pts_us,
+    jlong duration_us,
+    jint flags) {
+  auto* writer = FromHandle(handle);
+  if (!writer) {
+    return JNI_FALSE;
+  }
+  return writer->WriteRgb(JByteArrayToVector(env, data), pts_us, duration_us, flags) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

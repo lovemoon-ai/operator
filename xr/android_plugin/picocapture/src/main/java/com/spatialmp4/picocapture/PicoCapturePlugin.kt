@@ -27,14 +27,17 @@ import android.util.Size
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.spatialmp4.capturecommon.CapturedRgbaFrame
 import com.spatialmp4.capturecommon.CapturedYuvFrame
 import com.spatialmp4.capturecommon.ChromaLayout
 import com.spatialmp4.capturecommon.DeviceIdentity
+import com.spatialmp4.capturecommon.GpuSurfaceStereoEncoder
 import com.spatialmp4.capturecommon.StereoHevcEncoder
 import com.spatialmp4.capturecommon.YuvPlaneCapture
 import com.spatialmp4.contract.SessionConfig
 import com.spatialmp4.contract.SpatialDataSink
 import com.spatialmp4.contract.SpatialDataSinkRegistry
+import com.spatialmp4.contract.RgbVideoCodec
 import com.spatialmp4.muxer.SpatialMp4MuxerPlugin
 import com.spatialmp4.muxer.SpatialMp4SideDataPacker
 import org.godotengine.godot.Godot
@@ -50,6 +53,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
@@ -67,6 +71,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var finalMp4Path: File? = null
     private var partialMp4Path: File? = null
     private var hevcEncoder: StereoHevcEncoder? = null
+    private var gpuSurfaceEncoder: GpuSurfaceStereoEncoder? = null
     private var leftMetadata = "{}"
     private var rightMetadata = "{}"
     @Volatile private var openXrExternalCameraInfoJson = "{}"
@@ -89,6 +94,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var stereoRgb = true
     private var rgbBitrate = DEFAULT_RGB_BITRATE
     private var rgbFps = DEFAULT_RGB_FPS
+    private var rgbCodec = RgbVideoCodec.HEVC.tag
 
     @Volatile private var acceptingFrames = false
     @Volatile private var muxerSink: SpatialDataSink? = null
@@ -106,6 +112,8 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private val metricOxrRejectBadSize = AtomicLong(0L)
     private val metricOxrRejectBadBuffer = AtomicLong(0L)
     private val metricOxrRejectNoEncoder = AtomicLong(0L)
+    private val metricOxrRejectBackpressure = AtomicLong(0L)
+    private val pendingOpenXrRgbaTasks = AtomicInteger(0)
 
     override fun getPluginName(): String = "PicoCapturePlugin"
 
@@ -189,6 +197,12 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         this.recordBodyTracking = recordBodyTracking
         this.recordMotionTrackers = recordMotionTrackers
         this.maxMotionTrackerCount = maxMotionTrackerCount.coerceIn(0, MAX_MOTION_TRACKERS)
+        return true
+    }
+
+    @UsedByGodot
+    fun setRgbVideoCodec(codec: String): Boolean {
+        rgbCodec = RgbVideoCodec.normalize(codec)
         return true
     }
 
@@ -443,8 +457,10 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         } else {
             null
         }
-        leftMetadata = leftConfig.metadata.toString()
-        rightMetadata = rightConfig?.metadata?.toString() ?: "{}"
+        val leftRecordingMetadata = recordingCameraMetadata(leftConfig)
+        val rightRecordingMetadata = rightConfig?.let { recordingCameraMetadata(it) }
+        leftMetadata = leftRecordingMetadata.toString()
+        rightMetadata = rightRecordingMetadata?.toString() ?: "{}"
         writeText(File(root, "left_camera_characteristics.json"), leftMetadata)
         if (rightConfig != null) {
             writeText(File(root, "right_camera_characteristics.json"), rightMetadata)
@@ -453,7 +469,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
         val androidTimebase = writeAndroidTimebase(root, leftConfig.timestampSource, rightConfig?.timestampSource)
 
-        if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase)) {
+        if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase, useGpuSurfaceEncoder = false)) {
             return false
         }
 
@@ -505,8 +521,10 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             null
         }
 
-        leftMetadata = leftConfig.metadata.toString()
-        rightMetadata = rightConfig?.metadata?.toString() ?: "{}"
+        val leftRecordingMetadata = recordingCameraMetadata(leftConfig)
+        val rightRecordingMetadata = rightConfig?.let { recordingCameraMetadata(it) }
+        leftMetadata = leftRecordingMetadata.toString()
+        rightMetadata = rightRecordingMetadata?.toString() ?: "{}"
         writeText(File(root, "left_camera_characteristics.json"), leftMetadata)
         if (rightConfig != null) {
             writeText(File(root, "right_camera_characteristics.json"), rightMetadata)
@@ -515,7 +533,8 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
         val androidTimebase = writeAndroidTimebase(root, leftTimestampSource = null, rightTimestampSource = null)
 
-        if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase)) {
+        ensureBackgroundThread()
+        if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase, useGpuSurfaceEncoder = true)) {
             return false
         }
 
@@ -530,6 +549,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         if (rightConfig != null) {
             openXrCameraConfigs["right"] = rightConfig
         }
+        pendingOpenXrRgbaTasks.set(0)
         acceptingFrames = true
         emitSignal("camera_ready", "left", leftConfig.cameraId)
         if (rightConfig != null) {
@@ -564,20 +584,61 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             return false
         }
         val timestampNs = openXrTimeToGodotTicksNs(xrTimeNs)
-        val frame = rgbaToYuvFrame(normalizedEye, timestampNs, width, height, stride, bytesPerPixel, rgba)
-        if (frame == null) {
+        val pixelStride = bytesPerPixel.coerceAtLeast(4)
+        val rowStride = if (stride > 0) stride else width * pixelStride
+        if (!hasEnoughOpenXrRgbaBytes(width, height, rowStride, pixelStride, rgba)) {
             metricOxrRejectBadBuffer.incrementAndGet()
             emitSignal("camera_error", "Dropping OpenXR $normalizedEye frame with invalid RGBA buffer")
             return false
         }
+        val encoder = gpuSurfaceEncoder ?: run {
+            metricOxrRejectNoEncoder.incrementAndGet()
+            emitSignal("camera_error", "Dropping OpenXR $normalizedEye frame because GPU Surface encoder is not running")
+            return false
+        }
+        val handler = backgroundHandler ?: run {
+            metricOxrRejectNoEncoder.incrementAndGet()
+            emitSignal("camera_error", "Dropping OpenXR $normalizedEye frame because Pico background thread is not running")
+            return false
+        }
+        val frame = CapturedRgbaFrame(
+            eye = normalizedEye,
+            timestampNs = timestampNs,
+            width = width,
+            height = height,
+            rowStride = rowStride,
+            pixelStride = pixelStride,
+            bytes = rgba
+        )
         if (normalizedEye == "left") metricCameraFramesLeft.incrementAndGet()
         else metricCameraFramesRight.incrementAndGet()
-        hevcEncoder?.offer(frame) ?: run {
+        val pending = pendingOpenXrRgbaTasks.incrementAndGet()
+        if (pending > MAX_PENDING_OPENXR_RGBA_TASKS) {
+            decrementPendingOpenXrRgbaTasks()
+            metricOxrRejectBackpressure.incrementAndGet()
+            return false
+        }
+        if (!handler.post {
+                try {
+                    if (!acceptingFrames) {
+                        return@post
+                    }
+                    val offered = encoder.offer(frame)
+                    if (!offered) {
+                        metricOxrRejectNoEncoder.incrementAndGet()
+                        return@post
+                    }
+                    writeFrameIndex(normalizedEye, config, timestampNs, xrTimeNs, width, height)
+                    emitSignal("camera_frame_saved", normalizedEye, finalMp4Path?.absolutePath ?: "", timestampNs)
+                } finally {
+                    decrementPendingOpenXrRgbaTasks()
+                }
+            }
+        ) {
+            decrementPendingOpenXrRgbaTasks()
             metricOxrRejectNoEncoder.incrementAndGet()
             return false
         }
-        writeFrameIndex(normalizedEye, config, timestampNs, xrTimeNs, width, height)
-        emitSignal("camera_frame_saved", normalizedEye, finalMp4Path?.absolutePath ?: "", timestampNs)
         return true
     }
 
@@ -671,7 +732,17 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("oxr_rej_bad_size", metricOxrRejectBadSize.getAndSet(0L))
             .put("oxr_rej_bad_buffer", metricOxrRejectBadBuffer.getAndSet(0L))
             .put("oxr_rej_no_encoder", metricOxrRejectNoEncoder.getAndSet(0L))
+            .put("oxr_rej_backpressure", metricOxrRejectBackpressure.getAndSet(0L))
+            .put("oxr_pending_encode_tasks", pendingOpenXrRgbaTasks.get())
             .toString()
+    }
+
+    private fun decrementPendingOpenXrRgbaTasks() {
+        while (true) {
+            val current = pendingOpenXrRgbaTasks.get()
+            if (current <= 0) return
+            if (pendingOpenXrRgbaTasks.compareAndSet(current, current - 1)) return
+        }
     }
 
     private fun ensureBackgroundThread() {
@@ -751,7 +822,8 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         root: File,
         leftConfig: CameraConfig,
         rightConfig: CameraConfig?,
-        androidTimebase: JSONObject?
+        androidTimebase: JSONObject?,
+        useGpuSurfaceEncoder: Boolean
     ): Boolean {
         val sink = activeDataSink()
         if (sink == null) {
@@ -774,7 +846,14 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         finalMp4Path = finalPath
         partialMp4Path = partialPath
 
-        val rgbSideData = SpatialMp4SideDataPacker.packRgb(leftConfig.metadata, rightConfig?.metadata)
+        val rgbSideData = SpatialMp4SideDataPacker.packRgb(
+            leftConfig.metadata,
+            leftConfig.size.width,
+            leftConfig.size.height,
+            rightConfig?.metadata,
+            rightConfig?.size?.width ?: 0,
+            rightConfig?.size?.height ?: 0
+        )
         val rgbWidth = leftConfig.size.width + (rightConfig?.size?.width ?: 0)
         val rgbCameraCount = if (rightConfig == null) 1 else 2
         val deviceIdentity = DeviceIdentity.detect()
@@ -821,26 +900,79 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
                 rightConfig.metadata, rightConfig.size.width, rightConfig.size.height
             )
         }
-        val encoder = StereoHevcEncoder(
-            dataSink = sink,
-            eyeWidth = leftConfig.size.width,
-            eyeHeight = leftConfig.size.height,
-            fps = rgbFps,
-            bitrate = rgbBitrate,
-            stereo = rightConfig != null,
-            cameraIntrinsics = cameraIntrinsics,
-            onError = { message -> emitSignal("camera_error", message) },
-            onPairEncoded = { metricEncoderPairsOffered.incrementAndGet() },
-            onMonoEncoded = { metricEncoderMonoOffered.incrementAndGet() },
-            onPacketEmitted = { metricEncoderPacketsOut.incrementAndGet() }
-        )
-        if (!encoder.start()) {
-            sink.finishSession()
+        if (useGpuSurfaceEncoder) {
+            val encoder = GpuSurfaceStereoEncoder(
+                dataSink = sink,
+                eyeWidth = leftConfig.size.width,
+                eyeHeight = leftConfig.size.height,
+                fps = rgbFps,
+                bitrate = rgbBitrate,
+                stereo = rightConfig != null,
+                cameraIntrinsics = cameraIntrinsics,
+                rgbCodec = rgbCodec,
+                onError = { message -> emitSignal("camera_error", message) },
+                onPairEncoded = { metricEncoderPairsOffered.incrementAndGet() },
+                onMonoEncoded = { metricEncoderMonoOffered.incrementAndGet() },
+                onPacketEmitted = { metricEncoderPacketsOut.incrementAndGet() }
+            )
+            if (!startGpuSurfaceEncoderOnBackground(encoder)) {
+                sink.finishSession()
+                return false
+            }
+            gpuSurfaceEncoder = encoder
+            hevcEncoder = null
+        } else {
+            val encoder = StereoHevcEncoder(
+                dataSink = sink,
+                eyeWidth = leftConfig.size.width,
+                eyeHeight = leftConfig.size.height,
+                fps = rgbFps,
+                bitrate = rgbBitrate,
+                stereo = rightConfig != null,
+                cameraIntrinsics = cameraIntrinsics,
+                rgbCodec = rgbCodec,
+                onError = { message -> emitSignal("camera_error", message) },
+                onPairEncoded = { metricEncoderPairsOffered.incrementAndGet() },
+                onMonoEncoded = { metricEncoderMonoOffered.incrementAndGet() },
+                onPacketEmitted = { metricEncoderPacketsOut.incrementAndGet() }
+            )
+            if (!encoder.start()) {
+                sink.finishSession()
+                return false
+            }
+            hevcEncoder = encoder
+            gpuSurfaceEncoder = null
+        }
+        Log.i(TAG, "Pico SpatialMP4 writer started stereo=${rightConfig != null} gpuSurface=$useGpuSurfaceEncoder partial=${partialPath.absolutePath} final=${finalPath.absolutePath}")
+        return true
+    }
+
+    private fun startGpuSurfaceEncoderOnBackground(encoder: GpuSurfaceStereoEncoder): Boolean {
+        val handler = backgroundHandler ?: run {
+            emitSignal("camera_error", "Pico background thread is not available for GPU Surface encoder")
             return false
         }
-        hevcEncoder = encoder
-        Log.i(TAG, "Pico SpatialMP4 writer started stereo=${rightConfig != null} partial=${partialPath.absolutePath} final=${finalPath.absolutePath}")
-        return true
+        if (Looper.myLooper() == handler.looper) {
+            return encoder.start()
+        }
+        val started = java.util.concurrent.atomic.AtomicBoolean(false)
+        val latch = CountDownLatch(1)
+        if (!handler.post {
+                try {
+                    started.set(encoder.start())
+                } finally {
+                    latch.countDown()
+                }
+            }
+        ) {
+            emitSignal("camera_error", "Failed to schedule GPU Surface encoder start")
+            return false
+        }
+        if (!latch.await(STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            emitSignal("camera_error", "Timed out while starting GPU Surface encoder")
+            return false
+        }
+        return started.get()
     }
 
     private fun openEyeCamera(eye: String, config: CameraConfig) {
@@ -1111,6 +1243,8 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         openXrCameraConfigs.clear()
         hevcEncoder?.stopAndDrain()
         hevcEncoder = null
+        gpuSurfaceEncoder?.stopAndDrain()
+        gpuSurfaceEncoder = null
         closeFrameIndexWriters()
     }
 
@@ -1180,15 +1314,49 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         androidTimebase: JSONObject?
     ): JSONObject {
         val cameras = JSONObject()
-            .put("left", JSONObject(leftConfig.metadata.toString()))
+            .put("left", recordingCameraMetadata(leftConfig))
         if (rightConfig != null) {
-            cameras.put("right", JSONObject(rightConfig.metadata.toString()))
+            cameras.put("right", recordingCameraMetadata(rightConfig))
         }
         return JSONObject()
             .put("schema", "spatialmp4.operator_static.session.v1")
             .put("provider", "pico")
             .put("camera2_characteristics", cameras)
             .put("android_timebase", androidTimebase ?: JSONObject())
+    }
+
+    private fun recordingCameraMetadata(config: CameraConfig): JSONObject {
+        val intrinsics = SpatialMp4SideDataPacker.extractIntrinsics(
+            config.metadata,
+            config.size.width,
+            config.size.height
+        )
+        return JSONObject(config.metadata.toString())
+            .put("recording_width", config.size.width)
+            .put("recording_height", config.size.height)
+            .put("recording_lens_intrinsic_calibration", JSONArray()
+                .put(intrinsics.fx)
+                .put(intrinsics.fy)
+                .put(intrinsics.cx)
+                .put(intrinsics.cy))
+            .put("recording_intrinsics", intrinsics.toJsonObject())
+    }
+
+    private fun com.spatialmp4.contract.Intrinsics.toJsonObject(): JSONObject =
+        JSONObject()
+            .put("fx", fx)
+            .put("fy", fy)
+            .put("cx", cx)
+            .put("cy", cy)
+            .put("width", width)
+            .put("height", height)
+            .put("extrinsics3x4", doubleArrayJson(extrinsics3x4))
+            .put("distortion", doubleArrayJson(distortion))
+
+    private fun doubleArrayJson(values: List<Double>): JSONArray {
+        val array = JSONArray()
+        values.forEach { array.put(it) }
+        return array
     }
 
     private fun activeDataSink(): SpatialDataSink? =
@@ -1230,56 +1398,19 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         )
     }
 
-    private fun rgbaToYuvFrame(
-        eye: String,
-        timestampNs: Long,
+    private fun hasEnoughOpenXrRgbaBytes(
         width: Int,
         height: Int,
-        stride: Int,
-        bytesPerPixel: Int,
+        rowStride: Int,
+        pixelStride: Int,
         rgba: ByteArray
-    ): CapturedYuvFrame? {
-        if (width <= 0 || height <= 0) return null
-        val pixelBytes = bytesPerPixel.coerceAtLeast(4)
-        val rowStride = if (stride > 0) stride else width * pixelBytes
-        if (rgba.size < rowStride * (height - 1) + width * 3) return null
-        val uvWidth = width / 2
-        val uvHeight = height / 2
-        val yPlane = ByteArray(width * height)
-        val uPlane = ByteArray(uvWidth * uvHeight)
-        val vPlane = ByteArray(uvWidth * uvHeight)
-        for (row in 0 until height) {
-            val srcRow = row * rowStride
-            val yRow = row * width
-            for (col in 0 until width) {
-                val src = srcRow + col * pixelBytes
-                if (src + 2 >= rgba.size) continue
-                val r = rgba[src].toInt() and 0xff
-                val g = rgba[src + 1].toInt() and 0xff
-                val b = rgba[src + 2].toInt() and 0xff
-                yPlane[yRow + col] = clampVideoByte(((66 * r + 129 * g + 25 * b + 128) shr 8) + 16)
-                if ((row and 1) == 0 && (col and 1) == 0 && row / 2 < uvHeight && col / 2 < uvWidth) {
-                    val uvIndex = (row / 2) * uvWidth + (col / 2)
-                    uPlane[uvIndex] = clampVideoByte(((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128)
-                    vPlane[uvIndex] = clampVideoByte(((112 * r - 94 * g - 18 * b + 128) shr 8) + 128)
-                }
-            }
-        }
-        return CapturedYuvFrame(
-            eye = eye,
-            timestampNs = timestampNs,
-            width = width,
-            height = height,
-            planes = listOf(
-                YuvPlaneCapture(0, width, 1, yPlane),
-                YuvPlaneCapture(1, uvWidth, 1, uPlane),
-                YuvPlaneCapture(2, uvWidth, 1, vPlane)
-            ),
-            chromaLayout = ChromaLayout.UNKNOWN
-        )
+    ): Boolean {
+        if (width <= 0 || height <= 0 || rowStride <= 0 || pixelStride <= 0) return false
+        val minRowBytes = (width - 1L) * pixelStride.coerceAtLeast(4) + 4L
+        if (rowStride < minRowBytes) return false
+        val required = rowStride.toLong() * (height - 1L) + minRowBytes
+        return required <= rgba.size
     }
-
-    private fun clampVideoByte(value: Int): Byte = value.coerceIn(0, 255).toByte()
 
     private fun directorySize(target: File): Long {
         if (!target.exists()) return 0L
@@ -1339,6 +1470,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         private const val DEFAULT_RGB_BITRATE = 24_000_000
         private const val DEFAULT_RGB_FPS = 30
         private const val STOP_TIMEOUT_SECONDS = 5L
+        private const val MAX_PENDING_OPENXR_RGBA_TASKS = 4
         private const val MAX_MOTION_TRACKERS = 3
         private val PICO_POSITION_VENDOR_KEYS = listOf(
             "com.picovr.camera.position",
