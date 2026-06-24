@@ -140,7 +140,7 @@ func _settings_section() -> String:
 
 
 func _settings_defaults() -> Dictionary:
-	return _default_options()
+	return _mode_default_options()
 
 
 func _settings_log_tag() -> String:
@@ -217,6 +217,7 @@ func get_options() -> Dictionary:
 		options["upload_on_finalize"] = false
 		options["keep_local_after_upload"] = true
 	else:
+		options["show_hand_skeleton_overlay"] = _toggle_enabled_or_default("show_hand_skeleton_overlay")
 		options["save_controller_hand_sidecar"] = _toggle_enabled("save_controller_hand_sidecar")
 		options["save_body_sidecar"] = _toggle_enabled("save_body_sidecar")
 		options["save_root"] = _configured_save_root()
@@ -357,6 +358,11 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# gates the actual recording downstream, so a denied prompt degrades to
 	# video-only instead of failing the session.
 	_add_stream_toggle(streams, "record_audio", tr("UI_RECORD_AUDIO"), true)
+
+	# --- Display group -----------------------------------------------------
+	if not _live_server_mode:
+		var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
+		_add_stream_toggle(display, "show_hand_skeleton_overlay", tr("UI_SHOW_HAND_SKELETON_OVERLAY"), true)
 
 	# --- Robot constraint group -------------------------------------------
 	var robot_constraint := register_group("robot_constraint", "UI_ROBOT_CONSTRAINT_GROUP", "robot-arm")
@@ -790,6 +796,13 @@ func _add_field_label(parent: Container, text: String) -> Label:
 
 func _toggle_enabled(key: String) -> bool:
 	var toggle: CheckButton = _stream_toggles[key]
+	return toggle.button_pressed
+
+
+func _toggle_enabled_or_default(key: String) -> bool:
+	var toggle := _stream_toggles.get(key) as CheckButton
+	if toggle == null:
+		return bool(_default_value_for_key(key))
 	return toggle.button_pressed
 
 
@@ -1277,7 +1290,14 @@ func _configured_save_root() -> String:
 
 
 func _default_value_for_key(key: String) -> Variant:
-	return _default_options().get(key)
+	return _mode_default_options().get(key)
+
+
+func _mode_default_options() -> Dictionary:
+	var defaults := _default_options()
+	if _live_server_mode:
+		defaults.erase("show_hand_skeleton_overlay")
+	return defaults
 
 
 static func load_settings() -> Dictionary:
@@ -1319,6 +1339,7 @@ static func _default_options() -> Dictionary:
 		"record_body_tracking": true,
 		"record_motion_trackers": true,
 		"max_motion_trackers": 2,
+		"show_hand_skeleton_overlay": true,
 		"record_audio": true,
 		"audio_channel_layout": "stereo",
 		"audio_sample_rate_hz": 48000,
