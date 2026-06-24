@@ -16,6 +16,7 @@ const SettingsLauncherButtonScript := preload("res://scripts/ui/settings_launche
 const EgoUploaderScript := preload("res://scripts/sinks/upload/ego_uploader.gd")
 const EgoQRScannerScript := preload("res://scripts/ui/ego_qr_scanner.gd")
 const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
+const HandSkeletonOverlayScript := preload("res://scripts/xr/hand_skeleton_overlay.gd")
 const QR_SCANNER_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const QR_TARGET_UPLOAD_URL := "upload_url"
 const QR_TARGET_LIVE_SERVER := "live_server"
@@ -44,6 +45,9 @@ const PICO_BODY_STATUS_LIMITED := 2
 const XR_TRACKING_STABLE_SECONDS := 0.75
 const XR_TRACKING_WAIT_TIMEOUT_SECONDS := 15.0
 const XR_TRACKING_POLL_SECONDS := 0.1
+const RUNTIME_DISPLAY_OPTION_KEYS := [
+	"show_hand_skeleton_overlay",
+]
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
 @export var keep_passthrough_visible := true
@@ -94,6 +98,7 @@ var _body_pose_debug_started_pico_body := false
 var _body_pose_debug_tracking_provider: Node = null
 var _body_pose_debug_provider: Node = null
 var _body_pose_debug_overlay: Node3D = null
+var _hand_skeleton_overlay: Node3D = null
 var _h2_debug_provider: Node = null
 var _h2_debug_overlay: Node3D = null
 var _g1_debug_tracking_provider: Node = null
@@ -145,6 +150,9 @@ var capture_options := {
 	"record_body_tracking": true,
 	"record_motion_trackers": true,
 	"max_motion_trackers": DEFAULT_PICO_BODY_TRACKERS,
+	# Runtime-only VST overlay. This is deliberately stripped from the
+	# effective recording options before writer/samplers see them.
+	"show_hand_skeleton_overlay": true,
 	# v3 spatial audio: now on by default ("Audio" toggle in the settings
 	# panel). The pipeline still gates on the Android RECORD_AUDIO runtime
 	# permission downstream -- if the user denies the prompt, the session
@@ -617,6 +625,7 @@ func _process(delta: float) -> void:
 
 	var t_pointer := Time.get_ticks_usec()
 	_update_operator_interaction_state()
+	_update_hand_skeleton_overlay_state()
 	_stage_us_pointer += Time.get_ticks_usec() - t_pointer
 	_update_pico_tracker_setup_status(delta)
 	_update_motion_tracker_support_flag()
@@ -908,6 +917,7 @@ func _on_capture_session_started(_session_dir: String) -> void:
 		qr_scanner.set_external_capture_busy(CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name))
 	if record_control:
 		record_control.set_recording(true)
+	_update_hand_skeleton_overlay_state()
 	# Park any in-flight upload while we record — see
 	# claw/issues/010-ego-data-upload.md "Trip-wires".
 	if ego_uploader and not _is_live_feed_mode():
@@ -967,6 +977,7 @@ func _on_capture_session_stopped(final_path: String) -> void:
 		qr_scanner.set_external_capture_busy(false)
 	if record_control:
 		record_control.set_recording(false)
+	_update_hand_skeleton_overlay_state()
 	_play_cue(_stop_cue)
 	if is_live_feed:
 		print("Live feed push stopped; live-pull remains connected for algorithm results")
@@ -1047,6 +1058,12 @@ func _setup_xr_scene() -> void:
 	right_pointer.tracker = &"right_hand"
 	right_pointer.pose = &"aim"
 	origin.add_child(right_pointer)
+
+	_hand_skeleton_overlay = HandSkeletonOverlayScript.new()
+	_hand_skeleton_overlay.name = "HandSkeletonOverlay"
+	if _hand_skeleton_overlay.has_method("set_xr_origin"):
+		_hand_skeleton_overlay.call("set_xr_origin", origin)
+	origin.add_child(_hand_skeleton_overlay)
 
 	if _is_live_feed_mode() and enable_live_pull:
 		live_pull_view = LivePullDenseMapViewScript.new()
@@ -1780,6 +1797,7 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 	_merge_capture_options(options)
 	capture_options["save_root"] = _configured_save_root()
 	_sync_operator_interaction_override()
+	_update_hand_skeleton_overlay_state()
 	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_release_ui_pointer()
 	record_control.show_for_mode(_current_ui_interaction_mode())
@@ -1891,6 +1909,19 @@ func _update_operator_interaction_state() -> void:
 		interaction.call("set_busy", _recording)
 
 
+func _update_hand_skeleton_overlay_state() -> void:
+	if _hand_skeleton_overlay == null:
+		return
+	var show_overlay := not _is_live_feed_mode() \
+			and _recording \
+			and bool(capture_options.get("show_hand_skeleton_overlay", true)) \
+			and _current_ui_interaction_mode() == "hands"
+	if _hand_skeleton_overlay.has_method("set_enabled"):
+		_hand_skeleton_overlay.call("set_enabled", show_overlay)
+	else:
+		_hand_skeleton_overlay.visible = show_overlay
+
+
 func _current_ui_interaction_mode() -> String:
 	var interaction := _operator_interaction()
 	if interaction != null and interaction.has_method("get_current_mode"):
@@ -1955,6 +1986,7 @@ func _apply_capture_interaction_mode(mode: String) -> void:
 		settings_panel.call("set_interaction_mode", mode)
 	if record_control != null and record_control.visible and not _recording:
 		record_control.show_for_mode(mode)
+	_update_hand_skeleton_overlay_state()
 
 
 func _on_settings_requested() -> void:
@@ -2003,9 +2035,12 @@ func _capture_option(option: String, fallback: Variant = null) -> Variant:
 func _effective_capture_options(options: Dictionary) -> Dictionary:
 	if camera_plugin == null:
 		_bind_android_plugin()
+	var recording_options := options.duplicate(true)
+	for key in RUNTIME_DISPLAY_OPTION_KEYS:
+		recording_options.erase(key)
 	# WP6: the provider-capability gating moved verbatim to the composition
 	# root so the WP7 harness can exercise it with fake providers.
-	return EgoCaptureComposition.effective_capture_options(options, camera_plugin)
+	return EgoCaptureComposition.effective_capture_options(recording_options, camera_plugin)
 
 
 func _provider_label() -> String:
