@@ -207,6 +207,8 @@ Both must show the selected `versionCode` and `versionName`.
 mkdir -p xr/dist
 cp -f xr/build/pico/Operator.apk "xr/dist/Operator-v${VERSION}-pico.apk"
 cp -f xr/build/quest/Operator.apk "xr/dist/Operator-v${VERSION}-quest.apk"
+cp -f "claw/qa-artifacts/v${VERSION}/test-report.html" \
+  "xr/dist/Operator-v${VERSION}-QA-report.html"
 (cd xr/dist && shasum -a 256 \
   "Operator-v${VERSION}-pico.apk" \
   "Operator-v${VERSION}-quest.apk" \
@@ -222,26 +224,38 @@ git push origin "v${VERSION}"
 
 11. Create GitHub Release and upload assets.
 
+Release notes must be concise and user-facing:
+
+- Do not start the body with `Operator v${VERSION}` because it duplicates the
+  release title.
+- Include a `Changelog` section with `Added`, `Changed`, and `Fixed`
+  subsections when applicable.
+- Do not include `QA Summary`, `Builds`, or `Validation` sections; QA is already
+  enforced by the release gate, and release assets are shown by GitHub.
+- End with one short English feedback invitation. Vary this sentence between
+  releases.
+
 ```bash
 notes_file=$(mktemp)
 cat > "$notes_file" <<EOF
-Operator v${VERSION}
+Changelog
 
-Builds:
-- Operator-v${VERSION}-pico.apk
-- Operator-v${VERSION}-quest.apk
+Added
+- <new user-facing capability>
 
-Validation:
-- QA report: claw/qa-artifacts/v${VERSION}/test-report.html (PASS)
-- python3 cicd/validate_xr_features.py
-- python3 cicd/validate_xr_test_manifests.py
-- bash cicd/03_godot_mujoco_static.sh
-- make -C xr build-pico build-quest
+Changed
+- <changed behavior or compatibility note>
+
+Fixed
+- <bug fix or reliability improvement>
+
+Please try it out and keep the feedback coming.
 EOF
 
 gh release create "v${VERSION}" \
   "xr/dist/Operator-v${VERSION}-pico.apk" \
   "xr/dist/Operator-v${VERSION}-quest.apk" \
+  "xr/dist/Operator-v${VERSION}-QA-report.html" \
   "xr/dist/Operator-v${VERSION}-SHA256SUMS.txt" \
   --title "Operator v${VERSION}" \
   --notes-file "$notes_file"
@@ -257,4 +271,5 @@ gh release view "v${VERSION}" \
 git status -sb
 ```
 
-The release should contain the Pico APK, Quest APK, and SHA256 file.
+The release should contain the Pico APK, Quest APK, QA report HTML, and SHA256
+file.
