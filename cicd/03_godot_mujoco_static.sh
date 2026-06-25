@@ -28,11 +28,11 @@ for path in \
   xr/assets/mujoco/so101_pickplace.xml \
   xr/assets/mujoco/so101_new_calib.urdf \
   xr/scripts/app/modes/mujoco/mujoco_device_test.gd \
-  tests/03_godot_mujoco_device.sh; do
+  cicd/03_godot_mujoco_device.sh; do
   require_file "$path"
 done
 
-bash -n "$ROOT/tests/03_godot_mujoco_device.sh"
+bash -n "$ROOT/cicd/03_godot_mujoco_device.sh"
 
 grep -q 'mj_step(model, data)' "$ROOT/xr/native/godot_mujoco/src/mujoco_native.cpp"
 grep -q 'mj_loadXML' "$ROOT/xr/native/godot_mujoco/src/mujoco_native.cpp"
