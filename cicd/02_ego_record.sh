@@ -35,6 +35,16 @@
 #   CLEAR_APP_DATA=0    preserve app settings before launch (default clears).
 #   EXPECT_AUDIO=0      disable the audio-specific CI toggle/checks
 #                       (default 1: record and require AAC audio in MP4).
+#   EXPECT_BODY_TRACKING=1
+#   EXPECT_MOTION_TRACKERS=1
+#                       opt into body/motion capture toggles and checks.
+#                       Defaults are 0 because Pico body/motion tracking
+#                       requires worn external trackers.
+#   EXPECT_RGB_CODEC    RGB encoder to request and validate: hevc or h264
+#                       (default hevc).
+#   EXPECT_RGB_RESOLUTION
+#                       Optional per-eye RGB resolution, e.g. 1280x960.
+#   EXPECT_RGB_FPS      RGB capture FPS baked into the CI APK (default 30).
 #   AUDIO_CHANNEL_LAYOUT, AUDIO_SAMPLE_RATE_HZ, AUDIO_BITRATE_BPS
 #                       audio settings baked into the CI APK when EXPECT_AUDIO=1
 #                       (defaults stereo, 48000, 128000).
@@ -69,6 +79,11 @@ if [ "${EXPECT_AUDIO+x}" = "x" ]; then
   EXPECT_AUDIO_WAS_SET=1
 fi
 EXPECT_AUDIO="${EXPECT_AUDIO:-1}"
+EXPECT_BODY_TRACKING="${EXPECT_BODY_TRACKING:-0}"
+EXPECT_MOTION_TRACKERS="${EXPECT_MOTION_TRACKERS:-0}"
+EXPECT_RGB_CODEC="${EXPECT_RGB_CODEC:-hevc}"
+EXPECT_RGB_RESOLUTION="${EXPECT_RGB_RESOLUTION:-}"
+EXPECT_RGB_FPS="${EXPECT_RGB_FPS:-30}"
 AUDIO_CHANNEL_LAYOUT="${AUDIO_CHANNEL_LAYOUT:-stereo}"
 AUDIO_SAMPLE_RATE_HZ="${AUDIO_SAMPLE_RATE_HZ:-48000}"
 AUDIO_BITRATE_BPS="${AUDIO_BITRATE_BPS:-128000}"
@@ -333,9 +348,17 @@ flip_auto_start_on() {
   if [ "$EXPECT_AUDIO" = "1" ]; then
     record_audio_value="true"
   fi
+  local record_body_tracking_value="false"
+  if [ "$EXPECT_BODY_TRACKING" = "1" ]; then
+    record_body_tracking_value="true"
+  fi
+  local record_motion_trackers_value="false"
+  if [ "$EXPECT_MOTION_TRACKERS" = "1" ]; then
+    record_motion_trackers_value="true"
+  fi
   CAPTURE_APP_GD_BAK="$(mktemp -t operator_capture_app_gd.XXXXXX)"
   cp "$CAPTURE_APP_GD" "$CAPTURE_APP_GD_BAK"
-  "$PYTHON" - "$CAPTURE_APP_GD" "$stop_value" "$record_audio_value" "$AUDIO_CHANNEL_LAYOUT" "$AUDIO_SAMPLE_RATE_HZ" "$AUDIO_BITRATE_BPS" <<'PY'
+  "$PYTHON" - "$CAPTURE_APP_GD" "$stop_value" "$record_audio_value" "$record_body_tracking_value" "$record_motion_trackers_value" "$AUDIO_CHANNEL_LAYOUT" "$AUDIO_SAMPLE_RATE_HZ" "$AUDIO_BITRATE_BPS" "$EXPECT_RGB_CODEC" "$EXPECT_RGB_RESOLUTION" "$EXPECT_RGB_FPS" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -344,9 +367,46 @@ from pathlib import Path
 path = Path(sys.argv[1])
 stop_value = sys.argv[2]
 record_audio = sys.argv[3]
-layout = sys.argv[4]
-sample_rate = sys.argv[5]
-bitrate = sys.argv[6]
+record_body_tracking = sys.argv[4]
+record_motion_trackers = sys.argv[5]
+layout = sys.argv[6]
+sample_rate = sys.argv[7]
+bitrate = sys.argv[8]
+raw_rgb_codec = sys.argv[9]
+raw_rgb_resolution = sys.argv[10].strip()
+raw_rgb_fps = sys.argv[11]
+
+
+def normalize_codec(raw: str) -> str:
+    value = raw.strip().lower()
+    if value in {"h264", "h.264", "avc", "video/avc"}:
+        return "h264"
+    if value in {"hevc", "h265", "h.265", "video/hevc"}:
+        return "hevc"
+    raise SystemExit(f"unsupported EXPECT_RGB_CODEC: {raw!r}")
+
+
+def parse_positive_int(raw: str, name: str) -> int:
+    try:
+        value = int(float(raw))
+    except ValueError as exc:
+        raise SystemExit(f"{name} must be numeric: {raw!r}") from exc
+    if value <= 0:
+        raise SystemExit(f"{name} must be > 0: {raw!r}")
+    return value
+
+
+rgb_codec = normalize_codec(raw_rgb_codec)
+rgb_fps = parse_positive_int(raw_rgb_fps, "EXPECT_RGB_FPS")
+rgb_width = 0
+rgb_height = 0
+if raw_rgb_resolution:
+    parts = raw_rgb_resolution.lower().split("x", 1)
+    if len(parts) != 2:
+        raise SystemExit(f"EXPECT_RGB_RESOLUTION must look like 1280x960: {raw_rgb_resolution!r}")
+    rgb_width = parse_positive_int(parts[0], "EXPECT_RGB_RESOLUTION width")
+    rgb_height = parse_positive_int(parts[1], "EXPECT_RGB_RESOLUTION height")
+    raw_rgb_resolution = f"{rgb_width}x{rgb_height}"
 
 text = path.read_text()
 text = text.replace(
@@ -363,10 +423,20 @@ needle = '\t\tcapture_options["interaction_mode"] = "head"\n'
 injected = (
     needle
     + f'\t\tcapture_options["record_audio"] = {record_audio}\n'
+    + f'\t\tcapture_options["record_body_tracking"] = {record_body_tracking}\n'
+    + f'\t\tcapture_options["record_motion_trackers"] = {record_motion_trackers}\n'
     + f'\t\tcapture_options["audio_channel_layout"] = "{layout}"\n'
     + f'\t\tcapture_options["audio_sample_rate_hz"] = {sample_rate}\n'
     + f'\t\tcapture_options["audio_bitrate_bps"] = {bitrate}\n'
+    + f'\t\tcapture_options["rgb_codec"] = "{rgb_codec}"\n'
+    + f'\t\tcapture_options["rgb_fps"] = {rgb_fps}\n'
 )
+if raw_rgb_resolution:
+    injected += (
+        f'\t\tcapture_options["rgb_width"] = {rgb_width}\n'
+        f'\t\tcapture_options["rgb_height"] = {rgb_height}\n'
+        f'\t\tcapture_options["rgb_resolution"] = "{raw_rgb_resolution}"\n'
+    )
 if needle not in text:
     raise SystemExit("AUTO_START_FOR_DEVICE_TEST capture_options hook not found")
 text = text.replace(needle, injected, 1)
@@ -471,9 +541,9 @@ func _ci_xr_head_pose_confident() -> bool:
 path.write_text(text)
 PY
   if [ "$EXPECT_AUDIO" = "1" ]; then
-    ok "enabled AUTO_START_FOR_DEVICE_TEST for ${CAPTURE_SECONDS}s with audio ${AUDIO_CHANNEL_LAYOUT}/${AUDIO_SAMPLE_RATE_HZ}Hz"
+    ok "enabled AUTO_START_FOR_DEVICE_TEST for ${CAPTURE_SECONDS}s with audio ${AUDIO_CHANNEL_LAYOUT}/${AUDIO_SAMPLE_RATE_HZ}Hz, rgb=${EXPECT_RGB_CODEC}/${EXPECT_RGB_RESOLUTION:-default}/${EXPECT_RGB_FPS}fps, body=${EXPECT_BODY_TRACKING}, motion=${EXPECT_MOTION_TRACKERS}"
   else
-    ok "enabled AUTO_START_FOR_DEVICE_TEST for ${CAPTURE_SECONDS}s"
+    ok "enabled AUTO_START_FOR_DEVICE_TEST for ${CAPTURE_SECONDS}s, rgb=${EXPECT_RGB_CODEC}/${EXPECT_RGB_RESOLUTION:-default}/${EXPECT_RGB_FPS}fps, body=${EXPECT_BODY_TRACKING}, motion=${EXPECT_MOTION_TRACKERS}"
   fi
 }
 
@@ -771,7 +841,7 @@ validate_capture() {
   if [ "$SKIP_DEVICE" = "1" ]; then
     local_root="$OUTPUT_DIR/session/SpatialMP4"
   fi
-  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" "$EXPECTED_DEVICE_PREFIX" "$EXPECT_AUDIO" <<'PY'
+  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" "$EXPECTED_DEVICE_PREFIX" "$EXPECT_AUDIO" "$EXPECT_BODY_TRACKING" "$EXPECT_MOTION_TRACKERS" "$EXPECT_RGB_CODEC" "$EXPECT_RGB_RESOLUTION" "$EXPECT_RGB_FPS" <<'PY'
 from __future__ import annotations
 
 import json
@@ -789,11 +859,31 @@ min_rgb_frames = int(sys.argv[5]) or max(20, int(capture_seconds * 15))
 min_rgb_fps = float(sys.argv[6])
 expected_device_prefix = sys.argv[7] if len(sys.argv) > 7 else ""
 expect_audio = (sys.argv[8] if len(sys.argv) > 8 else "0") == "1"
+expect_body_tracking = (sys.argv[9] if len(sys.argv) > 9 else "0") == "1"
+expect_motion_trackers = (sys.argv[10] if len(sys.argv) > 10 else "0") == "1"
+expected_rgb_resolution = (sys.argv[12] if len(sys.argv) > 12 else "").strip().lower()
+expected_rgb_fps = float(sys.argv[13] if len(sys.argv) > 13 else "30")
 dense_start_limit_us = 750_000 if expected_device_prefix == "pico" else 500_000
 dense_start_limit_ms = dense_start_limit_us // 1000
 
 checks: list[tuple[str, str, str]] = []
 _FFPROBE_HEXDUMP_OFFSET_RE = re.compile(r"^\s*[0-9a-fA-F]+$")
+
+
+def normalize_codec(raw: str | None) -> str:
+    value = str(raw or "").strip().lower()
+    if value in {"h264", "h.264", "avc", "video/avc"}:
+        return "h264"
+    if value in {"hevc", "h265", "h.265", "video/hevc"}:
+        return "hevc"
+    return value
+
+
+expected_rgb_codec = normalize_codec(sys.argv[11] if len(sys.argv) > 11 else "hevc")
+
+
+def rgb_codec_label(codec: str) -> str:
+    return "H.264" if normalize_codec(codec) == "h264" else "HEVC"
 
 
 def add(status: str, name: str, detail: str = "") -> None:
@@ -930,6 +1020,21 @@ def stream_labels(stream: dict[str, Any]) -> list[str]:
         if value is not None:
             labels.append(str(value))
     return labels
+
+
+def find_rgb_stream(streams: list[dict[str, Any]], codec: str) -> dict[str, Any] | None:
+    if normalize_codec(codec) == "h264":
+        codec_names = {"h264"}
+        codec_tags = {"avc1", "avc3"}
+    else:
+        codec_names = {"hevc"}
+        codec_tags = {"hev1", "hvc1"}
+    for stream in streams:
+        codec_name = str(stream.get("codec_name", "")).lower()
+        codec_tag = str(stream.get("codec_tag_string", "")).lower()
+        if codec_name in codec_names or codec_tag in codec_tags:
+            return stream
+    return None
 
 
 def looks_like_metadata_kind(stream: dict[str, Any], kind: str) -> bool:
@@ -1122,31 +1227,60 @@ def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
             passed("capture option record_depth=true")
         else:
             failed("capture option record_depth is boolean", repr(options.get("record_depth")))
-        for key in ("record_body_tracking", "record_motion_trackers"):
-            if options.get(key) is True:
-                passed(f"capture option {key}=true")
-            else:
-                failed(f"capture option {key}=true", repr(options.get(key)))
     elif options.get("record_depth") is True:
         passed("capture option record_depth=true")
     else:
         failed("capture option record_depth=true", repr(options.get("record_depth")))
-    # Body tracking defaults: ON for both providers in the current code base
-    # (Quest goes through the godot-openxr-meta vendor AAR + XR_FB_body_tracking,
-    # Pico goes through pico_openxr + XR_BD_body_tracking). save_body_sidecar
-    # defaults OFF — the sidecar JSONL is only useful when the operator wants
-    # the frame-level body_flags + PICO velocity/acceleration extras that the
-    # mp4 mett payload does not carry.
-    if options.get("record_body_tracking") is True:
-        passed("capture option record_body_tracking=true")
-    else:
-        failed("capture option record_body_tracking=true", repr(options.get("record_body_tracking")))
+    for key, expected in (
+        ("record_body_tracking", expect_body_tracking),
+        ("record_motion_trackers", expect_motion_trackers),
+    ):
+        if expected:
+            if options.get(key) is True:
+                passed(f"capture option {key}=true")
+            else:
+                failed(f"capture option {key}=true", repr(options.get(key)))
+        elif options.get(key) is False:
+            passed(f"capture option {key}=false")
+        elif options.get(key) is True:
+            warned(
+                f"capture option {key}=true",
+                "CI tracker validation disabled; set EXPECT_BODY_TRACKING/EXPECT_MOTION_TRACKERS=1 for tracker coverage",
+            )
+        else:
+            failed(
+                f"capture option {key} is boolean",
+                repr(options.get(key)),
+            )
+    # Body/motion capture is opt-in for CI because Pico requires worn external
+    # trackers. save_body_sidecar defaults OFF — the sidecar JSONL is only
+    # useful when frame-level body_flags + PICO velocity/acceleration extras
+    # are needed beyond the mp4 mett payload.
     if "save_body_sidecar" in options:
         if options.get("save_body_sidecar") is False:
             passed("capture option save_body_sidecar=false (default)")
         else:
             warned("capture option save_body_sidecar=true",
                    "sidecar JSONL will be written next to the mp4")
+    observed_codec = normalize_codec(str(options.get("rgb_codec", "")))
+    if observed_codec == expected_rgb_codec:
+        passed("capture option rgb_codec", observed_codec)
+    else:
+        failed("capture option rgb_codec", f"{observed_codec!r} != {expected_rgb_codec!r}")
+    if expected_rgb_resolution:
+        requested_resolution = str(options.get("rgb_resolution", "")).strip().lower()
+        if requested_resolution == expected_rgb_resolution:
+            passed("capture option rgb_resolution", requested_resolution)
+        else:
+            failed("capture option rgb_resolution", f"{requested_resolution!r} != {expected_rgb_resolution!r}")
+    try:
+        requested_fps = float(options.get("rgb_fps") or 0)
+    except (TypeError, ValueError):
+        requested_fps = 0.0
+    if abs(requested_fps - expected_rgb_fps) < 0.001:
+        passed("capture option rgb_fps", f"{requested_fps:g}")
+    else:
+        failed("capture option rgb_fps", f"{requested_fps:g} != {expected_rgb_fps:g}")
     if expect_audio:
         if options.get("record_audio") is True:
             passed("capture option record_audio=true")
@@ -1279,10 +1413,17 @@ def check_body_tracking_source(manifest: dict[str, Any], options: dict[str, Any]
     #   joint_set        : "pico_bd_24" | "godot_xr_body_tracker_v1" | ""
     #   joint_count      : 24 / 87 / 0
     #   runtime_body_flags (godot path only) : XRBodyTracker.body_flags bitfield
-    # When record_body_tracking is off, sources.body_tracking is absent —
-    # both states are valid and tested below.
+    # CI only validates runtime body source metadata when the body-tracking
+    # check is explicitly enabled. The default Pico CI run does not have worn
+    # external trackers, so it must not fail on absent/empty body data.
     sources = manifest.get("sources") or {}
     body = sources.get("body_tracking")
+    if not expect_body_tracking:
+        if body is None:
+            passed("manifest.sources.body_tracking check skipped")
+        else:
+            warned("manifest.sources.body_tracking check skipped", repr(body))
+        return
     if options.get("record_body_tracking") is not True:
         if body is None:
             passed("manifest.sources.body_tracking absent when tracking off")
@@ -1510,12 +1651,15 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> dict[str, Any] | None:
     if not any(status == "FAIL" and name == "ffprobe parses MP4" for status, name, _ in checks):
         passed("ffprobe parses MP4")
     streams = data.get("streams", [])
-    rgb = next((s for s in streams if s.get("codec_name") == "hevc" or s.get("codec_tag_string") in ("hev1", "hvc1")), None)
+    rgb = find_rgb_stream(streams, expected_rgb_codec)
     depth = next((s for s in streams if s.get("codec_name") in ("ffv1", "rawvideo") or s.get("codec_tag_string") == "raw1"), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio" or s.get("codec_name") == "aac"), None)
     mett = [s for s in streams if s.get("codec_tag_string") == "mett"]
     if rgb:
-        passed("MP4 contains HEVC RGB stream", f"{rgb.get('width')}x{rgb.get('height')}")
+        passed(
+            f"MP4 contains {rgb_codec_label(expected_rgb_codec)} RGB stream",
+            f"{rgb.get('codec_name')}/{rgb.get('codec_tag_string')} {rgb.get('width')}x{rgb.get('height')}",
+        )
         mismatched = []
         expected_color = {
             "color_range": "tv",
@@ -1544,20 +1688,20 @@ def check_mp4(mp4: Path, options: dict[str, Any]) -> dict[str, Any] | None:
             else:
                 failed("MP4 RGB frame rate", f"{fps:.1f} fps < {min_rgb_fps:.1f}")
     else:
-        failed("MP4 contains HEVC RGB stream")
+        actual = [
+            f"{s.get('index')}:{s.get('codec_name')}/{s.get('codec_tag_string')}"
+            for s in streams
+            if s.get("codec_type") == "video"
+        ]
+        failed(f"MP4 contains {rgb_codec_label(expected_rgb_codec)} RGB stream", ", ".join(actual))
     if wants_depth(options):
         if depth:
             passed("MP4 contains depth stream", f"{depth.get('codec_name')}/{depth.get('codec_tag_string')}")
         else:
             failed("MP4 contains depth stream")
-    # Body joints mett track: the muxer pre-creates `spatialmp4:body_joints:body`
-    # whenever SessionConfig.bodyJointsExpected=true (i.e. record_body_tracking
-    # is on). We check the handler_name because mov muxer drops timed-metadata
-    # streams that received zero packets at av_write_trailer time — so when the
-    # OpenXR body runtime never produces a frame (no permission, runtime not
-    # initialised, …) the track disappears even though it was allocated. That
-    # is a real, user-visible regression we want to catch here.
-    if options.get("record_body_tracking") is True:
+    # Body joints mett track is only checked in explicit tracker runs. The
+    # default CI APK disables body tracking because Pico needs worn trackers.
+    if expect_body_tracking and options.get("record_body_tracking") is True:
         body_mett = [
             s for s in mett
             if (s.get("tags") or {}).get("handler_name") == "spatialmp4:body_joints:body"
@@ -1766,12 +1910,12 @@ def check_self_contained_mp4_metadata(
     check_timestamp_rows(
         body_rows,
         "MP4 body_frame_meta",
-        options.get("record_body_tracking") is True and observed_body != "",
+        expect_body_tracking and options.get("record_body_tracking") is True and observed_body != "",
     )
 
     motion_frames = load_json_metadata_frames(mp4, mp4_info, "motion_trackers")
     motion_rows = [r for rows in motion_frames.values() for r in rows]
-    if options.get("record_motion_trackers") is True:
+    if expect_motion_trackers and options.get("record_motion_trackers") is True:
         if motion_rows:
             passed("MP4 motion_trackers metadata non-empty", f"{len(motion_rows)} record(s)")
         else:

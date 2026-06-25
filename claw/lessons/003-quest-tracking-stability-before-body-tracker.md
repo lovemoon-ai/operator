@@ -17,7 +17,7 @@ process launch. Starting body pose debug, body tracking, RGB camera, or audio in
 that window can make vrshell/Guardian take focus, which pauses Operator and can
 prevent the debug overlay from ever showing.
 
-This was already known in the e2e harness: `tests/02_ego_record.sh` injects a
+This was already known in the e2e harness: `cicd/02_ego_record.sh` injects a
 CI-only wait for head-pose tracking confidence before auto-starting capture.
 
 ## Fix

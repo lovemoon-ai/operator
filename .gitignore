@@ -65,9 +65,6 @@ conductor.log
 .conductor/state/
 .conductor/worktrees/
 
-# tests output
-tests/logs
-
 # SO-101 mesh STLs (fetched by examples/mujuco-arm-so101/prepare.sh
 # from upstream mujoco_menagerie — kept out of the repo to save ~17 MB)
 examples/mujuco-arm-so101/assets/so101/assets/*.stl
@@ -118,6 +115,10 @@ xr/addons/godot-xr-tools
 xr/native/ahb_decoder/godot-cpp
 xr/native/pico_openxr/godot-cpp
 
-# release artifacts
+# release artifacts, and tests output
 xr/dist/
-tests/results/
+cicd/results/
+cicd/logs
+
+# qa
+claw/qa-artifacts

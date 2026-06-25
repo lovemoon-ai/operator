@@ -271,18 +271,18 @@ under the Pico family.
    If a top-level E2E script needs to detect the brand, update its
    manufacturer/model matching. Current examples are in:
 
-   - `tests/02_ego_record.sh`;
-   - `tests/03_godot_mujoco_device.sh`;
-   - `tests/04_live_feed_e2e.sh`.
+   - `cicd/02_ego_record.sh`;
+   - `cicd/03_godot_mujoco_device.sh`;
+   - `cicd/04_live_feed_e2e.sh`.
 
 ## Build Checklist
 
 Run from repo root unless noted:
 
 ```bash
-python3 tests/validate_xr_features.py
-python3 tests/validate_xr_test_manifests.py
-bash tests/03_godot_mujoco_static.sh
+python3 cicd/validate_xr_features.py
+python3 cicd/validate_xr_test_manifests.py
+bash cicd/03_godot_mujoco_static.sh
 ```
 
 Build the APK family from `xr/`:
@@ -307,9 +307,9 @@ make build-<brand>
 Run on every target model in the brand family:
 
 ```bash
-bash tests/xr_module_harness.sh --suite device.smoke --serial <serial> --skip-build --skip-install
-bash tests/02_ego_record.sh --device quest
-bash tests/04_live_feed_e2e.sh --device quest
+bash cicd/xr_module_harness.sh --suite device.smoke --serial <serial> --skip-build --skip-install
+bash cicd/02_ego_record.sh --device quest
+bash cicd/04_live_feed_e2e.sh --device quest
 ```
 
 For Pico, replace the device flag and APK build/install path accordingly.

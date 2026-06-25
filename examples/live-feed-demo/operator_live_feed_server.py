@@ -681,6 +681,7 @@ class RgbHevcDecoder:
         self.enabled = enabled
         self.ffmpeg_bin = shutil.which(ffmpeg_bin) if ffmpeg_bin else None
         self.max_frames = max(1, max_frames)
+        self.codec = "hevc"
         self.width = 0
         self.height = 0
         self.stereo_layout = "mono"
@@ -693,7 +694,7 @@ class RgbHevcDecoder:
         self._reader: threading.Thread | None = None
         self._lock = threading.Lock()
         self._pending_pts: queue.Queue[int] = queue.Queue(maxsize=256)
-        self._configured_signature: tuple[int, int, str, int] | None = None
+        self._configured_signature: tuple[int, int, str, int, str] | None = None
 
     def close(self) -> None:
         proc = self._proc
@@ -726,11 +727,16 @@ class RgbHevcDecoder:
         if width is None or height is None or width <= 0 or height <= 0:
             self.disabled_reason = "missing RGB frame dimensions"
             return
+        codec = self._codec_from_config(config)
+        if codec not in {"hevc", "h264"}:
+            self.disabled_reason = f"unsupported RGB codec: {codec or 'missing'}"
+            return
         cameras = rgb_cameras_from_config(config)
         layout = str(config.get("stereo_layout", "mono"))
-        signature = (width, height, layout, len(cameras))
+        signature = (width, height, layout, len(cameras), codec)
         if self._configured_signature != signature:
             self.close()
+            self.codec = codec
             self.width = width
             self.height = height
             self.stereo_layout = layout
@@ -779,7 +785,7 @@ class RgbHevcDecoder:
             "-loglevel",
             "error",
             "-f",
-            "hevc",
+            self.codec,
             "-i",
             "pipe:0",
             "-an",
@@ -801,8 +807,18 @@ class RgbHevcDecoder:
             self.failed = True
             self.disabled_reason = f"failed to start ffmpeg: {error}"
             return
-        self._reader = threading.Thread(target=self._reader_loop, name="rgb-hevc-decoder", daemon=True)
+        self._reader = threading.Thread(target=self._reader_loop, name=f"rgb-{self.codec}-decoder", daemon=True)
         self._reader.start()
+
+    @staticmethod
+    def _codec_from_config(config: dict[str, Any]) -> str:
+        codec = str(config.get("codec", "")).strip().lower()
+        bitstream = str(config.get("bitstream_format", "")).strip().lower()
+        if codec in {"hevc", "h265", "h.265", "video/hevc"} or bitstream.startswith("hevc"):
+            return "hevc"
+        if codec in {"h264", "h.264", "avc", "video/avc"} or bitstream.startswith("h264"):
+            return "h264"
+        return codec
 
     def _write_bytes(self, payload: bytes) -> None:
         proc = self._proc
