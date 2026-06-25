@@ -410,14 +410,14 @@ PY
 Run repo static checks:
 
 ```bash
-python3 tests/validate_xr_features.py
-python3 tests/validate_xr_test_manifests.py
+python3 cicd/validate_xr_features.py
+python3 cicd/validate_xr_test_manifests.py
 ```
 
 Run MuJoCo static packaging check only when the expected APK exists:
 
 ```bash
-bash tests/03_godot_mujoco_static.sh
+bash cicd/03_godot_mujoco_static.sh
 ```
 
 This script currently expects a built Quest APK. If it reports `missing APK`,
@@ -427,7 +427,7 @@ output.
 Run device tests only on real devices:
 
 ```bash
-bash tests/03_godot_mujoco_device.sh
+bash cicd/03_godot_mujoco_device.sh
 ```
 
 Do not run the XR project in desktop headless mode. `godot --headless` is for

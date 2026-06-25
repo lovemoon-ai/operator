@@ -85,9 +85,9 @@ automation mode intent extras and routes to:
 The MuJoCo test script wraps this for real devices:
 
 ```bash
-bash tests/03_godot_mujoco_device.sh --device quest
-bash tests/03_godot_mujoco_device.sh --device pico
-bash tests/03_godot_mujoco_device.sh --device both
+bash cicd/03_godot_mujoco_device.sh --device quest
+bash cicd/03_godot_mujoco_device.sh --device pico
+bash cicd/03_godot_mujoco_device.sh --device both
 ```
 
 Quest device E2E scripts accept either `--serial <adb-serial>` or
@@ -99,19 +99,19 @@ Quest device E2E scripts accept either `--serial <adb-serial>` or
 Run from the repo root:
 
 ```bash
-python3 tests/validate_xr_features.py
-python3 tests/validate_xr_test_manifests.py
-bash tests/03_godot_mujoco_static.sh
-bash tests/xr_module_harness.sh --suite capture.pipeline --serial <serial>
+python3 cicd/validate_xr_features.py
+python3 cicd/validate_xr_test_manifests.py
+bash cicd/03_godot_mujoco_static.sh
+bash cicd/xr_module_harness.sh --suite capture.pipeline --serial <serial>
 ```
 
 Device E2E tests:
 
 ```bash
-bash tests/01_rtsp_test.sh
-bash tests/02_ego_record.sh
-bash tests/03_godot_mujoco_device.sh
-bash tests/04_live_feed_e2e.sh
+bash cicd/01_rtsp_test.sh
+bash cicd/02_ego_record.sh
+bash cicd/03_godot_mujoco_device.sh
+bash cicd/04_live_feed_e2e.sh
 ```
 
 Do not replace these with local fixtures. The XR runtime depends on Android XR

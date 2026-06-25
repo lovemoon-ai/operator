@@ -64,7 +64,7 @@ Robot-side producers:
 6. Test on a real headset.
 
    ```bash
-   bash tests/01_rtsp_test.sh
+   bash cicd/01_rtsp_test.sh
    cd xr && make ship-quest
    cd xr && make ship-pico
    ```

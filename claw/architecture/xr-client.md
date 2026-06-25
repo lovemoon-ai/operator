@@ -177,7 +177,7 @@ providers from `scripts/test_support/fakes/platform`.
 exporting an APK with the test-harness feature and launching with intent extras:
 
 ```bash
-bash tests/xr_module_harness.sh --suite capture.pipeline --serial <serial>
+bash cicd/xr_module_harness.sh --suite capture.pipeline --serial <serial>
 ```
 
 The harness runs on the target headset, logs `OPERATOR_TEST_*` markers, and
@@ -186,6 +186,6 @@ pulls JSON result files from the app external files directory.
 Static manifest validation is host-side only:
 
 ```bash
-python3 tests/validate_xr_features.py
-python3 tests/validate_xr_test_manifests.py
+python3 cicd/validate_xr_features.py
+python3 cicd/validate_xr_test_manifests.py
 ```

@@ -120,6 +120,6 @@ cargo test
 Run top-level E2E scripts from the repo root:
 
 ```bash
-bash tests/01_rtsp_test.sh
-bash tests/03_godot_mujoco_device.sh
+bash cicd/01_rtsp_test.sh
+bash cicd/03_godot_mujoco_device.sh
 ```
