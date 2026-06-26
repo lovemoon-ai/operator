@@ -213,8 +213,17 @@ make run-sim
 
 We are active in xhs and wechat, please join us:
 
-![](docs/figures/xhs-operator-group-qrcode.jpeg)
-
-![](docs/figures/wechat-operator-group-qrcode.jpeg)
+<table>
+  <tr>
+    <td align="center" width="25%">
+      <img src="docs/figures/xhs-operator-group-qrcode.jpeg" alt="xhs" height="128"><br>
+      <strong>Quest 3</strong>
+    </td>
+    <td align="center" width="25%">
+      <img src="docs/figures/wechat-operator-group-qrcode.jpeg" alt="wechat" height="128"><br>
+      <strong>Quest 3S</strong>
+    </td>
+  </tr>
+</table>
 
 If qr code is out of date, please [create an issue](https://github.com/lovemoon-ai/operator/issues/new) for a new one.
