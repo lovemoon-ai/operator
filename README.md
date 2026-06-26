@@ -217,11 +217,11 @@ We are active in xhs and wechat, please join us:
   <tr>
     <td align="center" width="25%">
       <img src="docs/figures/xhs-operator-group-qrcode.jpeg" alt="xhs" height="128"><br>
-      <strong>Quest 3</strong>
+      <strong>xhs</strong>
     </td>
     <td align="center" width="25%">
       <img src="docs/figures/wechat-operator-group-qrcode.jpeg" alt="wechat" height="128"><br>
-      <strong>Quest 3S</strong>
+      <strong>wechat</strong>
     </td>
   </tr>
 </table>
