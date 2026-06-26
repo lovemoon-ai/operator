@@ -211,8 +211,10 @@ make run-sim
 
 ## Join group
 
-We are active in XHS, please join us:
+We are active in xhs, wechat, please join us:
 
 ![](docs/figures/xhs-operator-group-qrcode.jpeg)
+
+![](docs/figures/wechat-operator-group-qrcode.jpeg.jpeg)
 
 If qr code is out of date, please [create an issue](https://github.com/lovemoon-ai/operator/issues/new) for a new one.
