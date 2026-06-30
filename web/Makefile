@@ -118,3 +118,6 @@ endif
 		rerun "$$rrd" --web-viewer --bind "$(RERUN_BIND)" --web-viewer-port "$(RERUN_WEB_PORT)" \
 		"$${viewer_args[@]}" \
 		$${RERUN_VIEWER_ARGS:-}
+
+pico-hand-tracking:
+	uv run --python 3.13 app/scripts/pico_hand_projection_video.py  --input $(MP4) 
