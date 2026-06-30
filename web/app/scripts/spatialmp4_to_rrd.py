@@ -49,27 +49,28 @@ Per-device branches (Quest vs Pico):
   them via a ``--device-type`` flag (or auto-detect from the manifest
   next to the input):
     1. **head mett track meaning** — Quest's ``head`` IS the IMU pose
-       already; Pico's per-frame ``pose`` is the mid-eye position and
-       must be passed through the SDK's ``head_to_imu`` axis/quaternion
-       conversion before composing with the RGB extrinsic.
-    2. **Extrinsic axis convention** — Pico's native axes need a
-       cyclic permutation ``[[0,0,1,0],[1,0,0,0],[0,1,0,0],[0,0,0,1]]``
-       on the composed ``T_W_S`` before logging.
-    3. **Pinhole camera_xyz** — Quest = ``RDF`` (OpenCV); Pico = ``UBR``
-       (the reference viewer's camera frame).
+       already; current Operator Pico captures also store ``head`` in the
+       same raw Godot/OpenXR world basis as hand joints and RGB extrinsics.
+    2. **Pico RGB standoff** — Pico MP4 ``rgb_extrinsics`` already carries
+       the RGB camera RDF frame, so we do not apply SDK ``head_to_imu`` or
+       tmp_refer.md's fixed rotation again. We only apply the measured
+       head-model standoff magnitude along RGB camera +Z:
+       ``T_I_Srgb = T_I_Srgb @ Trans_camera([0, 0, norm(HEAD_MODEL_OFFSET)])``.
+    3. **Pinhole camera_xyz** — Quest = ``RDF`` (OpenCV); current Operator
+       Pico captures also use ``RDF`` because their RGB local frame is already
+       X-right/Y-down/Z-forward.
   World coordinate system is ``RUB`` for both. Pico raw Godot/OpenXR
-  world samples (hands/controllers/head trajectory) are converted through
-  the same basis changes that the Pico camera path uses before logging.
+  world samples (hands/controllers/head trajectory) stay in the same basis as
+  the camera path.
 
 Coordinate conventions (mirrored from reference):
   * **world**: ``rr.ViewCoordinates.RUB``
       Quest / OpenXR — X-right, Y-up, Z-back-out-of-page. Head pose
       and all mett rigid_pose tracks live here in absolute world
       coordinates.
-  * **camera (RGB + depth)**: Quest uses ``rr.ViewCoordinates.RDF``
-      (OpenCV image axes, X-right, Y-down, Z-forward). Pico follows the
-      SpatialMP4 reference and logs Pinhole axes as ``UBR`` after composing
-      ``T_W_S = T_W_I @ T_I_S`` in Pico-native coordinates.
+  * **camera (RGB + depth)**: Quest and current Operator Pico captures use
+      ``rr.ViewCoordinates.RDF`` (OpenCV image axes, X-right, Y-down,
+      Z-forward).
   * **head gaze**: OpenXR head looks down its local -Z axis, so the
       world-frame gaze direction is ``-R[:, 2]`` of the head rotation
       matrix.
@@ -399,41 +400,38 @@ class DeviceProfile:
     """Per-device knobs the reference SDK encodes by having two separate
     scripts (``visualize_rerun_quest.py`` vs ``visualize_rerun_pico.py``).
 
-    Three axes of difference:
+    Device-specific differences:
       * ``head_is_imu``        — does the ``head`` mett track / per-frame
                                  ``pose`` already represent the IMU pose
-                                 (Quest) or the mid-eye head pose (Pico)?
-                                 Pico's needs the SDK ``head_to_imu``
-                                 convention conversion before composing
-                                 with RGB / depth extrinsics.
+                                 (or, for current Operator Pico captures,
+                                 the same raw head/view pose basis used by
+                                 the RGB extrinsics and hand joints)?
       * ``head_model_offset``  — translation offset supplied to the SDK
-                                 conversion above. Pico follows the
-                                 SpatialMP4 reference path and uses
-                                 ``HEAD_MODEL_OFFSET`` unless the caller
-                                 explicitly supplies another offset.
+                                 conversion above for legacy/device-native
+                                 captures that opt into ``head_to_imu``.
+      * ``rgb_head_model_forward`` — apply ``norm(HEAD_MODEL_OFFSET)`` as a
+                                 camera-local +Z translation to RGB
+                                 extrinsics. This matches the validated Pico
+                                 OpenCV/Numpy hand projection path without
+                                 reintroducing ``head_to_imu``'s basis remap.
       * ``extrinsic_perm``     — 4×4 axis swap applied to the composed
                                  ``T_W_S`` for both RGB and depth cameras
                                  before handing it to Rerun. Quest = None
-                                 (identity); Pico maps native (X,Y,Z) →
-                                 (Z,X,Y) so the device-local axes line
-                                 up with Rerun's world.
+                                 (identity). Current Operator Pico captures
+                                 also use None.
       * ``native_from_capture`` — 3×3 basis change from the raw capture
                                  world used by Godot hand/controller joints
-                                 into the native world expected by Pico's
-                                 ``head_to_imu`` / camera extrinsics path.
+                                 into a device-native world, for legacy
+                                 captures that require one.
                                  Quest = None (identity).
       * ``camera_view_coord``  — Pinhole's ``camera_xyz``. Quest = RDF
-                                 (OpenCV image axes); Pico = UBR (X-up,
-                                 Y-back, Z-right).
+                                 (OpenCV image axes); current Operator Pico
+                                 captures also use RDF.
       * ``camera_from_sensor`` — 3×3 local-frame rotation from the MP4
                                  RGB/depth extrinsic's sensor axes to the
                                  logical camera axes described by
-                                 ``camera_view_coord``. Quest's Camera2
-                                 writer already uses RDF. Our Pico
-                                 XR_PICO_camera_image writer stores the raw
-                                 SDK frame (URF), so we normalize it to the
-                                 reference viewer's UBR frame here without
-                                 moving the optical center.
+                                 ``camera_view_coord``. Quest and current
+                                 Operator Pico writers already use RDF.
       * ``image_rdf_from_camera`` — optional 3×3 local-frame mapping used
                                  only by our manual 2D overlay projection.
                                  It must not be applied to the Rerun
@@ -442,6 +440,7 @@ class DeviceProfile:
     name: str
     head_is_imu: bool
     head_model_offset: Optional[np.ndarray]
+    rgb_head_model_forward: bool
     extrinsic_perm: Optional[np.ndarray]
     native_from_capture: Optional[np.ndarray]
     camera_view_coord: str
@@ -503,12 +502,9 @@ _PICO_NATIVE_FROM_CAPTURE = np.array(
     dtype=np.float64,
 )
 
-# Our XR_PICO_camera_image side data stores the raw SDK camera local frame:
-# X=up, Y=right, Z=forward (URF). The SpatialMP4 Pico reference viewer logs
-# the camera as UBR (X=up, Y=back, Z=right). Convert the local basis by
-# right-multiplying the raw sensor pose with sensor_from_camera:
-#   raw_sensor_from_ubr = [[1, 0, 0], [0, 0, 1], [0, -1, 0]]
-# ``camera_from_sensor`` stores the inverse direction for the profile API.
+# Legacy Pico reference helpers retained for older experiments. Current
+# Operator Pico captures do not use them because the MP4 RGB extrinsics are
+# already in the raw Godot/OpenXR basis with an RDF camera local frame.
 _PICO_UBR_FROM_RAW_SENSOR = np.array(
     [
         [1.0, 0.0, 0.0],
@@ -522,6 +518,7 @@ PROFILE_QUEST = DeviceProfile(
     name="quest",
     head_is_imu=True,
     head_model_offset=None,
+    rgb_head_model_forward=False,
     extrinsic_perm=None,
     native_from_capture=None,
     camera_view_coord="RDF",
@@ -536,9 +533,12 @@ PROFILE_PICO = DeviceProfile(
     # XR_REFERENCE_SPACE_TYPE_VIEW with OpenXR right-handed convention.
     # That is the same space `XRCamera3D.global_transform` tracks, so the
     # chain collapses to T_W_S = T_W_H @ T_I_S directly with T_H_I = identity.
-    # No SDK head_to_imu axis swap is appropriate for this recording.
+    # No SDK head_to_imu axis swap is appropriate for this recording. The RGB
+    # standoff correction is applied to T_I_Srgb separately in
+    # rgb_extrinsics_for_profile().
     head_is_imu=True,
     head_model_offset=None,
+    rgb_head_model_forward=True,
     extrinsic_perm=None,
     native_from_capture=None,
     # Pico's T_I_S rotation is R_x(180°), so the sensor's local frame is
@@ -547,6 +547,37 @@ PROFILE_PICO = DeviceProfile(
     camera_from_sensor=None,
     image_rdf_from_camera=None,
 )
+
+
+def trans_camera(offset_xyz: Sequence[float]) -> np.ndarray:
+    mat = np.eye(4, dtype=np.float64)
+    mat[:3, 3] = np.asarray(offset_xyz, dtype=np.float64)
+    return mat
+
+
+def rgb_extrinsics_for_profile(
+    T_I_Srgb: Optional[np.ndarray],
+    profile: DeviceProfile,
+) -> Tuple[Optional[np.ndarray], Optional[float]]:
+    """Return the RGB extrinsic used by this converter's projection chain.
+
+    Current Operator Pico MP4s already store a head/view-relative RGB camera
+    transform with an RDF optical frame. The standalone
+    pico_hand_projection_video.py validation showed the remaining error is a
+    depth/standoff term, so we apply only the magnitude of SpatialMP4's
+    HEAD_MODEL_OFFSET along camera-local +Z.
+    """
+    if T_I_Srgb is None:
+        return None, None
+    if not profile.rgb_head_model_forward:
+        return T_I_Srgb, None
+
+    offset = profile.head_model_offset
+    if offset is None:
+        offset = sm.HEAD_MODEL_OFFSET
+    head_model_offset = np.asarray(offset, dtype=np.float64)
+    forward_m = float(np.linalg.norm(head_model_offset))
+    return T_I_Srgb @ trans_camera([0.0, 0.0, forward_m]), forward_m
 
 
 # Tokens that mark an Android XR / Glass XR capture. This converter only has
@@ -606,7 +637,10 @@ def detect_device_profile(
     # explicit CLI flag wins, then embedded provider, then manifest device_type.
     candidate = explicit_norm or provider or manifest_device_type
     if candidate.startswith("pico"):
-        info("device profile: PICO (T_W_S = T_W_H @ T_I_S, sensor RDF, view-space extrinsic)")
+        info(
+            "device profile: PICO "
+            "(T_W_S = T_W_H @ (T_I_Srgb @ HeadModelForward), sensor RDF)"
+        )
         return PROFILE_PICO
     if candidate.startswith("quest"):
         info("device profile: QUEST (head==IMU, RDF camera, no axis perm)")
@@ -626,13 +660,10 @@ def detect_device_profile(
 def head_pose_matrix(pose, profile: DeviceProfile) -> np.ndarray:
     """4×4 camera-root pose for a head sample, per device profile.
 
-    Quest: the head mett track already stores the IMU pose, so return
-    pose verbatim. Pico: the per-frame pose is mid-eye in the raw
-    capture convention, so we apply the SDK's ``head_to_imu`` helper to
-    match Pico's axis/quaternion convention. The profile controls the
-    translation offset: official SpatialMP4 Pico reference captures use
-    ``HEAD_MODEL_OFFSET``; a non-None profile value overrides that for
-    explicitly device-relative inputs.
+    Quest and current Operator Pico captures keep the head pose in the same
+    raw world basis as the RGB extrinsics and hand/controller joints, so their
+    profiles return the pose verbatim. Legacy profiles can still opt into the
+    SpatialMP4 ``head_to_imu`` helper by setting ``head_is_imu=False``.
     """
     mat = pose_frame_to_matrix(pose)
     if profile.head_is_imu:
@@ -907,12 +938,11 @@ def compose_world_sensor_pose(
       ``T_W_S = T_W_I @ T_I_S``
       ``T_S_hand = inverse(T_W_S) @ T_W_hand``
 
-    For Quest, ``head_pose_matrix`` is the identity interpretation:
-    the ``head`` track already stores ``T_W_I``. For Pico, the SpatialMP4
-    SDK reference represents the ``T_W_H @ T_H_I`` step with
-    ``sm.head_to_imu(T_W_H, HEAD_MODEL_OFFSET)``; that helper also moves
-    the pose into the Pico-native axis convention, so Pico hand points must
-    be converted into the same native world before projection.
+    For Quest and current Operator Pico captures, ``head_pose_matrix`` is the
+    identity interpretation: the ``head`` track already lives in the same raw
+    world basis as the camera extrinsics. Pico's RGB head-model standoff is
+    applied once in ``rgb_extrinsics_for_profile`` before this function sees
+    ``T_I_S``.
 
     Returns ``(T_W_I, T_W_S_sensor, T_W_S_camera)``. The ``sensor`` matrix is
     the raw MP4 extrinsic composition. The ``camera`` matrix has only the
@@ -928,14 +958,14 @@ def compose_world_sensor_pose(
 def device_logged_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.ndarray:
     """The matrix we hand to Rerun for ``world/camera`` Transform3D.
 
-    Pico stores extrinsics in a frame that doesn't line up with Rerun
-    world axes; apply the published cyclic permutation before logging
-    (see ``pico_pose_to_open3d`` in the reference). Quest is a no-op.
+    Legacy Pico profiles may store extrinsics in a frame that doesn't line up
+    with Rerun world axes; those profiles set ``extrinsic_perm``. Quest and
+    current Operator Pico captures are no-ops.
 
     The camera's local sensor axes are first converted into the profile's
-    ``camera_view_coord`` convention. Then Pico's world-axis permutation is a
-    left multiply only. Generic capture poses use a full similarity transform
-    instead.
+    ``camera_view_coord`` convention. Profiles that need a world-axis
+    permutation set ``extrinsic_perm``; current Quest/Pico profiles leave it as
+    identity.
     """
     T_W_C = device_native_camera_pose(T_W_S, profile)
     if profile.extrinsic_perm is None:
@@ -954,9 +984,9 @@ def _matrix4_from_rotation3(rotation: Optional[np.ndarray]) -> Optional[np.ndarr
 def device_native_capture_points(points: np.ndarray, profile: DeviceProfile) -> np.ndarray:
     """Convert raw capture-world points to the device-native world frame.
 
-    Pico's ``head_to_imu`` changes the raw Godot/OpenXR world basis before
-    composing camera extrinsics. Hand joints are still recorded in raw
-    capture world, so RGB projection must apply the same basis change first.
+    Current Operator captures use the raw Godot/OpenXR world basis directly.
+    Legacy/device-native profiles can set ``native_from_capture`` if their
+    camera path applies a world-basis change.
     """
     if profile.native_from_capture is None:
         return points
@@ -985,12 +1015,10 @@ def project_capture_points_to_image(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Project raw capture-world points through the profile's RGB camera.
 
-    ``capture_world_pts`` are the SDK hand joints (``T_W_hand`` points). Pico
-    captures store them in the raw Godot/OpenXR world basis, while
-    ``compose_world_sensor_pose`` has already moved the head/camera path into
-    Pico-native world through ``sm.head_to_imu``. Applying
-    ``device_native_capture_points`` here makes both sides of
-    ``T_S_hand = inverse(T_W_S) @ T_W_hand`` live in the same world frame.
+    ``capture_world_pts`` are the SDK hand joints (``T_W_hand`` points).
+    ``device_native_capture_points`` is a no-op for current Quest/Pico
+    captures, and only changes points for legacy profiles that explicitly set a
+    capture-to-native basis map.
     """
     world_pts = device_native_capture_points(capture_world_pts, profile)
     return project_world_points_to_image(
@@ -3467,10 +3495,9 @@ def run(args: argparse.Namespace) -> int:
     rr.send_blueprint(build_blueprint(has_depth_panel=has_depth))
 
     # ---- world coord system ----------------------------------------------
-    # Device profile selects the camera local frame: Quest uses RDF/OpenCV,
-    # while Pico follows the reference viewer's UBR camera and applies
-    # pico_pose_to_open3d's left-multiply world-axis permutation before
-    # logging camera transforms to Rerun.
+    # Device profile selects the camera local frame. Current Quest and
+    # Operator Pico captures use RDF/OpenCV directly; legacy profiles can still
+    # provide extra local/world basis mappings.
     world_view = getattr(rr.ViewCoordinates, args.world_coord.upper())
     camera_xyz = getattr(rr.ViewCoordinates, args.camera_coord.upper())
 
@@ -3504,7 +3531,16 @@ def run(args: argparse.Namespace) -> int:
     rgb_w = reader.get_rgb_width() if has_rgb else 0
     rgb_h = reader.get_rgb_height() if has_rgb else 0
     K_rgb_raw = reader.get_rgb_intrinsics_left() if has_rgb else None
-    T_I_Srgb = reader.get_rgb_extrinsics_left().as_se3() if has_rgb else None
+    T_I_Srgb_raw = reader.get_rgb_extrinsics_left().as_se3() if has_rgb else None
+    T_I_Srgb, rgb_head_model_forward_m = rgb_extrinsics_for_profile(T_I_Srgb_raw, profile)
+    if has_rgb and profile.rgb_head_model_forward and rgb_head_model_forward_m is not None:
+        raw_t = np.asarray(T_I_Srgb_raw, dtype=np.float64)[:3, 3]
+        effective_t = np.asarray(T_I_Srgb, dtype=np.float64)[:3, 3]
+        info(
+            "Pico RGB extrinsics: applied HEAD_MODEL_OFFSET magnitude along "
+            f"camera +Z ({rgb_head_model_forward_m:.6f}m); "
+            f"raw_t={raw_t.tolist()} effective_t={effective_t.tolist()}"
+        )
     camera2_projection = (
         load_camera2_projection_calibration(input_path, profile, "left", operator_static) if has_rgb else None
     )
@@ -3930,8 +3966,9 @@ def run(args: argparse.Namespace) -> int:
 
             # Hand-joint overlay onto the left RGB image. Hand joints
             # arrive in capture/raw world; log_hand_joints_on_image
-            # converts them into the device-native world before using
-            # the native RGB camera extrinsic for projection.
+            # uses the same RGB camera chain as pico_hand_projection_video.py:
+            # for Pico, raw hand points stay in capture world and T_I_Srgb has
+            # the camera-local head-model forward correction pre-applied.
             for tid, hl in hand_lookups.items():
                 hand_frame = hl.nearest_within(ts, HAND_FRAME_MATCH_MAX_DT)
                 if hand_frame is None:
