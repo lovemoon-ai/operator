@@ -16,6 +16,7 @@ signal manual_upload_requested(sessions: Array, options: Dictionary)
 signal body_pose_debug_toggled
 signal h2_debug_toggled
 signal g1_debug_toggled
+signal galbot_g1_debug_toggled
 
 # 840 wide gives ~430px of detail column after sidebar + margins. The 1180-tall
 # legacy viewport went away once the form was split into groups — every group
@@ -89,6 +90,7 @@ var _motion_tracker_toggle: CheckButton
 var _body_pose_debug_button: Button
 var _h2_debug_button: Button
 var _g1_debug_button: Button
+var _galbot_g1_debug_button: Button
 var _motion_tracker_supported := false
 var _depth_toggle: CheckButton
 var _depth_supported := false
@@ -436,6 +438,13 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_g1_debug_button.pressed.connect(_on_g1_debug_pressed)
 	add_interactive(robot_constraint, _g1_debug_button)
 
+	_galbot_g1_debug_button = Button.new()
+	_galbot_g1_debug_button.text = tr("UI_SHOW_GALBOT_G1_DEBUG")
+	_galbot_g1_debug_button.custom_minimum_size.y = 55
+	_galbot_g1_debug_button.add_theme_font_size_override("font_size", 21)
+	_galbot_g1_debug_button.pressed.connect(_on_galbot_g1_debug_pressed)
+	add_interactive(robot_constraint, _galbot_g1_debug_button)
+
 	if _live_server_mode:
 		return
 
@@ -662,6 +671,10 @@ func _on_g1_debug_pressed() -> void:
 	emit_signal("g1_debug_toggled")
 
 
+func _on_galbot_g1_debug_pressed() -> void:
+	emit_signal("galbot_g1_debug_toggled")
+
+
 func set_body_pose_debug_visible(visible_for_debug: bool) -> void:
 	if _body_pose_debug_button == null:
 		return
@@ -678,6 +691,12 @@ func set_g1_debug_visible(visible_for_debug: bool) -> void:
 	if _g1_debug_button == null:
 		return
 	_g1_debug_button.text = tr("UI_HIDE_G1_DEBUG") if visible_for_debug else tr("UI_SHOW_G1_DEBUG")
+
+
+func set_galbot_g1_debug_visible(visible_for_debug: bool) -> void:
+	if _galbot_g1_debug_button == null:
+		return
+	_galbot_g1_debug_button.text = tr("UI_HIDE_GALBOT_G1_DEBUG") if visible_for_debug else tr("UI_SHOW_GALBOT_G1_DEBUG")
 
 
 func set_pico_tracker_status(
