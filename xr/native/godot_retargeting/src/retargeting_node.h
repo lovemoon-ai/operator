@@ -17,9 +17,11 @@
 // be real filesystem paths — extract res:// assets to user:// first and pass
 // those (res:// inside an APK is not a real path).
 #include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_float64_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/packed_string_array.hpp>
 #include <godot_cpp/variant/quaternion.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
@@ -45,21 +47,36 @@ public:
 	bool configure(const String &scenario, const String &robot_xml,
 			const String &ik_config, double human_height, int locked_qpos_prefix,
 			bool freeze_locked, const PackedInt32Array &clamp_qpos_indices);
+	bool configure_algorithm(const String &scenario, const String &robot_xml,
+			const String &ik_config, const String &algorithm, double human_height,
+			int locked_qpos_prefix, bool freeze_locked,
+			const PackedInt32Array &clamp_qpos_indices);
+	bool configure_algorithm_options(const String &scenario, const String &robot_xml,
+			const String &ik_config, const String &algorithm, double human_height,
+			int locked_qpos_prefix, bool freeze_locked,
+			const PackedInt32Array &clamp_qpos_indices, const Dictionary &options);
 
 	// Accumulate one source joint pose for the next step().
 	void set_pose(const String &name, const Transform3D &xform);
 	void set_pose_pq(const String &name, const Vector3 &pos, const Quaternion &quat);
 	void clear_frame();
+	bool set_configuration(const PackedFloat64Array &qpos);
 
 	// Run one retargeting step. step() uses the accumulated frame; step_frame()
 	// takes a Dictionary {String name: Transform3D}. Returns the robot qpos, or
 	// an empty array on error (see get_last_error()).
 	PackedFloat64Array step();
 	PackedFloat64Array step_frame(const Dictionary &frame);
+	Dictionary step_robot_pose(const PackedStringArray &joint_names,
+			const PackedInt32Array &qpos_indices);
+	Dictionary step_frame_robot_pose(const Dictionary &frame,
+			const PackedStringArray &joint_names,
+			const PackedInt32Array &qpos_indices);
 
 	bool is_configured() const { return retargeter_ != nullptr; }
 	int get_nq() const;
 	String get_scenario() const;
+	String get_algorithm_name() const;
 	String get_last_error() const { return last_error_; }
 
 protected:
@@ -67,6 +84,11 @@ protected:
 
 private:
 	PackedFloat64Array run(const retargeting::SkeletonFrame &frame);
+	bool run_to_qpos(const retargeting::SkeletonFrame &frame, Eigen::VectorXd &qpos);
+	Dictionary make_robot_pose(const Eigen::VectorXd &qpos,
+			const PackedStringArray &joint_names,
+			const PackedInt32Array &qpos_indices);
+	retargeting::SkeletonFrame skeleton_from_dictionary(const Dictionary &frame);
 
 	std::unique_ptr<retargeting::Retargeter> retargeter_;
 	retargeting::SkeletonFrame frame_;

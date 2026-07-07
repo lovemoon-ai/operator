@@ -26,13 +26,17 @@ Installs `libgodot_retargeting.so` + `libmujoco.so` into
 
 | Method | Description |
 |---|---|
-| `configure(scenario, robot_xml, ik_config, human_height=1.75, locked_qpos_prefix=0) -> bool` | Bind a robot + mapping. `scenario`: `"whole_body"` / `"upper_body"` / `"hand"`. |
+| `configure(scenario, robot_xml, ik_config, human_height=1.75, locked_qpos_prefix=0, freeze_locked=false, clamp_qpos_indices=[]) -> bool` | Bind a robot + mapping with the default `"gmr"` algorithm. `scenario`: `"whole_body"` / `"upper_body"` / `"hand"`. |
+| `configure_algorithm(scenario, robot_xml, ik_config, algorithm="gmr", human_height=1.75, locked_qpos_prefix=0, freeze_locked=false, clamp_qpos_indices=[]) -> bool` | Bind a robot + mapping with an explicit algorithm, e.g. `"dual_arm_eepose"`. |
 | `set_pose(name, xform: Transform3D)` | Accumulate one source joint pose for the next `step()`. |
 | `set_pose_pq(name, pos: Vector3, quat: Quaternion)` | Same, from position + quaternion. |
 | `clear_frame()` | Drop the accumulated frame. |
+| `set_configuration(qpos: PackedFloat64Array) -> bool` | Seed/commit the native solver state, useful after output filtering. |
 | `step() -> PackedFloat64Array` | Retarget the accumulated frame → robot `qpos`. |
 | `step_frame(frame: Dictionary) -> PackedFloat64Array` | Retarget `{name: Transform3D}` in one call. |
-| `get_nq() -> int`, `get_scenario() -> String`, `is_configured() -> bool`, `get_last_error() -> String` | Introspection. |
+| `step_robot_pose(joint_names: PackedStringArray, qpos_indices: PackedInt32Array) -> Dictionary` | Retarget the accumulated frame and return `{joint_names, joint_q, qpos, scenario, algorithm}`. |
+| `step_frame_robot_pose(frame: Dictionary, joint_names: PackedStringArray, qpos_indices: PackedInt32Array) -> Dictionary` | One-call variant of `step_robot_pose`. |
+| `get_nq() -> int`, `get_scenario() -> String`, `get_algorithm_name() -> String`, `is_configured() -> bool`, `get_last_error() -> String` | Introspection. |
 
 ### Example
 
@@ -62,6 +66,17 @@ func _process(_dt: float) -> void:
     # ... remaining mapped joints ...
     var qpos := rt.step()      # length get_nq(); MuJoCo-convention qpos
     # drive the robot / sim with qpos
+```
+
+For Galbot G1 dual-arm control, select the native EE-pose algorithm and request
+a named robot pose:
+
+```gdscript
+rt.configure_algorithm("upper_body", robot_xml, ee_config, "dual_arm_eepose", 1.75, 14, true)
+rt.set_pose_pq("LeftWrist", left_tcp_pos, left_tcp_quat)
+rt.set_pose_pq("RightWrist", right_tcp_pos, right_tcp_quat)
+var pose := rt.step_robot_pose(arm_joint_names, arm_qpos_indices)
+# pose["joint_names"] + pose["joint_q"] are the robot command surface.
 ```
 
 See `example.gd` for a copyable script with an `_extract()` helper.

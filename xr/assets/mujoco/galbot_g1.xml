@@ -1,0 +1,560 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mujoco model="galbot_g1">
+  <compiler angle="radian" />
+  <option timestep="0.008333333" gravity="0 0 -9.81" />
+  <default>
+    <joint damping="0.3" armature="0.01" />
+    <geom friction="0.8 0.01 0.001" density="250" />
+  </default>
+  <worldbody>
+    <geom name="floor" type="plane" size="3 3 0.02" rgba="0.12 0.13 0.14 1" />
+    <body name="base_footprint" pos="0 0 1.05">
+      <freejoint name="base_footprint_freejoint" />
+      <geom name="base_footprint_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+      <body name="base_link" pos="0 0 0.028166" quat="1 0 0 0">
+        <geom name="base_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+        <body name="omni_chassis_base_link" pos="0 0 0" quat="1 0 0 0">
+          <geom name="omni_chassis_base_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+          <body name="omni_chassis_leg_mount_link" pos="0.134 0 0.1325" quat="1 0 0 0">
+            <geom name="omni_chassis_leg_mount_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            <body name="leg_base_link" pos="0 0 0" quat="1 0 0 0">
+              <geom name="leg_base_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+              <body name="leg_link1" pos="0 0 0" quat="-0.1352789408 0.1352789408 0.6940458257 0.6940458257">
+                <joint name="leg_joint1" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 0.9374" />
+                <geom name="leg_link1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                <body name="leg_link2" pos="0.45 0 0" quat="0 0.1913097075 0.9815297223 0">
+                  <joint name="leg_joint2" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 2.5847" />
+                  <geom name="leg_link2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                  <body name="leg_link3" pos="0.39 0 0" quat="0 0 1 0">
+                    <joint name="leg_joint3" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="0 2.3262" />
+                    <geom name="leg_link3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                    <body name="leg_link4" pos="0 0.224 0" quat="0.5 -0.5 -0.5 -0.5">
+                      <joint name="leg_joint4" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.5906 1.5906" />
+                      <geom name="leg_link4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                      <body name="leg_link5" pos="0 0 0" quat="0.7071067812 0.7071067812 0 0">
+                        <joint name="leg_joint5" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.1645 0.1645" />
+                        <geom name="leg_link5_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                        <body name="leg_end_effector_mount_link" pos="0 0 0" quat="1 0 0 0">
+                          <geom name="leg_end_effector_mount_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                          <body name="torso_base_link" pos="0 0 0" quat="1 0 0 0">
+                            <geom name="torso_base_link_proxy" type="box" size="0.11 0.07 0.18" rgba="0.55 0.65 0.75 0.55" />
+                            <body name="torso_head_mount_link" pos="0 0.37711 0" quat="0.5 -0.5 -0.5 -0.5">
+                              <geom name="torso_head_mount_link_proxy" type="box" size="0.11 0.07 0.18" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="head_base_link" pos="0 0 0" quat="1 0 0 0">
+                                <geom name="head_base_link_proxy" type="sphere" size="0.055" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="head_link1" pos="0 0 0" quat="1 0 0 0">
+                                  <joint name="head_joint1" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.5208 1.5208" />
+                                  <geom name="head_link1_proxy" type="sphere" size="0.055" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="head_link2" pos="0 0 0" quat="0.7071067812 -0.7071067812 0 0">
+                                    <joint name="head_joint2" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.2143461 0.4935988" />
+                                    <geom name="head_link2_proxy" type="sphere" size="0.055" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="head_end_effector_mount_link" pos="0 0 0" quat="1 0 0 0">
+                                      <geom name="head_end_effector_mount_link_proxy" type="sphere" size="0.055" rgba="0.55 0.65 0.75 0.55" />
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="torso_left_arm_mount_link" pos="0.20843 0.172 0" quat="0.7071067812 0 0.7071067812 0">
+                              <geom name="torso_left_arm_mount_link_proxy" type="box" size="0.11 0.07 0.18" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="left_arm_base_link" pos="0 0 0" quat="1 0 0 0">
+                                <geom name="left_arm_base_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="left_arm_link1" pos="0 0 0" quat="0.9659258263 0 0 0.2588190451">
+                                  <joint name="left_arm_joint1" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.00432619 3.00432619" />
+                                  <geom name="left_arm_link1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="left_arm_link2" pos="0 0 0" quat="0 0 0.7071067812 0.7071067812">
+                                    <joint name="left_arm_joint2" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.608062789 1.608062789" />
+                                    <geom name="left_arm_link2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="left_arm_link3" pos="0 0.35 0" quat="0.3535533906 -0.3535533906 0.6123724357 0.6123724357">
+                                      <joint name="left_arm_joint3" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.916972222 2.916972222" />
+                                      <geom name="left_arm_link3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="left_arm_link4" pos="0 0 0" quat="0 0 0.7071067812 0.7071067812">
+                                        <joint name="left_arm_joint4" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.567993878 1.869862177" />
+                                        <geom name="left_arm_link4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                        <body name="left_arm_link5" pos="0 0.36 0" quat="0.7071067812 -0.7071067812 0 0">
+                                          <joint name="left_arm_joint5" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.916972222 2.916972222" />
+                                          <geom name="left_arm_link5_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                          <body name="left_arm_link6" pos="0 0 0" quat="-0.5 -0.5 -0.5 0.5">
+                                            <joint name="left_arm_joint6" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.822664626 0.7353981634" />
+                                            <geom name="left_arm_link6_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                            <body name="left_arm_link7" pos="0 0 0" quat="0.7071067812 0.7071067812 0 0">
+                                              <joint name="left_arm_joint7" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.538202778 1.538202778" />
+                                              <geom name="left_arm_link7_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                              <body name="left_arm_end_effector_mount_link" pos="-0.10926 0 0" quat="0 0 1 0">
+                                                <geom name="left_arm_end_effector_mount_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                <body name="left_gripper_flange_link" pos="0 0 0" quat="0.7071067812 0.7071067812 0 0">
+                                                  <geom name="left_gripper_flange_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                  <body name="left_gripper_base_link" pos="0.0065 0 0" quat="1 0 0 0">
+                                                    <geom name="left_gripper_base_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    <body name="left_gripper_r_knuckle_link" pos="0.0745 0 0.0385" quat="0.5741606636 0.5741606636 -0.4127221007 0.4127221007">
+                                                      <joint name="left_gripper_joint" type="hinge" axis="0 0 -1" damping="0.3" armature="0.01" limited="true" range="0 1.703" />
+                                                      <geom name="left_gripper_r_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    </body>
+                                                    <body name="left_gripper_r_inner_knuckle_link" pos="0.079 0 0.026" quat="0.5741606636 0.5741606636 -0.4127221007 0.4127221007">
+                                                      <joint name="left_gripper_r_inner_knuckle_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                      <geom name="left_gripper_r_inner_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      <body name="left_gripper_r_finger_link" pos="0.045 0 0" quat="0.8119857974 0 0 -0.5836771923">
+                                                        <joint name="left_gripper_r_finger_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                        <geom name="left_gripper_r_finger_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      </body>
+                                                    </body>
+                                                    <body name="left_gripper_l_knuckle_link" pos="0.0745 0 -0.0385" quat="0.5741606636 0.5741606636 0.4127221007 -0.4127221007">
+                                                      <joint name="left_gripper_l_knuckle_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                      <geom name="left_gripper_l_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    </body>
+                                                    <body name="left_gripper_l_inner_knuckle_link" pos="0.079 0 -0.026" quat="0.5741606636 0.5741606636 0.4127221007 -0.4127221007">
+                                                      <joint name="left_gripper_l_inner_knuckle_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                      <geom name="left_gripper_l_inner_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      <body name="left_gripper_l_finger_link" pos="0.045 0 0" quat="0.8119857974 0 0 0.5836771923">
+                                                        <joint name="left_gripper_l_finger_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                        <geom name="left_gripper_l_finger_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      </body>
+                                                    </body>
+                                                    <body name="left_gripper_tcp_link" pos="0.13996 0 0" quat="0.7071067812 0.7071067812 0 0">
+                                                      <geom name="left_gripper_tcp_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    </body>
+                                                  </body>
+                                                </body>
+                                              </body>
+                                              <body name="left_arm_wrist_camera_stand" pos="0 0 0" quat="1 0 0 0">
+                                                <geom name="left_arm_wrist_camera_stand_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                <body name="left_wrist_camera_link" pos="-0.0822 0 -0.06842" quat="0 -0.6745818893 0 0.7382000234">
+                                                  <geom name="left_wrist_camera_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                </body>
+                                              </body>
+                                            </body>
+                                          </body>
+                                        </body>
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                            <body name="torso_right_arm_mount_link" pos="-0.20843 0.172 0" quat="0 0.7071067812 0 -0.7071067812">
+                              <geom name="torso_right_arm_mount_link_proxy" type="box" size="0.11 0.07 0.18" rgba="0.55 0.65 0.75 0.55" />
+                              <body name="right_arm_base_link" pos="0 0 0" quat="1 0 0 0">
+                                <geom name="right_arm_base_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                <body name="right_arm_link1" pos="0 0 0" quat="0.9659258263 0 0 -0.2588190451">
+                                  <joint name="right_arm_joint1" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.00432619 3.00432619" />
+                                  <geom name="right_arm_link1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                  <body name="right_arm_link2" pos="0 0 0" quat="0 0 0.7071067812 -0.7071067812">
+                                    <joint name="right_arm_joint2" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.608062789 1.608062789" />
+                                    <geom name="right_arm_link2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                    <body name="right_arm_link3" pos="0 -0.35 0" quat="0.3535533906 0.3535533906 0.6123724357 -0.6123724357">
+                                      <joint name="right_arm_joint3" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.916972222 2.916972222" />
+                                      <geom name="right_arm_link3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                      <body name="right_arm_link4" pos="0 0 0" quat="0 0 -0.7071067812 0.7071067812">
+                                        <joint name="right_arm_joint4" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.869862177 2.567993878" />
+                                        <geom name="right_arm_link4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                        <body name="right_arm_link5" pos="0 -0.36 0" quat="0 0 0.7071067812 -0.7071067812">
+                                          <joint name="right_arm_joint5" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-2.916972222 2.916972222" />
+                                          <geom name="right_arm_link5_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                          <body name="right_arm_link6" pos="0 0 0" quat="-0.5 -0.5 -0.5 0.5">
+                                            <joint name="right_arm_joint6" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-0.7353981634 0.822664626" />
+                                            <geom name="right_arm_link6_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                            <body name="right_arm_link7" pos="0 0 0" quat="0.7071067812 -0.7071067812 0 0">
+                                              <joint name="right_arm_joint7" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-1.538202778 1.538202778" />
+                                              <geom name="right_arm_link7_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                              <body name="right_arm_end_effector_mount_link" pos="-0.10926 0 0" quat="0 0 1 0">
+                                                <geom name="right_arm_end_effector_mount_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                <body name="right_gripper_flange_link" pos="0 0 0" quat="0.7071067812 0.7071067812 0 0">
+                                                  <geom name="right_gripper_flange_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                  <body name="right_gripper_base_link" pos="0.0065 0 0" quat="1 0 0 0">
+                                                    <geom name="right_gripper_base_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    <body name="right_gripper_r_knuckle_link" pos="0.0745 0 0.0385" quat="0.5741606636 0.5741606636 -0.4127221007 0.4127221007">
+                                                      <joint name="right_gripper_joint" type="hinge" axis="0 0 -1" damping="0.3" armature="0.01" limited="true" range="0 1.703" />
+                                                      <geom name="right_gripper_r_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    </body>
+                                                    <body name="right_gripper_r_inner_knuckle_link" pos="0.079 0 0.026" quat="0.5741606636 0.5741606636 -0.4127221007 0.4127221007">
+                                                      <joint name="right_gripper_r_inner_knuckle_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                      <geom name="right_gripper_r_inner_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      <body name="right_gripper_r_finger_link" pos="0.045 0 0" quat="0.8119857974 0 0 -0.5836771923">
+                                                        <joint name="right_gripper_r_finger_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                        <geom name="right_gripper_r_finger_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      </body>
+                                                    </body>
+                                                    <body name="right_gripper_l_knuckle_link" pos="0.0745 0 -0.0385" quat="0.5741606636 0.5741606636 0.4127221007 -0.4127221007">
+                                                      <joint name="right_gripper_l_knuckle_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                      <geom name="right_gripper_l_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    </body>
+                                                    <body name="right_gripper_l_inner_knuckle_link" pos="0.079 0 -0.026" quat="0.5741606636 0.5741606636 0.4127221007 -0.4127221007">
+                                                      <joint name="right_gripper_l_inner_knuckle_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                      <geom name="right_gripper_l_inner_knuckle_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      <body name="right_gripper_l_finger_link" pos="0.045 0 0" quat="0.8119857974 0 0 0.5836771923">
+                                                        <joint name="right_gripper_l_finger_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" limited="true" range="-3.13 3.13" />
+                                                        <geom name="right_gripper_l_finger_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                      </body>
+                                                    </body>
+                                                    <body name="right_gripper_tcp_link" pos="0.13996 0 0" quat="0.7071067812 0.7071067812 0 0">
+                                                      <geom name="right_gripper_tcp_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                    </body>
+                                                  </body>
+                                                </body>
+                                              </body>
+                                              <body name="right_arm_wrist_camera_stand" pos="0 0 0" quat="1 0 0 0">
+                                                <geom name="right_arm_wrist_camera_stand_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                <body name="right_wrist_camera_link" pos="-0.0822 0 -0.06842" quat="0 -0.6745818893 0 0.7382000234">
+                                                  <geom name="right_wrist_camera_link_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+                                                </body>
+                                              </body>
+                                            </body>
+                                          </body>
+                                        </body>
+                                      </body>
+                                    </body>
+                                  </body>
+                                </body>
+                              </body>
+                            </body>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+          <body name="wheel_1" pos="0.176493 0.176493 0.071834" quat="-0.3826834324 0 0 0.9238795325">
+            <joint name="wheel1_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" />
+            <geom name="wheel_1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            <body name="wheel_1_passive_0" pos="0 0.025 0" quat="1 0 0 0">
+              <joint name="wheel_1_passive_0_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_0_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_1" pos="0 0.02022542486 0.01469463131" quat="0.9510565163 0.3090169944 0 0">
+              <joint name="wheel_1_passive_1_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_2" pos="0 0.007725424859 0.02377641291" quat="0.8090169944 0.5877852523 0 0">
+              <joint name="wheel_1_passive_2_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_3" pos="0 -0.007725424859 0.02377641291" quat="0.5877852523 0.8090169944 0 0">
+              <joint name="wheel_1_passive_3_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_4" pos="0 -0.02022542486 0.01469463131" quat="0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_1_passive_4_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_5" pos="0 -0.025 0" quat="0 1 0 0">
+              <joint name="wheel_1_passive_5_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_5_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_6" pos="0 -0.02022542486 -0.01469463131" quat="-0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_1_passive_6_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_6_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_7" pos="0 -0.007725424859 -0.02377641291" quat="0.5877852523 -0.8090169944 0 0">
+              <joint name="wheel_1_passive_7_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_7_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_8" pos="0 0.007725424859 -0.02377641291" quat="0.8090169944 -0.5877852523 0 0">
+              <joint name="wheel_1_passive_8_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_8_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_1_passive_9" pos="0 0.02022542486 -0.01469463131" quat="0.9510565163 -0.3090169944 0 0">
+              <joint name="wheel_1_passive_9_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_1_passive_9_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+          </body>
+          <body name="wheel_2" pos="-0.176493 0.176493 0.071834" quat="0.9238795325 0 0 -0.3826834324">
+            <joint name="wheel2_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" />
+            <geom name="wheel_2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            <body name="wheel_2_passive_0" pos="0 0.025 0" quat="1 0 0 0">
+              <joint name="wheel_2_passive_0_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_0_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_1" pos="0 0.02022542486 0.01469463131" quat="0.9510565163 0.3090169944 0 0">
+              <joint name="wheel_2_passive_1_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_2" pos="0 0.007725424859 0.02377641291" quat="0.8090169944 0.5877852523 0 0">
+              <joint name="wheel_2_passive_2_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_3" pos="0 -0.007725424859 0.02377641291" quat="0.5877852523 0.8090169944 0 0">
+              <joint name="wheel_2_passive_3_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_4" pos="0 -0.02022542486 0.01469463131" quat="0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_2_passive_4_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_5" pos="0 -0.025 0" quat="0 1 0 0">
+              <joint name="wheel_2_passive_5_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_5_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_6" pos="0 -0.02022542486 -0.01469463131" quat="-0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_2_passive_6_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_6_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_7" pos="0 -0.007725424859 -0.02377641291" quat="0.5877852523 -0.8090169944 0 0">
+              <joint name="wheel_2_passive_7_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_7_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_8" pos="0 0.007725424859 -0.02377641291" quat="0.8090169944 -0.5877852523 0 0">
+              <joint name="wheel_2_passive_8_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_8_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_2_passive_9" pos="0 0.02022542486 -0.01469463131" quat="0.9510565163 -0.3090169944 0 0">
+              <joint name="wheel_2_passive_9_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_2_passive_9_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+          </body>
+          <body name="wheel_3" pos="-0.176493 -0.176493 0.071834" quat="0.9238795325 0 0 0.3826834324">
+            <joint name="wheel3_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" />
+            <geom name="wheel_3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            <body name="wheel_3_passive_0" pos="0 0.025 0" quat="1 0 0 0">
+              <joint name="wheel_3_passive_0_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_0_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_1" pos="0 0.02022542486 0.01469463131" quat="0.9510565163 0.3090169944 0 0">
+              <joint name="wheel_3_passive_1_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_2" pos="0 0.007725424859 0.02377641291" quat="0.8090169944 0.5877852523 0 0">
+              <joint name="wheel_3_passive_2_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_3" pos="0 -0.007725424859 0.02377641291" quat="0.5877852523 0.8090169944 0 0">
+              <joint name="wheel_3_passive_3_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_4" pos="0 -0.02022542486 0.01469463131" quat="0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_3_passive_4_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_5" pos="0 -0.025 0" quat="0 1 0 0">
+              <joint name="wheel_3_passive_5_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_5_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_6" pos="0 -0.02022542486 -0.01469463131" quat="-0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_3_passive_6_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_6_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_7" pos="0 -0.007725424859 -0.02377641291" quat="0.5877852523 -0.8090169944 0 0">
+              <joint name="wheel_3_passive_7_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_7_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_8" pos="0 0.007725424859 -0.02377641291" quat="0.8090169944 -0.5877852523 0 0">
+              <joint name="wheel_3_passive_8_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_8_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_3_passive_9" pos="0 0.02022542486 -0.01469463131" quat="0.9510565163 -0.3090169944 0 0">
+              <joint name="wheel_3_passive_9_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_3_passive_9_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+          </body>
+          <body name="wheel_4" pos="0.176493 -0.176493 0.071834" quat="0.3826834324 0 0 0.9238795325">
+            <joint name="wheel4_joint" type="hinge" axis="1 0 0" damping="0.3" armature="0.01" />
+            <geom name="wheel_4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            <body name="wheel_4_passive_0" pos="0 0.025 0" quat="1 0 0 0">
+              <joint name="wheel_4_passive_0_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_0_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_1" pos="0 0.02022542486 0.01469463131" quat="0.9510565163 0.3090169944 0 0">
+              <joint name="wheel_4_passive_1_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_1_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_2" pos="0 0.007725424859 0.02377641291" quat="0.8090169944 0.5877852523 0 0">
+              <joint name="wheel_4_passive_2_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_2_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_3" pos="0 -0.007725424859 0.02377641291" quat="0.5877852523 0.8090169944 0 0">
+              <joint name="wheel_4_passive_3_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_3_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_4" pos="0 -0.02022542486 0.01469463131" quat="0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_4_passive_4_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_4_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_5" pos="0 -0.025 0" quat="0 1 0 0">
+              <joint name="wheel_4_passive_5_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_5_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_6" pos="0 -0.02022542486 -0.01469463131" quat="-0.3090169944 0.9510565163 0 0">
+              <joint name="wheel_4_passive_6_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_6_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_7" pos="0 -0.007725424859 -0.02377641291" quat="0.5877852523 -0.8090169944 0 0">
+              <joint name="wheel_4_passive_7_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_7_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_8" pos="0 0.007725424859 -0.02377641291" quat="0.8090169944 -0.5877852523 0 0">
+              <joint name="wheel_4_passive_8_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_8_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+            <body name="wheel_4_passive_9" pos="0 0.02022542486 -0.01469463131" quat="0.9510565163 -0.3090169944 0 0">
+              <joint name="wheel_4_passive_9_joint" type="hinge" axis="0 0 1" damping="0.3" armature="0.01" />
+              <geom name="wheel_4_passive_9_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+            </body>
+          </body>
+          <body name="chassis_lidar" pos="0.235 0 0.2144" quat="1 0 0 0">
+            <geom name="chassis_lidar_proxy" type="sphere" size="0.025" rgba="0.55 0.65 0.75 0.55" />
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="leg_joint1_position" joint="leg_joint1" kp="15" ctrlrange="0 0.9374" />
+    <position name="leg_joint2_position" joint="leg_joint2" kp="15" ctrlrange="0 2.5847" />
+    <position name="leg_joint3_position" joint="leg_joint3" kp="15" ctrlrange="0 2.3262" />
+    <position name="leg_joint4_position" joint="leg_joint4" kp="15" ctrlrange="-1.5906 1.5906" />
+    <position name="leg_joint5_position" joint="leg_joint5" kp="15" ctrlrange="-0.1645 0.1645" />
+    <position name="head_joint1_position" joint="head_joint1" kp="15" ctrlrange="-1.5208 1.5208" />
+    <position name="head_joint2_position" joint="head_joint2" kp="15" ctrlrange="-0.2143461 0.4935988" />
+    <position name="left_arm_joint1_position" joint="left_arm_joint1" kp="15" ctrlrange="-3.00432619 3.00432619" />
+    <position name="left_arm_joint2_position" joint="left_arm_joint2" kp="15" ctrlrange="-1.608062789 1.608062789" />
+    <position name="left_arm_joint3_position" joint="left_arm_joint3" kp="15" ctrlrange="-2.916972222 2.916972222" />
+    <position name="left_arm_joint4_position" joint="left_arm_joint4" kp="15" ctrlrange="-2.567993878 1.869862177" />
+    <position name="left_arm_joint5_position" joint="left_arm_joint5" kp="15" ctrlrange="-2.916972222 2.916972222" />
+    <position name="left_arm_joint6_position" joint="left_arm_joint6" kp="15" ctrlrange="-0.822664626 0.7353981634" />
+    <position name="left_arm_joint7_position" joint="left_arm_joint7" kp="15" ctrlrange="-1.538202778 1.538202778" />
+    <position name="left_gripper_joint_position" joint="left_gripper_joint" kp="15" ctrlrange="0 1.703" />
+    <position name="left_gripper_r_inner_knuckle_joint_position" joint="left_gripper_r_inner_knuckle_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="left_gripper_r_finger_joint_position" joint="left_gripper_r_finger_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="left_gripper_l_knuckle_joint_position" joint="left_gripper_l_knuckle_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="left_gripper_l_inner_knuckle_joint_position" joint="left_gripper_l_inner_knuckle_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="left_gripper_l_finger_joint_position" joint="left_gripper_l_finger_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="right_arm_joint1_position" joint="right_arm_joint1" kp="15" ctrlrange="-3.00432619 3.00432619" />
+    <position name="right_arm_joint2_position" joint="right_arm_joint2" kp="15" ctrlrange="-1.608062789 1.608062789" />
+    <position name="right_arm_joint3_position" joint="right_arm_joint3" kp="15" ctrlrange="-2.916972222 2.916972222" />
+    <position name="right_arm_joint4_position" joint="right_arm_joint4" kp="15" ctrlrange="-1.869862177 2.567993878" />
+    <position name="right_arm_joint5_position" joint="right_arm_joint5" kp="15" ctrlrange="-2.916972222 2.916972222" />
+    <position name="right_arm_joint6_position" joint="right_arm_joint6" kp="15" ctrlrange="-0.7353981634 0.822664626" />
+    <position name="right_arm_joint7_position" joint="right_arm_joint7" kp="15" ctrlrange="-1.538202778 1.538202778" />
+    <position name="right_gripper_joint_position" joint="right_gripper_joint" kp="15" ctrlrange="0 1.703" />
+    <position name="right_gripper_r_inner_knuckle_joint_position" joint="right_gripper_r_inner_knuckle_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="right_gripper_r_finger_joint_position" joint="right_gripper_r_finger_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="right_gripper_l_knuckle_joint_position" joint="right_gripper_l_knuckle_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="right_gripper_l_inner_knuckle_joint_position" joint="right_gripper_l_inner_knuckle_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="right_gripper_l_finger_joint_position" joint="right_gripper_l_finger_joint" kp="15" ctrlrange="-3.13 3.13" />
+    <position name="wheel1_joint_position" joint="wheel1_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_0_joint_position" joint="wheel_1_passive_0_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_1_joint_position" joint="wheel_1_passive_1_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_2_joint_position" joint="wheel_1_passive_2_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_3_joint_position" joint="wheel_1_passive_3_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_4_joint_position" joint="wheel_1_passive_4_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_5_joint_position" joint="wheel_1_passive_5_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_6_joint_position" joint="wheel_1_passive_6_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_7_joint_position" joint="wheel_1_passive_7_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_8_joint_position" joint="wheel_1_passive_8_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_1_passive_9_joint_position" joint="wheel_1_passive_9_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel2_joint_position" joint="wheel2_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_0_joint_position" joint="wheel_2_passive_0_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_1_joint_position" joint="wheel_2_passive_1_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_2_joint_position" joint="wheel_2_passive_2_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_3_joint_position" joint="wheel_2_passive_3_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_4_joint_position" joint="wheel_2_passive_4_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_5_joint_position" joint="wheel_2_passive_5_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_6_joint_position" joint="wheel_2_passive_6_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_7_joint_position" joint="wheel_2_passive_7_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_8_joint_position" joint="wheel_2_passive_8_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_2_passive_9_joint_position" joint="wheel_2_passive_9_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel3_joint_position" joint="wheel3_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_0_joint_position" joint="wheel_3_passive_0_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_1_joint_position" joint="wheel_3_passive_1_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_2_joint_position" joint="wheel_3_passive_2_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_3_joint_position" joint="wheel_3_passive_3_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_4_joint_position" joint="wheel_3_passive_4_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_5_joint_position" joint="wheel_3_passive_5_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_6_joint_position" joint="wheel_3_passive_6_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_7_joint_position" joint="wheel_3_passive_7_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_8_joint_position" joint="wheel_3_passive_8_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_3_passive_9_joint_position" joint="wheel_3_passive_9_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel4_joint_position" joint="wheel4_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_0_joint_position" joint="wheel_4_passive_0_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_1_joint_position" joint="wheel_4_passive_1_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_2_joint_position" joint="wheel_4_passive_2_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_3_joint_position" joint="wheel_4_passive_3_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_4_joint_position" joint="wheel_4_passive_4_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_5_joint_position" joint="wheel_4_passive_5_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_6_joint_position" joint="wheel_4_passive_6_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_7_joint_position" joint="wheel_4_passive_7_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_8_joint_position" joint="wheel_4_passive_8_joint" kp="15" ctrlrange="-1 1" />
+    <position name="wheel_4_passive_9_joint_position" joint="wheel_4_passive_9_joint" kp="15" ctrlrange="-1 1" />
+  </actuator>
+  <sensor>
+    <jointpos name="leg_joint1_pos" joint="leg_joint1" />
+    <jointpos name="leg_joint2_pos" joint="leg_joint2" />
+    <jointpos name="leg_joint3_pos" joint="leg_joint3" />
+    <jointpos name="leg_joint4_pos" joint="leg_joint4" />
+    <jointpos name="leg_joint5_pos" joint="leg_joint5" />
+    <jointpos name="head_joint1_pos" joint="head_joint1" />
+    <jointpos name="head_joint2_pos" joint="head_joint2" />
+    <jointpos name="left_arm_joint1_pos" joint="left_arm_joint1" />
+    <jointpos name="left_arm_joint2_pos" joint="left_arm_joint2" />
+    <jointpos name="left_arm_joint3_pos" joint="left_arm_joint3" />
+    <jointpos name="left_arm_joint4_pos" joint="left_arm_joint4" />
+    <jointpos name="left_arm_joint5_pos" joint="left_arm_joint5" />
+    <jointpos name="left_arm_joint6_pos" joint="left_arm_joint6" />
+    <jointpos name="left_arm_joint7_pos" joint="left_arm_joint7" />
+    <jointpos name="left_gripper_joint_pos" joint="left_gripper_joint" />
+    <jointpos name="left_gripper_r_inner_knuckle_joint_pos" joint="left_gripper_r_inner_knuckle_joint" />
+    <jointpos name="left_gripper_r_finger_joint_pos" joint="left_gripper_r_finger_joint" />
+    <jointpos name="left_gripper_l_knuckle_joint_pos" joint="left_gripper_l_knuckle_joint" />
+    <jointpos name="left_gripper_l_inner_knuckle_joint_pos" joint="left_gripper_l_inner_knuckle_joint" />
+    <jointpos name="left_gripper_l_finger_joint_pos" joint="left_gripper_l_finger_joint" />
+    <jointpos name="right_arm_joint1_pos" joint="right_arm_joint1" />
+    <jointpos name="right_arm_joint2_pos" joint="right_arm_joint2" />
+    <jointpos name="right_arm_joint3_pos" joint="right_arm_joint3" />
+    <jointpos name="right_arm_joint4_pos" joint="right_arm_joint4" />
+    <jointpos name="right_arm_joint5_pos" joint="right_arm_joint5" />
+    <jointpos name="right_arm_joint6_pos" joint="right_arm_joint6" />
+    <jointpos name="right_arm_joint7_pos" joint="right_arm_joint7" />
+    <jointpos name="right_gripper_joint_pos" joint="right_gripper_joint" />
+    <jointpos name="right_gripper_r_inner_knuckle_joint_pos" joint="right_gripper_r_inner_knuckle_joint" />
+    <jointpos name="right_gripper_r_finger_joint_pos" joint="right_gripper_r_finger_joint" />
+    <jointpos name="right_gripper_l_knuckle_joint_pos" joint="right_gripper_l_knuckle_joint" />
+    <jointpos name="right_gripper_l_inner_knuckle_joint_pos" joint="right_gripper_l_inner_knuckle_joint" />
+    <jointpos name="right_gripper_l_finger_joint_pos" joint="right_gripper_l_finger_joint" />
+    <jointpos name="wheel1_joint_pos" joint="wheel1_joint" />
+    <jointpos name="wheel_1_passive_0_joint_pos" joint="wheel_1_passive_0_joint" />
+    <jointpos name="wheel_1_passive_1_joint_pos" joint="wheel_1_passive_1_joint" />
+    <jointpos name="wheel_1_passive_2_joint_pos" joint="wheel_1_passive_2_joint" />
+    <jointpos name="wheel_1_passive_3_joint_pos" joint="wheel_1_passive_3_joint" />
+    <jointpos name="wheel_1_passive_4_joint_pos" joint="wheel_1_passive_4_joint" />
+    <jointpos name="wheel_1_passive_5_joint_pos" joint="wheel_1_passive_5_joint" />
+    <jointpos name="wheel_1_passive_6_joint_pos" joint="wheel_1_passive_6_joint" />
+    <jointpos name="wheel_1_passive_7_joint_pos" joint="wheel_1_passive_7_joint" />
+    <jointpos name="wheel_1_passive_8_joint_pos" joint="wheel_1_passive_8_joint" />
+    <jointpos name="wheel_1_passive_9_joint_pos" joint="wheel_1_passive_9_joint" />
+    <jointpos name="wheel2_joint_pos" joint="wheel2_joint" />
+    <jointpos name="wheel_2_passive_0_joint_pos" joint="wheel_2_passive_0_joint" />
+    <jointpos name="wheel_2_passive_1_joint_pos" joint="wheel_2_passive_1_joint" />
+    <jointpos name="wheel_2_passive_2_joint_pos" joint="wheel_2_passive_2_joint" />
+    <jointpos name="wheel_2_passive_3_joint_pos" joint="wheel_2_passive_3_joint" />
+    <jointpos name="wheel_2_passive_4_joint_pos" joint="wheel_2_passive_4_joint" />
+    <jointpos name="wheel_2_passive_5_joint_pos" joint="wheel_2_passive_5_joint" />
+    <jointpos name="wheel_2_passive_6_joint_pos" joint="wheel_2_passive_6_joint" />
+    <jointpos name="wheel_2_passive_7_joint_pos" joint="wheel_2_passive_7_joint" />
+    <jointpos name="wheel_2_passive_8_joint_pos" joint="wheel_2_passive_8_joint" />
+    <jointpos name="wheel_2_passive_9_joint_pos" joint="wheel_2_passive_9_joint" />
+    <jointpos name="wheel3_joint_pos" joint="wheel3_joint" />
+    <jointpos name="wheel_3_passive_0_joint_pos" joint="wheel_3_passive_0_joint" />
+    <jointpos name="wheel_3_passive_1_joint_pos" joint="wheel_3_passive_1_joint" />
+    <jointpos name="wheel_3_passive_2_joint_pos" joint="wheel_3_passive_2_joint" />
+    <jointpos name="wheel_3_passive_3_joint_pos" joint="wheel_3_passive_3_joint" />
+    <jointpos name="wheel_3_passive_4_joint_pos" joint="wheel_3_passive_4_joint" />
+    <jointpos name="wheel_3_passive_5_joint_pos" joint="wheel_3_passive_5_joint" />
+    <jointpos name="wheel_3_passive_6_joint_pos" joint="wheel_3_passive_6_joint" />
+    <jointpos name="wheel_3_passive_7_joint_pos" joint="wheel_3_passive_7_joint" />
+    <jointpos name="wheel_3_passive_8_joint_pos" joint="wheel_3_passive_8_joint" />
+    <jointpos name="wheel_3_passive_9_joint_pos" joint="wheel_3_passive_9_joint" />
+    <jointpos name="wheel4_joint_pos" joint="wheel4_joint" />
+    <jointpos name="wheel_4_passive_0_joint_pos" joint="wheel_4_passive_0_joint" />
+    <jointpos name="wheel_4_passive_1_joint_pos" joint="wheel_4_passive_1_joint" />
+    <jointpos name="wheel_4_passive_2_joint_pos" joint="wheel_4_passive_2_joint" />
+    <jointpos name="wheel_4_passive_3_joint_pos" joint="wheel_4_passive_3_joint" />
+    <jointpos name="wheel_4_passive_4_joint_pos" joint="wheel_4_passive_4_joint" />
+    <jointpos name="wheel_4_passive_5_joint_pos" joint="wheel_4_passive_5_joint" />
+    <jointpos name="wheel_4_passive_6_joint_pos" joint="wheel_4_passive_6_joint" />
+    <jointpos name="wheel_4_passive_7_joint_pos" joint="wheel_4_passive_7_joint" />
+    <jointpos name="wheel_4_passive_8_joint_pos" joint="wheel_4_passive_8_joint" />
+    <jointpos name="wheel_4_passive_9_joint_pos" joint="wheel_4_passive_9_joint" />
+  </sensor>
+</mujoco>
