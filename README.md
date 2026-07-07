@@ -185,6 +185,12 @@ make install-pico
 make ship-pico
 ```
 
+> [!IMPORTANT]
+> Ego **depth** capture needs the patched OpenXR Vendors plugin. A plain
+> `make build-quest` fetches the unpatched vendor binaries and silently records
+> no depth. See [Build & Install the XR App](claw/develop/build-app.md) for the
+> `prepare.sh --build-patched` step.
+
 Robot-side Rust commands run from `robot/`:
 
 ```bash
@@ -208,6 +214,17 @@ cd examples/mujuco-arm-so101
 make env
 make run-sim
 ```
+
+## Documentation
+
+Deeper docs live under `claw/`:
+
+- [Build & install the XR app](claw/develop/build-app.md) — APK build, install, and the patched-vendor step required for ego depth capture.
+- [Architecture overview](claw/architecture/overview.md) — current system architecture.
+- Development guides (`claw/develop/`):
+  - [Add a new teleop video source](claw/develop/add-new-video-source.md)
+  - [Add a new VR device or brand](claw/develop/add-new-vr-device-or-brand.md)
+  - [Make a new robot](claw/develop/make-new-robot.md)
 
 ## Join group
 
