@@ -34,8 +34,7 @@ use crate::device::Device;
 const GRIPPER_AXIS: &str = "gripper";
 const GRIPPER_COMMAND_EPSILON: f64 = 0.01;
 
-/// A robotic arm device backed by an [`ArmDriver`] (this phase: the MuJoCo
-/// SO-101 simulator).
+/// A robotic arm device backed by an [`ArmDriver`] (SO-101 sim or hardware).
 pub struct RobotArmDevice {
     descriptor: DeviceDescriptor,
     /// Wrapped in a Mutex because ArmDriver is Send but not Sync.
@@ -68,7 +67,11 @@ pub struct RobotArmDevice {
 impl RobotArmDevice {
     /// Create a new `RobotArmDevice` from a descriptor and the arm config.
     pub fn new(descriptor: DeviceDescriptor, arm_config: &ArmConfig) -> Result<Self> {
-        let driver = drivers::create_driver(&arm_config.driver, arm_config.mujoco.as_ref())?;
+        let driver = drivers::create_driver(
+            &arm_config.driver,
+            arm_config.mujoco.as_ref(),
+            arm_config.so101.as_ref(),
+        )?;
         let safety = Safety::from_config(&arm_config.safety);
         let num_joints = arm_config.servo_ids.len();
         let gripper_joint_index = gripper_joint_index_for(&descriptor, num_joints);

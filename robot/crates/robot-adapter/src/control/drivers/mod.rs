@@ -1,18 +1,20 @@
 //! Arm driver abstraction and implementations (adapter side).
 //!
 //! The `ArmDriver` trait defines the interface that all arm drivers must
-//! implement. This phase only the MuJoCo SO-101 simulator driver is ported;
-//! serial-bus arms (dynamixel / feetech) land in a later phase.
+//! implement. SO-101 is supported through either the MuJoCo simulator driver
+//! or a Python/LeRobot Feetech bridge for real hardware.
 
 pub mod mujoco_so101;
+pub mod so101_real;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use teleop_protocol::Pose6D;
 
-use crate::config::MujocoConfig;
+use crate::config::{MujocoConfig, So101Config};
 use crate::control::JointAngles;
 use mujoco_so101::MujocoSo101Driver;
+use so101_real::So101RealDriver;
 
 /// Trait for controlling a robotic arm.
 ///
@@ -69,12 +71,12 @@ pub trait ArmDriver: Send {
 
 /// Create a driver instance based on configuration.
 ///
-/// This phase only supports `driver_type == "mujoco_so101"` (spawns the MuJoCo
-/// bridge subprocess via [`MujocoSo101Driver`]; requires `mujoco_cfg`). Any
-/// other driver type is an error — serial-bus arms migrate in a later phase.
+/// Supports `driver_type == "mujoco_so101"` for the simulator and
+/// `driver_type == "so101_real"` for a real Feetech/LeRobot SO-101.
 pub fn create_driver(
     driver_type: &str,
     mujoco_cfg: Option<&MujocoConfig>,
+    so101_cfg: Option<&So101Config>,
 ) -> Result<Box<dyn ArmDriver>> {
     if driver_type == "mujoco_so101" {
         let cfg = mujoco_cfg.ok_or_else(|| {
@@ -97,8 +99,24 @@ pub fn create_driver(
         return Ok(Box::new(driver));
     }
 
+    if driver_type == "so101_real" {
+        let cfg = so101_cfg.ok_or_else(|| {
+            anyhow::anyhow!(
+                "driver 'so101_real' requires an [arm.so101] block in config (script and port are mandatory)"
+            )
+        })?;
+        let driver = So101RealDriver::new(&cfg.script, &cfg.python, &cfg.port, &cfg.extra_args)
+            .with_context(|| {
+                format!(
+                    "failed to spawn SO-101 hardware bridge: python={} script={} port={}",
+                    cfg.python, cfg.script, cfg.port
+                )
+            })?;
+        return Ok(Box::new(driver));
+    }
+
     anyhow::bail!(
         "unsupported driver type '{driver_type}' in robot-adapter \
-         (this phase only 'mujoco_so101' is migrated)"
+         (supported: 'mujoco_so101', 'so101_real')"
     )
 }

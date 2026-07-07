@@ -21,15 +21,15 @@ pub struct AdapterConfig {
     /// Where the adapter listens for the bridge.
     #[serde(default, with = "endpoint_serde")]
     pub endpoint: Endpoint,
-    /// Which concrete device form to drive. Only `"dummy"` is supported here.
+    /// Which concrete device form to drive.
     #[serde(default = "default_device_type")]
     pub device_type: String,
     /// Optional path to a `DeviceDescriptor` (YAML/JSON). When unset, a
     /// minimal built-in descriptor is used (dummy descriptor for `dummy`,
-    /// the built-in arm descriptor for `mujoco_so101`).
+    /// the built-in arm descriptor for `mujoco_so101` / `so101_real`).
     #[serde(default)]
     pub descriptor_file: Option<String>,
-    /// Arm-specific config. Required when `device_type == "mujoco_so101"`,
+    /// Arm-specific config. Required when `device_type` is an SO-101 arm,
     /// ignored otherwise.
     #[serde(default)]
     pub arm: Option<ArmConfig>,
@@ -38,8 +38,8 @@ pub struct AdapterConfig {
 /// Robotic arm configuration. Ported from `robot/src/config.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArmConfig {
-    /// Driver type. This phase only `"mujoco_so101"` (and `"dummy"`) is
-    /// wired in the adapter; serial-bus arms land in a later phase.
+    /// Driver type. `"mujoco_so101"` drives the simulator; `"so101_real"`
+    /// drives a real SO-101 through the Python/LeRobot Feetech bridge.
     pub driver: String,
     /// Serial port path (e.g. `/dev/ttyUSB0`). Unused by the MuJoCo driver.
     #[serde(default)]
@@ -61,6 +61,10 @@ pub struct ArmConfig {
     /// `driver == "mujoco_so101"`, ignored otherwise.
     #[serde(default)]
     pub mujoco: Option<MujocoConfig>,
+    /// Real SO-101 bridge settings. Required when `driver == "so101_real"`,
+    /// ignored otherwise.
+    #[serde(default)]
+    pub so101: Option<So101Config>,
 }
 
 fn default_driver_write_timeout_ms() -> u64 {
@@ -94,6 +98,28 @@ fn default_mujoco_python() -> String {
 
 fn default_mujoco_steps() -> u32 {
     3
+}
+
+/// Settings for the real SO-101 hardware driver (`driver = "so101_real"`).
+/// The adapter spawns `<python> <script> bridge [extra_args ...]` and the
+/// Python bridge owns LeRobot/Feetech serial bus I/O plus hardware reflexes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct So101Config {
+    /// Python interpreter to invoke. Default `"python3"`. Use a venv that has
+    /// `lerobot` and Feetech motor support installed.
+    #[serde(default = "default_so101_python")]
+    pub python: String,
+    /// Path to `scripts/so101_real_bridge.py`.
+    pub script: String,
+    /// Serial port path for the Feetech bus, e.g. `/dev/ttyACM0`.
+    pub port: String,
+    /// Extra args passed after `bridge --port <port>`.
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+fn default_so101_python() -> String {
+    "python3".to_string()
 }
 
 /// Joint safety limits (degrees).
@@ -160,8 +186,8 @@ impl AdapterConfig {
 
     /// Resolve the [`DeviceDescriptor`] for this config: load from
     /// `descriptor_file` if set, else build the built-in descriptor for the
-    /// configured `device_type` (dummy → dummy descriptor, mujoco_so101 → the
-    /// built-in arm descriptor).
+    /// configured `device_type` (dummy -> dummy descriptor, SO-101 arm types ->
+    /// the built-in arm descriptor).
     pub fn load_descriptor(&self) -> Result<DeviceDescriptor> {
         match &self.descriptor_file {
             Some(file) => load_descriptor_file(file),
@@ -172,7 +198,7 @@ impl AdapterConfig {
     /// The built-in descriptor for this config's `device_type`.
     pub fn builtin_descriptor(&self) -> DeviceDescriptor {
         match self.device_type.as_str() {
-            "mujoco_so101" => crate::devices::RobotArmDevice::default_descriptor(),
+            "mujoco_so101" | "so101_real" => crate::devices::RobotArmDevice::default_descriptor(),
             _ => DummyDevice::default_descriptor(),
         }
     }
@@ -315,6 +341,42 @@ arm:
     }
 
     #[test]
+    fn parses_so101_real_arm_config() {
+        let yaml = r#"
+endpoint: "tcp:127.0.0.1:63910"
+device_type: "so101_real"
+arm:
+  driver: "so101_real"
+  serial_port: "/dev/ttyACM0"
+  servo_ids: [1, 2, 3, 4, 5, 6]
+  safety:
+    joint_limits_deg: [[-105.0, 105.0], [-95.0, 95.0]]
+    max_velocity_deg_s: 90.0
+    max_acceleration_deg_s2: 180.0
+  pose_mapping:
+    mode: "direct"
+    scale: 0.35
+    mirror: true
+  driver_write_timeout_ms: 250
+  so101:
+    python: "python3"
+    script: "scripts/so101_real_bridge.py"
+    port: "/dev/ttyACM0"
+"#;
+        let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(cfg.device_type, "so101_real");
+        let arm = cfg.arm.as_ref().expect("arm section present");
+        assert_eq!(arm.driver, "so101_real");
+        assert_eq!(arm.servo_ids.len(), 6);
+        assert_eq!(arm.driver_write_timeout_ms, 250);
+        let so101 = arm.so101.as_ref().expect("so101 block present");
+        assert_eq!(so101.port, "/dev/ttyACM0");
+        assert!(so101.script.ends_with("so101_real_bridge.py"));
+        let desc = cfg.builtin_descriptor();
+        assert_eq!(desc.device.device_type, "robot_arm");
+    }
+
+    #[test]
     fn parses_shared_yaml_adapter_section_and_adapter_link() {
         let yaml = r#"
 adapter_link:
@@ -379,5 +441,23 @@ adapter:
         let cfg = AdapterConfig::from_yaml_file(path).expect("shipped config parses");
         assert_eq!(cfg.device_type, "mujoco_so101");
         assert!(cfg.arm.is_some());
+    }
+
+    #[test]
+    fn shipped_so101_real_config_file_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/so101_real.yaml");
+        let cfg = AdapterConfig::from_yaml_file(path).expect("shipped config parses");
+        assert_eq!(cfg.device_type, "so101_real");
+        assert!(cfg
+            .arm
+            .as_ref()
+            .and_then(|arm| arm.so101.as_ref())
+            .is_some());
+        let desc_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/so101_real_descriptor.yaml"
+        );
+        let desc = load_descriptor_file(desc_path).expect("shipped descriptor parses");
+        assert_eq!(desc.device.device_type, "robot_arm");
     }
 }

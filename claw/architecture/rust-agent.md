@@ -9,6 +9,8 @@ robot/
     xr-bridge-default.yaml
     mujoco_so101.yaml
     mujoco_so101_descriptor.yaml
+    so101_real.yaml
+    so101_real_descriptor.yaml
   crates/
     teleop-protocol/
     xr-bridge/
@@ -64,6 +66,7 @@ Device abstraction and concrete robot drivers. It owns:
 - safety wrappers and limits;
 - pose mapping;
 - MuJoCo SO-101 driver path;
+- real SO-101 driver path through a Python/LeRobot Feetech bridge;
 - server that consumes bridge-side commands.
 
 Key paths:
@@ -116,6 +119,24 @@ Run from `robot/`:
 cargo build --release
 cargo test
 ```
+
+Run the SO-101 simulator adapter:
+
+```bash
+cargo run -p robot-adapter -- --config configs/mujoco_so101.yaml
+```
+
+Run the real SO-101 adapter after installing LeRobot in the selected Python
+environment and confirming the Feetech serial port:
+
+```bash
+cargo run -p robot-adapter -- --config configs/so101_real.yaml
+```
+
+The real hardware path spawns `robot/scripts/so101_real_bridge.py bridge
+--port /dev/ttyACM0`. The Python bridge reads the motor calibration already
+stored on the bus, applies conservative servo parameters, monitors
+current/load reflex thresholds, and bounds streamed teleop setpoint steps.
 
 Run top-level E2E scripts from the repo root:
 
