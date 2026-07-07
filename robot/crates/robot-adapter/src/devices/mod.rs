@@ -1,7 +1,7 @@
 //! Concrete robot-form `Device` implementations.
 //!
-//! Ships [`dummy::DummyDevice`] and [`robot_arm::RobotArmDevice`] (the MuJoCo
-//! SO-101 control chain). Serial-bus arms / rc_car land in later passes.
+//! Ships [`dummy::DummyDevice`] and [`robot_arm::RobotArmDevice`] (SO-101 sim
+//! and real hardware control chains). rc_car lands in a later pass.
 
 pub mod dummy;
 pub mod robot_arm;
@@ -20,7 +20,9 @@ use crate::device::Device;
 /// * `"dummy"` → [`DummyDevice`].
 /// * `"mujoco_so101"` → [`RobotArmDevice`] backed by the MuJoCo driver (needs
 ///   `cfg.arm` with a `mujoco` block).
-/// * anything else → a `DummyDevice` (with a warning); serial arms migrate later.
+/// * `"so101_real"` → [`RobotArmDevice`] backed by the Python/LeRobot hardware
+///   bridge (needs `cfg.arm` with a `so101` block).
+/// * anything else → a `DummyDevice` (with a warning).
 ///
 /// The descriptor is resolved by the caller (via [`AdapterConfig::load_descriptor`])
 /// and passed in so the same descriptor advertised over the boundary is the one
@@ -30,10 +32,11 @@ pub fn build_device(
     descriptor: teleop_protocol::DeviceDescriptor,
 ) -> Result<Box<dyn Device>> {
     match cfg.device_type.as_str() {
-        "mujoco_so101" => {
+        "mujoco_so101" | "so101_real" => {
             let arm = cfg.arm.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "device_type 'mujoco_so101' requires an `arm:` section in the adapter config"
+                    "device_type '{}' requires an `arm:` section in the adapter config",
+                    cfg.device_type
                 )
             })?;
             let dev = RobotArmDevice::new(descriptor, arm)?;

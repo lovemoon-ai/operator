@@ -1,7 +1,7 @@
 //! robot-adapter binary entry point.
 //!
-//! Loads config (optional YAML + CLI overrides), builds the dummy device and
-//! its descriptor, binds the boundary-protocol listener, and runs the server.
+//! Loads config (optional YAML + CLI overrides), builds the configured device
+//! and its descriptor, binds the boundary-protocol listener, and runs the server.
 
 use std::str::FromStr;
 
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         "building device"
     );
 
-    // Factory dispatch on device_type: dummy / mujoco_so101 (else dummy + warn).
+    // Factory dispatch on device_type.
     let device = build_device(&cfg, descriptor)
         .with_context(|| format!("building device_type {:?}", cfg.device_type))?;
 

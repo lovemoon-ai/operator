@@ -2,7 +2,7 @@
 //!
 //! Mirrors the legacy `robot/src/device/traits.rs` `Device` trait, but built
 //! on the shared `teleop_protocol` types instead of the in-tree ones. A
-//! concrete robot form (dummy / mujoco / serial arm) implements this trait;
+//! concrete robot form (dummy / simulator / serial arm) implements this trait;
 //! the adapter [`crate::server`] drives it from inbound boundary-protocol
 //! messages.
 //!
