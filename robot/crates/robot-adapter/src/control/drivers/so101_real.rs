@@ -1,22 +1,22 @@
 //! Real SO-101 hardware driver.
 //!
 //! This driver keeps hardware-specific Feetech/LeRobot code out of Rust by
-//! spawning `scripts/so101_real_bridge.py bridge --port <tty>` and speaking a
+//! spawning `scripts/so101_real_control.py control --port <tty>` and speaking a
 //! small stdin/stdout JSON-line protocol:
 //!
-//! * bridge -> host at startup:
+//! * control -> host at startup:
 //!   `{"event":"ready","joint_names":[...],"positions":[deg...]}`
-//! * host -> bridge:
+//! * host -> control:
 //!   `{"positions":[5 floats]}` writes arm joints in degrees
 //!   `{"gripper":0.5}` writes normalized gripper opening
 //!   `{"positions":[5 floats],"gripper":0.5}` writes both
 //!   `{"reset":true}` returns to configured home
 //!   `{"stop":true}` freezes current position and disables torque
 //!   `{"enable":true}` enables torque after a stop
-//! * bridge -> host per request:
+//! * control -> host per request:
 //!   `{"positions":[6 floats],"currents":{...},"loads":{...},"ts_ns":...}`
 //!
-//! The Python bridge owns conservative servo configuration, bus calibration,
+//! The Python control process owns conservative servo configuration, bus calibration,
 //! current/load reflexes, and gradual stepping. Rust remains responsible for
 //! adapter framing, timeouts, and telemetry snapshots.
 
@@ -137,7 +137,7 @@ impl So101RealDriver {
     ) -> Result<Self> {
         let mut cmd = Command::new(python_bin);
         cmd.arg(script_path)
-            .arg("bridge")
+            .arg("control")
             .arg("--port")
             .arg(port)
             .args(extra_args)
@@ -148,7 +148,7 @@ impl So101RealDriver {
 
         let mut child = cmd.spawn().with_context(|| {
             format!(
-                "failed to spawn SO-101 bridge: '{python_bin} {script_path} bridge --port {port}'"
+                "failed to spawn SO-101 control process: '{python_bin} {script_path} control --port {port}'"
             )
         })?;
 
@@ -163,7 +163,7 @@ impl So101RealDriver {
         let stdout = BufReader::new(stdout);
 
         tracing::info!(
-            "SO-101 hardware bridge spawned: python={} script={} port={}",
+            "SO-101 hardware control process spawned: python={} script={} port={}",
             python_bin,
             script_path,
             port
@@ -195,7 +195,7 @@ impl So101RealDriver {
             }
         } else if !resp.positions.is_empty() {
             tracing::warn!(
-                "SO-101 bridge returned positions length {} (expected {NUM_ACTUATORS})",
+                "SO-101 control process returned positions length {} (expected {NUM_ACTUATORS})",
                 resp.positions.len()
             );
         }
@@ -208,18 +208,18 @@ impl So101RealDriver {
         let mut line = String::new();
         let n = timeout(wait, self.stdout.read_line(&mut line))
             .await
-            .map_err(|_| anyhow!("SO-101 bridge response timeout after {:?}", wait))??;
+            .map_err(|_| anyhow!("SO-101 control process response timeout after {:?}", wait))??;
         if n == 0 {
-            anyhow::bail!("SO-101 bridge stdout EOF - Python process exited");
+            anyhow::bail!("SO-101 control process stdout EOF - Python process exited");
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            anyhow::bail!("SO-101 bridge sent empty line");
+            anyhow::bail!("SO-101 control process sent empty line");
         }
         let resp: BridgeResponse = serde_json::from_str(trimmed)
-            .with_context(|| format!("bad JSON from SO-101 bridge: {trimmed:?}"))?;
+            .with_context(|| format!("bad JSON from SO-101 control process: {trimmed:?}"))?;
         if let Some(err) = &resp.error {
-            anyhow::bail!("SO-101 bridge error: {err}");
+            anyhow::bail!("SO-101 control process error: {err}");
         }
         if let Some(reflex) = &resp.reflex {
             anyhow::bail!("SO-101 hardware reflex: {reflex}");
@@ -233,7 +233,7 @@ impl So101RealDriver {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 anyhow::bail!(
-                    "SO-101 bridge did not become ready within {:?}",
+                    "SO-101 control process did not become ready within {:?}",
                     READY_TIMEOUT
                 );
             }
@@ -241,13 +241,13 @@ impl So101RealDriver {
             if resp.event.as_deref() == Some("ready") {
                 self.apply_snapshot(&resp);
                 tracing::info!(
-                    "SO-101 bridge ready: joints={:?} positions={:?}",
+                    "SO-101 control process ready: joints={:?} positions={:?}",
                     resp.joint_names,
                     self.last_positions_deg
                 );
                 return Ok(());
             }
-            tracing::debug!("discarding non-ready SO-101 bridge line: {resp:?}");
+            tracing::debug!("discarding non-ready SO-101 control process line: {resp:?}");
         }
         anyhow::bail!("did not receive SO-101 `ready` event in the first 8 lines")
     }

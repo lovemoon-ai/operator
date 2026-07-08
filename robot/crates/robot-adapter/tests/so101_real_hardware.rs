@@ -23,7 +23,7 @@ async fn so101_real_connect_and_stop() {
     let port = std::env::var("SO101_REAL_PORT").unwrap_or_else(|_| "/dev/ttyACM0".to_string());
     let script = repo_robot_dir()
         .join("scripts")
-        .join("so101_real_bridge.py");
+        .join("so101_real_control.py");
     let extra_args = std::env::var("SO101_REAL_EXTRA_ARGS")
         .map(|s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -34,11 +34,11 @@ async fn so101_real_connect_and_stop() {
         &port,
         &extra_args,
     )
-    .expect("spawn SO-101 bridge");
+    .expect("spawn SO-101 control process");
     driver.enable_torque().await.expect("enable torque");
     let joints = driver
         .last_joint_angles()
-        .expect("hardware bridge returns joint snapshot");
+        .expect("hardware control process returns joint snapshot");
     assert_eq!(joints.angles.len(), 6);
     driver.emergency_stop().await.expect("emergency stop");
 }
@@ -50,7 +50,7 @@ async fn so101_real_small_joint_write() {
     let port = std::env::var("SO101_REAL_PORT").unwrap_or_else(|_| "/dev/ttyACM0".to_string());
     let script = repo_robot_dir()
         .join("scripts")
-        .join("so101_real_bridge.py");
+        .join("so101_real_control.py");
     let extra_args = std::env::var("SO101_REAL_EXTRA_ARGS")
         .map(|s| s.split_whitespace().map(str::to_string).collect::<Vec<_>>())
         .unwrap_or_default();
@@ -61,11 +61,11 @@ async fn so101_real_small_joint_write() {
         &port,
         &extra_args,
     )
-    .expect("spawn SO-101 bridge");
+    .expect("spawn SO-101 control process");
     driver.enable_torque().await.expect("enable torque");
     let start = driver
         .last_joint_angles()
-        .expect("hardware bridge returns joint snapshot")
+        .expect("hardware control process returns joint snapshot")
         .angles;
     assert_eq!(start.len(), 6);
 
@@ -82,7 +82,7 @@ async fn so101_real_small_joint_write() {
     }
     let after = driver
         .last_joint_angles()
-        .expect("hardware bridge returns post-write snapshot")
+        .expect("hardware control process returns post-write snapshot")
         .angles;
     assert_eq!(after.len(), 6);
     assert!(

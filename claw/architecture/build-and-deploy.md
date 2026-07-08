@@ -129,6 +129,7 @@ cargo test
 The Rust workspace contains:
 
 - `crates/teleop-protocol`
+- `crates/robot-service`
 - `crates/xr-bridge`
 - `crates/robot-adapter`
 - `crates/e2e-tests`

@@ -5,6 +5,7 @@ members = [
     "crates/teleop-protocol",
     "crates/robot-adapter",
     "crates/xr-bridge",
+    "crates/robot-service",
     "crates/e2e-tests",
 ]
 resolver = "2"

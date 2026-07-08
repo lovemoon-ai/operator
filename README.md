@@ -81,7 +81,7 @@ flowchart TB
   Launcher --> Mujoco["MuJoCo smoke mode"]
   Launcher --> Harness["Module test harness"]
 
-  Teleop --> RobotSide["xr-bridge + robot-adapter"]
+  Teleop --> RobotSide["robot-service"]
   Ego --> WebSide["web ingest + review"]
   LiveFeed --> AlgoSide["algorithm server"]
   Mujoco --> SimSide["SO-101 simulation"]
@@ -116,16 +116,19 @@ inside the XR view.
 ```mermaid
 sequenceDiagram
   participant XR as XR headset
-  participant Bridge as xr-bridge
+  participant Service as robot-service
+  participant Bridge as xr-bridge component
   participant Adapter as robot-adapter
   participant Robot as Robot or sim
 
-  XR->>Bridge: tracking and controller commands
+  XR->>Service: tracking and controller commands
+  Service->>Bridge: XR-facing network handling
   Bridge->>Adapter: normalized teleop frames
   Adapter->>Robot: device-specific control
   Robot-->>Adapter: telemetry and video source
   Adapter-->>Bridge: state, safety, video
-  Bridge-->>XR: low-latency video and feedback
+  Bridge-->>Service: low-latency video and feedback
+  Service-->>XR: low-latency video and feedback
 ```
 
 ### 3. Run Real-Time Algorithm Demos
@@ -155,13 +158,14 @@ before moving to a physical robot.
 ```mermaid
 flowchart LR
   Sim["MuJoCo SO-101"]
+  Service["robot-service"]
   Adapter["robot-adapter driver"]
   Protocol["teleop-protocol"]
   XR["XR teleop panel"]
   Dataset["episode data"]
 
-  XR --> Protocol --> Adapter --> Sim
-  Sim --> Adapter --> XR
+  XR --> Protocol --> Service --> Adapter --> Sim
+  Sim --> Adapter --> Service --> XR
   Sim --> Dataset
 ```
 
@@ -197,6 +201,10 @@ Robot-side Rust commands run from `robot/`:
 cd robot
 cargo build --release
 cargo test
+
+# Real SO-101 robot service examples:
+cargo run -p robot-service -- --config configs/so101_real.yaml
+cargo run -p robot-service -- --config configs/so101_dual_real.yaml
 ```
 
 Web ingest and review app commands run from `web/`:

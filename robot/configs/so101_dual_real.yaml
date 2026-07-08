@@ -1,0 +1,85 @@
+# robot-service config - drives two real SO-101 arms from one XR session.
+#
+# Run from the `robot/` directory:
+#
+#     cargo run -p robot-service -- --config configs/so101_dual_real.yaml
+#
+# Edit `dual_arm.left.so101.port` and `dual_arm.right.so101.port` so each arm
+# points at its own Feetech serial bus. The adapter starts one
+# `scripts/so101_real_control.py control --port ...` subprocess per arm.
+
+adapter_link:
+  endpoint: "tcp:127.0.0.1:63910"
+
+adapter:
+  device_type: "so101_dual_real"
+  descriptor_file: "configs/so101_dual_real_descriptor.yaml"
+
+  dual_arm:
+    left:
+      driver: "so101_real"
+      serial_port: "/dev/serial/by-id/LEFT_SO101_SERIAL"
+      baudrate: 0
+      servo_ids: [1, 2, 3, 4, 5, 6]
+
+      so101:
+        python: "/home/duino/code/github/lerobot/.venv/bin/python"
+        script: "scripts/so101_real_control.py"
+        port: "/dev/serial/by-id/LEFT_SO101_SERIAL"
+        extra_args: []
+
+      safety:
+        joint_limits_deg:
+          - [-105.0,  105.0]    # shoulder_pan
+          - [ -95.0,   95.0]    # shoulder_lift
+          - [ -92.0,   92.0]    # elbow_flex
+          - [ -90.0,   90.0]    # wrist_flex
+          - [-150.0,  155.0]    # wrist_roll
+          - [   0.0,  100.0]    # gripper normalized by LeRobot range mode
+        max_velocity_deg_s: 90.0
+        max_acceleration_deg_s2: 180.0
+
+      pose_mapping:
+        mode: "ik"
+        scale: 0.5
+        mirror: false
+
+      driver_write_timeout_ms: 250
+
+    right:
+      driver: "so101_real"
+      serial_port: "/dev/serial/by-id/RIGHT_SO101_SERIAL"
+      baudrate: 0
+      servo_ids: [1, 2, 3, 4, 5, 6]
+
+      so101:
+        python: "/home/duino/code/github/lerobot/.venv/bin/python"
+        script: "scripts/so101_real_control.py"
+        port: "/dev/serial/by-id/RIGHT_SO101_SERIAL"
+        extra_args: []
+
+      safety:
+        joint_limits_deg:
+          - [-105.0,  105.0]    # shoulder_pan
+          - [ -95.0,   95.0]    # shoulder_lift
+          - [ -92.0,   92.0]    # elbow_flex
+          - [ -90.0,   90.0]    # wrist_flex
+          - [-150.0,  155.0]    # wrist_roll
+          - [   0.0,  100.0]    # gripper normalized by LeRobot range mode
+        max_velocity_deg_s: 90.0
+        max_acceleration_deg_s2: 180.0
+
+      pose_mapping:
+        mode: "ik"
+        scale: 0.5
+        mirror: true
+
+      driver_write_timeout_ms: 250
+
+bridge:
+  name: "so101-dual-real"
+  pose_port: 63901
+  video_port: 12345
+  discovery_port: 63900
+  pose_udp_port: 63902
+  telemetry_port: 63903

@@ -108,7 +108,7 @@ pub fn create_driver(
         let driver = So101RealDriver::new(&cfg.script, &cfg.python, &cfg.port, &cfg.extra_args)
             .with_context(|| {
                 format!(
-                    "failed to spawn SO-101 hardware bridge: python={} script={} port={}",
+                    "failed to spawn SO-101 hardware control process: python={} script={} port={}",
                     cfg.python, cfg.script, cfg.port
                 )
             })?;

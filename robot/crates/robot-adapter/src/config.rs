@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use teleop_protocol::{DeviceDescriptor, Endpoint};
 
-use crate::devices::DummyDevice;
+use crate::devices::{DualSo101Device, DummyDevice};
 
 /// Runtime configuration for the adapter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +33,10 @@ pub struct AdapterConfig {
     /// ignored otherwise.
     #[serde(default)]
     pub arm: Option<ArmConfig>,
+    /// Dual-arm SO-101 config. Required when `device_type` is
+    /// `so101_dual_real`, ignored otherwise.
+    #[serde(default)]
+    pub dual_arm: Option<DualArmConfig>,
 }
 
 /// Robotic arm configuration. Ported from `robot/src/config.rs`.
@@ -65,6 +69,15 @@ pub struct ArmConfig {
     /// ignored otherwise.
     #[serde(default)]
     pub so101: Option<So101Config>,
+}
+
+/// Two independent SO-101 arms controlled from one XR session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DualArmConfig {
+    /// Arm driven from the XR left controller.
+    pub left: ArmConfig,
+    /// Arm driven from the XR right controller.
+    pub right: ArmConfig,
 }
 
 fn default_driver_write_timeout_ms() -> u64 {
@@ -101,19 +114,20 @@ fn default_mujoco_steps() -> u32 {
 }
 
 /// Settings for the real SO-101 hardware driver (`driver = "so101_real"`).
-/// The adapter spawns `<python> <script> bridge [extra_args ...]` and the
-/// Python bridge owns LeRobot/Feetech serial bus I/O plus hardware reflexes.
+/// The adapter spawns `<python> <script> control [extra_args ...]` and the
+/// Python control process owns LeRobot/Feetech serial bus I/O plus hardware
+/// reflexes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct So101Config {
     /// Python interpreter to invoke. Default `"python3"`. Use a venv that has
     /// `lerobot` and Feetech motor support installed.
     #[serde(default = "default_so101_python")]
     pub python: String,
-    /// Path to `scripts/so101_real_bridge.py`.
+    /// Path to `scripts/so101_real_control.py`.
     pub script: String,
     /// Serial port path for the Feetech bus, e.g. `/dev/ttyACM0`.
     pub port: String,
-    /// Extra args passed after `bridge --port <port>`.
+    /// Extra args passed after `control --port <port>`.
     #[serde(default)]
     pub extra_args: Vec<String>,
 }
@@ -155,6 +169,7 @@ impl Default for AdapterConfig {
             device_type: default_device_type(),
             descriptor_file: None,
             arm: None,
+            dual_arm: None,
         }
     }
 }
@@ -199,6 +214,7 @@ impl AdapterConfig {
     pub fn builtin_descriptor(&self) -> DeviceDescriptor {
         match self.device_type.as_str() {
             "mujoco_so101" | "so101_real" => crate::devices::RobotArmDevice::default_descriptor(),
+            "so101_dual_real" | "dual_so101_real" => DualSo101Device::default_descriptor(),
             _ => DummyDevice::default_descriptor(),
         }
     }
@@ -360,7 +376,7 @@ arm:
   driver_write_timeout_ms: 250
   so101:
     python: "python3"
-    script: "scripts/so101_real_bridge.py"
+    script: "scripts/so101_real_control.py"
     port: "/dev/ttyACM0"
 "#;
         let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();
@@ -371,9 +387,60 @@ arm:
         assert_eq!(arm.driver_write_timeout_ms, 250);
         let so101 = arm.so101.as_ref().expect("so101 block present");
         assert_eq!(so101.port, "/dev/ttyACM0");
-        assert!(so101.script.ends_with("so101_real_bridge.py"));
+        assert!(so101.script.ends_with("so101_real_control.py"));
         let desc = cfg.builtin_descriptor();
         assert_eq!(desc.device.device_type, "robot_arm");
+    }
+
+    #[test]
+    fn parses_so101_dual_real_arm_config() {
+        let yaml = r#"
+endpoint: "tcp:127.0.0.1:63910"
+device_type: "so101_dual_real"
+dual_arm:
+  left:
+    driver: "so101_real"
+    servo_ids: [1, 2, 3, 4, 5, 6]
+    safety:
+      joint_limits_deg: [[-105.0, 105.0], [-95.0, 95.0], [-92.0, 92.0], [-90.0, 90.0], [-150.0, 155.0], [0.0, 100.0]]
+      max_velocity_deg_s: 90.0
+      max_acceleration_deg_s2: 180.0
+    pose_mapping:
+      mode: "ik"
+      scale: 0.5
+      mirror: false
+    driver_write_timeout_ms: 250
+    so101:
+      python: "python3"
+      script: "scripts/so101_real_control.py"
+      port: "/dev/ttyLEFT"
+  right:
+    driver: "so101_real"
+    servo_ids: [1, 2, 3, 4, 5, 6]
+    safety:
+      joint_limits_deg: [[-105.0, 105.0], [-95.0, 95.0], [-92.0, 92.0], [-90.0, 90.0], [-150.0, 155.0], [0.0, 100.0]]
+      max_velocity_deg_s: 90.0
+      max_acceleration_deg_s2: 180.0
+    pose_mapping:
+      mode: "ik"
+      scale: 0.5
+      mirror: true
+    driver_write_timeout_ms: 250
+    so101:
+      python: "python3"
+      script: "scripts/so101_real_control.py"
+      port: "/dev/ttyRIGHT"
+"#;
+        let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(cfg.device_type, "so101_dual_real");
+        let dual = cfg.dual_arm.as_ref().expect("dual_arm section present");
+        assert_eq!(dual.left.driver, "so101_real");
+        assert_eq!(dual.left.so101.as_ref().unwrap().port, "/dev/ttyLEFT");
+        assert_eq!(dual.right.so101.as_ref().unwrap().port, "/dev/ttyRIGHT");
+        assert_eq!(
+            cfg.builtin_descriptor().device.device_type,
+            "so101_dual_arm"
+        );
     }
 
     #[test]
@@ -459,5 +526,22 @@ adapter:
         );
         let desc = load_descriptor_file(desc_path).expect("shipped descriptor parses");
         assert_eq!(desc.device.device_type, "robot_arm");
+    }
+
+    #[test]
+    fn shipped_so101_dual_real_config_file_parses() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/so101_dual_real.yaml"
+        );
+        let cfg = AdapterConfig::from_yaml_file(path).expect("shipped config parses");
+        assert_eq!(cfg.device_type, "so101_dual_real");
+        assert!(cfg.dual_arm.is_some());
+        let desc_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/so101_dual_real_descriptor.yaml"
+        );
+        let desc = load_descriptor_file(desc_path).expect("shipped descriptor parses");
+        assert_eq!(desc.device.device_type, "so101_dual_arm");
     }
 }

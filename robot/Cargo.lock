@@ -696,6 +696,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "robot-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "robot-adapter",
+ "teleop-protocol",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "xr-bridge",
+]
+
+[[package]]
 name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
