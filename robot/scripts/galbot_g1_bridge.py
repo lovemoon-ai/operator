@@ -124,6 +124,7 @@ class GalbotBridge:
             RIGHT_GRIPPER: 1.0,
         }
         self.last_joints: List[float] = []
+        self.invalid_pose_warnings: Dict[str, int] = {}
 
         log("initializing GalbotRobot")
         if not self.robot.init():
@@ -160,13 +161,23 @@ class GalbotBridge:
             lee_pose = ee_info.get("lee_pose")
             ree_pose = ee_info.get("ree_pose")
             if lee_pose is not None:
-                self.last_ee[LEFT_ARM] = pose_list_to_dict(lee_pose)
+                self._refresh_ee_pose(LEFT_ARM, lee_pose)
             if ree_pose is not None:
-                self.last_ee[RIGHT_ARM] = pose_list_to_dict(ree_pose)
+                self._refresh_ee_pose(RIGHT_ARM, ree_pose)
 
         self._refresh_gripper(LEFT_GRIPPER)
         self._refresh_gripper(RIGHT_GRIPPER)
         self._refresh_joints()
+
+    def _refresh_ee_pose(self, arm: str, pose: Iterable[Any]) -> None:
+        try:
+            self.last_ee[arm] = pose_list_to_dict(pose)
+            self.invalid_pose_warnings.pop(arm, None)
+        except (TypeError, ValueError) as exc:
+            count = self.invalid_pose_warnings.get(arm, 0) + 1
+            self.invalid_pose_warnings[arm] = count
+            if count <= 3 or count % 30 == 0:
+                log(f"ignoring invalid {arm} end-effector pose from SDK: {exc}")
 
     def _refresh_joints(self) -> None:
         reset_cfg = self.cfg.get("reset", {})
