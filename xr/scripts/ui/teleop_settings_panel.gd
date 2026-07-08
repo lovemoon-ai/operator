@@ -3,6 +3,7 @@ class_name TeleopSettingsPanel
 
 signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool)
 signal close_requested
+signal video_feed_visibility_changed(feed_name: String, visible: bool)
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
 const SECTION := "settings"
@@ -60,6 +61,8 @@ var _type_option: OptionButton
 var _video_face_toggle: CheckButton
 var _show_video_panel_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
+var _video_feeds_group: VBoxContainer
+var _video_feed_toggles: Dictionary = {}
 var _status_label: Label
 var _discovery_spinner: DiscoverySpinner
 var _discovery_active := false
@@ -246,6 +249,41 @@ func set_discovering(active: bool, text: String = "") -> void:
 		set_status(text)
 
 
+func configure_video_feeds(feeds: Array, visibility: Dictionary = {}) -> void:
+	if feeds.is_empty():
+		return
+	if _video_feeds_group == null:
+		_video_feeds_group = register_group("video_feeds", "UI_GROUP_VIDEO_FEEDS", "camera")
+		if _video_feeds_group == null:
+			return
+
+	for child in _video_feeds_group.get_children():
+		_video_feeds_group.remove_child(child)
+		child.queue_free()
+	_video_feed_toggles.clear()
+
+	for feed_variant in feeds:
+		if not (feed_variant is Dictionary):
+			continue
+		var feed := feed_variant as Dictionary
+		var feed_name := String(feed.get("name", ""))
+		if feed_name.is_empty():
+			continue
+		var label := String(feed.get("display", feed_name))
+		var default_visible := bool(feed.get("enabled_by_default", true))
+		var visible := bool(visibility.get(feed_name, default_visible))
+		var toggle := add_toggle(_video_feeds_group, label, visible, 21)
+		toggle.toggled.connect(_on_video_feed_toggled.bind(feed_name))
+		_video_feed_toggles[feed_name] = toggle
+
+
+func set_video_feed_visible(feed_name: String, visible: bool) -> void:
+	if not _video_feed_toggles.has(feed_name):
+		return
+	var toggle := _video_feed_toggles[feed_name] as CheckButton
+	toggle.set_pressed_no_signal(visible)
+
+
 func get_options() -> Dictionary:
 	var rtype := DEFAULT_TYPE
 	if _type_option.selected >= 0:
@@ -292,6 +330,10 @@ func _on_discovery_selected(idx: int) -> void:
 			_type_option.select(t_idx)
 	_apply_mode_lock()
 	set_status(tr("UI_WILL_CONNECT_TO") % _format_robot_label(rname, info))
+
+
+func _on_video_feed_toggled(enabled: bool, feed_name: String) -> void:
+	video_feed_visibility_changed.emit(feed_name, enabled)
 
 
 func _apply_mode_lock() -> void:

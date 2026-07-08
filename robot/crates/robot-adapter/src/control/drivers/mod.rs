@@ -4,6 +4,7 @@
 //! implement. This phase only the MuJoCo SO-101 simulator driver is ported;
 //! serial-bus arms (dynamixel / feetech) land in a later phase.
 
+pub mod galbot_g1;
 pub mod mujoco_so101;
 
 use anyhow::{Context, Result};

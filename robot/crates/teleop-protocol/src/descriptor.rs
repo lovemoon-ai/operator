@@ -206,6 +206,20 @@ pub struct VideoFeedInfo {
     /// Whether this is a stereo feed.
     #[serde(default)]
     pub stereo: bool,
+    /// Whether the XR client should connect and show this feed by default.
+    /// Operators can still hide it from the headset UI, which should also
+    /// disconnect the feed so the bridge can stop pulling the upstream stream.
+    #[serde(default = "default_video_enabled")]
+    pub enabled_by_default: bool,
+    /// Suggested display size in meters for the XR video panel.
+    #[serde(default = "default_video_view_size_m")]
+    pub view_size_m: [f64; 2],
+    /// Suggested camera-relative offset in meters for face-locked layout.
+    #[serde(default = "default_video_view_offset_m")]
+    pub view_offset_m: [f64; 3],
+    /// Suggested face-locked distance in meters.
+    #[serde(default = "default_video_view_distance_m")]
+    pub view_distance_m: f64,
     /// Preferred transport for this feed: "tcp", "udp", or "auto".
     /// "auto" lets the headset pick — currently it prefers UDP if
     /// `udp_port` is also non-zero (Wi-Fi friendly), otherwise TCP.
@@ -233,6 +247,18 @@ fn default_transport() -> String {
 
 fn default_video_codec() -> String {
     "h264".to_string()
+}
+fn default_video_enabled() -> bool {
+    true
+}
+fn default_video_view_size_m() -> [f64; 2] {
+    [1.2, 0.9]
+}
+fn default_video_view_offset_m() -> [f64; 3] {
+    [0.0, 0.0, 0.0]
+}
+fn default_video_view_distance_m() -> f64 {
+    2.2
 }
 
 fn default_width() -> u32 {

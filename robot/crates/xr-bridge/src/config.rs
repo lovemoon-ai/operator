@@ -71,6 +71,9 @@ pub struct VideoConfig {
 pub struct VideoFeedConfig {
     /// Feed identifier (e.g. "wrist_left"); surfaced to the headset.
     pub name: String,
+    /// Optional human-readable label surfaced to XR.
+    #[serde(default)]
+    pub display: Option<String>,
     /// RTSP URL to pull from (e.g. `rtsp://127.0.0.1:8554/wrist_left`).
     pub rtsp_url: String,
     /// TCP port the headset connects to for this feed.
@@ -87,6 +90,21 @@ pub struct VideoFeedConfig {
     /// Advertised frames per second.
     #[serde(default = "default_video_fps")]
     pub fps: u32,
+    /// Whether the encoded feed is side-by-side stereo.
+    #[serde(default)]
+    pub stereo: bool,
+    /// Whether XR should connect and show this feed by default.
+    #[serde(default = "default_video_enabled")]
+    pub enabled_by_default: bool,
+    /// Suggested XR panel size in meters.
+    #[serde(default)]
+    pub view_size_m: Option<[f64; 2]>,
+    /// Suggested face-locked camera-relative offset in meters.
+    #[serde(default)]
+    pub view_offset_m: Option<[f64; 3]>,
+    /// Suggested face-locked distance in meters.
+    #[serde(default)]
+    pub view_distance_m: Option<f64>,
     /// Preferred transport advertised in the descriptor ("tcp" | "udp" | "auto").
     #[serde(default = "default_video_transport")]
     pub transport: String,
@@ -113,6 +131,9 @@ fn default_video_transport() -> String {
 }
 fn default_video_codec() -> String {
     "h264".to_string()
+}
+fn default_video_enabled() -> bool {
+    true
 }
 
 impl Default for BridgeConfig {
@@ -296,12 +317,18 @@ mod tests {
 video:
   feeds:
     - name: wrist_left
+      display: Left wrist RGB
       rtsp_url: \"rtsp://127.0.0.1:8554/wrist_left\"
       tcp_port: 12345
       udp_port: 22345
       width: 640
       height: 480
       fps: 30
+      stereo: false
+      enabled_by_default: true
+      view_size_m: [1.1, 0.82]
+      view_offset_m: [-0.7, -0.35, 0.0]
+      view_distance_m: 2.2
       transport: udp
     - name: head
       rtsp_url: \"rtsp://127.0.0.1:8554/head\"
@@ -312,11 +339,17 @@ video:
 
         let wl = &cfg.video.feeds[0];
         assert_eq!(wl.name, "wrist_left");
+        assert_eq!(wl.display.as_deref(), Some("Left wrist RGB"));
         assert_eq!(wl.rtsp_url, "rtsp://127.0.0.1:8554/wrist_left");
         assert_eq!(wl.tcp_port, 12345);
         assert_eq!(wl.udp_port, Some(22345));
         assert_eq!(wl.width, 640);
         assert_eq!(wl.height, 480);
+        assert!(!wl.stereo);
+        assert!(wl.enabled_by_default);
+        assert_eq!(wl.view_size_m, Some([1.1, 0.82]));
+        assert_eq!(wl.view_offset_m, Some([-0.7, -0.35, 0.0]));
+        assert_eq!(wl.view_distance_m, Some(2.2));
         assert_eq!(wl.transport, "udp");
         // Codec defaults to h264 when the field is absent.
         assert_eq!(wl.codec, "h264");
@@ -329,6 +362,11 @@ video:
         assert_eq!(head.width, 1280);
         assert_eq!(head.height, 720);
         assert_eq!(head.fps, 30);
+        assert!(!head.stereo);
+        assert!(head.enabled_by_default);
+        assert_eq!(head.view_size_m, None);
+        assert_eq!(head.view_offset_m, None);
+        assert_eq!(head.view_distance_m, None);
         assert_eq!(head.transport, "tcp");
         assert_eq!(head.codec, "h264");
     }
@@ -433,5 +471,27 @@ bridge:
 
         assert_eq!(cfg.name, "xr-bridge");
         assert_eq!(cfg.video.feeds.len(), 3);
+    }
+
+    #[test]
+    fn shipped_galbot_g1_config_file_parses() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/galbot-g1.yaml"
+        ));
+        let cfg = BridgeConfig::from_yaml_file(path).expect("shipped config parses");
+
+        assert_eq!(cfg.name, "galbot-g1");
+        assert_eq!(cfg.video.feeds.len(), 3);
+        assert_eq!(cfg.video.feeds[0].name, "head_left_rgb");
+        assert_eq!(cfg.video.feeds[0].tcp_port, 12345);
+        assert_eq!(cfg.video.feeds[1].name, "left_wrist_rgb");
+        assert_eq!(cfg.video.feeds[1].tcp_port, 12346);
+        assert_eq!(cfg.video.feeds[2].name, "right_wrist_rgb");
+        assert_eq!(cfg.video.feeds[2].tcp_port, 12347);
+        assert_eq!(
+            cfg.adapter_endpoint,
+            Endpoint::Tcp("127.0.0.1:63911".parse().unwrap())
+        );
     }
 }

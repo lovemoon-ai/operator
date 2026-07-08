@@ -4,9 +4,11 @@
 //! SO-101 control chain). Serial-bus arms / rc_car land in later passes.
 
 pub mod dummy;
+pub mod galbot_g1;
 pub mod robot_arm;
 
 pub use dummy::{DummyDevice, DummyHandle};
+pub use galbot_g1::GalbotG1Device;
 pub use robot_arm::RobotArmDevice;
 
 use anyhow::Result;
@@ -20,6 +22,7 @@ use crate::device::Device;
 /// * `"dummy"` → [`DummyDevice`].
 /// * `"mujoco_so101"` → [`RobotArmDevice`] backed by the MuJoCo driver (needs
 ///   `cfg.arm` with a `mujoco` block).
+/// * `"galbot_g1"` → [`GalbotG1Device`] backed by the Galbot SDK Python bridge.
 /// * anything else → a `DummyDevice` (with a warning); serial arms migrate later.
 ///
 /// The descriptor is resolved by the caller (via [`AdapterConfig::load_descriptor`])
@@ -40,6 +43,15 @@ pub fn build_device(
             Ok(Box::new(dev))
         }
         "dummy" => Ok(Box::new(DummyDevice::new(descriptor))),
+        "galbot_g1" => {
+            let galbot = cfg.galbot_g1.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "device_type 'galbot_g1' requires a `galbot_g1:` section in the adapter config"
+                )
+            })?;
+            let dev = GalbotG1Device::new(descriptor, galbot)?;
+            Ok(Box::new(dev))
+        }
         other => {
             tracing::warn!("device_type {other:?} not supported; using dummy device");
             Ok(Box::new(DummyDevice::new(descriptor)))

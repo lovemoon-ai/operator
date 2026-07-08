@@ -112,7 +112,7 @@ pub async fn run_rtsp_source(url: &str, ctx: SourceCtx) -> Result<()> {
     // truth, set from config when the feed is wired up in `mod.rs::run`). Use
     // it to pick the matching bitstream filter / muxer for the stream-copy.
     let args = RtspSource::ffmpeg_args_for(url, ctx.params.codec());
-    run_ffmpeg_source(args, ctx).await
+    run_ffmpeg_source_on_demand(args, ctx).await
 }
 
 /// Supervised ingest loop for arbitrary ffmpeg args that emit an Annex-B H.264
@@ -120,11 +120,30 @@ pub async fn run_rtsp_source(url: &str, ctx: SourceCtx) -> Result<()> {
 /// tests use this directly with a self-contained `lavfi` input so the live
 /// ffmpeg→relay path is exercised without an external RTSP server.
 pub async fn run_ffmpeg_source(args: Vec<String>, ctx: SourceCtx) -> Result<()> {
+    run_ffmpeg_source_supervised(args, ctx, false).await
+}
+
+/// Supervised ingest loop that only runs ffmpeg while at least one downstream
+/// subscriber exists. This is used for RTSP relay feeds so hiding a feed in XR
+/// can stop pulling the upstream stream.
+pub async fn run_ffmpeg_source_on_demand(args: Vec<String>, ctx: SourceCtx) -> Result<()> {
+    run_ffmpeg_source_supervised(args, ctx, true).await
+}
+
+async fn run_ffmpeg_source_supervised(
+    args: Vec<String>,
+    ctx: SourceCtx,
+    demand_driven: bool,
+) -> Result<()> {
     let mut backoff = BACKOFF_MIN;
     let mut frame_id: u64 = 0;
 
     loop {
-        match ingest_once(&args, &ctx, &mut frame_id).await {
+        if demand_driven {
+            wait_for_subscriber(&ctx).await;
+        }
+
+        match ingest_once(&args, &ctx, &mut frame_id, demand_driven).await {
             Ok(()) => {
                 tracing::warn!(
                     "[{}] ffmpeg stream ended (stdout EOF); reconnecting in {:?}",
@@ -146,11 +165,25 @@ pub async fn run_ffmpeg_source(args: Vec<String>, ctx: SourceCtx) -> Result<()> 
     }
 }
 
+async fn wait_for_subscriber(ctx: &SourceCtx) {
+    if ctx.nal_tx.receiver_count() == 0 {
+        tracing::info!("[{}] waiting for a video client before pulling RTSP", ctx.name);
+    }
+    while ctx.nal_tx.receiver_count() == 0 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// One ffmpeg lifetime: spawn, read stdout, relay NALs until EOF/exit.
 ///
 /// Returns `Ok(())` on a clean stdout EOF (stream gap / Isaac restart) and
 /// `Err` if ffmpeg couldn't be spawned or stdout couldn't be taken.
-async fn ingest_once(args: &[String], ctx: &SourceCtx, frame_id: &mut u64) -> Result<()> {
+async fn ingest_once(
+    args: &[String],
+    ctx: &SourceCtx,
+    frame_id: &mut u64,
+    demand_driven: bool,
+) -> Result<()> {
     tracing::info!("[{}] Starting ffmpeg: ffmpeg {}", ctx.name, args.join(" "));
 
     let mut child = Command::new("ffmpeg")
@@ -187,12 +220,25 @@ async fn ingest_once(args: &[String], ctx: &SourceCtx, frame_id: &mut u64) -> Re
     let mut nal_total: u64 = 0;
 
     loop {
-        let n = match stdout.read(&mut buf).await {
-            Ok(0) => break, // EOF: ffmpeg exited / stream closed.
-            Ok(n) => n,
-            Err(e) => {
-                let _ = child.start_kill();
-                return Err(e.into());
+        let n = tokio::select! {
+            read = stdout.read(&mut buf) => {
+                match read {
+                    Ok(0) => break, // EOF: ffmpeg exited / stream closed.
+                    Ok(n) => n,
+                    Err(e) => {
+                        let _ = child.start_kill();
+                        return Err(e.into());
+                    }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(200)), if demand_driven => {
+                if ctx.nal_tx.receiver_count() == 0 {
+                    tracing::info!("[{}] no video clients; stopping upstream ffmpeg", ctx.name);
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return Ok(());
+                }
+                continue;
             }
         };
 

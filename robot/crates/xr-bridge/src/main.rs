@@ -273,12 +273,16 @@ fn feed_config_to_relay(fc: &VideoFeedConfig) -> VideoFeed {
 fn feed_config_to_info(fc: &VideoFeedConfig) -> VideoFeedInfo {
     VideoFeedInfo {
         name: fc.name.clone(),
-        display: fc.name.clone(),
+        display: fc.display.clone().unwrap_or_else(|| fc.name.clone()),
         port: fc.tcp_port,
         width: fc.width,
         height: fc.height,
         fps: fc.fps,
-        stereo: false,
+        stereo: fc.stereo,
+        enabled_by_default: fc.enabled_by_default,
+        view_size_m: fc.view_size_m.unwrap_or([1.2, 0.9]),
+        view_offset_m: fc.view_offset_m.unwrap_or([0.0, 0.0, 0.0]),
+        view_distance_m: fc.view_distance_m.unwrap_or(2.2),
         transport: fc.transport.clone(),
         udp_port: fc.udp_port.unwrap_or(0),
         // Normalise to the lower-case wire name so the headset's MIME lookup
@@ -314,6 +318,11 @@ video:
       width: 1920
       height: 1080
       fps: 60
+      stereo: false
+      enabled_by_default: false
+      view_size_m: [1.4, 0.8]
+      view_offset_m: [0.0, 0.4, 0.0]
+      view_distance_m: 2.4
       transport: udp
 "#,
         )
@@ -337,6 +346,11 @@ video:
         assert_eq!(feed.width, 1920);
         assert_eq!(feed.height, 1080);
         assert_eq!(feed.fps, 60);
+        assert!(!feed.stereo);
+        assert!(!feed.enabled_by_default);
+        assert_eq!(feed.view_size_m, [1.4, 0.8]);
+        assert_eq!(feed.view_offset_m, [0.0, 0.4, 0.0]);
+        assert_eq!(feed.view_distance_m, 2.4);
         assert_eq!(feed.transport, "udp");
     }
 }
