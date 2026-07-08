@@ -1,17 +1,18 @@
-# robot-adapter config - drives a real SO-101 arm over the Feetech serial bus.
+# robot-service config - drives a real SO-101 arm over the Feetech serial bus.
 #
 # Run from the `robot/` directory:
 #
-#     cargo run -p robot-adapter -- --config configs/so101_real.yaml
+#     cargo run -p robot-service -- --config configs/so101_real.yaml
 #
 # Required Python environment:
 #
 # - `lerobot` importable by the configured `python`
 # - access to the Feetech serial port in `arm.so101.port`
 #
-# The adapter spawns `python scripts/so101_real_bridge.py bridge --port ...`.
-# That Python bridge owns hardware calibration, conservative servo parameters,
-# current/load reflexes, and one-step-per-frame setpoint limiting.
+# The adapter component spawns
+# `python scripts/so101_real_control.py control --port ...`.
+# That Python control process owns hardware calibration, conservative servo
+# parameters, current/load reflexes, and one-step-per-frame setpoint limiting.
 
 adapter_link:
   endpoint: "tcp:127.0.0.1:63910"
@@ -26,12 +27,12 @@ adapter:
     baudrate: 0
 
     # SO-101 has 6 actuators (5 arm joints + 1 gripper). servo_ids sizes the
-    # PoseMapper output vector; the hardware bridge maps fixed Feetech IDs 1-6.
+    # PoseMapper output vector; the hardware control process maps fixed Feetech IDs 1-6.
     servo_ids: [1, 2, 3, 4, 5, 6]
 
     so101:
       python: "/home/duino/code/github/lerobot/.venv/bin/python"
-      script: "scripts/so101_real_bridge.py"
+      script: "scripts/so101_real_control.py"
       port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA101992-if00"
       extra_args: []
 
@@ -47,7 +48,7 @@ adapter:
       max_acceleration_deg_s2: 180.0
 
     pose_mapping:
-      # Real hardware uses driver-side IK in the Python bridge. Controller-space
+      # Real hardware uses driver-side IK in the Python control process. Controller-space
       # deltas become SO-101 base-frame end-effector target deltas, then MuJoCo
       # Jacobian IK solves the five arm joints before hardware step limiting.
       mode: "ik"

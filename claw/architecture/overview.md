@@ -21,6 +21,7 @@ samples to a server and receives algorithm results for in-headset rendering.
 ```text
 robot/
   crates/teleop-protocol   shared Rust protocol types and codecs
+  crates/robot-service     robot-side service entry point
   crates/xr-bridge         discovery, video relay, pose/control bridge
   crates/robot-adapter     device abstraction and robot drivers
 
@@ -53,9 +54,10 @@ XR tracking/controllers
   -> scripts/input/command_sender.gd
   -> scripts/sinks/robot_control/robot_control_sink.gd
   -> TCP command channel
+  -> robot-service
   -> robot-adapter device driver
 
-xr-bridge video source
+robot-service xr-bridge component
   -> TCP or UDP timed H.264 packets
   -> scripts/network/tcp_handler.gd or udp_video_handler.gd
   -> scripts/ui/teleop_panel.gd

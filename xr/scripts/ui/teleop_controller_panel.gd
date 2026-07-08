@@ -322,7 +322,7 @@ func _has_controller_teleop_mapping(descriptor: Dictionary) -> bool:
 	var has_enable_button := false
 	var schema: Dictionary = descriptor.get("control_schema", {})
 	for button_def in schema.get("buttons", []):
-		if button_def is Dictionary and String(button_def.get("name", "")) == "enable":
+		if button_def is Dictionary and _is_enable_target(String(button_def.get("name", ""))):
 			has_enable_button = true
 			break
 	if not has_enable_button:
@@ -332,10 +332,14 @@ func _has_controller_teleop_mapping(descriptor: Dictionary) -> bool:
 	for mapping in descriptor.get("input_mapping", []):
 		if not mapping is Dictionary:
 			continue
-		if String(mapping.get("target", "")) == "enable":
+		if _is_enable_target(String(mapping.get("target", ""))):
 			has_enable_mapping = true
 			break
 	return has_enable_mapping
+
+
+func _is_enable_target(target: String) -> bool:
+	return target == "enable" or target.ends_with("_enable")
 
 
 func _material(color: Color, transparent: bool = false) -> StandardMaterial3D:

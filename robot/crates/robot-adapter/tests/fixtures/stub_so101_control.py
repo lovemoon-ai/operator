@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny stand-in for scripts/so101_real_bridge.py.
+"""Tiny stand-in for scripts/so101_real_control.py.
 
 Speaks the real SO-101 JSON-line protocol without hardware so Rust driver
 framing can be tested hermetically.
@@ -7,6 +7,7 @@ framing can be tested hermetically.
 
 import json
 import sys
+import time
 
 HOME = [0.0, -90.0, 90.0, 0.0, 0.0, 85.0]
 HOME_EE = {"position": [0.25, 0.0, 0.2], "rotation": [0.0, 0.0, 0.0, 1.0]}
@@ -36,7 +37,13 @@ def snapshot(positions):
 
 
 def main():
-    # argv: stub_so101_bridge.py bridge --port <port> [extra...]
+    # argv: stub_so101_control.py control --port <port> [extra...]
+    fail_ee = "--fail-ee" in sys.argv
+    delay_ee_s = 0.0
+    for index, arg in enumerate(sys.argv):
+        if arg == "--delay-ee-ms" and index + 1 < len(sys.argv):
+            delay_ee_s = float(sys.argv[index + 1]) / 1000.0
+
     pos = list(HOME)
     emit({"event": "ready", "joint_names": NAMES, **snapshot(pos)})
     for line in sys.stdin:
@@ -52,10 +59,16 @@ def main():
             pos = list(HOME)
             emit(snapshot(pos))
         elif msg.get("stop"):
+            pos[0] = -123.0
             emit(snapshot(pos))
         elif msg.get("enable"):
             emit(snapshot(pos))
         elif isinstance(msg.get("ee_pose"), dict):
+            if fail_ee:
+                emit({"error": "forced ee failure"})
+                continue
+            if delay_ee_s > 0.0:
+                time.sleep(delay_ee_s)
             ee = msg["ee_pose"]
             pos[0] = float(ee.get("position", HOME_EE["position"])[0])
             if msg.get("gripper") is not None:

@@ -1,13 +1,13 @@
-# robot-adapter config — drives the MuJoCo SO-101 simulator over the boundary.
+# robot-service config - drives the MuJoCo SO-101 simulator over the boundary.
 #
 # Run from the `robot/` directory (the documented CWD; the python/script paths
 # below are relative to it):
 #
-#     cargo run -p robot-adapter -- --config configs/mujoco_so101.yaml
+#     cargo run -p robot-service -- --config configs/mujoco_so101.yaml
 #
 # or with the built binary:
 #
-#     robot-adapter --config configs/mujoco_so101.yaml
+#     robot-service --config configs/mujoco_so101.yaml
 #
 # First-time sim setup:
 #

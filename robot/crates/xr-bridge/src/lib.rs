@@ -38,6 +38,7 @@ pub mod pose_udp_server;
 pub mod protocol;
 pub mod runtime;
 pub mod safety;
+pub mod service;
 pub mod telemetry_server;
 pub mod video;
 pub mod watchdog;

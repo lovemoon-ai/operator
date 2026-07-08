@@ -1,0 +1,130 @@
+device:
+  type: "so101_dual_arm"
+  name: "Dual SO-101 Arms"
+  icon: "robot_arm"
+  model_url: ""
+
+control_schema:
+  axes:
+    - name: "left_gripper"
+      display: "Left Gripper"
+      range: [0.0, 1.0]
+      default: 1.0
+      dead_zone: 0.02
+    - name: "right_gripper"
+      display: "Right Gripper"
+      range: [0.0, 1.0]
+      default: 1.0
+      dead_zone: 0.02
+  buttons:
+    - name: "left_enable"
+      display: "Left Enable"
+      toggle: false
+      confirm: false
+    - name: "right_enable"
+      display: "Right Enable"
+      toggle: false
+      confirm: false
+    - name: "reset"
+      display: "Reset Both Arms"
+      toggle: false
+      confirm: true
+  poses:
+    - name: "left_end_effector"
+      display: "Left End Effector Target"
+      dof: 6
+      frame: "left_hand"
+    - name: "right_end_effector"
+      display: "Right End Effector Target"
+      dof: 6
+      frame: "right_hand"
+    - name: "operator_frame"
+      display: "Operator Alignment Frame"
+      dof: 6
+      frame: "head"
+
+input_mapping:
+  - source: "left_controller_pose"
+    target: "left_end_effector"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "absolute"
+  - source: "right_controller_pose"
+    target: "right_end_effector"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "absolute"
+  - source: "head_pose"
+    target: "operator_frame"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "absolute"
+  - source: "left_trigger"
+    target: "left_gripper"
+    scale: 1.0
+    invert: true
+    offset: 1.0
+    mode: "absolute"
+  - source: "right_trigger"
+    target: "right_gripper"
+    scale: 1.0
+    invert: true
+    offset: 1.0
+    mode: "absolute"
+  - source: "left_grip"
+    target: "left_enable"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "momentary"
+  - source: "right_grip"
+    target: "right_enable"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "momentary"
+  - source: "button_b"
+    target: "reset"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "momentary"
+
+telemetry_schema:
+  values:
+    - name: "left_joint_angles"
+      display: "Left Joint Angles"
+      unit: "deg"
+      type: "array"
+      length: 6
+    - name: "right_joint_angles"
+      display: "Right Joint Angles"
+      unit: "deg"
+      type: "array"
+      length: 6
+    - name: "joint_angles"
+      display: "Joint Angles"
+      unit: "deg"
+      type: "array"
+      length: 12
+    - name: "num_joints"
+      display: "Number of Joints"
+      type: "int"
+    - name: "num_joints_per_arm"
+      display: "Joints Per Arm"
+      type: "int"
+    - name: "connected"
+      display: "Connected"
+      type: "bool"
+
+video_feeds: []
+
+safety:
+  disconnect_action: "stop"
+  command_timeout_ms: 300
+  limits:
+    left_gripper: [0.0, 1.0]
+    right_gripper: [0.0, 1.0]

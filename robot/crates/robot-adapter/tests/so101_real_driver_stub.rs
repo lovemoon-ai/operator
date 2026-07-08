@@ -20,7 +20,7 @@ fn stub_script() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("stub_so101_bridge.py")
+        .join("stub_so101_control.py")
 }
 
 #[tokio::test]

@@ -9,7 +9,7 @@ var _mappings: Array = []
 var _dead_zones: Dictionary = {}  # axis_name -> dead_zone
 var _button_targets: Dictionary = {}  # button_name -> button definition
 var _toggle_states: Dictionary = {}  # button_name -> bool (for toggle buttons)
-var _enable_hold_until_msec: int = 0
+var _enable_hold_until_msec: Dictionary = {}
 
 const ENABLE_RELEASE_GRACE_MSEC := 100
 
@@ -40,12 +40,13 @@ func collect_command(tracking: TrackingProvider) -> Dictionary:
 		if value == null:
 			continue
 
-		if target == "enable":
+		if _is_enable_target(target):
 			var enable_pressed := _source_value_to_button(value, scale, invert, offset)
+			var now_msec := Time.get_ticks_msec()
 			if enable_pressed:
-				_enable_hold_until_msec = Time.get_ticks_msec() + ENABLE_RELEASE_GRACE_MSEC
+				_enable_hold_until_msec[target] = now_msec + ENABLE_RELEASE_GRACE_MSEC
 			else:
-				enable_pressed = Time.get_ticks_msec() <= _enable_hold_until_msec
+				enable_pressed = now_msec <= int(_enable_hold_until_msec.get(target, 0))
 			cmd["buttons"][target] = bool(cmd["buttons"].get(target, false)) or enable_pressed
 			continue
 
@@ -110,6 +111,10 @@ func _source_value_to_button(value: Variant, scale: float, invert: bool, offset:
 		vector_magnitude = vector_magnitude * scale + offset
 		return vector_magnitude >= 0.5
 	return false
+
+
+func _is_enable_target(target: String) -> bool:
+	return target == "enable" or target.ends_with("_enable")
 
 
 # Helper methods to safely extract input values

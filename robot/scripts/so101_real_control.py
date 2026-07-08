@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""SO-101 real-hardware JSONL bridge for robot-adapter.
+"""SO-101 real-hardware JSONL control process for robot-adapter.
 
-This bridge intentionally keeps LeRobot/Feetech hardware I/O in Python, close
-to the SO-101 reference controller. Rust talks to it with one JSON object per
-line on stdin/stdout.
+This control process intentionally keeps LeRobot/Feetech hardware I/O in
+Python, close to the SO-101 reference controller. Rust talks to it with one
+JSON object per line on stdin/stdout.
 """
 
 from __future__ import annotations
@@ -794,20 +794,28 @@ def run_bridge(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    bridge = sub.add_parser("bridge", help="run stdin/stdout JSONL bridge")
-    bridge.add_argument("--port", required=True, help="Feetech serial port, e.g. /dev/ttyACM0")
-    bridge.add_argument(
+    control = sub.add_parser(
+        "control",
+        aliases=["bridge"],
+        help="run stdin/stdout JSONL control process",
+    )
+    control.add_argument(
+        "--port",
+        required=True,
+        help="Feetech serial port, e.g. /dev/ttyACM0",
+    )
+    control.add_argument(
         "--reset-timeout",
         type=float,
         default=8.0,
         help="reset/home move timeout in seconds",
     )
-    bridge.add_argument(
+    control.add_argument(
         "--no-configure",
         action="store_true",
         help="skip conservative servo PID/torque setup",
     )
-    bridge.add_argument(
+    control.add_argument(
         "--kinematics-model",
         type=Path,
         default=DEFAULT_KINEMATICS_MODEL,
@@ -818,7 +826,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.cmd == "bridge":
+    if args.cmd in ("control", "bridge"):
         return run_bridge(args)
     raise AssertionError(args.cmd)
 

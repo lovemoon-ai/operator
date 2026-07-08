@@ -1,0 +1,19 @@
+[package]
+name = "robot-service"
+version = "0.1.0"
+edition = "2021"
+description = "Robot-side service: starts the adapter and XR bridge from one shared YAML config"
+
+[[bin]]
+name = "robot-service"
+path = "src/main.rs"
+
+[dependencies]
+robot-adapter = { path = "../robot-adapter" }
+teleop-protocol = { path = "../teleop-protocol" }
+xr-bridge = { path = "../xr-bridge" }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
