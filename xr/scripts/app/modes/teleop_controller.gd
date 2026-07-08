@@ -18,6 +18,7 @@ extends Node3D
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
+const TeleopVideoFeedManagerScript = preload("res://scripts/ui/teleop_video_feed_manager.gd")
 
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
@@ -50,6 +51,7 @@ var _video_tcp_handler: TcpHandler
 var _video_udp_handler: UdpVideoHandler
 var _active_video_transport: String = "tcp"  # "tcp" or "udp"
 var _last_video_feed: Dictionary = {}
+var _video_feed_manager: TeleopVideoFeedManager
 var _clock_sync: RobotClockSync
 var _known_robots: Dictionary = {}
 
@@ -129,13 +131,13 @@ func _ready() -> void:
 	# waiting for a fresh OK press.
 	var persisted: Dictionary = SettingsUI.load_settings()
 	_user_robot_type_hint = persisted.get("robot_type", "robot_arm")
-	if _robot_view:
-		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
-		# `show_video_panel` defaults to false: a fresh install should NOT
-		# pop a placeholder quad in front of the operator before any robot
-		# has sent a frame. The user opts in via the Settings panel toggle.
-		if _robot_view.has_method("set_show_video_panel"):
-			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
+	# `show_video_panel` defaults to false: a fresh install should NOT
+	# pop a placeholder quad in front of the operator before any robot
+	# has sent a frame. The user opts in via the Settings panel toggle.
+	_apply_video_preferences(
+		bool(persisted.get("video_face_locked", true)),
+		bool(persisted.get("show_video_panel", false))
+	)
 
 	var xr_interface := XRServer.find_interface("OpenXR")
 	if xr_interface and xr_interface.is_initialized():
@@ -227,6 +229,11 @@ func _create_v2_nodes() -> void:
 	_video_udp_handler.name = "VideoUdpHandler"
 	add_child(_video_udp_handler)
 
+	_video_feed_manager = TeleopVideoFeedManagerScript.new()
+	_video_feed_manager.name = "VideoFeedManager"
+	_video_feed_manager.setup(_origin, _robot_view)
+	add_child(_video_feed_manager)
+
 	# [opt 5] Clock-sync helper. Sends ClockPing on the command channel
 	# every second; the offset it learns is read by VideoLatencyTracker
 	# to make `tx=` honest.
@@ -243,6 +250,8 @@ func _create_settings_ui_nodes() -> void:
 	_settings_panel.name = "TeleopSettingsPanel"
 	_settings_panel.settings_applied.connect(_on_settings_applied)
 	_settings_panel.exit_requested.connect(_on_settings_exit_requested)
+	if _settings_panel.has_signal("video_feed_visibility_changed"):
+		_settings_panel.video_feed_visibility_changed.connect(_on_video_feed_visibility_changed)
 	_origin.add_child(_settings_panel)
 	_settings_ui = _settings_panel
 
@@ -307,6 +316,8 @@ func _on_xr_started() -> void:
 	_xr_started = true
 	_configure_passthrough()
 	_robot_view.initialize()
+	if _video_feed_manager:
+		_video_feed_manager.set_xr_started(true)
 	print("[Operator] XR Ready — XR started successfully")
 
 	var xr_interface := XRServer.find_interface("OpenXR")
@@ -339,6 +350,16 @@ func _configure_passthrough() -> void:
 		_start_xr.xr_interface.environment_blend_mode = XRInterface.XR_ENV_BLEND_MODE_ALPHA_BLEND
 
 
+func _apply_video_preferences(video_face_locked: bool, show_video_panel: bool) -> void:
+	if _video_feed_manager:
+		_video_feed_manager.apply_preferences(video_face_locked, show_video_panel)
+		return
+	if _robot_view:
+		_robot_view.follow_camera = video_face_locked
+		if _robot_view.has_method("set_show_video_panel"):
+			_robot_view.set_show_video_panel(show_video_panel)
+
+
 # --- Settings flow ------------------------------------------------------------
 
 ## Called by SettingsUI when the user presses Confirm.
@@ -352,10 +373,7 @@ func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_
 	_user_robot_type_hint = robot_type
 
 	# Apply video window mode immediately.
-	if _robot_view:
-		_robot_view.follow_camera = video_face_locked
-		if _robot_view.has_method("set_show_video_panel"):
-			_robot_view.set_show_video_panel(show_video_panel)
+	_apply_video_preferences(video_face_locked, show_video_panel)
 
 	_hide_settings_panel()
 
@@ -363,8 +381,11 @@ func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_
 	# pressed OK twice with different IP" without leaking sockets).
 	if _tcp_handler.is_connected_to_robot():
 		_tcp_handler.disconnect_from_robot()
-		_video_tcp_handler.disconnect_from_robot()
-		_video_udp_handler.disconnect_from_robot()
+		if _video_feed_manager:
+			_video_feed_manager.disconnect_all()
+		else:
+			_video_tcp_handler.disconnect_from_robot()
+			_video_udp_handler.disconnect_from_robot()
 
 	_connect_to_robot(ip, port)
 
@@ -394,9 +415,13 @@ func _on_settings_exit_requested() -> void:
 		_discovery.stop_scan()
 	if _tcp_handler:
 		_tcp_handler.disconnect_from_robot()
-	if _video_tcp_handler:
+	if _video_feed_manager:
+		_video_feed_manager.disconnect_all()
+	elif _video_tcp_handler:
 		_video_tcp_handler.disconnect_from_robot()
-	if _video_udp_handler:
+		if _video_udp_handler:
+			_video_udp_handler.disconnect_from_robot()
+	elif _video_udp_handler:
 		_video_udp_handler.disconnect_from_robot()
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
@@ -514,10 +539,10 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	# the panel-hide step (panel was never shown). Also apply persisted
 	# video mode + type hint so the auto-path matches what OK would do.
 	var persisted: Dictionary = SettingsUI.load_settings()
-	if _robot_view:
-		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
-		if _robot_view.has_method("set_show_video_panel"):
-			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
+	_apply_video_preferences(
+		bool(persisted.get("video_face_locked", true)),
+		bool(persisted.get("show_video_panel", false))
+	)
 	_user_robot_type_hint = String(info.get("device_type", persisted.get("robot_type", "robot_arm")))
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
@@ -612,10 +637,14 @@ func _on_disconnected() -> void:
 	_robot_control_sink.set_sending(false)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
-	_video_tcp_handler.disconnect_from_robot()
-	_video_udp_handler.disconnect_from_robot()
-	if _robot_view and _robot_view.has_method("clear_video_stream"):
-		_robot_view.clear_video_stream()
+	if _video_feed_manager:
+		_video_feed_manager.disconnect_all()
+		_video_feed_manager.clear_all()
+	else:
+		_video_tcp_handler.disconnect_from_robot()
+		_video_udp_handler.disconnect_from_robot()
+		if _robot_view and _robot_view.has_method("clear_video_stream"):
+			_robot_view.clear_video_stream()
 	_session.on_disconnected()
 	if _clock_sync:
 		_clock_sync.stop()
@@ -662,6 +691,11 @@ func _on_video_frame_received(packet: Dictionary) -> void:
 		_robot_view.report_video_frame(packet)
 
 
+func _on_video_feed_visibility_changed(feed_name: String, visible: bool) -> void:
+	if _video_feed_manager:
+		_video_feed_manager.set_feed_visible(feed_name, visible)
+
+
 func _on_device_connected(descriptor: Dictionary) -> void:
 	var device_name: String = descriptor.get("device", {}).get("name", tr("UI_UNKNOWN"))
 	var device_type: String = descriptor.get("device", {}).get("type", tr("UI_UNKNOWN"))
@@ -687,7 +721,9 @@ func _on_device_disconnected() -> void:
 	_robot_control_sink.set_sending(false)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
-	if _robot_view and _robot_view.has_method("clear_video_stream"):
+	if _video_feed_manager:
+		_video_feed_manager.clear_all()
+	elif _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 
 
@@ -700,6 +736,15 @@ func _on_telemetry_received(_data: Dictionary) -> void:
 
 
 func _configure_robot_video_stream(descriptor: Dictionary) -> void:
+	if _video_feed_manager:
+		_video_feed_manager.configure_feeds(descriptor)
+		var feeds := _video_feed_manager.configured_feeds()
+		if not feeds.is_empty():
+			_last_video_feed = feeds[0]
+		if _settings_ui and _settings_ui.has_method("configure_video_feeds"):
+			_settings_ui.call("configure_video_feeds", feeds, _video_feed_manager.visibility_state())
+		return
+
 	if not _robot_view or not _robot_view.has_method("configure_video_stream"):
 		return
 	var feed := _extract_primary_video_feed(descriptor)
@@ -765,10 +810,13 @@ func _on_robot_lost(robot_name: String) -> void:
 		var info: Dictionary = _known_robots[ip]
 		if info.get("name", "") == robot_name:
 			_known_robots.erase(ip)
-			if _video_tcp_handler.is_connected_to_robot() and _video_tcp_handler.get_host() == ip:
-				_video_tcp_handler.disconnect_from_robot()
-			if _video_udp_handler.is_connected_to_robot() and _video_udp_handler.get_host() == ip:
-				_video_udp_handler.disconnect_from_robot()
+			if _video_feed_manager:
+				_video_feed_manager.disconnect_host(ip)
+			else:
+				if _video_tcp_handler.is_connected_to_robot() and _video_tcp_handler.get_host() == ip:
+					_video_tcp_handler.disconnect_from_robot()
+				if _video_udp_handler.is_connected_to_robot() and _video_udp_handler.get_host() == ip:
+					_video_udp_handler.disconnect_from_robot()
 			break
 	if _settings_panel and _settings_panel.visible and _settings_ui and _settings_ui.has_method("remove_discovered"):
 		_settings_ui.remove_discovered(robot_name)
@@ -784,6 +832,11 @@ func _connect_video_stream(ip: String) -> void:
 	if _known_robots.has(ip):
 		var info: Dictionary = _known_robots[ip]
 		tcp_port = int(info.get("video_port", tcp_port))
+
+	if _video_feed_manager:
+		_video_feed_manager.connect_video_streams(ip, tcp_port)
+		return
+
 	if int(_last_video_feed.get("port", 0)) > 0:
 		tcp_port = int(_last_video_feed["port"])
 

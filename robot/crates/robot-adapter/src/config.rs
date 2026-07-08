@@ -37,6 +37,10 @@ pub struct AdapterConfig {
     /// `so101_dual_real`, ignored otherwise.
     #[serde(default)]
     pub dual_arm: Option<DualArmConfig>,
+    /// Galbot G1 true-robot config. Required when `device_type == "galbot_g1"`,
+    /// ignored otherwise.
+    #[serde(default)]
+    pub galbot_g1: Option<GalbotG1Config>,
 }
 
 /// Robotic arm configuration. Ported from `robot/src/config.rs`.
@@ -105,6 +109,172 @@ pub struct MujocoConfig {
     pub extra_args: Vec<String>,
 }
 
+/// Settings for the Galbot G1 true-robot bridge (`device_type = "galbot_g1"`).
+///
+/// The adapter spawns a small Python process that imports `galbot_sdk.g1` on the
+/// robot/control host, then exchanges JSON lines with this Rust process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalbotG1Config {
+    /// Python interpreter to invoke. On the robot this is usually `python3.8`.
+    #[serde(default = "default_galbot_python")]
+    pub python: String,
+    /// Path to `galbot_g1_bridge.py`. Relative paths resolve against CWD.
+    pub script: String,
+    /// Maximum time to wait for SDK init and the bridge ready event.
+    #[serde(default = "default_galbot_ready_timeout_ms")]
+    pub ready_timeout_ms: u64,
+    /// Maximum time to wait for one bridge command response.
+    #[serde(default = "default_galbot_response_timeout_ms")]
+    pub response_timeout_ms: u64,
+    /// Maximum time a single driver write is allowed to block.
+    #[serde(default = "default_galbot_driver_write_timeout_ms")]
+    pub driver_write_timeout_ms: u64,
+    /// End-effector command reference frame passed to the SDK. The Galbot WBC
+    /// realtime API defaults to `world`; keep this explicit in config.
+    #[serde(default = "default_galbot_reference_frame")]
+    pub reference_frame: String,
+    /// Delay after `robot.init()` before reading WBC poses.
+    #[serde(default = "default_galbot_startup_delay_s")]
+    pub startup_delay_s: f64,
+    /// Pose delta mapping from controller frame to robot/base frame.
+    #[serde(default = "default_galbot_pose_mapping")]
+    pub pose_mapping: PoseMappingConfig,
+    /// Gripper width mapping for normalized trigger values.
+    #[serde(default)]
+    pub gripper: GalbotGripperConfig,
+    /// Blocking reset-pose command issued by the reset gesture.
+    #[serde(default)]
+    pub reset: GalbotResetConfig,
+}
+
+fn default_galbot_python() -> String {
+    "python3.8".to_string()
+}
+
+fn default_galbot_ready_timeout_ms() -> u64 {
+    15_000
+}
+
+fn default_galbot_response_timeout_ms() -> u64 {
+    2_000
+}
+
+fn default_galbot_driver_write_timeout_ms() -> u64 {
+    80
+}
+
+fn default_galbot_reference_frame() -> String {
+    "world".to_string()
+}
+
+fn default_galbot_startup_delay_s() -> f64 {
+    2.0
+}
+
+fn default_galbot_pose_mapping() -> PoseMappingConfig {
+    PoseMappingConfig {
+        mode: "ik".to_string(),
+        scale: 0.5,
+        mirror: true,
+    }
+}
+
+/// Normalized gripper axis mapping. `0.0 = closed`, `1.0 = open`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalbotGripperConfig {
+    #[serde(default = "default_galbot_gripper_closed_width_m")]
+    pub closed_width_m: f64,
+    #[serde(default = "default_galbot_gripper_open_width_m")]
+    pub open_width_m: f64,
+    #[serde(default = "default_galbot_gripper_velocity_mps")]
+    pub velocity_mps: f64,
+    #[serde(default = "default_galbot_gripper_effort")]
+    pub effort: f64,
+}
+
+impl Default for GalbotGripperConfig {
+    fn default() -> Self {
+        Self {
+            closed_width_m: default_galbot_gripper_closed_width_m(),
+            open_width_m: default_galbot_gripper_open_width_m(),
+            velocity_mps: default_galbot_gripper_velocity_mps(),
+            effort: default_galbot_gripper_effort(),
+        }
+    }
+}
+
+fn default_galbot_gripper_closed_width_m() -> f64 {
+    0.02
+}
+
+fn default_galbot_gripper_open_width_m() -> f64 {
+    0.10
+}
+
+fn default_galbot_gripper_velocity_mps() -> f64 {
+    0.05
+}
+
+fn default_galbot_gripper_effort() -> f64 {
+    10.0
+}
+
+/// Reset pose used by the Galbot adapter. Joint positions are in radians and
+/// are expanded in `joint_groups` order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GalbotResetConfig {
+    #[serde(default = "default_galbot_reset_joint_groups")]
+    pub joint_groups: Vec<String>,
+    #[serde(default = "default_galbot_reset_joint_positions_rad")]
+    pub joint_positions_rad: Vec<f64>,
+    #[serde(default = "default_galbot_reset_speed_rad_s")]
+    pub speed_rad_s: f64,
+    #[serde(default = "default_galbot_reset_timeout_s")]
+    pub timeout_s: f64,
+    #[serde(default = "default_galbot_reset_gripper_open_width_m")]
+    pub gripper_open_width_m: f64,
+}
+
+impl Default for GalbotResetConfig {
+    fn default() -> Self {
+        Self {
+            joint_groups: default_galbot_reset_joint_groups(),
+            joint_positions_rad: default_galbot_reset_joint_positions_rad(),
+            speed_rad_s: default_galbot_reset_speed_rad_s(),
+            timeout_s: default_galbot_reset_timeout_s(),
+            gripper_open_width_m: default_galbot_reset_gripper_open_width_m(),
+        }
+    }
+}
+
+fn default_galbot_reset_joint_groups() -> Vec<String> {
+    ["leg", "head", "left_arm", "right_arm"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn default_galbot_reset_joint_positions_rad() -> Vec<f64> {
+    vec![
+        0.5, 1.5, 1.0, 0.0, 0.0, // leg
+        0.0, 0.0, // head
+        2.0, -1.5, -0.6, -1.7, 0.0, -0.8, 0.0, // left_arm
+        -2.0, 1.5, 0.6, 1.7, 0.0, 0.8, 0.0, // right_arm
+    ]
+}
+
+fn default_galbot_reset_speed_rad_s() -> f64 {
+    0.12
+}
+
+fn default_galbot_reset_timeout_s() -> f64 {
+    20.0
+}
+
+fn default_galbot_reset_gripper_open_width_m() -> f64 {
+    default_galbot_gripper_open_width_m()
+}
+
 fn default_mujoco_python() -> String {
     "python3".to_string()
 }
@@ -170,6 +340,7 @@ impl Default for AdapterConfig {
             descriptor_file: None,
             arm: None,
             dual_arm: None,
+            galbot_g1: None,
         }
     }
 }
@@ -215,6 +386,7 @@ impl AdapterConfig {
         match self.device_type.as_str() {
             "mujoco_so101" | "so101_real" => crate::devices::RobotArmDevice::default_descriptor(),
             "so101_dual_real" | "dual_so101_real" => DualSo101Device::default_descriptor(),
+            "galbot_g1" => crate::devices::GalbotG1Device::default_descriptor(),
             _ => DummyDevice::default_descriptor(),
         }
     }
@@ -543,5 +715,41 @@ adapter:
         );
         let desc = load_descriptor_file(desc_path).expect("shipped descriptor parses");
         assert_eq!(desc.device.device_type, "so101_dual_arm");
+    }
+
+    #[test]
+    fn parses_galbot_g1_config() {
+        let yaml = r#"
+adapter_link:
+  endpoint: "tcp:127.0.0.1:63911"
+
+adapter:
+  device_type: "galbot_g1"
+  galbot_g1:
+    python: "python3.8"
+    script: "scripts/galbot_g1_bridge.py"
+    reference_frame: "world"
+    pose_mapping:
+      mode: "ik"
+      scale: 0.5
+      mirror: true
+"#;
+        let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();
+        assert_eq!(cfg.device_type, "galbot_g1");
+        let galbot = cfg.galbot_g1.as_ref().expect("galbot config present");
+        assert_eq!(galbot.python, "python3.8");
+        assert_eq!(galbot.script, "scripts/galbot_g1_bridge.py");
+        assert_eq!(galbot.reference_frame, "world");
+        assert_eq!(galbot.reset.joint_positions_rad.len(), 21);
+        let desc = cfg.builtin_descriptor();
+        assert_eq!(desc.device.device_type, "galbot_g1");
+    }
+
+    #[test]
+    fn shipped_galbot_g1_config_file_parses() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/galbot-g1.yaml");
+        let cfg = AdapterConfig::from_yaml_file(path).expect("shipped config parses");
+        assert_eq!(cfg.device_type, "galbot_g1");
+        assert!(cfg.galbot_g1.is_some());
     }
 }

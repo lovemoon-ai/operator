@@ -1,0 +1,133 @@
+# Galbot G1 true-robot teleop config.
+#
+# Run from the `robot/` directory:
+#
+#     cargo run -p robot-adapter -- --config configs/galbot-g1.yaml
+#     cargo run -p xr-bridge -- --config configs/galbot-g1.yaml
+#
+# Robot-side Python environment, from /Users/bytedance/ws/galbot-projects:
+#   PYTHONPATH=/data/galbot/lib
+#   LD_LIBRARY_PATH=/data/galbot/lib:/data/lib
+#
+# Optional RGB camera RTSP publisher:
+#   python3.8 scripts/galbot_g1_rgb_rtsp.py --rtsp-base rtsp://127.0.0.1:8554
+# The publisher expects an RTSP server such as MediaMTX listening on 127.0.0.1:8554.
+#
+# Controls:
+#   left/right controller pose -> left/right arm end-effector eepose target
+#   left/right grip            -> left/right arm enable deadman
+#   left/right trigger         -> left/right gripper close/open
+#   both triggers held >2 s    -> reset Galbot to the reset pose below
+
+adapter_link:
+  endpoint: "tcp:127.0.0.1:63911"
+
+adapter:
+  device_type: "galbot_g1"
+
+  galbot_g1:
+    python: "python3.8"
+    script: "scripts/galbot_g1_bridge.py"
+
+    # Galbot's realtime WBC eepose API works in world by default. The adapter
+    # uses relative controller deltas from the current WBC pose snapshot.
+    reference_frame: "world"
+    ready_timeout_ms: 15000
+    response_timeout_ms: 2000
+    driver_write_timeout_ms: 80
+    startup_delay_s: 2.0
+
+    pose_mapping:
+      mode: "ik"
+      scale: 0.5
+      mirror: true
+
+    gripper:
+      closed_width_m: 0.02
+      open_width_m: 0.10
+      velocity_mps: 0.05
+      effort: 10.0
+
+    # Reset pose from the Galbot SDK G1 install/welcome verification examples.
+    # Positions are radians, expanded in joint_groups order.
+    reset:
+      joint_groups: ["leg", "head", "left_arm", "right_arm"]
+      joint_positions_rad:
+        - 0.5
+        - 1.5
+        - 1.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 2.0
+        - -1.5
+        - -0.6
+        - -1.7
+        - 0.0
+        - -0.8
+        - 0.0
+        - -2.0
+        - 1.5
+        - 0.6
+        - 1.7
+        - 0.0
+        - 0.8
+        - 0.0
+      speed_rad_s: 0.12
+      timeout_s: 20.0
+      gripper_open_width_m: 0.10
+
+bridge:
+  name: "galbot-g1"
+  pose_port: 63901
+  video_port: 12345
+  discovery_port: 63900
+  pose_udp_port: 63902
+  telemetry_port: 63903
+  video:
+    feeds:
+      - name: "head_left_rgb"
+        display: "Head left RGB"
+        rtsp_url: "rtsp://127.0.0.1:8554/head_left_rgb"
+        tcp_port: 12345
+        width: 640
+        height: 480
+        fps: 15
+        stereo: false
+        enabled_by_default: true
+        view_size_m: [1.2, 0.9]
+        view_offset_m: [0.0, 0.52, 0.0]
+        view_distance_m: 2.2
+        transport: tcp
+        codec: h264
+
+      - name: "left_wrist_rgb"
+        display: "Left wrist RGB"
+        rtsp_url: "rtsp://127.0.0.1:8554/left_wrist_rgb"
+        tcp_port: 12346
+        width: 640
+        height: 480
+        fps: 15
+        stereo: false
+        enabled_by_default: true
+        view_size_m: [1.05, 0.78]
+        view_offset_m: [-0.72, -0.42, 0.0]
+        view_distance_m: 2.2
+        transport: tcp
+        codec: h264
+
+      - name: "right_wrist_rgb"
+        display: "Right wrist RGB"
+        rtsp_url: "rtsp://127.0.0.1:8554/right_wrist_rgb"
+        tcp_port: 12347
+        width: 640
+        height: 480
+        fps: 15
+        stereo: false
+        enabled_by_default: true
+        view_size_m: [1.05, 0.78]
+        view_offset_m: [0.72, -0.42, 0.0]
+        view_distance_m: 2.2
+        transport: tcp
+        codec: h264

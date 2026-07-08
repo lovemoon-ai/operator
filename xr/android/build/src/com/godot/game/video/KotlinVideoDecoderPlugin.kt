@@ -197,6 +197,8 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	@Volatile
 	private var configuredMime: String = MIME_AVC
 
+	private val streamSessions = ConcurrentHashMap<String, StreamDecoderSession>()
+
 	override fun getPluginName(): String = "KotlinVideoDecoderPlugin"
 
 	override fun getPluginMethods(): MutableList<String> =
@@ -208,6 +210,10 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			"submit_access_unit",
 			"submit_access_unit_timed",
 			"submit_access_unit_timed_with_clock",
+			"start_decoder_with_codec_for_stream",
+			"stop_decoder_for_stream",
+			"is_running_for_stream",
+			"submit_access_unit_timed_with_clock_for_stream",
 			"get_latest_frame",
 			"get_ahb_latency_stats",
 			"probe_hardware_buffer_support",
@@ -238,12 +244,32 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 				ByteArray::class.java,            // v plane (w/2 * h/2 bytes)
 			),
 			SignalInfo("decoder_error", String::class.java),
+			SignalInfo(
+				"frame_ready_for_stream",
+				String::class.java,
+				Int::class.javaObjectType,
+				Int::class.javaObjectType,
+				Long::class.javaObjectType,
+				ByteArray::class.java,
+			),
+			SignalInfo(
+				"yuv_frame_ready_for_stream",
+				String::class.java,
+				Int::class.javaObjectType,
+				Int::class.javaObjectType,
+				Long::class.javaObjectType,
+				ByteArray::class.java,
+				ByteArray::class.java,
+				ByteArray::class.java,
+			),
+			SignalInfo("decoder_error_for_stream", String::class.java, String::class.java),
 		)
 
 	@Suppress("DEPRECATION")
 	override fun onMainDestroy() {
 		super.onMainDestroy()
 		stop_decoder()
+		stopAllStreamSessions()
 	}
 
 	@Suppress("FunctionName")
@@ -343,6 +369,68 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			return offerAccessUnit(access_unit, receiveNs, sendNs, clockOffsetNs, clockSamples)
 		}
 
+		@Suppress("FunctionName")
+		@UsedByGodot
+		fun start_decoder_with_codec_for_stream(
+			streamId: String,
+			width: Int,
+			height: Int,
+			codec: String,
+		): Boolean {
+			if (streamId.isBlank()) {
+				return start_decoder_with_codec(width, height, codec)
+			}
+			val session = streamSessions.computeIfAbsent(streamId) { StreamDecoderSession(it) }
+			return session.start(width, height, codec)
+		}
+
+		@Suppress("FunctionName")
+		@UsedByGodot
+		fun stop_decoder_for_stream(streamId: String) {
+			if (streamId.isBlank()) {
+				stop_decoder()
+				return
+			}
+			streamSessions.remove(streamId)?.stop()
+		}
+
+		@Suppress("FunctionName")
+		@UsedByGodot
+		fun is_running_for_stream(streamId: String): Boolean {
+			if (streamId.isBlank()) {
+				return is_running()
+			}
+			return streamSessions[streamId]?.isRunning() ?: false
+		}
+
+		@Suppress("FunctionName")
+		@UsedByGodot
+		fun submit_access_unit_timed_with_clock_for_stream(
+			streamId: String,
+			accessUnit: ByteArray,
+			receiveNs: Long,
+			sendNs: Long,
+			clockOffsetNs: Long,
+			clockSamples: Int,
+		): Boolean {
+			if (streamId.isBlank()) {
+				return submit_access_unit_timed_with_clock(
+					accessUnit,
+					receiveNs,
+					sendNs,
+					clockOffsetNs,
+					clockSamples,
+				)
+			}
+			return streamSessions[streamId]?.offer(
+				accessUnit,
+				receiveNs,
+				sendNs,
+				clockOffsetNs,
+				clockSamples,
+			) ?: false
+		}
+
 		private fun offerAccessUnit(
 			access_unit: ByteArray,
 			receiveNs: Long,
@@ -370,6 +458,14 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 				return false
 			}
 			return true
+	}
+
+	private fun stopAllStreamSessions() {
+		val sessions = streamSessions.values.toList()
+		streamSessions.clear()
+		for (session in sessions) {
+			session.stop()
+		}
 	}
 
 	@Suppress("FunctionName")
@@ -981,6 +1077,261 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 				ahbBridgeLatencyMaxMs = 0.0
 			}
 		}
+
+	private inner class StreamDecoderSession(private val streamId: String) {
+		private val sessionRunning = AtomicBoolean(false)
+		private val sessionQueue = LinkedBlockingQueue<AccessUnit>(QUEUE_CAPACITY)
+
+		@Volatile
+		private var sessionThread: Thread? = null
+
+		@Volatile
+		private var sessionCodec: MediaCodec? = null
+
+		@Volatile
+		private var sessionWidth: Int = 0
+
+		@Volatile
+		private var sessionHeight: Int = 0
+
+		@Volatile
+		private var sessionMime: String = MIME_AVC
+
+		fun start(width: Int, height: Int, codecName: String): Boolean {
+			val mime = when (codecName.lowercase()) {
+				"hevc", "h265", "x265" -> MIME_HEVC
+				else -> MIME_AVC
+			}
+
+			if (sessionRunning.get()) {
+				if (sessionWidth == width && sessionHeight == height && sessionMime == mime) {
+					return true
+				}
+				stop()
+			}
+
+			if (width <= 0 || height <= 0) {
+				Log.w(TAG, "stream=$streamId rejected invalid size ${width}x$height")
+				return false
+			}
+
+			sessionWidth = width
+			sessionHeight = height
+			sessionMime = mime
+			sessionQueue.clear()
+			sessionRunning.set(true)
+
+			val worker = Thread({ runLoop() }, "xrVideoDecoder-$streamId")
+			sessionThread = worker
+			worker.start()
+
+			Log.i(TAG, "Stream decoder started stream=$streamId ${width}x${height} mime=$mime")
+			return true
+		}
+
+		fun stop() {
+			sessionRunning.set(false)
+			sessionQueue.clear()
+			sessionThread?.interrupt()
+			sessionThread?.join(1000)
+			sessionThread = null
+			releaseCodec()
+			Log.i(TAG, "Stream decoder stopped stream=$streamId")
+		}
+
+		fun isRunning(): Boolean = sessionRunning.get()
+
+		fun offer(
+			accessUnit: ByteArray,
+			receiveNs: Long,
+			sendNs: Long,
+			clockOffsetNs: Long,
+			clockSamples: Int,
+		): Boolean {
+			if (!sessionRunning.get() || accessUnit.isEmpty()) {
+				return false
+			}
+			val accepted = sessionQueue.offer(
+				AccessUnit(
+					bytes = accessUnit.clone(),
+					receiveNs = receiveNs,
+					sendNs = sendNs,
+					clockOffsetNs = clockOffsetNs,
+					clockSamples = clockSamples,
+				)
+			)
+			if (!accepted) {
+				Log.w(TAG, "Stream decoder queue full, dropping access unit stream=$streamId")
+				return false
+			}
+			return true
+		}
+
+		private fun runLoop() {
+			var pendingAccessUnit: AccessUnit? = null
+			try {
+				while (sessionRunning.get() && !Thread.currentThread().isInterrupted) {
+					if (pendingAccessUnit == null) {
+						pendingAccessUnit = sessionQueue.poll(20, TimeUnit.MILLISECONDS)
+					}
+
+					if (pendingAccessUnit != null && sessionCodec == null) {
+						if (!configureCodec(pendingAccessUnit.bytes)) {
+							sessionRunning.set(false)
+							break
+						}
+					}
+
+					val activeCodec = sessionCodec ?: continue
+					if (pendingAccessUnit != null) {
+						val inputIndex = activeCodec.dequeueInputBuffer(INPUT_TIMEOUT_US)
+						if (inputIndex >= 0) {
+							val inputBuffer = activeCodec.getInputBuffer(inputIndex)
+							if (inputBuffer == null) {
+								emitError("Decoder input buffer unavailable")
+								sessionRunning.set(false)
+								break
+							}
+							inputBuffer.clear()
+							inputBuffer.put(pendingAccessUnit.bytes)
+							val receiveNs = pendingAccessUnit.receiveNs
+							val ptsUs =
+								if (receiveNs > 0L) receiveNs / 1_000L else nowNs() / 1_000L
+							activeCodec.queueInputBuffer(
+								inputIndex,
+								0,
+								pendingAccessUnit.bytes.size,
+								ptsUs,
+								0,
+							)
+							pendingAccessUnit = null
+						}
+					}
+
+					drainOutput(activeCodec)
+				}
+			} catch (e: InterruptedException) {
+				Thread.currentThread().interrupt()
+			} catch (e: Exception) {
+				Log.e(TAG, "Stream decoder loop failed stream=$streamId", e)
+				emitError("Decoder loop failed: ${e.message}")
+			} finally {
+				releaseCodec()
+			}
+		}
+
+		private fun configureCodec(firstAccessUnit: ByteArray): Boolean {
+			return try {
+				val format = MediaFormat.createVideoFormat(sessionMime, sessionWidth, sessionHeight)
+				format.setInteger(
+					MediaFormat.KEY_MAX_INPUT_SIZE,
+					max(1_048_576, sessionWidth * sessionHeight * 2),
+				)
+				if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+					format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+				}
+
+				var csdDesc = "none"
+				if (sessionMime == MIME_HEVC) {
+					val concatenated = extractHevcCodecSpecificData(firstAccessUnit)
+					if (concatenated != null) {
+						format.setByteBuffer("csd-0", ByteBuffer.wrap(concatenated))
+						csdDesc = "vps+sps+pps(${concatenated.size}B)"
+					}
+				} else {
+					val (sps, pps) = extractCodecSpecificData(firstAccessUnit)
+					if (sps != null) {
+						format.setByteBuffer("csd-0", ByteBuffer.wrap(sps))
+					}
+					if (pps != null) {
+						format.setByteBuffer("csd-1", ByteBuffer.wrap(pps))
+					}
+					csdDesc = "sps=${sps != null}/pps=${pps != null}"
+				}
+
+				val createdCodec = MediaCodec.createDecoderByType(sessionMime)
+				createdCodec.configure(format, null, null, 0)
+				createdCodec.start()
+				sessionCodec = createdCodec
+				Log.i(
+					TAG,
+					"Stream decoder configured stream=$streamId ${sessionWidth}x${sessionHeight} " +
+						"mime=$sessionMime csd=$csdDesc"
+				)
+				true
+			} catch (e: Exception) {
+				Log.e(TAG, "Failed to configure stream decoder stream=$streamId", e)
+				emitError("Failed to configure decoder: ${e.message}")
+				false
+			}
+		}
+
+		private fun drainOutput(activeCodec: MediaCodec) {
+			val info = MediaCodec.BufferInfo()
+			while (sessionRunning.get()) {
+				val outputIndex = activeCodec.dequeueOutputBuffer(info, 0)
+				when {
+					outputIndex >= 0 -> drainOutputImage(activeCodec, outputIndex)
+					outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ->
+						Log.i(TAG, "Stream decoder output format changed stream=$streamId: ${activeCodec.outputFormat}")
+					outputIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
+						// Ignored on modern codecs.
+					}
+					outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> return
+					else -> return
+				}
+			}
+		}
+
+		private fun drainOutputImage(activeCodec: MediaCodec, outputIndex: Int) {
+			val image = try {
+				activeCodec.getOutputImage(outputIndex)
+			} catch (_: Exception) {
+				null
+			}
+			try {
+				if (image == null) {
+					return
+				}
+				val nowNsCached = nowNs()
+				val planes = extractYuvPlanesTight(image)
+				if (planes == null) {
+					emitError("Decoder output image is not YUV_420_888")
+					return
+				}
+				emitSignal(
+					"yuv_frame_ready_for_stream",
+					streamId,
+					image.width,
+					image.height,
+					nowNsCached,
+					planes.first,
+					planes.second,
+					planes.third,
+				)
+			} finally {
+				try { image?.close() } catch (_: Exception) {}
+				try { activeCodec.releaseOutputBuffer(outputIndex, false) } catch (_: Exception) {}
+			}
+		}
+
+		private fun releaseCodec() {
+			val localCodec = sessionCodec
+			sessionCodec = null
+			if (localCodec != null) {
+				try {
+					localCodec.stop()
+				} catch (_: Exception) {}
+				try {
+					localCodec.release()
+				} catch (_: Exception) {}
+			}
+		}
+
+		private fun emitError(message: String) {
+			emitSignal("decoder_error_for_stream", streamId, message)
+		}
+	}
 
 		private fun extractCodecSpecificData(accessUnit: ByteArray): Pair<ByteArray?, ByteArray?> {
 		var sps: ByteArray? = null

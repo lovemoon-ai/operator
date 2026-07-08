@@ -47,6 +47,20 @@ func set_clock_offset(offset_ns: int, samples: int = 1) -> void:
 	_clock_offset_ns = offset_ns
 	_clock_samples = maxi(0, samples)
 
+
+func set_decoder_stream_id(value: String) -> void:
+	if decoder_stream_id == value:
+		return
+	if _video_decoder and _decoder_is_running():
+		_decoder_stop()
+	_disconnect_video_decoder_signals()
+	decoder_stream_id = value
+
+
+func set_display_size(value: Vector2) -> void:
+	display_size = value
+	_apply_display_size()
+
 var _shader_material: ShaderMaterial
 var _placeholder_texture: ImageTexture
 var _video_texture: ImageTexture
@@ -76,6 +90,8 @@ var _last_ahb_frame_count: int = 0
 @export var follow_camera: bool = true
 ## Distance in meters in front of the camera when follow_camera is enabled.
 @export var follow_distance: float = 3.0
+## Camera-relative offset in meters when follow_camera is enabled.
+@export var follow_offset: Vector3 = Vector3.ZERO
 ## Optional camera path. When empty, the view looks for `XRCamera3D` under its parent.
 @export var camera_path: NodePath
 ## Create the default quad, collision body, and HUD label if the scene did not provide them.
@@ -84,6 +100,9 @@ var _last_ahb_frame_count: int = 0
 @export var display_size: Vector2 = Vector2(3.2, 1.8)
 ## Godot Android plugin singleton that exposes start_decoder/submit_access_unit.
 @export var decoder_singleton_name: String = DEFAULT_VIDEO_DECODER_SINGLETON
+## Optional decoder stream id. Empty uses the legacy singleton decoder path;
+## non-empty uses stream-scoped decoder methods/signals for multi-feed teleop.
+@export var decoder_stream_id: String = ""
 ## When false, the panel stays hidden even when the robot is sending frames —
 ## the user opted out of the video display entirely. When true, the panel
 ## still only becomes visible AFTER `_receiving_video` flips on (i.e. a NAL
@@ -105,6 +124,7 @@ func _ready() -> void:
 
 func _ensure_display_nodes() -> void:
 	if _display_mesh != null or not auto_create_display_nodes:
+		_apply_display_size()
 		return
 
 	_display_mesh = MeshInstance3D.new()
@@ -142,6 +162,34 @@ func _ensure_display_nodes() -> void:
 	_latency_hud.modulate = Color(1, 1, 0.4, 1)
 	_latency_hud.outline_modulate = Color(0, 0, 0, 1)
 	_display_mesh.add_child(_latency_hud)
+	_apply_display_size()
+
+
+func _apply_display_size() -> void:
+	if _display_mesh == null:
+		return
+	var quad := _display_mesh.mesh as QuadMesh
+	if quad != null:
+		if not quad.resource_local_to_scene:
+			quad = quad.duplicate() as QuadMesh
+			quad.resource_local_to_scene = true
+			_display_mesh.mesh = quad
+		quad.size = display_size
+
+	var body := _display_mesh.get_node_or_null("StaticBody3D") as StaticBody3D
+	if body:
+		var collision := body.get_node_or_null("CollisionShape3D") as CollisionShape3D
+		if collision:
+			var box := collision.shape as BoxShape3D
+			if box != null:
+				if not box.resource_local_to_scene:
+					box = box.duplicate() as BoxShape3D
+					box.resource_local_to_scene = true
+					collision.shape = box
+				box.size = Vector3(display_size.x, display_size.y, 0.02)
+
+	if _latency_hud:
+		_latency_hud.transform.origin = Vector3(display_size.x * 0.3125, display_size.y * 0.4722, 0.01)
 
 
 ## Initialize the display after XR is started.
@@ -292,7 +340,7 @@ func _process(_delta: float) -> void:
 	# Place the panel in front of the camera, facing the camera.
 	var cam_xform := _xr_camera.global_transform
 	var forward := -cam_xform.basis.z.normalized()
-	var target_pos := cam_xform.origin + forward * follow_distance
+	var target_pos := cam_xform.origin + forward * follow_distance + cam_xform.basis * follow_offset
 	var t := Transform3D()
 	t.origin = target_pos
 	t.basis = cam_xform.basis  # Mesh quad faces -Z, camera looks -Z; same basis works.
@@ -442,18 +490,11 @@ func configure_video_stream(feed: Dictionary) -> void:
 		return
 
 	if (decoder_size_changed or codec_changed) and decoder_running:
-		_decoder_call_void("stop_decoder")
+		_decoder_stop()
 		decoder_running = false
 
 	if not decoder_running:
-		# Always call the codec-aware overload. We can't gate on
-		# has_method("start_decoder_with_codec") because Godot 4's Kotlin-plugin
-		# reflection does NOT populate has_method() for @UsedByGodot methods even
-		# when they're perfectly callable — gating on a false reading would
-		# silently downgrade HEVC streams to the AVC MediaCodec. The plugin ships
-		# in the same APK as this script, so the 3-arg method is guaranteed
-		# present and call-by-name dispatches correctly.
-		var started := bool(_video_decoder.call("start_decoder_with_codec", width, height, codec))
+		var started := _decoder_start(width, height, codec)
 		if not started:
 			print("[LiveVideo] Warning: failed to start video decoder")
 			return
@@ -474,6 +515,9 @@ func configure_h264_stream(width: int, height: int, stereo: bool = false) -> voi
 func _decoder_is_running() -> bool:
 	if _video_decoder == null:
 		return false
+	if not decoder_stream_id.is_empty():
+		var stream_result: Variant = _video_decoder.call("is_running_for_stream", decoder_stream_id)
+		return bool(stream_result) if stream_result != null else false
 	# Try has_method() first; fall back to a direct call which works even
 	# when reflection misses the @UsedByGodot binding.
 	if _video_decoder.has_method("is_running"):
@@ -482,10 +526,56 @@ func _decoder_is_running() -> bool:
 	return bool(result) if result != null else false
 
 
-func _decoder_call_void(method_name: String) -> void:
+func _decoder_start(width: int, height: int, codec: String) -> bool:
+	if _video_decoder == null:
+		return false
+	# Always call the codec-aware overload. We can't gate on has_method()
+	# because Godot 4's Kotlin-plugin reflection does not reliably expose
+	# @UsedByGodot methods even when call-by-name works.
+	if not decoder_stream_id.is_empty():
+		return bool(_video_decoder.call(
+			"start_decoder_with_codec_for_stream",
+			decoder_stream_id,
+			width,
+			height,
+			codec,
+		))
+	return bool(_video_decoder.call("start_decoder_with_codec", width, height, codec))
+
+
+func _decoder_stop() -> void:
 	if _video_decoder == null:
 		return
-	_video_decoder.call(method_name)
+	if not decoder_stream_id.is_empty():
+		_video_decoder.call("stop_decoder_for_stream", decoder_stream_id)
+		return
+	_decoder_call_void("stop_decoder")
+
+
+func _decoder_call_void(method_name: String, args: Array = []) -> void:
+	if _video_decoder == null:
+		return
+	_video_decoder.callv(method_name, args)
+
+
+func _disconnect_video_decoder_signals() -> void:
+	if _video_decoder == null:
+		_video_decoder_connected = false
+		return
+	var signal_pairs := [
+		["frame_ready", Callable(self, "_on_video_frame_ready")],
+		["yuv_frame_ready", Callable(self, "_on_video_yuv_frame_ready")],
+		["decoder_error", Callable(self, "_on_video_decoder_error")],
+		["frame_ready_for_stream", Callable(self, "_on_video_frame_ready_for_stream")],
+		["yuv_frame_ready_for_stream", Callable(self, "_on_video_yuv_frame_ready_for_stream")],
+		["decoder_error_for_stream", Callable(self, "_on_video_decoder_error_for_stream")],
+	]
+	for pair in signal_pairs:
+		var signal_name := String(pair[0])
+		var callback := pair[1] as Callable
+		if _video_decoder.has_signal(signal_name) and _video_decoder.is_connected(signal_name, callback):
+			_video_decoder.disconnect(signal_name, callback)
+	_video_decoder_connected = false
 
 
 func _create_placeholder_texture() -> void:
@@ -555,25 +645,45 @@ func _ensure_video_decoder(width: int, height: int) -> bool:
 	_video_decoder = decoder
 
 	if not _video_decoder_connected:
-		# Decoder runs on a worker thread; defer callbacks to the main thread.
-		_video_decoder.connect(
-			"frame_ready",
-			Callable(self, "_on_video_frame_ready"),
-			CONNECT_DEFERRED
-		)
-		# Plan B: GPU YUV->RGB. Prefer this path; the RGBA frame_ready
-		# signal stays connected as a fallback for the placeholder code.
-		if _video_decoder.has_signal("yuv_frame_ready"):
+		if not decoder_stream_id.is_empty():
+			if not _video_decoder.has_signal("yuv_frame_ready_for_stream"):
+				print("[LiveVideo] Stream-scoped video decoder signals unavailable")
+				return false
 			_video_decoder.connect(
-				"yuv_frame_ready",
-				Callable(self, "_on_video_yuv_frame_ready"),
+				"frame_ready_for_stream",
+				Callable(self, "_on_video_frame_ready_for_stream"),
 				CONNECT_DEFERRED
 			)
-		_video_decoder.connect(
-			"decoder_error",
-			Callable(self, "_on_video_decoder_error"),
-			CONNECT_DEFERRED
-		)
+			_video_decoder.connect(
+				"yuv_frame_ready_for_stream",
+				Callable(self, "_on_video_yuv_frame_ready_for_stream"),
+				CONNECT_DEFERRED
+			)
+			_video_decoder.connect(
+				"decoder_error_for_stream",
+				Callable(self, "_on_video_decoder_error_for_stream"),
+				CONNECT_DEFERRED
+			)
+		else:
+			# Decoder runs on a worker thread; defer callbacks to the main thread.
+			_video_decoder.connect(
+				"frame_ready",
+				Callable(self, "_on_video_frame_ready"),
+				CONNECT_DEFERRED
+			)
+			# Plan B: GPU YUV->RGB. Prefer this path; the RGBA frame_ready
+			# signal stays connected as a fallback for the placeholder code.
+			if _video_decoder.has_signal("yuv_frame_ready"):
+				_video_decoder.connect(
+					"yuv_frame_ready",
+					Callable(self, "_on_video_yuv_frame_ready"),
+					CONNECT_DEFERRED
+				)
+			_video_decoder.connect(
+				"decoder_error",
+				Callable(self, "_on_video_decoder_error"),
+				CONNECT_DEFERRED
+			)
 		_video_decoder_connected = true
 
 	return true
@@ -581,6 +691,12 @@ func _ensure_video_decoder(width: int, height: int) -> bool:
 
 func _on_video_decoder_error(message: String) -> void:
 	print("[LiveVideo] Video decoder error: %s" % message)
+
+
+func _on_video_decoder_error_for_stream(stream_id: String, message: String) -> void:
+	if stream_id != decoder_stream_id:
+		return
+	_on_video_decoder_error(message)
 
 
 var _frame_diag_count: int = 0
@@ -774,6 +890,20 @@ func _on_video_yuv_frame_ready(
 		print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(_last_video_packet, _clock_offset_ns, _clock_samples))
 
 
+func _on_video_yuv_frame_ready_for_stream(
+		stream_id: String,
+		width: int,
+		height: int,
+		decoded_ns: int,
+		y_bytes: PackedByteArray,
+		u_bytes: PackedByteArray,
+		v_bytes: PackedByteArray,
+	) -> void:
+	if stream_id != decoder_stream_id:
+		return
+	_on_video_yuv_frame_ready(width, height, decoded_ns, y_bytes, u_bytes, v_bytes)
+
+
 func _on_video_frame_ready(
 		width: int = -1,
 		height: int = -1,
@@ -863,6 +993,18 @@ func _on_video_frame_ready(
 
 	var packet: Dictionary = _submitted_video_packets.pop_front() if not _submitted_video_packets.is_empty() else _last_video_packet
 	update_video_texture(image, packet, decoded_ns)
+
+
+func _on_video_frame_ready_for_stream(
+		stream_id: String,
+		width: int = -1,
+		height: int = -1,
+		decoded_ns: int = 0,
+		rgba: PackedByteArray = PackedByteArray()
+	) -> void:
+	if stream_id != decoder_stream_id:
+		return
+	_on_video_frame_ready(width, height, decoded_ns, rgba)
 
 
 ## Update the video texture and print a full latency summary.
@@ -1014,14 +1156,26 @@ func _submit_video_access_unit(access_unit: PackedByteArray, packet: Dictionary)
 	# Use call() to avoid relying on Godot's reflection of @UsedByGodot methods.
 	var receive_ns: int = int(packet.get("receive_ns", 0))
 	var send_ns: int = int(packet.get("send_ns", 0))
-	var accepted := bool(_video_decoder.call(
-		"submit_access_unit_timed_with_clock",
-		access_unit,
-		receive_ns,
-		send_ns,
-		_clock_offset_ns,
-		_clock_samples,
-	))
+	var accepted := false
+	if not decoder_stream_id.is_empty():
+		accepted = bool(_video_decoder.call(
+			"submit_access_unit_timed_with_clock_for_stream",
+			decoder_stream_id,
+			access_unit,
+			receive_ns,
+			send_ns,
+			_clock_offset_ns,
+			_clock_samples,
+		))
+	else:
+		accepted = bool(_video_decoder.call(
+			"submit_access_unit_timed_with_clock",
+			access_unit,
+			receive_ns,
+			send_ns,
+			_clock_offset_ns,
+			_clock_samples,
+		))
 	if accepted:
 		return true
 
@@ -1152,7 +1306,7 @@ func clear_video_stream() -> void:
 	_yuv_path_logged = false
 
 	if _video_decoder:
-		_decoder_call_void("stop_decoder")
+		_decoder_stop()
 
 	if _shader_material and _placeholder_texture:
 		_shader_material.set_shader_parameter("use_yuv", false)

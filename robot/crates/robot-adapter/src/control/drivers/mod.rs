@@ -4,6 +4,7 @@
 //! implement. SO-101 is supported through either the MuJoCo simulator driver
 //! or a Python/LeRobot Feetech bridge for real hardware.
 
+pub mod galbot_g1;
 pub mod mujoco_so101;
 pub mod so101_real;
 

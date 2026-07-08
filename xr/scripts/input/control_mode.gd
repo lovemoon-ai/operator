@@ -10,8 +10,10 @@ var _dead_zones: Dictionary = {}  # axis_name -> dead_zone
 var _button_targets: Dictionary = {}  # button_name -> button definition
 var _toggle_states: Dictionary = {}  # button_name -> bool (for toggle buttons)
 var _enable_hold_until_msec: Dictionary = {}
+var _both_triggers_hold_start_msec: int = -1
 
 const ENABLE_RELEASE_GRACE_MSEC := 100
+const TRIGGER_BUTTON_THRESHOLD := 0.5
 
 
 func configure(descriptor: Dictionary) -> void:
@@ -19,6 +21,8 @@ func configure(descriptor: Dictionary) -> void:
 	_mappings = descriptor.get("input_mapping", [])
 	_dead_zones.clear()
 	_button_targets.clear()
+	_enable_hold_until_msec.clear()
+	_both_triggers_hold_start_msec = -1
 	# Build dead zone lookup from control_schema.axes
 	var schema = descriptor.get("control_schema", {})
 	for axis_def in schema.get("axes", []):
@@ -80,6 +84,7 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"right_joystick_y": return _get_input(tracking, 1, "joystick").y
 		"left_trigger": return _get_input_float(tracking, 0, "trigger")
 		"right_trigger": return _get_input_float(tracking, 1, "trigger")
+		"both_triggers_hold_2s": return _both_triggers_held_for(tracking, 2000)
 		"left_grip": return _get_grip_value(tracking, 0)
 		"right_grip": return _get_grip_value(tracking, 1)
 		"button_a": return _get_input_bool(tracking, 1, "ax_button")
@@ -92,6 +97,20 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"right_hand_joints": return tracking.get_hand_joints(1)
 		"left_hand_joints": return tracking.get_hand_joints(0)
 	return null
+
+func _is_enable_target(target: String) -> bool:
+	return target == "enable" or target.ends_with("_enable")
+
+func _both_triggers_held_for(tracking: TrackingProvider, required_msec: int) -> bool:
+	var left := _get_input_float(tracking, 0, "trigger") >= TRIGGER_BUTTON_THRESHOLD
+	var right := _get_input_float(tracking, 1, "trigger") >= TRIGGER_BUTTON_THRESHOLD
+	if not (left and right):
+		_both_triggers_hold_start_msec = -1
+		return false
+	var now_msec := Time.get_ticks_msec()
+	if _both_triggers_hold_start_msec < 0:
+		_both_triggers_hold_start_msec = now_msec
+	return now_msec - _both_triggers_hold_start_msec >= required_msec
 
 
 func _source_value_to_button(value: Variant, scale: float, invert: bool, offset: float) -> bool:
@@ -111,10 +130,6 @@ func _source_value_to_button(value: Variant, scale: float, invert: bool, offset:
 		vector_magnitude = vector_magnitude * scale + offset
 		return vector_magnitude >= 0.5
 	return false
-
-
-func _is_enable_target(target: String) -> bool:
-	return target == "enable" or target.ends_with("_enable")
 
 
 # Helper methods to safely extract input values

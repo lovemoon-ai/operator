@@ -5,10 +5,12 @@
 
 pub mod dual_so101;
 pub mod dummy;
+pub mod galbot_g1;
 pub mod robot_arm;
 
 pub use dual_so101::DualSo101Device;
 pub use dummy::{DummyDevice, DummyHandle};
+pub use galbot_g1::GalbotG1Device;
 pub use robot_arm::RobotArmDevice;
 
 use anyhow::Result;
@@ -26,6 +28,7 @@ use crate::device::Device;
 ///   bridge (needs `cfg.arm` with a `so101` block).
 /// * `"so101_dual_real"` → [`DualSo101Device`] with two independent SO-101
 ///   hardware control processes (needs `cfg.dual_arm.left/right`).
+/// * `"galbot_g1"` → [`GalbotG1Device`] backed by the Galbot SDK Python bridge.
 /// * anything else → a `DummyDevice` (with a warning).
 ///
 /// The descriptor is resolved by the caller (via [`AdapterConfig::load_descriptor`])
@@ -57,6 +60,15 @@ pub fn build_device(
             Ok(Box::new(dev))
         }
         "dummy" => Ok(Box::new(DummyDevice::new(descriptor))),
+        "galbot_g1" => {
+            let galbot = cfg.galbot_g1.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "device_type 'galbot_g1' requires a `galbot_g1:` section in the adapter config"
+                )
+            })?;
+            let dev = GalbotG1Device::new(descriptor, galbot)?;
+            Ok(Box::new(dev))
+        }
         other => {
             tracing::warn!("device_type {other:?} not supported; using dummy device");
             Ok(Box::new(DummyDevice::new(descriptor)))

@@ -20,5 +20,7 @@ pub mod server;
 
 pub use config::AdapterConfig;
 pub use device::Device;
-pub use devices::{build_device, DummyDevice, DummyHandle, RobotArmDevice};
+pub use devices::{
+    build_device, DualSo101Device, DummyDevice, DummyHandle, GalbotG1Device, RobotArmDevice,
+};
 pub use server::serve;
