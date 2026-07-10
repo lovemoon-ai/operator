@@ -9,7 +9,7 @@
 | 项 | 值 |
 |---|---|
 | 机器人 | G1，主机名 `galbot-xcu` |
-| 连接 | `ssh root@172.16.63.24`（SSH 密钥 `~/.ssh/id_ed25519_dang217`） |
+| 连接 | `ssh root@172.16.22.158`（SSH 密钥 `~/.ssh/id_ed25519_dang217`） |
 | 系统 | Ubuntu 18.04.5 LTS，aarch64 |
 | 系统自带 Python | 3.6.9（不可用，见问题 3） |
 | SDK | GalbotSDK V1.9.0，用 `linux-aarch64-gcc940` |
@@ -24,7 +24,7 @@
 机器人上已封装为启动器 `/data/galbot/run_hello.sh`，重跑只需：
 
 ```bash
-ssh root@172.16.63.24 'cd /data/galbot && ./run_hello.sh hello_world_move_forward.py'
+ssh root@172.16.22.158 'cd /data/galbot && ./run_hello.sh hello_world_move_forward.py'
 ```
 
 ---
@@ -33,19 +33,19 @@ ssh root@172.16.63.24 'cd /data/galbot && ./run_hello.sh hello_world_move_forwar
 
 **表现**
 ```
-$ ssh root@172.16.63.24
-ssh: connect to host 172.16.63.24 port 22: Operation timed out
-$ ping -c3 172.16.63.24   # 100% packet loss
-$ nc -z -w5 172.16.63.24 22 → PORT_22_CLOSED
+$ ssh root@172.16.22.158
+ssh: connect to host 172.16.22.158 port 22: Operation timed out
+$ ping -c3 172.16.22.158   # 100% packet loss
+$ nc -z -w5 172.16.22.158 22 → PORT_22_CLOSED
 ```
-本机 IP `172.16.53.221`，机器人 `172.16.63.24`，不在同一网段。
+本机 IP `172.16.53.221`，机器人 `172.16.22.158`，不在同一网段。
 
 **原因**：机器人未开机/未联网，或本机未接入机器人所在网络（WiFi/网线/VPN）。
 
 **解决步骤**
 1. 确认机器人开机并联网。
 2. 本机接入正确网络。
-3. 复测连通：`ping -c3 172.16.63.24`，能通再继续。
+3. 复测连通：`ping -c3 172.16.22.158`，能通再继续。
 
 ---
 
@@ -53,7 +53,7 @@ $ nc -z -w5 172.16.63.24 22 → PORT_22_CLOSED
 
 **表现**
 ```
-root@172.16.63.24: Permission denied (publickey,password).
+root@172.16.22.158: Permission denied (publickey,password).
 ```
 即使配了密钥，**默认 `ssh`（不带 `-i`）仍然失败**——因为本机有多把 key，默认会先试到被服务器拒绝的那把。
 
@@ -62,11 +62,11 @@ root@172.16.63.24: Permission denied (publickey,password).
 **解决步骤**
 1. 配一次免密（会提示输入一次机器人密码）：
    ```bash
-   ssh-copy-id -i ~/.ssh/id_ed25519_dang217.pub root@172.16.63.24
+   ssh-copy-id -i ~/.ssh/id_ed25519_dang217.pub root@172.16.22.158
    ```
 2. **之后所有 ssh/scp 必须显式指定该 key**：
    ```bash
-   ssh -i ~/.ssh/id_ed25519_dang217 root@172.16.63.24
+   ssh -i ~/.ssh/id_ed25519_dang217 root@172.16.22.158
    ```
    逐个 key 测试可确认哪把有效（本例是 `id_ed25519_dang217`）。
 
@@ -93,7 +93,7 @@ galbot_sdk.cpython-39-...  ...  cpython-314-...
 
 **解决步骤**：官方源直接装 python3.8（无需第三方 PPA）：
 ```bash
-ssh -i ~/.ssh/id_ed25519_dang217 root@172.16.63.24 \
+ssh -i ~/.ssh/id_ed25519_dang217 root@172.16.22.158 \
   'DEBIAN_FRONTEND=noninteractive apt-get install -y python3.8 && python3.8 --version'
 ```
 
@@ -112,13 +112,13 @@ ssh -i ~/.ssh/id_ed25519_dang217 root@172.16.63.24 \
 **解决步骤**
 1. 先建目录，**ssh 命令内联写全**（不要用 zsh 变量拼）：
    ```bash
-   ssh -i ~/.ssh/id_ed25519_dang217 root@172.16.63.24 'mkdir -p /data/galbot/lib'
+   ssh -i ~/.ssh/id_ed25519_dang217 root@172.16.22.158 'mkdir -p /data/galbot/lib'
    ```
 2. 用 scp 部署（比依赖远端 rsync 更稳）：
    ```bash
    LIB=galbot_sdk/linux-aarch64-gcc940/lib
-   scp -q  -i ~/.ssh/id_ed25519_dang217 "$LIB"/libgalbot_sdk.so*   root@172.16.63.24:/data/galbot/lib/
-   scp -qr -i ~/.ssh/id_ed25519_dang217 "$LIB"/python/galbot_sdk   root@172.16.63.24:/data/galbot/lib/
+   scp -q  -i ~/.ssh/id_ed25519_dang217 "$LIB"/libgalbot_sdk.so*   root@172.16.22.158:/data/galbot/lib/
+   scp -qr -i ~/.ssh/id_ed25519_dang217 "$LIB"/python/galbot_sdk   root@172.16.22.158:/data/galbot/lib/
    ```
 
 ---

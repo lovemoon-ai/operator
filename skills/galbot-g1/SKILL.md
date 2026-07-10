@@ -27,3 +27,9 @@ Galbot G1 真机使用的参考资料集合，覆盖从**数据采集 → 数据
 - **`scripts/hello_world_move_forward.py`** — 底盘运动 Hello World。依次执行「前进 5cm → 后退 5cm → 原地顺时针旋转 30°」，演示 `GalbotRobot` / `GalbotNavigation` 初始化、切换 `CHASSIS_POSE_CTRL` 控制器、`relocalize` + `is_localized` 就绪判定、`move_straight_to` 相对位姿运动，并处理 `WAIT_INITIALIZED` 重试与资源安全释放。
   - 运行前确保机器人周围无障碍（不做避障），并已按 troubleshooting 文档配好 SDK 环境。
   - 在机器人 xpu 上运行：`python3 scripts/hello_world_move_forward.py`
+- **`scripts/hello_world_standup.py`** — 腿部/躯干运动 Hello World。从当前位姿执行「半高直立位 → 最高直立位 → 半高直立位 → 保持」，演示 `GalbotRobot.set_joint_positions()` 低频点位控制 `leg_joint1-3`、按 `leg_joint1:leg_joint2:leg_joint3 = 1:3:2` 和 `leg_joint2` 上限生成半高/最高直立位、限速阻塞等待，并在异常时释放 SDK 资源。
+  - 运行前确保机器人周围无障碍、急停可触达，并已按 troubleshooting 文档配好 SDK 环境。
+  - 在机器人 xpu 上运行：`python3 scripts/hello_world_standup.py`
+- **`scripts/get_camera.py`** — 三路 RGB 相机采集脚本。默认读取 `left` / `right` / `head`（分别映射 `LEFT_FRONT_SURROUND_CAMERA` / `RIGHT_FRONT_SURROUND_CAMERA` / `HEAD_LEFT_CAMERA`），直接保存 SDK 返回的 JPEG 帧，并在设备存在 `ffmpeg` 时输出 MP4；腕部相机可显式传 `left_arm,right_arm`。
+  - 机器人环境没有视频编码器时，可先保存帧目录，再拉回开发机用 `ffmpeg` 转 MP4。
+  - 在机器人 xpu 上运行：`python3 scripts/get_camera.py --duration 5 --fps 10`
