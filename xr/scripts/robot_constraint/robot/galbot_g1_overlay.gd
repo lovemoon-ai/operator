@@ -1,7 +1,7 @@
 class_name GalbotG1Overlay
 extends Node3D
 
-## Galbot G1 in-headset overlay driven by retargeting v0.1.1's
+## Galbot G1 in-headset overlay driven by retargeting v0.1.3's
 ## "dual_arm_eepose" algorithm.
 ##
 ## Runtime contract:
@@ -77,8 +77,10 @@ const JOINT_MAP := {
 const REQUIRED_RETARGET_SLOTS := [
 	"Head",
 	"LeftShoulder",
+	"LeftArmLower",
 	"LeftWrist",
 	"RightShoulder",
+	"RightArmLower",
 	"RightWrist",
 ]
 
@@ -157,7 +159,7 @@ const DIRECT_HAND_JOINT_SUFFIXES := [
 
 ## MuJoCo/GMR robot-world rest geometry for xr/assets/mujoco/galbot_g1.xml with
 ## dual_arm_eepose_galbot_g1.json posture_reference applied. Values are generated
-## from retargeting v0.1.1's Galbot example and kept here so the headset path does
+## from retargeting v0.1.3's Galbot example and kept here so the headset path does
 ## not need a second MuJoCo FK pass just to build targets.
 const ROBOT_BASE_POS := Vector3(0.0, 0.0, 1.05)
 const HEAD_DEBUG_REST_POS := Vector3(0.1069451212, 0.0, 1.9807747465)
