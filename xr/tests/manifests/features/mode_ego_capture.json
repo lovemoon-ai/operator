@@ -29,6 +29,13 @@
       "script": "res://tests/unit/capture/capture_state_machine_test.gd"
     },
     {
+      "id": "capture.pico_rgb_resolution_options",
+      "level": "unit",
+      "suite": "capture.pipeline",
+      "module": "core/capture",
+      "script": "res://tests/unit/capture/pico_rgb_resolution_options_test.gd"
+    },
+    {
       "id": "capture.start_stop_with_fake_sources",
       "level": "integration",
       "suite": "capture.pipeline",

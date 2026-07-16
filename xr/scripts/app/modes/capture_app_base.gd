@@ -358,11 +358,7 @@ func _ready() -> void:
 		add_child(upload_ack_request)
 
 	var automation := _capture_automation_options_from_args()
-	if automation.has("interaction_mode"):
-		capture_options["interaction_mode"] = automation["interaction_mode"]
-		if settings_panel and settings_panel.has_method("set_options"):
-			settings_panel.set_options(capture_options)
-		print("Capture automation interaction_mode=%s" % capture_options["interaction_mode"])
+	_apply_capture_automation_options(automation)
 
 	if bool(automation.get("auto_start", false)):
 		call_deferred(
@@ -536,6 +532,76 @@ func _capture_automation_options_from_args() -> Dictionary:
 	return options
 
 
+func _apply_capture_automation_options(automation: Dictionary) -> void:
+	var changed := false
+	if automation.has("interaction_mode"):
+		capture_options["interaction_mode"] = automation["interaction_mode"]
+		changed = true
+
+	# Host-driven RGB matrix tests only need the encoded camera stream and a
+	# head pose. Disable every optional/high-overhead stream and automatic
+	# upload without changing or persisting the operator's saved settings.
+	if bool(automation.get("rgb_only", false)):
+		var rgb_only_overrides := {
+			"stereo_rgb": true,
+			"record_depth": false,
+			"record_head_pose": true,
+			"record_controller_pose": false,
+			"record_hand_data": false,
+			"record_body_tracking": false,
+			"record_motion_trackers": false,
+			"record_audio": false,
+			"show_hand_skeleton_overlay": false,
+			"save_controller_hand_sidecar": false,
+			"save_body_sidecar": false,
+			"upload_on_finalize": false,
+		}
+		_merge_capture_options(rgb_only_overrides)
+		changed = true
+
+	if automation.has("rgb_resolution"):
+		var resolution := _parse_capture_resolution(str(automation["rgb_resolution"]))
+		if resolution != Vector2i.ZERO:
+			capture_options["rgb_width"] = resolution.x
+			capture_options["rgb_height"] = resolution.y
+			capture_options["rgb_resolution"] = _rgb_resolution_text(resolution)
+			changed = true
+
+	if automation.has("save_root"):
+		var save_root := str(automation["save_root"]).strip_edges()
+		if not save_root.is_empty():
+			capture_options["save_root"] = save_root
+			changed = true
+
+	if not changed:
+		return
+	# Keep the panel snapshot aligned so the later provider capability refresh
+	# cannot restore a persisted resolution over the automation override.
+	# set_options() only updates in-memory controls; it does not save settings.
+	if settings_panel and settings_panel.has_method("set_options"):
+		# The panel starts with Quest as its conservative fallback provider. On
+		# Pico, applying 2048x1536 before selecting the detected provider would
+		# clamp it to Quest's 1280x960 list. Bind the provider first so automation
+		# is normalized against the correct platform-specific choices.
+		if camera_plugin != null and settings_panel.has_method("set_capture_provider_name"):
+			var provider := CaptureProviderRegistryScript.provider_name(camera_plugin)
+			if not provider.is_empty():
+				settings_panel.call("set_capture_provider_name", provider)
+				_rgb_recording_provider_pushed = provider
+		settings_panel.set_options(capture_options)
+		if settings_panel.has_method("get_options"):
+			_merge_capture_options(settings_panel.get_options())
+	print(
+		"Capture automation applied: interaction_mode=%s rgb_resolution=%s save_root=%s rgb_only=%s"
+		% [
+			str(capture_options.get("interaction_mode", "")),
+			str(capture_options.get("rgb_resolution", "")),
+			str(capture_options.get("save_root", "")),
+			str(bool(automation.get("rgb_only", false))),
+		]
+	)
+
+
 func _collect_capture_automation_args(options: Dictionary, args: PackedStringArray) -> void:
 	var i := 0
 	while i < args.size():
@@ -555,6 +621,20 @@ func _collect_capture_automation_args(options: Dictionary, args: PackedStringArr
 				if i + 1 < args.size():
 					options["auto_stop_seconds"] = _parse_capture_seconds(String(args[i + 1]), AUTO_STOP_AFTER_SECONDS)
 					i += 1
+			"--operator-capture-rgb-resolution", "--capture-rgb-resolution":
+				if i + 1 < args.size():
+					options["rgb_resolution"] = String(args[i + 1]).strip_edges()
+					i += 1
+			"--operator-capture-save-root", "--capture-save-root":
+				if i + 1 < args.size():
+					options["save_root"] = String(args[i + 1]).strip_edges()
+					i += 1
+			"--operator-capture-rgb-only", "--capture-rgb-only":
+				if i + 1 < args.size() and not String(args[i + 1]).begins_with("--"):
+					options["rgb_only"] = _parse_capture_bool(String(args[i + 1]))
+					i += 1
+				else:
+					options["rgb_only"] = true
 			_:
 				if arg.begins_with("--operator-capture-interaction-mode="):
 					options["interaction_mode"] = _normalize_capture_interaction_mode(arg.substr("--operator-capture-interaction-mode=".length()))
@@ -574,6 +654,24 @@ func _collect_capture_automation_args(options: Dictionary, args: PackedStringArr
 					options["auto_stop_seconds"] = _parse_capture_seconds(arg.substr("--capture-auto-stop-seconds=".length()), AUTO_STOP_AFTER_SECONDS)
 				elif arg.begins_with("operator.capture.auto_stop_seconds="):
 					options["auto_stop_seconds"] = _parse_capture_seconds(arg.substr("operator.capture.auto_stop_seconds=".length()), AUTO_STOP_AFTER_SECONDS)
+				elif arg.begins_with("--operator-capture-rgb-resolution="):
+					options["rgb_resolution"] = arg.substr("--operator-capture-rgb-resolution=".length()).strip_edges()
+				elif arg.begins_with("--capture-rgb-resolution="):
+					options["rgb_resolution"] = arg.substr("--capture-rgb-resolution=".length()).strip_edges()
+				elif arg.begins_with("operator.capture.rgb_resolution="):
+					options["rgb_resolution"] = arg.substr("operator.capture.rgb_resolution=".length()).strip_edges()
+				elif arg.begins_with("--operator-capture-save-root="):
+					options["save_root"] = arg.substr("--operator-capture-save-root=".length()).strip_edges()
+				elif arg.begins_with("--capture-save-root="):
+					options["save_root"] = arg.substr("--capture-save-root=".length()).strip_edges()
+				elif arg.begins_with("operator.capture.save_root="):
+					options["save_root"] = arg.substr("operator.capture.save_root=".length()).strip_edges()
+				elif arg.begins_with("--operator-capture-rgb-only="):
+					options["rgb_only"] = _parse_capture_bool(arg.substr("--operator-capture-rgb-only=".length()))
+				elif arg.begins_with("--capture-rgb-only="):
+					options["rgb_only"] = _parse_capture_bool(arg.substr("--capture-rgb-only=".length()))
+				elif arg.begins_with("operator.capture.rgb_only="):
+					options["rgb_only"] = _parse_capture_bool(arg.substr("operator.capture.rgb_only=".length()))
 		i += 1
 
 
@@ -603,6 +701,19 @@ func _parse_capture_seconds(raw_value: String, fallback: float) -> float:
 		push_warning("Invalid capture auto-stop seconds: %s" % value)
 		return fallback
 	return max(value.to_float(), 0.0)
+
+
+func _parse_capture_resolution(raw_value: String) -> Vector2i:
+	var value := raw_value.strip_edges().to_lower().replace("×", "x")
+	var parts := value.split("x", false, 2)
+	if parts.size() != 2 or not parts[0].is_valid_int() or not parts[1].is_valid_int():
+		push_warning("Invalid capture RGB resolution: %s" % raw_value)
+		return Vector2i.ZERO
+	var resolution := Vector2i(int(parts[0]), int(parts[1]))
+	if resolution.x <= 0 or resolution.y <= 0:
+		push_warning("Invalid capture RGB resolution: %s" % raw_value)
+		return Vector2i.ZERO
+	return resolution
 
 
 func _process(delta: float) -> void:

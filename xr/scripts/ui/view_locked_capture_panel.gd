@@ -55,11 +55,11 @@ const LOCAL_FILE_MODE_DELETE := "delete"
 const RGB_PROVIDER_DEFAULT := "quest"
 const RGB_RESOLUTIONS := {
 	"pico": [
-		Vector2i(640, 480),
-		Vector2i(800, 600),
-		Vector2i(960, 720),
+		Vector2i(2048, 1536),
+		Vector2i(1920, 1440),
 		Vector2i(1280, 960),
-		Vector2i(1600, 1200),
+		Vector2i(1024, 768),
+		Vector2i(640, 480),
 	],
 	"quest": [
 		Vector2i(640, 480),
