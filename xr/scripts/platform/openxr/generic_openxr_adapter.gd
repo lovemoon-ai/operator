@@ -1,5 +1,10 @@
 class_name GenericOpenXRPlatformAdapter
 extends RefCounted
+
+const CapabilityInfoScript := preload("res://scripts/contracts/platform/capability_info.gd")
+const CapabilityStateScript := preload("res://scripts/contracts/platform/capability_state.gd")
+const SensorCapabilityScript := preload("res://scripts/contracts/platform/sensor_capability.gd")
+
 ## Fallback platform adapter: capabilities every OpenXR runtime provides via
 ## Godot's XRServer (pose / controllers / hand tracking).
 
@@ -16,9 +21,9 @@ func is_present() -> bool:
 
 func capabilities() -> Array:
 	var present := is_present()
-	var state := CapabilityState.AVAILABLE if present else CapabilityState.UNAVAILABLE
+	var state := CapabilityStateScript.AVAILABLE if present else CapabilityStateScript.UNAVAILABLE
 	return [
-		CapabilityInfo.create(SensorCapability.POSE, PROVIDER_ID, state, "", "", "openxr_play_space", "openxr_runtime_display_time"),
-		CapabilityInfo.create(SensorCapability.CONTROLLER, PROVIDER_ID, state, "", "", "openxr_play_space"),
-		CapabilityInfo.create(SensorCapability.HAND_TRACKING, PROVIDER_ID, state, "", "", "openxr_play_space"),
+		CapabilityInfoScript.create(SensorCapabilityScript.POSE, PROVIDER_ID, state, "", "", "openxr_play_space", "openxr_runtime_display_time"),
+		CapabilityInfoScript.create(SensorCapabilityScript.CONTROLLER, PROVIDER_ID, state, "", "", "openxr_play_space"),
+		CapabilityInfoScript.create(SensorCapabilityScript.HAND_TRACKING, PROVIDER_ID, state, "", "", "openxr_play_space"),
 	]

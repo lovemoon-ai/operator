@@ -1,5 +1,4 @@
 #include "native_openxr_hand_capture.h"
-#include "variant_json.h"
 
 #include <android/log.h>
 #include <dlfcn.h>
@@ -94,54 +93,6 @@ void pack_hand(const std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT>
 	}
 }
 
-std::string build_hand_json_line(
-		const std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> &p_joints,
-		int64_t p_timestamp_ns,
-		const char *p_hand,
-		const String &p_coordinate_space) {
-	std::string line;
-	line.reserve(8192);
-	char head[128];
-	std::snprintf(head, sizeof(head),
-			"{\"timestamp_ns\":%" PRId64 ",\"hand\":\"%s\",\"coordinate_space\":",
-			p_timestamp_ns, p_hand);
-	line += head;
-	append_json_string(line, p_coordinate_space);
-	std::snprintf(head, sizeof(head), ",\"joint_count\":%d,\"joints\":[", XR_HAND_JOINT_COUNT_EXT);
-	line += head;
-	constexpr float sqrt_half = 0.7071067811865475f;
-	const XrQuaternionf bone_adjustment{ 0.f, -sqrt_half, sqrt_half, 0.f };
-	for (uint16_t joint_index = 0; joint_index < XR_HAND_JOINT_COUNT_EXT; ++joint_index) {
-		if (joint_index > 0) line += ',';
-		const XrHandJointLocationEXT &joint = p_joints[joint_index];
-		const XrQuaternionf rotation = multiply(joint.pose.orientation, bone_adjustment);
-		char prefix[80];
-		std::snprintf(prefix, sizeof(prefix),
-				"{\"joint\":%u,\"flags\":%u,\"radius_m\":",
-				static_cast<unsigned>(joint_index),
-				static_cast<unsigned>(godot_hand_flags(joint.locationFlags)));
-		line += prefix;
-		append_json_float(line, joint.radius);
-		line += ",\"position\":{\"x\":";
-		append_json_float(line, joint.pose.position.x);
-		line += ",\"y\":";
-		append_json_float(line, joint.pose.position.y);
-		line += ",\"z\":";
-		append_json_float(line, joint.pose.position.z);
-		line += "},\"rotation\":{\"x\":";
-		append_json_float(line, rotation.x);
-		line += ",\"y\":";
-		append_json_float(line, rotation.y);
-		line += ",\"z\":";
-		append_json_float(line, rotation.z);
-		line += ",\"w\":";
-		append_json_float(line, rotation.w);
-		line += "}}";
-	}
-	line += "]}";
-	return line;
-}
-
 } // namespace
 
 NativeOpenXRHandCapture::NativeOpenXRHandCapture() : OpenXRExtensionWrapperExtension() {
@@ -154,9 +105,8 @@ NativeOpenXRHandCapture::~NativeOpenXRHandCapture() {
 }
 
 void NativeOpenXRHandCapture::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("start_recording", "xr_time_to_godot_ns", "hands_jsonl_path", "coordinate_space"),
-			&NativeOpenXRHandCapture::start_recording, DEFVAL(0), DEFVAL(String()),
-			DEFVAL(String("openxr_play_space")));
+	ClassDB::bind_method(D_METHOD("start_recording", "xr_time_to_godot_ns"),
+			&NativeOpenXRHandCapture::start_recording, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("stop_recording"), &NativeOpenXRHandCapture::stop_recording);
 	ClassDB::bind_method(D_METHOD("is_recording"), &NativeOpenXRHandCapture::is_recording);
 	ClassDB::bind_method(D_METHOD("pop_metrics"), &NativeOpenXRHandCapture::pop_metrics);
@@ -240,9 +190,7 @@ void NativeOpenXRHandCapture::close_muxer() {
 	}
 }
 
-bool NativeOpenXRHandCapture::start_recording(int64_t p_xr_time_to_godot_ns,
-		const String &p_hands_jsonl_path,
-		const String &p_coordinate_space) {
+bool NativeOpenXRHandCapture::start_recording(int64_t p_xr_time_to_godot_ns) {
 	stop_recording();
 	(void)pop_metrics();
 	set_error("");
@@ -253,19 +201,12 @@ bool NativeOpenXRHandCapture::start_recording(int64_t p_xr_time_to_godot_ns,
 		return false;
 	}
 	base_space_ = reinterpret_cast<XrSpace>(api->get_play_space());
-	coordinate_space_ = p_coordinate_space.is_empty() ? String("openxr_play_space") : p_coordinate_space;
 	if (!resolve_muxer() || !active_writer_()) {
 		if (get_last_error().is_empty()) set_error("SpatialMP4 writer is not active");
 		close_muxer();
 		return false;
 	}
-	if (!p_hands_jsonl_path.is_empty() && !jsonl_.begin(p_hands_jsonl_path)) {
-		set_error("failed to open the native hands.jsonl sidecar");
-		close_muxer();
-		return false;
-	}
-
-	for (int hand = 0; hand < 2; ++hand) {
+		for (int hand = 0; hand < 2; ++hand) {
 		const XrHandTrackerCreateInfoEXT create_info{
 			XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT,
 			nullptr,
@@ -274,11 +215,10 @@ bool NativeOpenXRHandCapture::start_recording(int64_t p_xr_time_to_godot_ns,
 		};
 		const XrResult result = create_hand_tracker_(session_, &create_info, &trackers_[hand]);
 		if (XR_FAILED(result) || trackers_[hand] == XR_NULL_HAND_TRACKER_EXT) {
-			set_error("xrCreateHandTrackerEXT failed for one or more hands");
-			destroy_trackers();
-			jsonl_.end();
-			close_muxer();
-			return false;
+				set_error("xrCreateHandTrackerEXT failed for one or more hands");
+				destroy_trackers();
+				close_muxer();
+				return false;
 		}
 	}
 
@@ -294,7 +234,6 @@ void NativeOpenXRHandCapture::stop_recording() {
 	stop_requested_.store(true, std::memory_order_release);
 	if (worker_.joinable()) worker_.join();
 	running_.store(false, std::memory_order_release);
-	jsonl_.end();
 	destroy_trackers();
 	close_muxer();
 	base_space_ = nullptr;
@@ -322,8 +261,6 @@ Dictionary NativeOpenXRHandCapture::pop_metrics() {
 	metrics["native_hand_locate_failures"] = metric_locate_failures_.exchange(0);
 	metrics["native_hand_inactive_samples"] = metric_inactive_samples_.exchange(0);
 	metrics["native_hand_deadline_misses"] = metric_deadline_misses_.exchange(0);
-	metrics["native_hand_jsonl_lines"] = static_cast<int64_t>(jsonl_.pop_lines());
-	metrics["native_hand_jsonl_dropped"] = static_cast<int64_t>(jsonl_.pop_dropped());
 	return metrics;
 }
 
@@ -359,8 +296,7 @@ void NativeOpenXRHandCapture::worker_loop() {
 			break;
 		}
 		const int64_t pts_us = (xr_time + xr_time_to_godot_ns_) / 1000;
-		const int64_t timestamp_ns = xr_time + xr_time_to_godot_ns_;
-		bool metadata_write_failed = false;
+			bool metadata_write_failed = false;
 		for (int hand = 0; hand < 2; ++hand) {
 			(hand == 0 ? metric_queries_left_ : metric_queries_right_).fetch_add(1, std::memory_order_relaxed);
 			XrHandJointLocationsEXT locations{
@@ -380,14 +316,10 @@ void NativeOpenXRHandCapture::worker_loop() {
 				continue;
 			}
 			pack_hand(joints[hand], payloads[hand]);
-			if (write_metadata_(hand == 0 ? kTrackLeftHand : kTrackRightHand,
-					payloads[hand].data(), payloads[hand].size(), pts_us, kSampleDurationUs)) {
-				(hand == 0 ? metric_writes_left_ : metric_writes_right_).fetch_add(1, std::memory_order_relaxed);
-				if (jsonl_.active()) {
-					jsonl_.enqueue(build_hand_json_line(
-							joints[hand], timestamp_ns, hand == 0 ? "left" : "right", coordinate_space_));
-				}
-			} else {
+				if (write_metadata_(hand == 0 ? kTrackLeftHand : kTrackRightHand,
+						payloads[hand].data(), payloads[hand].size(), pts_us, kSampleDurationUs)) {
+					(hand == 0 ? metric_writes_left_ : metric_writes_right_).fetch_add(1, std::memory_order_relaxed);
+				} else {
 				set_error("SpatialMP4 writer rejected a native hand metadata packet");
 				metadata_write_failed = true;
 				break;

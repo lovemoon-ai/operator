@@ -1,11 +1,15 @@
 class_name CapabilityInfo
 extends RefCounted
+
+const CapabilityStateScript := preload("res://scripts/contracts/platform/capability_state.gd")
+const SensorCapabilityScript := preload("res://scripts/contracts/platform/sensor_capability.gd")
+
 ## v2 contracts: description of one capability as reported by a platform
 ## adapter through PlatformRegistry.
 
 var capability_id: int = -1
 var provider_id: String = ""
-var state: int = CapabilityState.UNAVAILABLE
+var state: int = CapabilityStateScript.UNAVAILABLE
 var reason: String = ""
 var payload_format: String = ""
 var coordinate_space: String = ""
@@ -22,7 +26,7 @@ static func create(
 	p_coordinate_space: String = "",
 	p_timestamp_source: String = "",
 	p_rate_hz: float = 0.0
-) -> CapabilityInfo:
+) -> Object:
 	var info := CapabilityInfo.new()
 	info.capability_id = p_capability_id
 	info.provider_id = p_provider_id
@@ -36,14 +40,14 @@ static func create(
 
 
 func available() -> bool:
-	return state == CapabilityState.AVAILABLE
+	return state == CapabilityStateScript.AVAILABLE
 
 
 func to_dict() -> Dictionary:
 	return {
-		"capability": SensorCapability.id_to_string(capability_id),
+		"capability": SensorCapabilityScript.id_to_string(capability_id),
 		"provider_id": provider_id,
-		"state": CapabilityState.id_to_string(state),
+		"state": CapabilityStateScript.id_to_string(state),
 		"reason": reason,
 		"payload_format": payload_format,
 		"coordinate_space": coordinate_space,

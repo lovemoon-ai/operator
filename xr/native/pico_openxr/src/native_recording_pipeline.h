@@ -25,16 +25,24 @@ public:
 		bool stereo = true;
 		int eye_width = 0;
 		int eye_height = 0;
-		int fps = 30;
-		int bitrate = 8'000'000;
-		std::string codec = "hevc";
-		int64_t xr_time_to_godot_ns = 0;
-		std::string left_frame_index_path;
-		std::string right_frame_index_path;
+			int fps = 30;
+			int bitrate = 8'000'000;
+			std::string codec = "hevc";
+			int64_t xr_time_to_godot_ns = 0;
+			bool rgb_tracking_sample_metadata = true;
+			bool rgb_tracking_sample_head = true;
+			bool rgb_tracking_sample_hands = true;
+		std::string tracking_coordinate_space = "openxr_play_space";
+		XrSpace base_space = nullptr;
+		XrSpace view_space = nullptr;
+		XrHandTrackerEXT left_hand_tracker = XR_NULL_HAND_TRACKER_EXT;
+		XrHandTrackerEXT right_hand_tracker = XR_NULL_HAND_TRACKER_EXT;
 
 		PFN_xrAcquireCameraImagePICO acquire_camera = nullptr;
 		PFN_xrGetCameraImageDataPICO get_camera_data = nullptr;
 		PFN_xrReleaseCameraImagePICO release_camera = nullptr;
+		PFN_xrLocateSpace locate_space = nullptr;
+		PFN_xrLocateHandJointsEXT locate_hand_joints = nullptr;
 	};
 
 	struct Metrics {

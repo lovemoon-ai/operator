@@ -19,9 +19,7 @@ class_name EgoUploader
 ##     Pico eMMC + Wi-Fi cannot sustain a 24 Mbps HEVC write AND a
 ##     TUS PATCH stream simultaneously without dropping recording
 ##     frames (see claw/issues/010-ego-data-upload.md, "Trip-wires").
-##   - We upload `manifest.json`, every opt-in fixed-name debug sidecar listed
-##     by the manifest, and `<session_dir>/{session_id}.mp4`. Raw depth dumps
-##     remain local because they are an unbounded binary diagnostic directory.
+##   - We upload `manifest.json` and `<session_dir>/{session_id}.mp4`.
 ##
 ## Signals are emitted via call_deferred from the worker thread so
 ## listeners always see them on the main thread.
@@ -139,17 +137,6 @@ func enqueue(session_dir: String, mp4_path: String, options: Dictionary) -> bool
 		ARTIFACT_MANIFEST: {"path": manifest_path, "tus_location": "", "offset": 0, "done": false},
 		ARTIFACT_MEDIA:    {"path": mp4_path,      "tus_location": "", "offset": 0, "done": false},
 	}
-	for sidecar in SessionLayout.DEBUG_SIDECAR_ARTIFACTS:
-		var filename := str(sidecar.get("filename", ""))
-		var path := session_dir.path_join(filename)
-		if filename.is_empty() or not FileAccess.file_exists(path):
-			continue
-		artifacts[str(sidecar.get("kind", filename.get_basename()))] = {
-			"path": path,
-			"tus_location": "",
-			"offset": 0,
-			"done": false
-		}
 	var job := {
 		"session_id": session_id,
 		"session_dir": session_dir,
@@ -366,10 +353,8 @@ func _process_job(job: Dictionary) -> bool:
 		_cleanup_cancelled_job(job)
 		return false
 	var artifacts: Dictionary = job.get("artifacts", {})
-	# Manifest first so the server can allocate the session record before
-	# optional legacy sidecars and the much larger mp4 arrive. Keep sidecars
-	# ahead of media so older ingest workers that still consult them have the
-	# fallback files before media completion starts preview/Rerun work.
+		# Manifest first so the server can allocate the session record before
+		# the much larger mp4 arrives.
 	for kind in _artifact_upload_order(artifacts):
 		if not artifacts.has(kind):
 			continue
@@ -394,12 +379,6 @@ func _artifact_upload_order(artifacts: Dictionary) -> Array:
 	var ordered: Array = []
 	if artifacts.has(ARTIFACT_MANIFEST):
 		ordered.append(ARTIFACT_MANIFEST)
-	for sidecar in SessionLayout.DEBUG_SIDECAR_ARTIFACTS:
-		var sidecar_kind := str(sidecar.get("kind", ""))
-		if artifacts.has(sidecar_kind):
-			ordered.append(sidecar_kind)
-	# Media is the completion trigger on the ingest server, so upload it after
-	# every declared sidecar is durable and integrity-checked there.
 	if artifacts.has(ARTIFACT_MEDIA):
 		ordered.append(ARTIFACT_MEDIA)
 	for kind in artifacts.keys():

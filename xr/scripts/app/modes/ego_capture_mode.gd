@@ -1,5 +1,5 @@
-class_name EgoCaptureMode
 extends "res://scripts/app/modes/capture_app_base.gd"
+class_name EgoCaptureMode
 ## v2 app/modes (WP6): thin scene-lifecycle entry point for the ego-capture
 ## mode (feature: operator_feature_mode_ego_capture).
 ##

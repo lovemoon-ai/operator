@@ -159,7 +159,7 @@ claw/qa-artifacts/<version>/qa-test-plan.md
 
 - 静态检查脚本：聚合 shell syntax、Python syntax、repo 静态 validator。
 - 矩阵脚本：按 `device:codec:resolution:fps` 等 case 调用基础脚本。
-- 产物 validator：读取 manifest、ffprobe、metadata、sidecar，做结构化校验。
+- 产物 validator：读取 manifest、ffprobe、metadata，做结构化校验。
 - 转换检查：对真实产物跑 web/Rerun/转换链路。
 
 测试脚本设计要求：

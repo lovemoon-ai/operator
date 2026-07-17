@@ -70,8 +70,8 @@ mode intent extras, and routes to mode scenes.
 `scripts/app/composition/` builds feature-specific dependency graphs:
 
 - `teleop_composition.gd` wires command output and robot control.
-- `ego_capture_composition.gd` wires SpatialMP4, manifest/upload artifacts,
-  optional sidecars, and sensors.
+- `ego_capture_composition.gd` wires SpatialMP4, manifest/upload artifacts, and
+  sensors.
 - `live_feed_composition.gd` wires live-push writers and live-stream sinks.
 
 ## Core Modules
@@ -85,14 +85,14 @@ mode intent extras, and routes to mode scenes.
 - `scripts/contracts/` - stable GDScript contracts used by modes, sinks, and
   tests.
 - `scripts/sinks/` - concrete outputs: SpatialMP4, upload queue, live stream,
-  robot control, JSONL sidecar, and sink contract.
+  robot control, and sink contract.
 - `native/hand_capture/` - GDExtension owning the hot joint-capture paths in
   C++: `NativeOpenXRHandCapture` owns Quest/PICO `XR_EXT_hand_tracking`
   trackers and writes MP4 HJNT on an independent 60 Hz worker clock;
-  `NativeHandSampler` handles render-driven live push + hands.jsonl;
+  `NativeHandSampler` handles render-driven live push;
   `NativeBodyMotionWriter`
-  packs/serializes body joints and motion-tracker records (mp4 metadata JSON
-  + JSONL sidecars on a background thread). GDScript keeps only the
+  packs/serializes body joints and motion-tracker records into MP4 metadata
+  tracks. GDScript keeps only the
   per-frame trigger, runtime selection, and diagnostics.
 - `native/pico_openxr/` - PICO OpenXR bridge; camera RGB frames are pumped
   by a dedicated native worker: `XR_PICO_camera_image` raw RGBA pointer -> GLES
@@ -162,13 +162,11 @@ Each local Ego recording is stored as one movable session directory:
     manifest.json
 ```
 
-This is the default complete recording. `poses/`, `body_motion/`, and `depth/`
-are created only when their explicit debug mirrors are enabled. Camera metadata
-sidecars (`android_timebase.json`, camera characteristics, and per-eye frame
-JSONL) are likewise opt-in through `save_camera_metadata_sidecars`; their
-canonical contents remain embedded in MP4. Local-session discovery continues
-to recognize the historical `<capture_root>/<session_id>.mp4` sibling layout so
-existing recordings remain available for preview, upload, and deletion.
+This is the complete recording. Pose, body, depth, camera calibration, timebase,
+and RGB frame-index metadata are embedded in MP4 tracks/metadata. Local-session
+discovery continues to recognize the historical `<capture_root>/<session_id>.mp4`
+sibling layout so existing recordings remain available for preview, upload, and
+deletion.
 
 ## Ego Recording Container Contract
 
@@ -177,15 +175,14 @@ canonical replay artifact. A consumer that only has `media.mp4` must be able to
 recover the sensor payloads and metadata required for spatial interpretation:
 RGB/depth pixels, audio, head/controller/hand/body tracks, Camera2 calibration,
 RGB frame timing, depth frame metadata, body frame extras, and motion trackers.
-JSONL sidecars may still exist for debug, export, or legacy compatibility, but
-they must not be required to correctly parse a new raw MP4.
+MP4 metadata is the source of truth.
 
 `manifest.json` remains a first-class upload artifact. Its role is file and
 session inventory, not sensor interpretation. It records artifact filenames,
-kinds, sizes, hashes such as `sha256`, upload status, derivation status, optional
-debug sidecars, and any file-level metadata that cannot live inside the MP4
-without creating circular dependencies. In particular, `media.mp4` cannot embed
-its own final hash; that belongs in `manifest.json` or the ingest database.
+kinds, sizes, hashes such as `sha256`, upload status, derivation status, and any
+file-level metadata that cannot live inside the MP4 without creating circular
+dependencies. In particular, `media.mp4` cannot embed its own final hash; that
+belongs in `manifest.json` or the ingest database.
 
 The MP4 container contract uses media tracks for high-volume samples and `mett`
 timed-metadata tracks for structured metadata:
@@ -200,18 +197,9 @@ timed-metadata tracks for structured metadata:
 | `body_frame_meta` | Frame-level `body_flags` and provider-specific body extras that do not fit the compact body-joints payload. | Per body frame. |
 | `motion_trackers` | PICO motion tracker pose samples, velocities, accelerations, battery state, and power-key events. | Per tracker sample/event. |
 
-Readers should use this precedence:
-
-1. Prefer embedded MP4 metadata tracks.
-2. Fall back to uploaded sidecars for old recordings.
-3. Treat `manifest.json` as artifact inventory and integrity metadata, not as
-   the source of geometry or timing needed to render the recording.
-
-The migration is complete for current captures: readers and ingest prefer the
-embedded tracks, while legacy sidecar fallback paths keep old recordings usable.
-Default uploads require only `manifest.json` and `media.mp4`. Fixed-name debug
-sidecars are opt-in artifacts: when present they are inventoried and hashed in
-the manifest, then uploaded before the media artifact. Unbounded raw depth dumps
+Readers should use embedded MP4 metadata tracks for geometry and timing, while
+`manifest.json` remains artifact inventory and integrity metadata. Default
+uploads require only `manifest.json` and `media.mp4`. Unbounded raw depth dumps
 remain local diagnostics and are not part of the upload artifact contract.
 
 ## Platform Registry

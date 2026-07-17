@@ -40,6 +40,7 @@ constexpr AVRational kUsTimeBase{1, 1000000};
 constexpr int64_t kDefaultRgbDurationUs = 33333;
 constexpr int64_t kDefaultDepthDurationUs = 200000;
 constexpr int64_t kDefaultPoseDurationUs = 11111;
+constexpr int64_t kPoseReorderWindowUs = 2'000'000;
 // AAC-LC at 48 kHz packs 1024 samples per frame = ~21.3 ms; default keeps
 // the audio packets in steady-state if the provider forgets to set duration.
 constexpr int64_t kDefaultAudioDurationUs = 21333;
@@ -158,6 +159,7 @@ struct PendingPacket {
   int64_t pts_us = 0;
   int64_t duration_us = 0;
   int flags = 0;
+  uint64_t sequence = 0;
   std::vector<uint8_t> data;
 };
 
@@ -207,7 +209,10 @@ class LiveSpatialMp4Writer {
         device_type_(std::move(device_type)),
         device_model_(std::move(device_model)),
         device_manufacturer_(std::move(device_manufacturer)),
-        timed_streams_(kTimedTrackCount, nullptr) {
+        timed_streams_(kTimedTrackCount, nullptr),
+        timed_reorder_buffers_(kTimedTrackCount),
+        timed_reorder_max_pts_us_(kTimedTrackCount, INT64_MIN),
+        timed_last_written_pts_us_(kTimedTrackCount, INT64_MIN) {
     // Document the configured session in logcat so a crash report or an
     // unexpected mp4 layout can be triaged from the launch banner alone.
     // Touching audio_channel_layout_code_hint_ here also keeps the field
@@ -681,6 +686,7 @@ class LiveSpatialMp4Writer {
       if (affects_timeline && (first_pts_us_ == INT64_MIN || pts_us < first_pts_us_)) {
         first_pts_us_ = pts_us;
       }
+      packet.sequence = next_packet_sequence_++;
       io_queue_.push_back(std::move(packet));
     }
     queue_cv_.notify_one();
@@ -754,15 +760,18 @@ class LiveSpatialMp4Writer {
         }
         if (header_written_) {
           for (auto& pkt : deferred) {
-            WritePacket_Locked(pkt);
+            WriteOrBufferPacket_Locked(std::move(pkt));
             if (!last_error_.empty()) break;
           }
           deferred.clear();
           for (auto& pkt : batch) {
-            WritePacket_Locked(pkt);
+            WriteOrBufferPacket_Locked(std::move(pkt));
             if (!last_error_.empty()) break;
           }
           batch.clear();
+          if (last_error_.empty()) {
+            FlushTimedReorderBuffers_Locked(finish_now);
+          }
         } else {
           // Header still not writable (e.g. depth not yet configured).
           // Hold packets in the io thread's local deferred buffer so we
@@ -927,7 +936,7 @@ class LiveSpatialMp4Writer {
     }
     // Replay-critical JSON metadata tracks. These make a raw SpatialMP4
     // self-contained while the external manifest stays responsible for file
-    // inventory, hashes, and optional debug sidecars.
+    // inventory and hashes.
     AddTimedMetadataStream(kTrackOperatorStatic, "session", "operator_static",
                            "spatialmp4.operator_static.session.v1", "application/json", "session");
     AddTimedMetadataStream(kTrackRgbFrameIndexLeft, "left", "rgb_frame_index",
@@ -1024,6 +1033,86 @@ class LiveSpatialMp4Writer {
       av_dict_set_int(&stream->metadata, "track_base_time", track_base_unix_us, 0);
       av_dict_set_int(&stream->metadata, "track_base_godot_ticks_us", track_base_godot_ticks_us, 0);
       av_dict_set_int(&stream->metadata, "track_base_unix_us", track_base_unix_us, 0);
+    }
+  }
+
+  static bool IsReorderedTimedTrack(int track_id) {
+    return track_id == kTrackHeadPose ||
+           track_id == kTrackLeftHandJoints ||
+           track_id == kTrackRightHandJoints;
+  }
+
+  bool WriteOrBufferPacket_Locked(PendingPacket&& pending) {
+    if (pending.kind == PacketKind::kTimedMetadata && IsReorderedTimedTrack(pending.timed_track_id)) {
+      BufferTimedReorderPacket_Locked(std::move(pending));
+      return last_error_.empty();
+    }
+    return WritePacket_Locked(pending);
+  }
+
+  void BufferTimedReorderPacket_Locked(PendingPacket&& pending) {
+    if (pending.timed_track_id < 0 || pending.timed_track_id >= kTimedTrackCount) {
+      return;
+    }
+    if (pending.pts_us <= timed_last_written_pts_us_[pending.timed_track_id]) {
+      __android_log_print(ANDROID_LOG_WARN, kTag,
+                          "dropping late timed metadata track=%d pts=%lld last=%lld",
+                          pending.timed_track_id,
+                          static_cast<long long>(pending.pts_us),
+                          static_cast<long long>(timed_last_written_pts_us_[pending.timed_track_id]));
+      return;
+    }
+
+    auto& buffer = timed_reorder_buffers_[pending.timed_track_id];
+    for (auto& existing : buffer) {
+      if (existing.pts_us == pending.pts_us) {
+        if (pending.sequence >= existing.sequence) {
+          existing = std::move(pending);
+        }
+        return;
+      }
+    }
+
+    int64_t& max_pts = timed_reorder_max_pts_us_[pending.timed_track_id];
+    if (max_pts == INT64_MIN || pending.pts_us > max_pts) {
+      max_pts = pending.pts_us;
+    }
+    auto insert_at = std::upper_bound(buffer.begin(), buffer.end(), pending,
+                                      [](const PendingPacket& lhs, const PendingPacket& rhs) {
+                                        if (lhs.pts_us != rhs.pts_us) {
+                                          return lhs.pts_us < rhs.pts_us;
+                                        }
+                                        return lhs.sequence < rhs.sequence;
+                                      });
+    buffer.insert(insert_at, std::move(pending));
+  }
+
+  void FlushTimedReorderBuffers_Locked(bool flush_all) {
+    for (int track_id : {kTrackHeadPose, kTrackLeftHandJoints, kTrackRightHandJoints}) {
+      auto& buffer = timed_reorder_buffers_[track_id];
+      const int64_t max_pts = timed_reorder_max_pts_us_[track_id];
+      const int64_t watermark = flush_all || max_pts == INT64_MIN
+          ? INT64_MAX
+          : max_pts - kPoseReorderWindowUs;
+      while (!buffer.empty() && buffer.front().pts_us <= watermark) {
+        PendingPacket packet = std::move(buffer.front());
+        buffer.erase(buffer.begin());
+        if (packet.pts_us <= timed_last_written_pts_us_[track_id]) {
+          __android_log_print(ANDROID_LOG_WARN, kTag,
+                              "dropping duplicate/late timed metadata track=%d pts=%lld last=%lld",
+                              track_id,
+                              static_cast<long long>(packet.pts_us),
+                              static_cast<long long>(timed_last_written_pts_us_[track_id]));
+          continue;
+        }
+        if (!WritePacket_Locked(packet)) {
+          return;
+        }
+        timed_last_written_pts_us_[track_id] = packet.pts_us;
+      }
+      if (!last_error_.empty()) {
+        return;
+      }
     }
   }
 
@@ -1224,6 +1313,11 @@ class LiveSpatialMp4Writer {
     depth_stream_ = nullptr;
     audio_stream_ = nullptr;
     std::fill(timed_streams_.begin(), timed_streams_.end(), nullptr);
+    for (auto& buffer : timed_reorder_buffers_) {
+      buffer.clear();
+    }
+    std::fill(timed_reorder_max_pts_us_.begin(), timed_reorder_max_pts_us_.end(), INT64_MIN);
+    std::fill(timed_last_written_pts_us_.begin(), timed_last_written_pts_us_.end(), INT64_MIN);
   }
 
   // --- FFmpeg / writer-thread state (guarded by format_mutex_) ---
@@ -1267,6 +1361,9 @@ class LiveSpatialMp4Writer {
   int depth_width_ = 0;
   int depth_height_ = 0;
   std::vector<AVStream*> timed_streams_;
+  std::vector<std::vector<PendingPacket>> timed_reorder_buffers_;
+  std::vector<int64_t> timed_reorder_max_pts_us_;
+  std::vector<int64_t> timed_last_written_pts_us_;
   std::string last_error_;
 
   // --- Producer/consumer queue (guarded by queue_mutex_) ---
@@ -1275,6 +1372,7 @@ class LiveSpatialMp4Writer {
   std::condition_variable drain_cv_;
   std::deque<PendingPacket> io_queue_;
   int64_t first_pts_us_ = INT64_MIN;
+  uint64_t next_packet_sequence_ = 0;
   bool shutdown_requested_ = false;
   bool finish_requested_ = false;
   bool drained_ = false;

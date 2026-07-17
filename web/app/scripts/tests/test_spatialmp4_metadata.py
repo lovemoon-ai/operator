@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -24,7 +23,7 @@ class SpatialMp4MetadataTest(unittest.TestCase):
             set(RERUN_FRAME_METADATA_KINDS),
         )
 
-    def test_mp4_metadata_is_sufficient_without_sidecars(self) -> None:
+    def test_mp4_metadata_is_sufficient_without_external_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             input_path = Path(raw_root) / "session" / "session.mp4"
             operator_static = {
@@ -48,28 +47,23 @@ class SpatialMp4MetadataTest(unittest.TestCase):
             self.assertEqual("mp4", source)
             self.assertEqual("godot_ticks_ns", timebase["rgb_timestamp_domain"])
             self.assertIsNone(timebase_error)
-            self.assertFalse(input_path.parent.exists(), "resolution must not create sidecar directories")
+            self.assertFalse(input_path.parent.exists(), "resolution must not create external metadata directories")
 
-    def test_legacy_sidecars_remain_a_reader_fallback(self) -> None:
+    def test_missing_mp4_metadata_does_not_fall_back_to_external_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             session_dir = Path(raw_root) / "session"
             session_dir.mkdir()
             input_path = session_dir / "session.mp4"
-            (session_dir / "left_camera_characteristics.json").write_text(
-                json.dumps({"recording_width": 1024, "recording_height": 1024})
-            )
-            (session_dir / "android_timebase.json").write_text(
-                json.dumps({"rgb_timestamp_domain": "legacy"})
-            )
+            (session_dir / "left_camera_characteristics.json").write_text("{}")
+            (session_dir / "android_timebase.json").write_text("{}")
 
             candidates, errors = camera2_metadata_candidates(input_path, None, "left")
             timebase, source, timebase_error = resolve_android_timebase_metadata(input_path, None)
 
-            self.assertEqual(1, len(candidates))
-            self.assertFalse(candidates[0][2])
+            self.assertEqual([], candidates)
             self.assertEqual([], errors)
-            self.assertEqual("legacy", timebase["rgb_timestamp_domain"])
-            self.assertEqual(str(session_dir / "android_timebase.json"), source)
+            self.assertIsNone(timebase)
+            self.assertEqual("", source)
             self.assertIsNone(timebase_error)
 
 

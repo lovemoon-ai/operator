@@ -29,10 +29,6 @@ const KNOWN_KEYS := [
 	"server_host",
 	"server_port",
 	"server_result_port",
-	"save_controller_hand_sidecar",
-	"save_body_sidecar",
-	"save_depth_sidecar",
-	"save_camera_metadata_sidecars",
 	"save_root",
 	"capture_sink",
 	"capture_provider",
@@ -63,10 +59,6 @@ var rgb_codec: String = "hevc"
 var server_host: String = ""
 var server_port: int = 0
 var server_result_port: int = 0
-var save_controller_hand_sidecar: bool = false
-var save_body_sidecar: bool = false
-var save_depth_sidecar: bool = false
-var save_camera_metadata_sidecars: bool = false
 var save_root: String = ""
 var capture_sink: String = ""
 var capture_provider: String = ""
@@ -143,10 +135,6 @@ func _assign(key: String, value: Variant) -> void:
 		"server_host": server_host = str(value)
 		"server_port": server_port = int(value)
 		"server_result_port": server_result_port = int(value)
-		"save_controller_hand_sidecar": save_controller_hand_sidecar = bool(value)
-		"save_body_sidecar": save_body_sidecar = bool(value)
-		"save_depth_sidecar": save_depth_sidecar = bool(value)
-		"save_camera_metadata_sidecars": save_camera_metadata_sidecars = bool(value)
 		"save_root": save_root = str(value)
 		"capture_sink": capture_sink = str(value)
 		"capture_provider": capture_provider = str(value)
@@ -179,10 +167,6 @@ func _read(key: String) -> Variant:
 		"server_host": return server_host
 		"server_port": return server_port
 		"server_result_port": return server_result_port
-		"save_controller_hand_sidecar": return save_controller_hand_sidecar
-		"save_body_sidecar": return save_body_sidecar
-		"save_depth_sidecar": return save_depth_sidecar
-		"save_camera_metadata_sidecars": return save_camera_metadata_sidecars
 		"save_root": return save_root
 		"capture_sink": return capture_sink
 		"capture_provider": return capture_provider

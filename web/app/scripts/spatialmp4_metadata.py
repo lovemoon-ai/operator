@@ -7,7 +7,6 @@ the native SpatialMP4 SDK.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -85,64 +84,26 @@ def extract_android_timebase(
     return None
 
 
-def legacy_sidecar_candidates(input_path: Path, filename: str) -> List[Path]:
-    return [
-        input_path.with_suffix("") / filename,
-        input_path.parent / filename,
-    ]
-
-
-def load_legacy_json_sidecar(
-    input_path: Path,
-    filename: str,
-) -> Tuple[Optional[Dict[str, Any]], Optional[Path], Optional[str]]:
-    sidecar_path = next(
-        (path for path in legacy_sidecar_candidates(input_path, filename) if path.exists()),
-        None,
-    )
-    if sidecar_path is None:
-        return None, None, None
-    try:
-        decoded = json.loads(sidecar_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        return None, sidecar_path, str(exc)
-    if not isinstance(decoded, dict):
-        return None, sidecar_path, "metadata is not a JSON object"
-    return decoded, sidecar_path, None
-
-
 def camera2_metadata_candidates(
     input_path: Path,
     operator_static: Optional[Dict[str, Any]],
     eye: str,
 ) -> Tuple[List[CameraMetadataCandidate], List[str]]:
-    """Return embedded metadata first, followed by a legacy sidecar fallback."""
+    """Return Camera2 metadata embedded in MP4 operator_static."""
+    _ = input_path
     candidates: List[CameraMetadataCandidate] = []
-    errors: List[str] = []
     embedded = extract_camera2_characteristics(operator_static, eye)
     if embedded is not None:
         candidates.append((embedded, f"MP4 operator_static {eye} Camera2 characteristics", True))
-
-    sidecar, sidecar_path, error = load_legacy_json_sidecar(
-        input_path,
-        f"{eye}_camera_characteristics.json",
-    )
-    if sidecar is not None and sidecar_path is not None:
-        candidates.append((sidecar, str(sidecar_path), False))
-    elif error is not None and sidecar_path is not None:
-        errors.append(f"Camera2 sidecar read failed ({sidecar_path}): {error}")
-    return candidates, errors
+    return candidates, []
 
 
 def resolve_android_timebase_metadata(
     input_path: Path,
     operator_static: Optional[Dict[str, Any]],
 ) -> Tuple[Optional[Dict[str, Any]], str, Optional[str]]:
+    _ = input_path
     embedded = extract_android_timebase(operator_static)
     if embedded is not None:
         return embedded, "mp4", None
-
-    sidecar, sidecar_path, error = load_legacy_json_sidecar(input_path, "android_timebase.json")
-    if sidecar is not None and sidecar_path is not None:
-        return sidecar, str(sidecar_path), None
-    return None, str(sidecar_path) if sidecar_path is not None else "", error
+    return None, "", None

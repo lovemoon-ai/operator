@@ -1,5 +1,10 @@
 class_name QuestPlatformAdapter
 extends RefCounted
+
+const CapabilityInfoScript := preload("res://scripts/contracts/platform/capability_info.gd")
+const CapabilityStateScript := preload("res://scripts/contracts/platform/capability_state.gd")
+const SensorCapabilityScript := preload("res://scripts/contracts/platform/sensor_capability.gd")
+
 ## Platform adapter for Meta Quest. This file (and the rest of
 ## xr/scripts/platform/) is the only place allowed to reference the Quest
 ## vendor singleton names. App/core code reaches these objects through
@@ -96,16 +101,16 @@ func convert_depth_to_u16mm(data: PackedByteArray, width: int, height: int, row3
 func capabilities() -> Array:
 	var caps: Array = []
 	var present := is_present()
-	var cam_state := CapabilityState.AVAILABLE if present else CapabilityState.UNAVAILABLE
-	caps.append(CapabilityInfo.create(SensorCapability.CAMERA_RGB, PROVIDER_ID, cam_state))
-	caps.append(CapabilityInfo.create(SensorCapability.CAMERA_STEREO, PROVIDER_ID, cam_state))
-	caps.append(CapabilityInfo.create(SensorCapability.AUDIO_CAPTURE, PROVIDER_ID, cam_state))
-	caps.append(CapabilityInfo.create(SensorCapability.OPENXR_TIMEBASE, PROVIDER_ID, cam_state))
-	var depth_state := CapabilityState.AVAILABLE if not depth_extension_info().is_empty() else CapabilityState.REQUIRES_RUNTIME_EXTENSION
-	caps.append(CapabilityInfo.create(SensorCapability.DEPTH_MAP, PROVIDER_ID, depth_state))
-	var boundary_state := CapabilityState.AVAILABLE if boundary_extension() != null else CapabilityState.UNAVAILABLE
-	caps.append(CapabilityInfo.create(SensorCapability.BOUNDARY, PROVIDER_ID, boundary_state))
-	var mux_state := CapabilityState.AVAILABLE if muxer_plugin() != null else CapabilityState.UNAVAILABLE
-	caps.append(CapabilityInfo.create(SensorCapability.SPATIAL_MP4_MUX, PROVIDER_ID, mux_state))
-	caps.append(CapabilityInfo.create(SensorCapability.BODY_TRACKING, PROVIDER_ID, cam_state, "", "godot_xr_body_tracker"))
+	var cam_state := CapabilityStateScript.AVAILABLE if present else CapabilityStateScript.UNAVAILABLE
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.CAMERA_RGB, PROVIDER_ID, cam_state))
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.CAMERA_STEREO, PROVIDER_ID, cam_state))
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.AUDIO_CAPTURE, PROVIDER_ID, cam_state))
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.OPENXR_TIMEBASE, PROVIDER_ID, cam_state))
+	var depth_state := CapabilityStateScript.AVAILABLE if not depth_extension_info().is_empty() else CapabilityStateScript.REQUIRES_RUNTIME_EXTENSION
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.DEPTH_MAP, PROVIDER_ID, depth_state))
+	var boundary_state := CapabilityStateScript.AVAILABLE if boundary_extension() != null else CapabilityStateScript.UNAVAILABLE
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.BOUNDARY, PROVIDER_ID, boundary_state))
+	var mux_state := CapabilityStateScript.AVAILABLE if muxer_plugin() != null else CapabilityStateScript.UNAVAILABLE
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.SPATIAL_MP4_MUX, PROVIDER_ID, mux_state))
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.BODY_TRACKING, PROVIDER_ID, cam_state, "", "godot_xr_body_tracker"))
 	return caps

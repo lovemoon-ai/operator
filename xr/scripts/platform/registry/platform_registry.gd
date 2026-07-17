@@ -1,20 +1,30 @@
 class_name PlatformRegistry
 extends RefCounted
+
+const PicoPlatformAdapterScript := preload("res://scripts/platform/pico/pico_platform_adapter.gd")
+const QuestPlatformAdapterScript := preload("res://scripts/platform/quest/quest_platform_adapter.gd")
+const GenericOpenXRPlatformAdapterScript := preload("res://scripts/platform/openxr/generic_openxr_adapter.gd")
+const CapabilityInfoScript := preload("res://scripts/contracts/platform/capability_info.gd")
+const CapabilityStateScript := preload("res://scripts/contracts/platform/capability_state.gd")
+const SensorCapabilityScript := preload("res://scripts/contracts/platform/sensor_capability.gd")
+const LiveStreamProviderScript := preload("res://scripts/platform/registry/live_stream_provider.gd")
+const QrProviderScript := preload("res://scripts/platform/registry/qr_provider.gd")
+
 ## v2 platform capability registry. Owns the vendor platform adapters and is
 ## the app/core entry point for capability queries and provider objects.
 ## Dependency rule: app/core/sinks code never references vendor singleton
 ## names — it goes through this registry (or an injected adapter).
 
-static var _shared: PlatformRegistry
+static var _shared: Object
 
-var _pico_adapter: PicoPlatformAdapter
-var _quest_adapter: QuestPlatformAdapter
-var _generic_adapter: GenericOpenXRPlatformAdapter
+var _pico_adapter: Object
+var _quest_adapter: Object
+var _generic_adapter: Object
 var _capabilities: Dictionary = {}  # capability_id -> CapabilityInfo (best provider wins)
 var _providers: Dictionary = {}     # capability_id -> Object
 
 
-static func create() -> PlatformRegistry:
+static func create() -> Object:
 	var registry := PlatformRegistry.new()
 	registry._initialize()
 	return registry
@@ -22,16 +32,16 @@ static func create() -> PlatformRegistry:
 
 ## Process-wide cached registry for call sites that have no injection path
 ## (legacy sampler fallbacks). Cheap to build; adapters are stateless probes.
-static func shared() -> PlatformRegistry:
+static func shared() -> Object:
 	if _shared == null:
 		_shared = create()
 	return _shared
 
 
 func _initialize() -> void:
-	_pico_adapter = PicoPlatformAdapter.new()
-	_quest_adapter = QuestPlatformAdapter.new()
-	_generic_adapter = GenericOpenXRPlatformAdapter.new()
+	_pico_adapter = PicoPlatformAdapterScript.new()
+	_quest_adapter = QuestPlatformAdapterScript.new()
+	_generic_adapter = GenericOpenXRPlatformAdapterScript.new()
 	# Priority order: Pico > Quest > generic. Later (lower-priority) entries
 	# only fill capability ids not already AVAILABLE from a higher-priority
 	# adapter that is present on this device.
@@ -49,42 +59,42 @@ func _initialize() -> void:
 		ordered.append(_quest_adapter)
 	for adapter in ordered:
 		for info_v in adapter.capabilities():
-			var info := info_v as CapabilityInfo
+			var info: Object = info_v
 			if info == null:
 				continue
-			var existing: CapabilityInfo = _capabilities.get(info.capability_id)
+			var existing: Object = _capabilities.get(info.capability_id)
 			if existing == null or (not existing.available() and info.available()):
 				_capabilities[info.capability_id] = info
 				_providers[info.capability_id] = adapter
 	# Cross-cutting providers.
-	var live_plugin := LiveStreamProvider.bind()
-	_capabilities[SensorCapability.LIVE_STREAM_SERVER] = CapabilityInfo.create(
-		SensorCapability.LIVE_STREAM_SERVER, "live_stream",
-		CapabilityState.AVAILABLE if live_plugin != null else CapabilityState.UNAVAILABLE)
-	var qr_plugin := QrProvider.bind()
-	_capabilities[SensorCapability.QR_SCAN] = CapabilityInfo.create(
-		SensorCapability.QR_SCAN, "qr_scanner",
-		CapabilityState.AVAILABLE if qr_plugin != null else CapabilityState.UNAVAILABLE)
+	var live_plugin: Object = LiveStreamProviderScript.bind()
+	_capabilities[SensorCapabilityScript.LIVE_STREAM_SERVER] = CapabilityInfoScript.create(
+		SensorCapabilityScript.LIVE_STREAM_SERVER, "live_stream",
+		CapabilityStateScript.AVAILABLE if live_plugin != null else CapabilityStateScript.UNAVAILABLE)
+	var qr_plugin: Object = QrProviderScript.bind()
+	_capabilities[SensorCapabilityScript.QR_SCAN] = CapabilityInfoScript.create(
+		SensorCapabilityScript.QR_SCAN, "qr_scanner",
+		CapabilityStateScript.AVAILABLE if qr_plugin != null else CapabilityStateScript.UNAVAILABLE)
 
 
 func has_capability(id: int) -> bool:
-	var info: CapabilityInfo = _capabilities.get(id)
+	var info: Object = _capabilities.get(id)
 	return info != null and info.available()
 
 
-func capability_info(id: int) -> CapabilityInfo:
-	var info: CapabilityInfo = _capabilities.get(id)
+func capability_info(id: int) -> Object:
+	var info: Object = _capabilities.get(id)
 	if info != null:
 		return info
-	return CapabilityInfo.create(id, "", CapabilityState.UNAVAILABLE, "no provider")
+	return CapabilityInfoScript.create(id, "", CapabilityStateScript.UNAVAILABLE, "no provider")
 
 
 func provider_for(id: int) -> Object:
 	match id:
-		SensorCapability.LIVE_STREAM_SERVER:
-			return LiveStreamProvider.bind()
-		SensorCapability.QR_SCAN:
-			return QrProvider.bind()
+		SensorCapabilityScript.LIVE_STREAM_SERVER:
+			return LiveStreamProviderScript.bind()
+		SensorCapabilityScript.QR_SCAN:
+			return QrProviderScript.bind()
 	return _providers.get(id)
 
 
@@ -95,11 +105,11 @@ func capabilities() -> Array:
 	return out
 
 
-func pico_adapter() -> PicoPlatformAdapter:
+func pico_adapter() -> Object:
 	return _pico_adapter
 
 
-func quest_adapter() -> QuestPlatformAdapter:
+func quest_adapter() -> Object:
 	return _quest_adapter
 
 
@@ -126,14 +136,14 @@ func bind_camera_provider() -> Object:
 
 
 func muxer_plugin() -> Object:
-	var plugin := _quest_adapter.muxer_plugin()
+	var plugin: Object = _quest_adapter.muxer_plugin()
 	if plugin != null:
 		return plugin
 	return _pico_adapter.muxer_plugin()
 
 
 func live_server_plugin() -> Object:
-	return LiveStreamProvider.bind()
+	return LiveStreamProviderScript.bind()
 
 
 func boundary_extension() -> Object:

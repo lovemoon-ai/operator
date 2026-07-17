@@ -1,5 +1,10 @@
 class_name PicoPlatformAdapter
 extends RefCounted
+
+const CapabilityInfoScript := preload("res://scripts/contracts/platform/capability_info.gd")
+const CapabilityStateScript := preload("res://scripts/contracts/platform/capability_state.gd")
+const SensorCapabilityScript := preload("res://scripts/contracts/platform/sensor_capability.gd")
+
 ## Platform adapter for PICO. Only xr/scripts/platform/ may reference the
 ## PICO vendor singleton names.
 
@@ -73,14 +78,14 @@ func instantiate_openxr_bridge() -> Object:
 func capabilities() -> Array:
 	var caps: Array = []
 	var present := is_present()
-	var cam_state := CapabilityState.AVAILABLE if present else CapabilityState.UNAVAILABLE
-	caps.append(CapabilityInfo.create(SensorCapability.CAMERA_RGB, PROVIDER_ID, cam_state))
-	var body_state := CapabilityState.AVAILABLE if openxr_bridge_native() != null else CapabilityState.UNAVAILABLE
-	caps.append(CapabilityInfo.create(SensorCapability.BODY_TRACKING, PROVIDER_ID, body_state, "", "pico_bd"))
-	caps.append(CapabilityInfo.create(SensorCapability.MOTION_TRACKERS, PROVIDER_ID, body_state))
-	var mux_state := CapabilityState.AVAILABLE if muxer_plugin() != null else CapabilityState.UNAVAILABLE
-	caps.append(CapabilityInfo.create(SensorCapability.SPATIAL_MP4_MUX, PROVIDER_ID, mux_state))
-	caps.append(CapabilityInfo.create(
-		SensorCapability.DEPTH_MAP, PROVIDER_ID,
-		CapabilityState.UNAVAILABLE, "no depth camera stream"))
+	var cam_state := CapabilityStateScript.AVAILABLE if present else CapabilityStateScript.UNAVAILABLE
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.CAMERA_RGB, PROVIDER_ID, cam_state))
+	var body_state := CapabilityStateScript.AVAILABLE if openxr_bridge_native() != null else CapabilityStateScript.UNAVAILABLE
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.BODY_TRACKING, PROVIDER_ID, body_state, "", "pico_bd"))
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.MOTION_TRACKERS, PROVIDER_ID, body_state))
+	var mux_state := CapabilityStateScript.AVAILABLE if muxer_plugin() != null else CapabilityStateScript.UNAVAILABLE
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.SPATIAL_MP4_MUX, PROVIDER_ID, mux_state))
+	caps.append(CapabilityInfoScript.create(
+		SensorCapabilityScript.DEPTH_MAP, PROVIDER_ID,
+		CapabilityStateScript.UNAVAILABLE, "no depth camera stream"))
 	return caps

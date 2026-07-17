@@ -26,8 +26,6 @@ static func definitions() -> Array[FeatureDefinition]:
 	defs.append(FeatureDefinition.create(
 		OperatorFeature.SINK_SPATIALMP4, true, "sinks/spatialmp4"))
 	defs.append(FeatureDefinition.create(
-		OperatorFeature.SINK_JSONL, true, "sinks/jsonl"))
-	defs.append(FeatureDefinition.create(
 		OperatorFeature.SINK_LIVE_STREAM, false, "sinks/live_stream"))
 	defs.append(FeatureDefinition.create(
 		OperatorFeature.SINK_UPLOAD, true, "sinks/upload"))

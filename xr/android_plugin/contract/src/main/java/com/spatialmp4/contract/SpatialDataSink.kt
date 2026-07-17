@@ -52,8 +52,7 @@ import java.nio.ByteBuffer
 //
 // Bumped to 5 alongside self-contained ego MP4 Phase 1: providers can embed
 // one-shot operator static JSON (Camera2 characteristics + Android timebase)
-// and per-RGB-frame index JSON into `mett` tracks while keeping legacy sidecar
-// files unchanged.
+// and per-RGB-frame index JSON into `mett` tracks.
 //
 // Bumped to 6 alongside selectable RGB video codecs: RgbStreamConfig gains a
 // `codec` tag ("hevc" or "h264") so muxers can tag the MP4 video track with
@@ -439,8 +438,7 @@ interface SpatialDataSink {
     // ---- v5 self-contained ego metadata ----------------------------------
     //
     // Default no-ops keep older sinks bind-compatible. Providers always send
-    // these records to MP4 `mett` tracks so a raw MP4 can stand alone; JSON
-    // sidecars are optional debug mirrors controlled by capture options.
+    // these records to MP4 `mett` tracks so a raw MP4 can stand alone.
 
     /**
      * One-shot session-static JSON. The muxer writes it to the
