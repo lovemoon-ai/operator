@@ -40,6 +40,9 @@ static func definitions() -> Array[FeatureDefinition]:
 		OperatorFeature.DEBUG_METRICS, false, "app/debug"))
 	defs.append(FeatureDefinition.create(
 		OperatorFeature.TEST_HARNESS, false, "test_support"))
+	defs.append(FeatureDefinition.create(
+		OperatorFeature.SINK_ISAAC_TELEOP, false, "sinks/isaac_teleop",
+		"", [OperatorFeature.MODE_TELEOP], [], ["POSE", "CONTROLLER"]))
 	return defs
 
 

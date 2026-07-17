@@ -1,6 +1,9 @@
 extends Node
 class_name PoseSampler
 
+const LEFT_HAND_TRACKER := &"/user/hand_tracker/left"
+const RIGHT_HAND_TRACKER := &"/user/hand_tracker/right"
+
 # Per-category JSONL write throttles. Head still goes to the mp4 `mett` stream
 # every sample() call (cheap JNI Enqueue), but the GDScript-side JSONL writes
 # are far more expensive (Dictionary build + JSON.stringify +
@@ -16,6 +19,7 @@ class_name PoseSampler
 # runtime in the desktop editor anyway.
 const HEAD_JSONL_INTERVAL_US := 16667        # 60 Hz
 const CONTROLLER_JSONL_INTERVAL_US := 33333  # 30 Hz
+const HAND_STREAM_INTERVAL_US := 33333       # 30 Hz
 # Controller-input capture is event-driven: XRController3D's button/float/
 # vector2 signals (connected in configure) call _sample_controller_input the
 # moment anything changes. The periodic poll below is only a snapshot
@@ -63,6 +67,10 @@ var _record_hand_data := true
 var _last_head_jsonl_us := 0
 var _last_controller_jsonl_us := 0
 var _last_controller_input_poll_us := 0
+var _last_hand_emit_us := 0
+var _controller_emit_interval_us := CONTROLLER_JSONL_INTERVAL_US
+var _hand_emit_interval_us := HAND_STREAM_INTERVAL_US
+var _external_hand_stream_enabled := false
 var _xr_display_time_provider: Object
 var _capture_provider: Object
 var _platform: Object
@@ -194,6 +202,15 @@ func on_session_stopped() -> void:
 		_native_hand_sampler.end_jsonl()
 
 
+## Override the controller/hand canonical-frame intervals for low-latency
+## non-recording sinks. Capture keeps the JSONL-friendly defaults above;
+## IsaacTeleop passes zero so every sampler tick publishes the latest pose.
+func set_stream_intervals(controller_interval_us: int, hand_interval_us: int) -> void:
+	_controller_emit_interval_us = maxi(0, controller_interval_us)
+	_hand_emit_interval_us = maxi(0, hand_interval_us)
+	_external_hand_stream_enabled = true
+
+
 func resolve_pose_timestamp_ns(default_ticks_ns: int) -> int:
 	# Prefer the OpenXR-predicted display time (XrTime, ns) when the patched
 	# Vendors wrapper exposes it, so pose, depth, and RGB share the same XR
@@ -267,7 +284,8 @@ func sample(timestamp_ns: int) -> void:
 			if head_jsonl:
 				_last_head_jsonl_us = now_us
 
-	var controller_jsonl: bool = (now_us - _last_controller_jsonl_us) >= CONTROLLER_JSONL_INTERVAL_US
+	var controller_jsonl: bool = (now_us - _last_controller_jsonl_us) \
+		>= _controller_emit_interval_us
 	if _record_controller_pose and left_controller and controller_jsonl:
 		var left_pose := left_controller.get_pose()
 		if left_pose != null:
@@ -309,6 +327,46 @@ func sample(timestamp_ns: int) -> void:
 		# are disabled while the independent 60 Hz OpenXR recorder is active.
 		# NativeHandSampler dedupes extra pose-loop iterations per process frame.
 		_native_hand_sampler.sample(resolved_ts)
+	elif _record_hand_data and _external_hand_stream_enabled:
+		var hand_due: bool = (now_us - _last_hand_emit_us) >= _hand_emit_interval_us
+		if hand_due:
+			_sample_hand("left", LEFT_HAND_TRACKER, resolved_ts)
+			_sample_hand("right", RIGHT_HAND_TRACKER, resolved_ts)
+			_last_hand_emit_us = now_us
+
+
+func _sample_hand(hand: String, tracker_name: StringName, timestamp_ns: int) -> void:
+	var tracker := XRServer.get_tracker(tracker_name)
+	if tracker == null or not (tracker is XRHandTracker):
+		return
+
+	var hand_tracker := tracker as XRHandTracker
+	if not hand_tracker.has_tracking_data:
+		return
+
+	var joints: Array = []
+	for joint in range(XRHandTracker.HAND_JOINT_MAX):
+		var transform := hand_tracker.get_hand_joint_transform(joint)
+		var q := transform.basis.get_rotation_quaternion()
+		var p := transform.origin
+		joints.append({
+			"joint": joint,
+			"flags": hand_tracker.get_hand_joint_flags(joint),
+			"radius_m": hand_tracker.get_hand_joint_radius(joint),
+			"position": {"x": p.x, "y": p.y, "z": p.z},
+			"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
+		})
+
+	var frame := SensorFrame.new()
+	frame.frame_type = SensorFrameType.HAND
+	frame.timestamp_ns = timestamp_ns
+	frame.coordinate_space = _coordinate_space
+	frame.source_id = hand
+	frame.payload = {
+		"hand": hand,
+		"joints": joints,
+	}
+	_frame_sink.on_frame(frame)
 
 
 ## XRCamera3D applies XRPose.get_adjusted_transform() to its Node3D transform,

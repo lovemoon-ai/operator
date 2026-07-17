@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=71,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "operator-to-so101"
+version = "0.1.0"
+description = "Teleoperate and record a real SO-101 follower from Operator XR through LeRobot"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Operator contributors" }]
+dependencies = [
+    "huggingface-hub>=1.5,<2",
+    "lerobot[dataset,feetech,kinematics] @ git+https://github.com/huggingface/lerobot.git@92f96f33b3a842ead3a115cc4f701ba2ad8aa3b5",
+    "numpy>=2,<3",
+    "operator-isaacteleop",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+operator-to-so101-teleoperate = "operator_to_so101.teleoperate:main"
+operator-to-so101-record = "operator_to_so101.record:main"
+operator-to-so101-save-reset = "operator_to_so101.save_reset_pose:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+operator-isaacteleop = { path = "../../plugins/isaac-teleop/python", editable = true }
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

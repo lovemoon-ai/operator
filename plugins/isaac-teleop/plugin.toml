@@ -1,0 +1,23 @@
+[plugin]
+id = "isaac_teleop"
+name = "Operator IsaacTeleop"
+version = "0.1.0"
+description = "Operator OpenXR input and display bridge for IsaacTeleop and Isaac Sim"
+
+[compatibility]
+operator_protocol = 1
+isaac_teleop_tag = "v1.3.131"
+isaac_teleop_commit = "7002ed63d69454ae4f15c0ee19f803fd2846592b"
+schema_codec = "operator-canonical-v1"
+direct_flatbuffers_codec = "reserved-v2"
+
+[components]
+xr = "../../xr/scripts/sinks/isaac_teleop"
+gateway = "../../robot/crates/xr-bridge"
+python = "python"
+schema = "schema"
+
+[transport]
+udp_port = 63904
+unix_socket = "/tmp/operator-isaacteleop.sock"
+max_datagram_bytes = 1200

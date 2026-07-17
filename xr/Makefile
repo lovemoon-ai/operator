@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-isaac-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 ADB?=adb
 ADB_BASE:=$(ADB)
@@ -113,6 +113,11 @@ run-vr:
 run-teleop:
 	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode teleop
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+
+run-isaac-teleop:
+	$(ADB) shell am start -n $(package)/$(activity) \
+		--es operator.mode teleop --es operator.isaac_teleop true
+	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "IsaacTeleop" -e "godot" -e "OpenXR"
 
 run-ego:
 	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode ego

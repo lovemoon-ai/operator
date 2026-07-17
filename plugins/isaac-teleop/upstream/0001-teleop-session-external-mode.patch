@@ -1,0 +1,165 @@
+diff --git a/src/core/teleop_session_manager/python/config.py b/src/core/teleop_session_manager/python/config.py
+index 172ba6f..978aeec 100644
+--- a/src/core/teleop_session_manager/python/config.py
++++ b/src/core/teleop_session_manager/python/config.py
+@@ -33,10 +33,11 @@ if TYPE_CHECKING:
+ 
+ 
+ class SessionMode(Enum):
+-    """Determines whether the teleop session runs live or replays from an MCAP file."""
++    """Select the DeviceIO lifecycle used by a teleop session."""
+ 
+     LIVE = "live"
+     REPLAY = "replay"
++    EXTERNAL = "external"
+ 
+ 
+ class RetargetingExecutionMode(str, Enum):
+@@ -303,7 +304,8 @@ class TeleopSessionConfig:
+     Attributes:
+         app_name: Name of the OpenXR application
+         pipeline: Main retargeting pipeline.
+-        mode: Whether to run a live OpenXR session or replay from an MCAP file.
++        mode: Whether to run a live OpenXR session, replay from an MCAP file,
++            or accept only caller-provided inputs without creating OpenXR/DeviceIO.
+             Defaults to ``SessionMode.LIVE``. When ``REPLAY``, ``mcap_config`` is required
+             and OpenXR/plugin initialization is skipped.
+         teleop_control_pipeline: Optional control pipeline whose outputs are
+@@ -394,6 +396,18 @@ class TeleopSessionConfig:
+         """Validate configuration consistency."""
+         if self.mode == SessionMode.REPLAY and self.mcap_config is None:
+             raise ValueError("mcap_config is required when mode is SessionMode.REPLAY")
++        if self.mode == SessionMode.EXTERNAL:
++            if self.oxr_handles is not None:
++                raise ValueError("oxr_handles are not valid in SessionMode.EXTERNAL")
++            if self.mcap_config is not None:
++                raise ValueError(
++                    "mcap_config is not yet supported in SessionMode.EXTERNAL; "
++                    "record external records at the provider boundary"
++                )
++            if self.trackers:
++                raise ValueError("trackers are not valid in SessionMode.EXTERNAL")
++            if self.sinks:
++                raise ValueError("DeviceIO sinks are not valid in SessionMode.EXTERNAL")
+ 
+         self._validate_sinks()
+ 
+diff --git a/src/core/teleop_session_manager/python/teleop_session.py b/src/core/teleop_session_manager/python/teleop_session.py
+index f7fecf9..d603d06 100644
+--- a/src/core/teleop_session_manager/python/teleop_session.py
++++ b/src/core/teleop_session_manager/python/teleop_session.py
+@@ -292,7 +292,11 @@ class TeleopSession:
+             if isinstance(node, IDeviceIOSource):
+                 self._sources.append(node)
+             elif node.input_spec():
+-                if id(node) in control_leaf_ids and id(node) not in main_leaf_ids:
++                if (
++                    self.config.mode != SessionMode.EXTERNAL
++                    and id(node) in control_leaf_ids
++                    and id(node) not in main_leaf_ids
++                ):
+                     raise ValueError(
+                         "teleop_control_pipeline contains an external-input leaf "
+                         f"'{node.name}', which is not supported. Control pipeline "
+@@ -300,6 +304,13 @@ class TeleopSession:
+                     )
+                 self._external_leaves.append(node)
+ 
++        if self.config.mode == SessionMode.EXTERNAL and self._sources:
++            source_names = sorted(source.name for source in self._sources)
++            raise ValueError(
++                "SessionMode.EXTERNAL pipelines cannot contain DeviceIO sources; "
++                f"replace them with external ValueInput leaves: {source_names}"
++            )
++
+         # Create tracker-to-source mapping for efficient lookup
+         self._tracker_to_source: Dict[Any, Any] = {}
+         for source in self._sources:
+@@ -463,7 +474,8 @@ class TeleopSession:
+         DeviceIO source state across threads. Sync mode calls the same method
+         directly so the behavioral core stays in one place.
+         """
+-        self.deviceio_session.update()
++        if self.deviceio_session is not None:
++            self.deviceio_session.update()
+         pipeline_inputs = self._collect_tracker_data()
+ 
+         if request.external_inputs:
+@@ -941,7 +953,11 @@ class TeleopSession:
+                     mcap_tracker_names,
+                 )
+ 
+-        if self.config.mode == SessionMode.REPLAY:
++        if self.config.mode == SessionMode.EXTERNAL:
++            # The caller owns acquisition and passes every required leaf through
++            # step(external_inputs=...). No OpenXR or DeviceIO object exists.
++            self.deviceio_session = None
++        elif self.config.mode == SessionMode.REPLAY:
+             self.deviceio_session = self._exit_stack.enter_context(
+                 deviceio.ReplaySession.run(mcap_config)
+             )
+diff --git a/src/core/teleop_session_manager_tests/python/test_teleop_session.py b/src/core/teleop_session_manager_tests/python/test_teleop_session.py
+index 8a1f657..f9bd124 100644
+--- a/src/core/teleop_session_manager_tests/python/test_teleop_session.py
++++ b/src/core/teleop_session_manager_tests/python/test_teleop_session.py
+@@ -3053,5 +3053,60 @@ class TestOutputSinks:
+             )
+ 
+ 
++class TestExternalMode:
++    """Headless caller-owned input lifecycle."""
++
++    def test_external_mode_skips_openxr_and_deviceio(self):
++        ext = MockExternalRetargeter("operator_head")
++        pipeline = MockPipeline(leaf_nodes=[ext], call_result={"action": "ok"})
++        config = TeleopSessionConfig(
++            app_name="operator",
++            pipeline=pipeline,
++            mode=SessionMode.EXTERNAL,
++            verbose=False,
++        )
++        external_data = {"operator_head": {"external_data": MagicMock()}}
++
++        with (
++            patch("isaacteleop.oxr.OpenXRSession") as openxr_session,
++            patch("isaacteleop.deviceio.DeviceIOSession.run") as deviceio_run,
++        ):
++            with TeleopSession(config) as session:
++                result = session.step(external_inputs=external_data)
++
++        assert result == {"action": "ok"}
++        assert set(pipeline.last_inputs) == {"operator_head"}
++        openxr_session.assert_not_called()
++        deviceio_run.assert_not_called()
++
++    def test_external_mode_rejects_deviceio_sources(self):
++        source = MockHeadSource()
++        config = TeleopSessionConfig(
++            app_name="operator",
++            pipeline=MockPipeline(leaf_nodes=[source]),
++            mode=SessionMode.EXTERNAL,
++        )
++
++        with pytest.raises(ValueError, match="cannot contain DeviceIO sources"):
++            TeleopSession(config)
++
++    @pytest.mark.parametrize(
++        "kwargs, message",
++        [
++            ({"trackers": [object()]}, "trackers"),
++            ({"oxr_handles": MockOpenXRHandles()}, "oxr_handles"),
++            ({"mcap_config": MagicMock()}, "mcap_config"),
++        ],
++    )
++    def test_external_mode_rejects_deviceio_configuration(self, kwargs, message):
++        with pytest.raises(ValueError, match=message):
++            TeleopSessionConfig(
++                app_name="operator",
++                pipeline=MockPipeline(),
++                mode=SessionMode.EXTERNAL,
++                **kwargs,
++            )
++
++
+ if __name__ == "__main__":
+     pytest.main([__file__, "-v"])

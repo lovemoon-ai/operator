@@ -23,6 +23,12 @@ const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 
+@export var isaac_teleop_udp_port := IsaacTeleopSink.DEFAULT_UDP_PORT
+@export var isaac_teleop_session_token := 0
+@export var isaac_teleop_descriptor_version := IsaacTeleopSink.DEFAULT_DESCRIPTOR_VERSION
+@export var isaac_teleop_require_deadman := true
+@export_range(0.0, 1.0, 0.05) var isaac_teleop_button_threshold := 0.5
+
 @onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
 @onready var _origin: XROrigin3D = $XROrigin3D
 @onready var _camera: XRCamera3D = $XROrigin3D/XRCamera3D
@@ -40,6 +46,12 @@ var _session: Session
 ## composition — wire JSON, 72 Hz rate, enable prints all unchanged.
 var _robot_control_sink: RobotControlSink
 var _command_sender: CommandSender
+## Optional external-device stream for IsaacTeleop.  It is composed only in
+## APKs with operator_feature_sink_isaac_teleop and is otherwise null.
+var _isaac_teleop_sink: IsaacTeleopSink
+var _isaac_teleop_pose_sampler: PoseSampler
+var _isaac_teleop_body_sampler: IsaacTeleopBodySampler
+var _isaac_teleop_control_policy: IsaacTeleopControlPolicy
 ## TCP video handler — used when the descriptor selects "tcp" or as the
 ## fallback for "auto"-mode descriptors that didn't supply a UDP port.
 var _video_tcp_handler: TcpHandler
@@ -153,6 +165,26 @@ func _process(_delta: float) -> void:
 	_update_teleop_controller_panel()
 
 
+func _physics_process(_delta: float) -> void:
+	if _isaac_teleop_sink == null or not _isaac_teleop_sink.is_sending():
+		return
+	var timestamp_ns := Time.get_ticks_usec() * 1000
+	if _isaac_teleop_pose_sampler != null:
+		_isaac_teleop_pose_sampler.sample(timestamp_ns)
+	if _isaac_teleop_body_sampler != null:
+		_isaac_teleop_body_sampler.sample(timestamp_ns)
+	if _isaac_teleop_control_policy != null:
+		var right_input: Dictionary = {}
+		if _tracking_provider != null and _tracking_provider.has_method("get_controller_input"):
+			var right_input_v: Variant = _tracking_provider.call("get_controller_input", 1)
+			if right_input_v is Dictionary:
+				right_input = right_input_v as Dictionary
+		var control := _isaac_teleop_control_policy.sample(right_input)
+		_isaac_teleop_sink.send_control(
+			bool(control["kill"]), bool(control["run_toggle"]),
+			bool(control["reset"]), bool(control["deadman"]), timestamp_ns)
+
+
 # Push the detected input source down to the teleop settings panel so the
 # title-bar indicator (defined on BaseSettingsPanel) stays in sync. Cheap
 # because the panel only repaints when the mode actually changes.
@@ -207,9 +239,27 @@ func _create_v2_nodes() -> void:
 
 	# WP6: command emission stack built by the teleop composition root
 	# (CommandSender Node + RobotControlSink wrapper, behavior unchanged).
-	var teleop := TeleopComposition.build(self)
+	var features := FeatureSet.from_export_tags()
+	var pico_bridge: Object = null
+	var bridge_autoload := get_node_or_null("/root/PicoOpenXRBridge")
+	if bridge_autoload != null and bridge_autoload.has_method("get_bridge"):
+		pico_bridge = bridge_autoload.call("get_bridge")
+	var teleop := TeleopComposition.build(self, features, {
+		"camera": _camera,
+		"left_controller": _left_controller,
+		"right_controller": _right_controller,
+		"platform": PlatformRegistry.shared(),
+		"pico_openxr_bridge": pico_bridge,
+	})
 	_command_sender = teleop.get("command_sender")
 	_robot_control_sink = teleop.get("robot_control_sink")
+	_isaac_teleop_sink = teleop.get("isaac_teleop_sink")
+	_isaac_teleop_pose_sampler = teleop.get("isaac_teleop_pose_sampler")
+	_isaac_teleop_body_sampler = teleop.get("isaac_teleop_body_sampler")
+	if _isaac_teleop_sink:
+		_isaac_teleop_control_policy = IsaacTeleopControlPolicy.new()
+		_isaac_teleop_control_policy.configure(
+			isaac_teleop_require_deadman, isaac_teleop_button_threshold)
 
 	# Dedicated video stream handler. [issue 005 / item 6] Bumped to
 	# 32 MiB so a freshly connected client surviving a brief WiFi
@@ -389,6 +439,8 @@ func _on_settings_exit_requested() -> void:
 	_cancel_launch_window()
 	if _robot_control_sink:
 		_robot_control_sink.set_sending(false)
+	if _isaac_teleop_sink:
+		_stop_isaac_teleop(true)
 	if _clock_sync:
 		_clock_sync.stop()
 	if _discovery and _discovery.has_method("stop_scan"):
@@ -624,6 +676,23 @@ func _on_connected() -> void:
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", true)
 	_session.on_connected()
+	if _isaac_teleop_sink:
+		var started := _isaac_teleop_sink.start({
+			"host": _tcp_handler.get_host(),
+			"udp_port": isaac_teleop_udp_port,
+			"session_token": isaac_teleop_session_token,
+			"descriptor_version": isaac_teleop_descriptor_version,
+		})
+		if not started:
+			push_warning("[Operator] IsaacTeleop UDP sink failed to start: %s" % str(
+				_isaac_teleop_sink.health()))
+		elif _isaac_teleop_body_sampler != null:
+			# Body extensions are session resources: start only while the
+			# external sink has a live bridge endpoint.
+			_isaac_teleop_body_sampler.set_capture_options({
+				"record_body_tracking": true,
+				"record_motion_trackers": false,
+			})
 	_connect_video_stream(_tcp_handler.get_host())
 	if _clock_sync:
 		_clock_sync.start()
@@ -632,6 +701,8 @@ func _on_connected() -> void:
 func _on_disconnected() -> void:
 	_set_status(tr("UI_DISCONNECTED"))
 	_robot_control_sink.set_sending(false)
+	if _isaac_teleop_sink:
+		_stop_isaac_teleop(true)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	_video_tcp_handler.disconnect_from_robot()
@@ -689,11 +760,20 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	var device_type: String = descriptor.get("device", {}).get("type", tr("UI_UNKNOWN"))
 	_set_status(tr("UI_DRIVER_ACTIVE") % [device_name, _robot_type_display(device_type)])
 	print("[Operator] Connected to %s (type=%s per descriptor)" % [device_name, device_type])
-	_robot_control_sink.configure_for_device(descriptor)
-	# If the settings panel is up, stay paused; _set_teleop_suspended(false)
-	# re-enables sending when it closes.
-	if not _teleop_suspended:
-		_robot_control_sink.set_sending(true)
+	if device_type != _user_robot_type_hint:
+		print("[Operator] Robot type hint (%s) differs from descriptor (%s) — descriptor wins" % [
+			_user_robot_type_hint, device_type,
+		])
+	if _isaac_teleop_sink:
+		# IsaacTeleop consumes canonical XR inputs and owns retargeting; do not
+		# also emit mapped DeviceCommands for the same input stream.
+		_robot_control_sink.set_sending(false)
+	else:
+		_robot_control_sink.configure_for_device(descriptor)
+		# If the settings panel is up, stay paused; _set_teleop_suspended(false)
+		# re-enables sending when it closes.
+		if not _teleop_suspended:
+			_robot_control_sink.set_sending(true)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_update_teleop_controller_panel()
@@ -707,10 +787,33 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 
 func _on_device_disconnected() -> void:
 	_robot_control_sink.set_sending(false)
+	if _isaac_teleop_sink:
+		_stop_isaac_teleop(true)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
+
+
+func _stop_isaac_teleop(send_kill: bool) -> void:
+	if _isaac_teleop_sink == null:
+		return
+	if send_kill and _isaac_teleop_sink.is_sending():
+		var kill := _isaac_teleop_control_policy.kill_sample() \
+			if _isaac_teleop_control_policy != null else {
+				"kill": true,
+				"run_toggle": false,
+				"reset": false,
+				"deadman": false,
+			}
+		_isaac_teleop_sink.send_control(
+			bool(kill["kill"]), bool(kill["run_toggle"]),
+			bool(kill["reset"]), bool(kill["deadman"]))
+	_isaac_teleop_sink.stop()
+	if _isaac_teleop_body_sampler != null:
+		_isaac_teleop_body_sampler.stop()
+	if _isaac_teleop_control_policy != null:
+		_isaac_teleop_control_policy.reset_edges()
 
 
 func _on_telemetry_received(_data: Dictionary) -> void:

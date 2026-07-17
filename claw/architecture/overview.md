@@ -13,6 +13,10 @@ The project supports two primary workflows:
 2. Egocentric data collection: the headset records SpatialMP4 sessions and
    uploads them to the web ingest stack.
 
+Isaac Sim teleoperation is an alternate teleop backend. Operator keeps the
+headset OpenXR runtime and video display while the `isaac-teleop` plugin feeds
+canonical XR samples into IsaacTeleop's state/retargeting/action graph.
+
 Live Feed is the streaming variant of ego capture: XR pushes RGB/depth/pose
 samples to a server and receives algorithm results for in-headset rendering.
 
@@ -64,6 +68,16 @@ robot-service xr-bridge component
   -> addons/live_video/live_video_view.gd
 ```
 
+The optional IsaacTeleop path replaces `RobotControlSink` command emission,
+not the mode or display stack:
+
+```text
+XR SensorFrame -> IsaacTeleopSink -> UDP :63904
+  -> xr-bridge validation/latest-only -> Unix datagram
+  -> operator_isaacteleop -> IsaacTeleop external ValueInput graph
+  -> Isaac Lab action / env.step
+```
+
 ### Ego Capture
 
 ```text
@@ -108,3 +122,4 @@ mode scenes:
 - Build and device procedures: `build-and-deploy.md`
 - Wire contracts: `wire-protocol.md`
 - Live Feed server integration: `live-feed-cloud.md`
+- IsaacTeleop/Isaac Sim backend: `isaac-teleop-plugin.md`

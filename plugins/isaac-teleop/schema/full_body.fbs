@@ -1,0 +1,60 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+include "pose.fbs";
+include "timestamp.fbs";
+
+namespace core;
+
+enum BodyJointPico : uint8 {
+    PELVIS = 0,
+    LEFT_HIP = 1,
+    RIGHT_HIP = 2,
+    SPINE1 = 3,
+    LEFT_KNEE = 4,
+    RIGHT_KNEE = 5,
+    SPINE2 = 6,
+    LEFT_ANKLE = 7,
+    RIGHT_ANKLE = 8,
+    SPINE3 = 9,
+    LEFT_FOOT = 10,
+    RIGHT_FOOT = 11,
+    NECK = 12,
+    LEFT_COLLAR = 13,
+    RIGHT_COLLAR = 14,
+    HEAD = 15,
+    LEFT_SHOULDER = 16,
+    RIGHT_SHOULDER = 17,
+    LEFT_ELBOW = 18,
+    RIGHT_ELBOW = 19,
+    LEFT_WRIST = 20,
+    RIGHT_WRIST = 21,
+    LEFT_HAND = 22,
+    RIGHT_HAND = 23,
+    NUM_JOINTS = 24,
+}
+
+struct BodyJointPose {
+    pose: Pose;
+    is_valid: bool;
+}
+
+struct BodyJointsPico {
+    joints: [BodyJointPose:24];
+}
+
+table FullBodyPosePico {
+    joints: BodyJointsPico (id: 0);
+    all_joint_poses_tracked: bool (id: 1);
+}
+
+table FullBodyPosePicoTracked {
+    data: FullBodyPosePico (id: 0);
+}
+
+table FullBodyPosePicoRecord {
+    data: FullBodyPosePico (id: 0);
+    timestamp: DeviceDataTimestamp (id: 1);
+}
+
+root_type FullBodyPosePicoRecord;

@@ -18,6 +18,7 @@ const ROBOT_CONTROL := 8
 const ROBOT_CONSTRAINT := 9
 const DEBUG_METRICS := 10
 const TEST_HARNESS := 11
+const SINK_ISAAC_TELEOP := 12
 
 const _ID_TO_STRING := {
 	MODE_TELEOP: "mode_teleop",
@@ -32,6 +33,7 @@ const _ID_TO_STRING := {
 	ROBOT_CONSTRAINT: "robot_constraint",
 	DEBUG_METRICS: "debug_metrics",
 	TEST_HARNESS: "test_harness",
+	SINK_ISAAC_TELEOP: "sink_isaac_teleop",
 }
 
 

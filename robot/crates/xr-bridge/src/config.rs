@@ -6,7 +6,7 @@
 //! (`--adapter-endpoint tcp:127.0.0.1:63910`).
 
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
@@ -26,6 +26,13 @@ pub const DEFAULT_DISCOVERY_PORT: u16 = 63900;
 pub const DEFAULT_POSE_UDP_PORT: u16 = 63902;
 /// Default TCP port for the dedicated telemetry stream.
 pub const DEFAULT_TELEMETRY_PORT: u16 = 63903;
+/// Default UDP port for the IsaacTeleop external-input data plane.
+pub const DEFAULT_ISAAC_TELEOP_UDP_PORT: u16 = 63904;
+/// Default local Unix datagram endpoint owned by the Isaac Sim plugin.
+pub const DEFAULT_ISAAC_TELEOP_UNIX_SOCKET: &str = "/tmp/operator-isaacteleop.sock";
+/// Conservative datagram ceiling that keeps the complete UDP packet below a
+/// typical Wi-Fi MTU without IP fragmentation.
+pub const DEFAULT_ISAAC_TELEOP_MAX_DATAGRAM_BYTES: usize = 1200;
 
 /// Top-level bridge configuration.
 ///
@@ -54,6 +61,52 @@ pub struct BridgeConfig {
     pub telemetry_port: u16,
     /// Video relay configuration (RTSP → XR wire protocol). Empty = no video.
     pub video: VideoConfig,
+    /// Optional IsaacTeleop external-input gateway. Disabled by default.
+    pub isaac_teleop: IsaacTeleopGatewayConfig,
+}
+
+/// UDP-to-Unix-datagram gateway configuration for IsaacTeleop external inputs.
+///
+/// The headset sends opaque canonical records over UDP; the bridge keeps their
+/// 32-byte transport header intact and forwards each accepted datagram to the
+/// Unix socket bound by the Isaac Sim-side plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IsaacTeleopGatewayConfig {
+    /// Whether to bind the IsaacTeleop UDP port and start forwarding.
+    #[serde(default)]
+    pub enabled: bool,
+    /// XR-facing UDP port.
+    #[serde(default = "default_isaac_teleop_udp_port")]
+    pub udp_port: u16,
+    /// Destination Unix datagram socket bound by the Isaac Sim plugin.
+    #[serde(default = "default_isaac_teleop_unix_socket")]
+    pub unix_socket: PathBuf,
+    /// Maximum complete UDP datagram size, including the 32-byte header.
+    #[serde(default = "default_isaac_teleop_max_datagram_bytes")]
+    pub max_datagram_bytes: usize,
+}
+
+impl Default for IsaacTeleopGatewayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            udp_port: DEFAULT_ISAAC_TELEOP_UDP_PORT,
+            unix_socket: PathBuf::from(DEFAULT_ISAAC_TELEOP_UNIX_SOCKET),
+            max_datagram_bytes: DEFAULT_ISAAC_TELEOP_MAX_DATAGRAM_BYTES,
+        }
+    }
+}
+
+fn default_isaac_teleop_udp_port() -> u16 {
+    DEFAULT_ISAAC_TELEOP_UDP_PORT
+}
+
+fn default_isaac_teleop_unix_socket() -> PathBuf {
+    PathBuf::from(DEFAULT_ISAAC_TELEOP_UNIX_SOCKET)
+}
+
+fn default_isaac_teleop_max_datagram_bytes() -> usize {
+    DEFAULT_ISAAC_TELEOP_MAX_DATAGRAM_BYTES
 }
 
 /// Video relay configuration: a list of feeds the bridge pulls over RTSP and
@@ -127,6 +180,7 @@ impl Default for BridgeConfig {
             pose_udp_port: DEFAULT_POSE_UDP_PORT,
             telemetry_port: DEFAULT_TELEMETRY_PORT,
             video: VideoConfig::default(),
+            isaac_teleop: IsaacTeleopGatewayConfig::default(),
         }
     }
 }
@@ -185,6 +239,8 @@ struct BridgeConfigFile {
     telemetry_port: Option<u16>,
     #[serde(default)]
     video: Option<VideoConfig>,
+    #[serde(default)]
+    isaac_teleop: Option<IsaacTeleopGatewayConfig>,
 }
 
 impl BridgeConfig {
@@ -254,6 +310,9 @@ fn apply_bridge_config_file(cfg: &mut BridgeConfig, file: BridgeConfigFile) -> R
     if let Some(v) = file.video {
         cfg.video = v;
     }
+    if let Some(v) = file.isaac_teleop {
+        cfg.isaac_teleop = v;
+    }
     Ok(())
 }
 
@@ -288,6 +347,57 @@ mod tests {
         assert_eq!(cfg.telemetry_port, DEFAULT_TELEMETRY_PORT);
         assert_eq!(cfg.name, DEFAULT_NAME);
         assert!(cfg.video.feeds.is_empty());
+        assert!(!cfg.isaac_teleop.enabled);
+        assert_eq!(cfg.isaac_teleop.udp_port, DEFAULT_ISAAC_TELEOP_UDP_PORT);
+        assert_eq!(
+            cfg.isaac_teleop.unix_socket,
+            PathBuf::from(DEFAULT_ISAAC_TELEOP_UNIX_SOCKET)
+        );
+        assert_eq!(
+            cfg.isaac_teleop.max_datagram_bytes,
+            DEFAULT_ISAAC_TELEOP_MAX_DATAGRAM_BYTES
+        );
+    }
+
+    #[test]
+    fn parses_isaac_teleop_gateway_config() {
+        let yaml = r#"
+isaac_teleop:
+  enabled: true
+  udp_port: 64004
+  unix_socket: /tmp/custom-isaacteleop.sock
+  max_datagram_bytes: 1180
+"#;
+        let cfg = BridgeConfig::from_yaml_str(yaml).unwrap();
+        assert!(cfg.isaac_teleop.enabled);
+        assert_eq!(cfg.isaac_teleop.udp_port, 64004);
+        assert_eq!(
+            cfg.isaac_teleop.unix_socket,
+            PathBuf::from("/tmp/custom-isaacteleop.sock")
+        );
+        assert_eq!(cfg.isaac_teleop.max_datagram_bytes, 1180);
+    }
+
+    #[test]
+    fn partial_isaac_teleop_config_uses_field_defaults() {
+        let cfg = BridgeConfig::from_yaml_str(
+            r#"
+bridge:
+  isaac_teleop:
+    enabled: true
+"#,
+        )
+        .unwrap();
+        assert!(cfg.isaac_teleop.enabled);
+        assert_eq!(cfg.isaac_teleop.udp_port, DEFAULT_ISAAC_TELEOP_UDP_PORT);
+        assert_eq!(
+            cfg.isaac_teleop.unix_socket,
+            PathBuf::from(DEFAULT_ISAAC_TELEOP_UNIX_SOCKET)
+        );
+        assert_eq!(
+            cfg.isaac_teleop.max_datagram_bytes,
+            DEFAULT_ISAAC_TELEOP_MAX_DATAGRAM_BYTES
+        );
     }
 
     #[test]
@@ -433,5 +543,22 @@ bridge:
 
         assert_eq!(cfg.name, "xr-bridge");
         assert_eq!(cfg.video.feeds.len(), 3);
+    }
+
+    #[test]
+    fn shipped_isaac_teleop_example_parses() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../configs/isaac-teleop-example.yaml"
+        ));
+        let cfg = BridgeConfig::from_yaml_file(path).expect("shipped example parses");
+
+        assert!(cfg.isaac_teleop.enabled);
+        assert_eq!(cfg.isaac_teleop.udp_port, 63904);
+        assert_eq!(
+            cfg.isaac_teleop.unix_socket,
+            PathBuf::from("/tmp/operator-isaacteleop.sock")
+        );
+        assert_eq!(cfg.isaac_teleop.max_datagram_bytes, 1200);
     }
 }

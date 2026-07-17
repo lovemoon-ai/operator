@@ -21,6 +21,7 @@ const MODE_CAPABILITY_REQUIREMENTS := {
 	"mode_vr": ["pose"],
 	"sink_spatialmp4": ["spatial_mp4_mux"],
 	"sink_live_stream": ["live_stream_server"],
+	"sink_isaac_teleop": ["pose", "controller"],
 }
 
 var features: FeatureSet

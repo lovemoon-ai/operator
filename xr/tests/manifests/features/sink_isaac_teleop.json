@@ -1,0 +1,42 @@
+{
+  "id": "sink_isaac_teleop",
+  "feature": "operator_feature_sink_isaac_teleop",
+  "owner": "sinks/isaac_teleop",
+  "required_features": [
+    "operator_feature_mode_teleop"
+  ],
+  "required_capabilities": [
+    "POSE",
+    "CONTROLLER"
+  ],
+  "test_cases": [
+    {
+      "id": "sink_isaac_teleop.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "sink_isaac_teleop.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd",
+      "fixture": "fake_platform_pico_like"
+    },
+    {
+      "id": "isaac_teleop.packet_codec",
+      "level": "unit",
+      "suite": "teleop.isaac_teleop",
+      "module": "sinks/isaac_teleop",
+      "script": "res://tests/unit/teleop/isaac_teleop_packet_codec_test.gd"
+    },
+    {
+      "id": "isaac_teleop.body_mapper",
+      "level": "unit",
+      "suite": "teleop.isaac_teleop",
+      "module": "sinks/isaac_teleop",
+      "script": "res://tests/unit/teleop/isaac_teleop_body_mapper_test.gd"
+    }
+  ]
+}

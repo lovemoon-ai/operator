@@ -54,3 +54,22 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		[OperatorFeature.ROBOT_CONSTRAINT])
 	t.is_true(features.validate().size() > 0,
 		"FeatureSet.validate surfaces dependency errors")
+
+	# Per-launch IsaacTeleop opt-in enables the mode and sink together while
+	# leaving normal feature sets untouched.
+	var opt_in := FeatureSet.from_enabled_ids([])
+	opt_in.apply_runtime_overrides(["operator.isaac_teleop=true"])
+	t.is_true(opt_in.enabled(OperatorFeature.MODE_TELEOP),
+		"IsaacTeleop opt-in enables teleop mode")
+	t.is_true(opt_in.enabled(OperatorFeature.SINK_ISAAC_TELEOP),
+		"IsaacTeleop opt-in enables its sink")
+	t.eq(opt_in.validate().size(), 0, "IsaacTeleop opt-in satisfies feature dependencies")
+	var paired := FeatureSet.from_enabled_ids([])
+	paired.apply_runtime_overrides(["--operator.isaac_teleop", "true"])
+	t.is_true(paired.enabled(OperatorFeature.SINK_ISAAC_TELEOP),
+		"Android extra pair form is accepted")
+	var opt_out := FeatureSet.from_enabled_ids([])
+	opt_out.apply_runtime_overrides(["operator.isaac_teleop=false"])
+	t.is_false(opt_out.enabled(OperatorFeature.SINK_ISAAC_TELEOP),
+		"explicit false does not enable the sink")
+	t.is_false(opt_out.set_enabled(9999, true), "unknown feature overrides are rejected")

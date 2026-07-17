@@ -1,0 +1,23 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+include "pose.fbs";
+include "timestamp.fbs";
+
+namespace core;
+
+table HeadPose {
+    pose: Pose (id: 0);
+    is_valid: bool (id: 1);
+}
+
+table HeadPoseTracked {
+    data: HeadPose (id: 0);
+}
+
+table HeadPoseRecord {
+    data: HeadPose (id: 0);
+    timestamp: DeviceDataTimestamp (id: 1);
+}
+
+root_type HeadPoseRecord;

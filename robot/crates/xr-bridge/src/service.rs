@@ -16,11 +16,13 @@ use teleop_protocol::{
 
 use crate::adapter_client::AdapterClient;
 use crate::config::{BridgeConfig, VideoFeedConfig};
+use crate::isaac_teleop_gateway::IsaacTeleopGatewayStats;
 use crate::pose_udp_server::UdpDropStats;
 use crate::video::{Codec, VideoFeed};
 use crate::wire_runtime::TimedCommand;
 use crate::{
-    discovery, forward, latency, pose_server, pose_udp_server, runtime, telemetry_server, video,
+    discovery, forward, isaac_teleop_gateway, latency, pose_server, pose_udp_server, runtime,
+    telemetry_server, video,
 };
 
 /// Run the normal adapter-backed XR bridge mode.
@@ -54,15 +56,17 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
     let latency = latency::LatencyRecorder::new();
     let session_token = Arc::new(AtomicU32::new(0));
     let udp_stats = UdpDropStats::new();
+    let isaac_teleop_stats = IsaacTeleopGatewayStats::new();
 
     tokio::spawn(runtime::telemetry_fanin(adapter_telemetry, telemetry_tx));
 
     tracing::info!(
-        "XR network up: pose={} pose_udp={} telemetry={} discovery={}",
+        "XR network up: pose={} pose_udp={} telemetry={} discovery={} isaac_teleop={}",
         config.pose_port,
         config.pose_udp_port,
         config.telemetry_port,
         config.discovery_port,
+        config.isaac_teleop.enabled,
     );
 
     tokio::try_join!(
@@ -78,8 +82,13 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
             config.pose_udp_port,
             device_cmd_tx,
             latency.clone(),
-            session_token,
+            session_token.clone(),
             udp_stats,
+        ),
+        run_isaac_teleop_gateway(
+            config.isaac_teleop.clone(),
+            session_token,
+            isaac_teleop_stats,
         ),
         telemetry_server::run(config.telemetry_port, telemetry_rx),
         forward::run(descriptor, device_cmd_rx, client),
@@ -105,13 +114,15 @@ pub async fn run_video_only_mode(config: BridgeConfig) -> Result<()> {
     let latency = latency::LatencyRecorder::new();
     let session_token = Arc::new(AtomicU32::new(0));
     let udp_stats = UdpDropStats::new();
+    let isaac_teleop_stats = IsaacTeleopGatewayStats::new();
 
     tracing::info!(
-        "XR video-only network up: pose={} pose_udp={} telemetry={} discovery={}",
+        "XR video-only network up: pose={} pose_udp={} telemetry={} discovery={} isaac_teleop={}",
         config.pose_port,
         config.pose_udp_port,
         config.telemetry_port,
         config.discovery_port,
+        config.isaac_teleop.enabled,
     );
 
     tokio::try_join!(
@@ -127,8 +138,13 @@ pub async fn run_video_only_mode(config: BridgeConfig) -> Result<()> {
             config.pose_udp_port,
             device_cmd_tx,
             latency.clone(),
-            session_token,
+            session_token.clone(),
             udp_stats,
+        ),
+        run_isaac_teleop_gateway(
+            config.isaac_teleop.clone(),
+            session_token,
+            isaac_teleop_stats,
         ),
         telemetry_server::run(config.telemetry_port, telemetry_rx),
         latency::run_aggregator(latency.clone()),
@@ -136,6 +152,20 @@ pub async fn run_video_only_mode(config: BridgeConfig) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+async fn run_isaac_teleop_gateway(
+    config: crate::config::IsaacTeleopGatewayConfig,
+    session_token: Arc<AtomicU32>,
+    stats: Arc<IsaacTeleopGatewayStats>,
+) -> Result<()> {
+    if !config.enabled {
+        // Every other service in the try_join is intentionally long-lived.
+        // Stay pending when disabled so default startup/exit behaviour remains
+        // unchanged while still allowing sibling errors to cancel this future.
+        return std::future::pending::<Result<()>>().await;
+    }
+    isaac_teleop_gateway::run(config, session_token, stats).await
 }
 
 fn build_video_only_descriptor(config: &BridgeConfig) -> Result<DeviceDescriptor> {

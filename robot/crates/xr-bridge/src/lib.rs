@@ -21,6 +21,8 @@
 //! * [`pose_server`] — TCP command server (Hello handshake, command in,
 //!   telemetry out, clock sync).
 //! * [`pose_udp_server`] — UDP high-frequency pose data plane (drop-old by seq).
+//! * [`isaac_teleop_gateway`] — validated, drop-old UDP-to-Unix-datagram
+//!   passthrough for IsaacTeleop external-input records.
 //! * [`telemetry_server`] — dedicated TCP telemetry push.
 //! * [`wire_runtime`] — bridge-internal `TimedCommand` envelope +
 //!   `build_descriptor_frame` handshake helper.
@@ -32,6 +34,7 @@ pub mod adapter_client;
 pub mod config;
 pub mod discovery;
 pub mod forward;
+pub mod isaac_teleop_gateway;
 pub mod latency;
 pub mod pose_server;
 pub mod pose_udp_server;

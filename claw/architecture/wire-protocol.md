@@ -53,6 +53,40 @@ High-frequency pose updates use sequence-aware UDP. Robot-side consumers drop
 old sequence numbers rather than queue stale motion. This plane is separate
 from the command TCP channel so slow consumers do not block fresh pose data.
 
+## IsaacTeleop External Input UDP
+
+Default port: `63904`. Disabled unless `bridge.isaac_teleop.enabled=true`.
+
+This plugin data plane reuses the Pose UDP 32-byte little-endian envelope but
+keeps an independent sequence per FourCC channel:
+
+```text
+u64_le sample_time_raw_device_ns
+u64_le sequence
+u32_le session_token
+u16_le descriptor_version
+u16_le payload_length
+u16_le crc16_ccitt_false(payload)
+u8     flags
+u8     reserved
+bytes4 kind: HEAD/LCTL/RCTL/LHND/RHND/BODY/CTRL/ANCH
+bytes  payload
+```
+
+The bridge validates the exact length, kind, CRC, token and per-kind sequence,
+then forwards the complete datagram to the configured Unix datagram socket.
+It does not decode sensor values. The current payload codec is
+`operator-canonical-v1`; the host maps its values to IsaacTeleop's public
+standard TensorGroups corresponding to the pinned schemas. It is not a
+FlatBuffers byte layout. Direct FlatBuffers records are reserved for the next
+codec revision.
+
+Relevant paths:
+
+- `xr/scripts/sinks/isaac_teleop/`
+- `robot/crates/xr-bridge/src/isaac_teleop_gateway.rs`
+- `plugins/isaac-teleop/python/src/operator_isaacteleop/`
+
 ## Telemetry TCP
 
 Default port: `63903`.

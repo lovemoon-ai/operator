@@ -1,0 +1,40 @@
+# IsaacTeleop external-input gateway example.
+#
+# The Isaac Sim-side `operator_isaacteleop` process must bind the Unix
+# datagram socket before XR frames can be delivered. The first integration
+# uses anonymous session_token=0 and descriptor_version=1 on the headset.
+# Token zero provides no authentication; use it only on a trusted development
+# network. The gateway recovers anonymous restarts by UDP peer change or a
+# one-second idle timeout. A future TCP-minted non-zero token should be used in
+# production.
+#
+# With only simulation video, start this as:
+#   cargo run -p xr-bridge -- --config configs/isaac-teleop-example.yaml --video-only
+
+bridge:
+  name: "operator-isaacteleop"
+
+  pose_port: 63901
+  discovery_port: 63900
+  pose_udp_port: 63902
+  telemetry_port: 63903
+
+  isaac_teleop:
+    enabled: true
+    udp_port: 63904
+    unix_socket: "/tmp/operator-isaacteleop.sock"
+    # Complete UDP datagram ceiling, including the 32-byte transport header.
+    max_datagram_bytes: 1200
+
+  # Operator continues to own display. Isaac Sim publishes H.264 over RTSP;
+  # xr-bridge relays it through the existing timed-video path.
+  video:
+    feeds:
+      - name: head
+        rtsp_url: "rtsp://127.0.0.1:8554/head"
+        tcp_port: 12347
+        width: 1280
+        height: 720
+        fps: 30
+        transport: tcp
+        codec: h264

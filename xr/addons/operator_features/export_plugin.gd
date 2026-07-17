@@ -45,6 +45,7 @@ class OperatorFeaturesExportPlugin:
 		{"name": "operator_feature_robot_constraint", "default": false},
 		{"name": "operator_feature_debug_metrics", "default": false},
 		{"name": "operator_feature_test_harness", "default": false},
+		{"name": "operator_feature_sink_isaac_teleop", "default": false},
 	]
 
 	func _supports_platform(platform: EditorExportPlatform) -> bool:

@@ -1,0 +1,10 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+namespace core;
+
+struct DeviceDataTimestamp {
+    available_time_local_common_clock: int64;
+    sample_time_local_common_clock: int64;
+    sample_time_raw_device_clock: int64;
+}
