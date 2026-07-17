@@ -2196,6 +2196,11 @@ func _on_exit_requested() -> void:
 	if _recording:
 		stop_capture()
 	_stop_live_pull()
+	# EgoUploader owns a worker thread. Ask it to leave any HTTP poll before
+	# change_scene tears down this node and waits for that thread in _exit_tree().
+	# Pending upload state is durable and resumes next time Ego is opened.
+	if ego_uploader != null and ego_uploader.has_method("request_shutdown"):
+		ego_uploader.call("request_shutdown")
 	_set_passthrough_visible(false)
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
