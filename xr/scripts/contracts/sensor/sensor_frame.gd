@@ -1,5 +1,8 @@
 class_name SensorFrame
 extends RefCounted
+
+const SensorFrameTypeScript := preload("res://scripts/contracts/sensor/frame_types.gd")
+
 ## v2 contracts (WP4): canonical sensor frame passed from samplers/sources to
 ## sinks. Pure data + validation; no engine singletons, no vendor knowledge.
 ##
@@ -30,26 +33,26 @@ var valid := true
 var payload: Dictionary = {}
 
 const _POSE_LIKE_TYPES := [
-	SensorFrameType.POSE,
-	SensorFrameType.CONTROLLER,
-	SensorFrameType.HAND,
-	SensorFrameType.BODY,
-	SensorFrameType.MOTION_TRACKER,
+	SensorFrameTypeScript.POSE,
+	SensorFrameTypeScript.CONTROLLER,
+	SensorFrameTypeScript.HAND,
+	SensorFrameTypeScript.BODY,
+	SensorFrameTypeScript.MOTION_TRACKER,
 ]
 
 
 func validate() -> Array[String]:
 	var errors: Array[String] = []
-	if SensorFrameType.id_to_string(frame_type).is_empty():
+	if SensorFrameTypeScript.id_to_string(frame_type).is_empty():
 		errors.append("frame_type %d is not a known SensorFrameType" % frame_type)
 	if timestamp_ns <= 0:
 		errors.append("timestamp_ns must be > 0 (got %d)" % timestamp_ns)
 	if frame_type in _POSE_LIKE_TYPES and coordinate_space.is_empty():
 		errors.append(
 			"coordinate_space must be non-empty for pose-like frame type %s"
-			% SensorFrameType.id_to_string(frame_type))
+			% SensorFrameTypeScript.id_to_string(frame_type))
 	return errors
 
 
 func type_name() -> String:
-	return SensorFrameType.id_to_string(frame_type)
+	return SensorFrameTypeScript.id_to_string(frame_type)

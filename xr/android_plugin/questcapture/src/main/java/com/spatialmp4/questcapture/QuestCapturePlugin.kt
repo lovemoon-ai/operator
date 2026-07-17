@@ -32,7 +32,6 @@ import com.spatialmp4.capturecommon.AudioCapture
 import com.spatialmp4.capturecommon.CapturedYuvFrame
 import com.spatialmp4.capturecommon.ChromaLayout
 import com.spatialmp4.capturecommon.DeviceIdentity
-import com.spatialmp4.capturecommon.RgbFrameIndexRecorder
 import com.spatialmp4.capturecommon.StereoHevcEncoder
 import com.spatialmp4.capturecommon.YuvPlaneCapture
 import com.spatialmp4.muxer.SpatialMp4MuxerPlugin
@@ -64,10 +63,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var cameraManager: CameraManager? = null
 
     private val sessions = ConcurrentHashMap<String, EyeCameraSession>()
-    private val frameIndexRecorder = RgbFrameIndexRecorder()
+    private val frameIndexCounters = ConcurrentHashMap<String, AtomicLong>()
     private var finalMp4Path: File? = null
     private var partialMp4Path: File? = null
-    private var sidecarDir: File? = null
     // nativeWriterHandle migrated to SpatialMp4MuxerPlugin in Stage 2b. The
     // provider now hands the muxer a SessionConfig and lets it own the handle.
     private var hevcEncoder: StereoHevcEncoder? = null
@@ -76,7 +74,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var audioCapture: AudioCapture? = null
     private var leftMetadata = "{}"
     private var rightMetadata = "{}"
-    private var cameraMetadataSidecarsEnabled = false
     private var sessionStartUnixUs = 0L
     private var sessionStartGodotTicksUs = 0L
     private var configureGodotTicksUs = 0L
@@ -115,7 +112,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     // popped + reset whenever GDScript calls popMetricsJson().
     private val metricCameraFramesLeft = AtomicLong(0L)
     private val metricCameraFramesRight = AtomicLong(0L)
-    private val metricFrameIndexSidecarWrites = AtomicLong(0L)
     private val metricEncoderPairsOffered = AtomicLong(0L)
     private val metricEncoderMonoOffered = AtomicLong(0L)
     private val metricEncoderPacketsOut = AtomicLong(0L)
@@ -183,12 +179,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return true
     }
 
-    @UsedByGodot
-    fun setCameraMetadataSidecarsEnabled(enabled: Boolean): Boolean {
-        cameraMetadataSidecarsEnabled = enabled
-        return true
-    }
-
     override fun getPluginSignals(): Set<SignalInfo> {
         return setOf(
             SignalInfo("camera_ready", String::class.java, String::class.java),
@@ -226,7 +216,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     fun configureSpatialMp4SessionWithTime(
         finalPath: String,
         partialPath: String,
-        sidecarPath: String,
+        sessionPath: String,
         sessionStartUnixUs: Long,
         sessionStartGodotTicksUs: Long,
         configureGodotTicksUs: Long,
@@ -243,7 +233,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         // that has not been updated to the v3 RPC keeps recording exactly
         // what it did before.
         return configureSessionInternal(
-            sidecarPath,
+            sessionPath,
             sessionStartUnixUs,
             sessionStartGodotTicksUs,
             configureGodotTicksUs,
@@ -274,7 +264,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     fun configureSpatialMp4SessionWithAudio(
         finalPath: String,
         partialPath: String,
-        sidecarPath: String,
+        sessionPath: String,
         sessionStartUnixUs: Long,
         sessionStartGodotTicksUs: Long,
         configureGodotTicksUs: Long,
@@ -292,7 +282,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         audioBitrateBps: Int
     ): Boolean {
         return configureSessionInternal(
-            sidecarPath,
+            sessionPath,
             sessionStartUnixUs,
             sessionStartGodotTicksUs,
             configureGodotTicksUs,
@@ -329,9 +319,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
 
         val finalPath = config.optString("final_path", "")
         val partialPath = config.optString("partial_path", "")
-        val sidecarPath = config.optString("sidecar_path", "")
-        if (finalPath.isBlank() || partialPath.isBlank() || sidecarPath.isBlank()) {
-            emitSignal("camera_error", "SpatialMP4 session config requires final_path, partial_path, and sidecar_path")
+        val sessionPath = config.optString("session_dir", "")
+        if (finalPath.isBlank() || partialPath.isBlank() || sessionPath.isBlank()) {
+            emitSignal("camera_error", "SpatialMP4 session config requires final_path, partial_path, and session_dir")
             return false
         }
 
@@ -347,7 +337,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         val requestedRgbSize = requestedRgbSizeFromConfig(config)
 
         return configureSessionInternal(
-            sidecarPath,
+            sessionPath,
             config.optLong("session_start_unix_us", 0L),
             config.optLong("session_start_godot_ticks_us", 0L),
             config.optLong("configure_godot_ticks_us", 0L),
@@ -412,7 +402,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
 
         sessionDir = dir
-        sidecarDir = dir
         finalMp4Path = finalPath?.let { File(it) }
         partialMp4Path = partialPath?.let { File(it) }
         this.sessionStartUnixUs = sessionStartUnixUs
@@ -444,15 +433,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         configureClockMonotonicNs = System.nanoTime()
         configureElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos()
         configureUnixTimeMs = System.currentTimeMillis()
-        if (cameraMetadataSidecarsEnabled) {
-            try {
-                writeAndroidTimebaseSidecar(dir, buildAndroidTimebase(null, null))
-            } catch (error: Exception) {
-                Log.w(TAG, "Failed to write optional android_timebase.json: ${error.message}")
-            }
-        } else {
-            clearCameraMetadataSidecars(dir)
-        }
         return true
     }
 
@@ -673,25 +653,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         val rightRecordingMetadata = rightConfig?.let { recordingCameraMetadata(it) }
         leftMetadata = leftRecordingMetadata.toString()
         rightMetadata = rightRecordingMetadata?.toString() ?: "{}"
-        if (cameraMetadataSidecarsEnabled) {
-            writeText(File(root, "left_camera_characteristics.json"), leftMetadata)
-            if (rightConfig != null) {
-                writeText(File(root, "right_camera_characteristics.json"), rightMetadata)
-            } else {
-                File(root, "right_camera_characteristics.json").delete()
-            }
-        }
         val androidTimebase = buildAndroidTimebase(
             leftTimestampSource = leftConfig.timestampSource,
             rightTimestampSource = rightConfig?.timestampSource
         )
-        if (cameraMetadataSidecarsEnabled) {
-            try {
-                writeAndroidTimebaseSidecar(root, androidTimebase)
-            } catch (error: Exception) {
-                Log.w(TAG, "Failed to refresh optional android_timebase.json: ${error.message}")
-            }
-        }
 
         if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase)) {
             return false
@@ -700,8 +665,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         openFrameIndexWriter(root, "left")
         if (rightConfig != null) {
             openFrameIndexWriter(root, "right")
-        } else {
-            File(root, "right_camera_frames.jsonl").delete()
         }
 
         acceptingFrames = true
@@ -807,7 +770,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     /**
      * GDScript-facing accessor for the headset identity captured from
      * android.os.Build. Mirrors what is written into the mp4 moov metadata, so
-     * the session manifest.json sidecar can carry the same device_type /
+     * manifest.json can carry the same device_type /
      * device_model / device_manufacturer values without re-deriving them.
      */
     @UsedByGodot
@@ -890,7 +853,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         val payload = JSONObject()
             .put("cam_frames_left", metricCameraFramesLeft.getAndSet(0L))
             .put("cam_frames_right", metricCameraFramesRight.getAndSet(0L))
-            .put("frame_index_sidecar_writes", metricFrameIndexSidecarWrites.getAndSet(0L))
             .put("enc_pairs_in", metricEncoderPairsOffered.getAndSet(0L))
             .put("enc_mono_in", metricEncoderMonoOffered.getAndSet(0L))
             .put("enc_packets_out", metricEncoderPacketsOut.getAndSet(0L))
@@ -1393,14 +1355,12 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
     }
 
-    private fun openFrameIndexWriter(root: File, eye: String) {
-        if (!frameIndexRecorder.open(root, eye, cameraMetadataSidecarsEnabled)) {
-            Log.w(TAG, "Failed to open optional ${eye}_camera_frames.jsonl")
-        }
+    private fun openFrameIndexWriter(@Suppress("UNUSED_PARAMETER") root: File, eye: String) {
+        frameIndexCounters[eye] = AtomicLong(0L)
     }
 
     private fun closeFrameIndexWriters() {
-        frameIndexRecorder.close()
+        frameIndexCounters.clear()
     }
 
     private fun writeFrameIndex(
@@ -1411,7 +1371,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         width: Int,
         height: Int
     ) {
-        val index = frameIndexRecorder.nextIndex(eye) ?: return
+        val index = frameIndexCounters[eye]?.getAndIncrement() ?: return
         val record = JSONObject()
             .put("frame_index", index)
             .put("eye", eye)
@@ -1424,9 +1384,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("raw_path", "")
             .put("planes", JSONArray())
         val recordText = record.toString()
-        if (frameIndexRecorder.append(eye, recordText)) {
-            metricFrameIndexSidecarWrites.incrementAndGet()
-        }
         try {
             activeDataSink()?.onRgbFrameIndex(
                 eye,
@@ -1509,20 +1466,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("rgb_sensor_timestamp_sources", rgbSources)
     }
 
-    private fun writeAndroidTimebaseSidecar(dir: File, record: JSONObject) {
-        writeText(File(dir, "android_timebase.json"), record.toString(2))
-    }
-
-    private fun clearCameraMetadataSidecars(dir: File) {
-        listOf(
-            "android_timebase.json",
-            "left_camera_characteristics.json",
-            "right_camera_characteristics.json",
-            "left_camera_frames.jsonl",
-            "right_camera_frames.jsonl"
-        ).forEach { filename -> File(dir, filename).delete() }
-    }
-
     private fun buildOperatorStaticMetadata(
         leftConfig: CameraConfig,
         rightConfig: CameraConfig?,
@@ -1594,11 +1537,6 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
 
     private fun ensureDirectory(path: File): Boolean {
         return path.isDirectory || path.mkdirs()
-    }
-
-    private fun writeText(path: File, text: String) {
-        path.parentFile?.mkdirs()
-        path.writeText(text)
     }
 
     private data class CameraConfig(

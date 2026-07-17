@@ -21,20 +21,17 @@ const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provide
 
 
 ## Phase 1: writer engine + sinks + canonical-frame fanout.
-## Returns {writer, frame_sink, spatialmp4_sink, jsonl_sink, upload_sink}.
+## Returns {writer, frame_sink, spatialmp4_sink, upload_sink}.
 ## The samplers are configured against `writer` by the scene before phase 2.
 static func build_io() -> Dictionary:
 	var writer: Object = SessionSpoolWriterScript.new()
 	var spatialmp4_sink := SpatialMp4Sink.new(writer)
-	var jsonl_sink := JsonlSidecarSink.new()
 	var binding := StreamBinding.new()
 	binding.add_sink(spatialmp4_sink)
-	binding.add_sink(jsonl_sink)
 	return {
 		"writer": writer,
 		"frame_sink": binding,
 		"spatialmp4_sink": spatialmp4_sink,
-		"jsonl_sink": jsonl_sink,
 		# EgoUploader drains user://ego_upload_queue.json for ego capture
 		# only. The sink owns the uploader instance (same queue file / TUS
 		# behavior / signals); the scene keeps node lifecycle + UI glue.
@@ -48,7 +45,7 @@ static func build_io() -> Dictionary:
 ##   permission_check: Callable -> bool (storage readiness)
 ##   stop_live_pull: Callable (live-pull disconnect, ego mode only)
 static func build_controller(io: Dictionary, deps: Dictionary) -> CaptureSessionController:
-	var writer_adapter := SpoolWriterAdapter.new(io.get("writer"), io.get("jsonl_sink"))
+	var writer_adapter := SpoolWriterAdapter.new(io.get("writer"))
 	# Legacy stop order, preserved exactly: body_motion.stop -> live-pull
 	# disconnect -> depth.stop -> writer.close (inside the controller).
 	var stop_chain: Array = [deps.get("body_motion_sampler")]
@@ -90,9 +87,8 @@ static func effective_capture_options(options: Dictionary, camera_plugin: Object
 		if CaptureProviderRegistryScript.provider_uses_pico_bridge(provider_name) \
 				and bool(effective.get("record_body_tracking", false)):
 			# PICO full-body capture and independent tracker capture are separate
-			# runtime modes. Keep the manifest and sidecars aligned with the
-			# sampler, which must not request independent trackers while body
-			# tracking is active.
+			# runtime modes. Keep the manifest aligned with the sampler, which
+			# must not request independent trackers while body tracking is active.
 			effective["record_motion_trackers"] = false
 		if not CaptureProviderRegistryScript.provider_supports_audio_capture(provider_name):
 			effective["record_audio"] = false

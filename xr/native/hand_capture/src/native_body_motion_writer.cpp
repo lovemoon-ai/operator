@@ -112,7 +112,7 @@ NativeBodyMotionWriter::~NativeBodyMotionWriter() {
 void NativeBodyMotionWriter::_bind_methods() {
     ClassDB::bind_method(D_METHOD("configure", "muxer_plugin"),
                          &NativeBodyMotionWriter::configure);
-    ClassDB::bind_method(D_METHOD("begin_session", "body_jsonl_path", "motion_jsonl_path"),
+    ClassDB::bind_method(D_METHOD("begin_session"),
                          &NativeBodyMotionWriter::begin_session);
     ClassDB::bind_method(D_METHOD("end_session"), &NativeBodyMotionWriter::end_session);
     ClassDB::bind_method(D_METHOD("sample_body_tracker", "timestamp_ns"),
@@ -132,15 +132,10 @@ void NativeBodyMotionWriter::configure(Object *p_muxer_plugin) {
     contract_version_ = -1;
 }
 
-void NativeBodyMotionWriter::begin_session(const String &p_body_jsonl_path,
-                                           const String &p_motion_jsonl_path) {
-    body_jsonl_.begin(p_body_jsonl_path);
-    motion_jsonl_.begin(p_motion_jsonl_path);
+void NativeBodyMotionWriter::begin_session() {
 }
 
 void NativeBodyMotionWriter::end_session() {
-    body_jsonl_.end();
-    motion_jsonl_.end();
 }
 
 Object *NativeBodyMotionWriter::resolve_muxer() {
@@ -166,7 +161,7 @@ bool NativeBodyMotionWriter::metadata_supported(Object *p_muxer) {
 }
 
 // Shared tail of both body paths: payload_scratch_ + json_scratch_ are
-// ready; push them to the muxer + jsonl sidecar.
+// ready; push them to the muxer.
 void NativeBodyMotionWriter::emit_body(Object *p_muxer, int64_t p_timestamp_ns) {
     if (p_muxer != nullptr) {
         p_muxer->call("writeBodyJointsPayload", p_timestamp_ns, payload_scratch_);
@@ -174,11 +169,6 @@ void NativeBodyMotionWriter::emit_body(Object *p_muxer, int64_t p_timestamp_ns) 
             p_muxer->call("writeBodyFrameMetadataJson", p_timestamp_ns,
                           String::utf8(json_scratch_.data(), int(json_scratch_.size())));
         }
-    }
-    if (body_jsonl_.active()) {
-        // Move, not copy: json_scratch_ is dead after emit and cleared on
-        // its next use.
-        body_jsonl_.enqueue(std::move(json_scratch_));
     }
 }
 
@@ -190,7 +180,7 @@ Dictionary NativeBodyMotionWriter::sample_body_tracker(int64_t p_timestamp_ns) {
     result["body_flags"] = 0;
 
     Object *muxer = resolve_muxer();
-    if (muxer == nullptr && !body_jsonl_.active()) {
+    if (muxer == nullptr) {
         result["status"] = String("no_muxer");
         return result;
     }
@@ -301,7 +291,7 @@ bool NativeBodyMotionWriter::write_body_joints(int64_t p_timestamp_ns, int64_t p
         return false;
     }
     Object *muxer = resolve_muxer();
-    if (muxer == nullptr && !body_jsonl_.active()) {
+    if (muxer == nullptr) {
         return false;
     }
 
@@ -360,12 +350,6 @@ void NativeBodyMotionWriter::emit_motion_json(Object *p_muxer, int64_t p_timesta
                       String::utf8(json_scratch_.data(), int(json_scratch_.size())));
         r_wrote = true;
     }
-    if (motion_jsonl_.active()) {
-        // Move, not copy: json_scratch_ is dead after emit and cleared on
-        // its next use.
-        motion_jsonl_.enqueue(std::move(json_scratch_));
-        r_wrote = true;
-    }
 }
 
 bool NativeBodyMotionWriter::write_motion_tracker_pose(
@@ -373,7 +357,7 @@ bool NativeBodyMotionWriter::write_motion_tracker_pose(
         const Transform3D &p_transform, bool p_tracking_valid,
         const Dictionary &p_metadata) {
     Object *muxer = resolve_muxer();
-    if (muxer == nullptr && !motion_jsonl_.active()) {
+    if (muxer == nullptr) {
         return false;
     }
 
@@ -415,7 +399,7 @@ bool NativeBodyMotionWriter::write_motion_tracker_event(int64_t p_timestamp_ns,
                                                         const String &p_event_type,
                                                         const Dictionary &p_event) {
     Object *muxer = resolve_muxer();
-    if (muxer == nullptr && !motion_jsonl_.active()) {
+    if (muxer == nullptr) {
         return false;
     }
 
@@ -444,10 +428,6 @@ Dictionary NativeBodyMotionWriter::pop_metrics() {
     metrics["body_joints"] = static_cast<int64_t>(metric_body_joints_);
     metrics["motion_writes"] = static_cast<int64_t>(metric_motion_writes_);
     metrics["motion_event_writes"] = static_cast<int64_t>(metric_motion_event_writes_);
-    metrics["body_jsonl_lines"] = static_cast<int64_t>(body_jsonl_.pop_lines());
-    metrics["body_jsonl_dropped"] = static_cast<int64_t>(body_jsonl_.pop_dropped());
-    metrics["motion_jsonl_lines"] = static_cast<int64_t>(motion_jsonl_.pop_lines());
-    metrics["motion_jsonl_dropped"] = static_cast<int64_t>(motion_jsonl_.pop_dropped());
     metric_body_writes_ = 0;
     metric_body_joints_ = 0;
     metric_motion_writes_ = 0;

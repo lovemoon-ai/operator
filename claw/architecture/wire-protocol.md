@@ -157,17 +157,16 @@ Ego capture uploads finalized artifacts to a TUS 1.0.0 endpoint.
 The required upload set is:
 
 - `manifest.json` - session and file inventory. It records artifact kinds,
-  filenames, byte sizes, hashes such as `sha256`, upload/derivation state, and
-  optional debug sidecars. It is the right place for information about files,
-  including the final hash of `media.mp4`.
+  filenames, byte sizes, hashes such as `sha256`, and upload/derivation state.
+  It is the right place for information about files, including the final hash of
+  `media.mp4`.
 - `media.mp4` - the raw SpatialMP4 recording. New recordings should be
   self-contained for replay-critical sensor metadata; readers must not require
-  sidecars for calibration, timing, depth metadata, body extras, or motion
+  extra files for calibration, timing, depth metadata, body extras, or motion
   trackers.
 
-Optional artifacts include generated previews, Rerun `.rrd` files, and debug or
-legacy sidecars. Ingest should prefer metadata embedded in `media.mp4`, then
-fall back to sidecars only for older captures.
+Optional artifacts include generated previews and Rerun `.rrd` files. Ingest
+should use metadata embedded in `media.mp4` for replay-critical sensor data.
 
 Creation:
 

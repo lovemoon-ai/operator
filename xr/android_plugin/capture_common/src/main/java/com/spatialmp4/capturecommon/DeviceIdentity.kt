@@ -4,7 +4,7 @@ import android.os.Build
 
 /**
  * Headset identity captured at session start, so every produced spatial mp4
- * (and the JSON manifest sidecar) records which device the data came from.
+ * and manifest.json records which device the data came from.
  *
  * `type` is a normalised short id ("pico4_ultra", "quest3", "quest3s",
  * "questpro", "vivexr_elite", ...). Unknown devices fall back to a slugified

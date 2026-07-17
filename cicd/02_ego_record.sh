@@ -5,7 +5,6 @@
 # auto-start harness enabled, installs it on the attached headset, launches
 # the app in ego mode, waits for a recording to finalize, pulls the captured
 # SpatialMP4 session, and validates the self-contained MP4 plus manifest.
-# Legacy/debug sidecars are checked when present but are not required.
 #
 # Usage:
 #   bash tests/02_ego_record.sh
@@ -743,8 +742,8 @@ parse_stopped_session() {
   path=$(printf '%s\n' "$line" | sed -n 's/.*Capture session stopped: //p' | tr -d '\r')
   if [ -z "$path" ]; then
     # The app still emits the stop marker when finalization fails before it can
-    # produce a saved path. Treat that as a real stop so we can pull sidecars
-    # and let validation report the missing/invalid MP4 instead of timing out.
+    # produce a saved path. Treat that as a real stop so validation can report
+    # the missing/invalid MP4 instead of timing out.
     return 0
   fi
   if printf '%s\n' "$path" | grep -q '\.mp4$'; then
@@ -914,21 +913,6 @@ def failed(name: str, detail: str = "") -> None:
 
 def safe_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(errors="replace"))
-
-
-def safe_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    if not path.exists():
-        return records
-    for line in path.read_text(errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return records
 
 
 def pick_latest_session(root: Path) -> tuple[Path, Path]:
@@ -1184,53 +1168,30 @@ def wants_head_pose(options: dict[str, Any]) -> bool:
 
 def check_required_files(session_dir: Path, mp4: Path, options: dict[str, Any]) -> None:
     required = ["manifest.json"]
-    camera_sidecars = [
+    forbidden_legacy_artifacts = [
         "android_timebase.json",
         "left_camera_characteristics.json",
+        "right_camera_characteristics.json",
         "left_camera_frames.jsonl",
+        "right_camera_frames.jsonl",
+        "depth/frames.jsonl",
+        "poses/head.jsonl",
+        "poses/controllers.jsonl",
+        "body_motion/body.jsonl",
+        "body_motion/motion_trackers.jsonl",
     ]
-    if wants_stereo_rgb(options):
-        camera_sidecars += ["right_camera_characteristics.json", "right_camera_frames.jsonl"]
     for rel in required:
         path = session_dir / rel
         if path.exists() and path.stat().st_size > 0:
             passed(f"file present: {rel}")
         else:
             failed(f"file present: {rel}", str(path))
-    camera_sidecar_mode = options.get("save_camera_metadata_sidecars")
-    for rel in camera_sidecars:
+    for rel in forbidden_legacy_artifacts:
         path = session_dir / rel
-        if camera_sidecar_mode is True:
-            if path.exists() and path.stat().st_size > 0:
-                passed(f"requested camera sidecar present: {rel}")
-            else:
-                failed(f"requested camera sidecar present: {rel}", str(path))
-        elif camera_sidecar_mode is False:
-            if path.exists():
-                failed(f"default capture omits camera sidecar: {rel}", str(path))
-            else:
-                passed(f"default capture omits camera sidecar: {rel}")
-        elif path.exists() and path.stat().st_size > 0:
-            passed(f"legacy camera sidecar present: {rel}")
+        if path.exists():
+            failed(f"legacy debug artifact is not written: {rel}", str(path))
         else:
-            warned(f"legacy camera sidecar absent: {rel}", "self-contained MP4 metadata should cover this")
-    if wants_depth(options):
-        depth_sidecar = session_dir / "depth/frames.jsonl"
-        depth_sidecar_mode = options.get("save_depth_sidecar")
-        if depth_sidecar_mode is True:
-            if depth_sidecar.exists() and depth_sidecar.stat().st_size > 0:
-                passed("requested depth sidecar present: depth/frames.jsonl")
-            else:
-                failed("requested depth sidecar present: depth/frames.jsonl", str(depth_sidecar))
-        elif depth_sidecar_mode is False:
-            if depth_sidecar.exists():
-                failed("default capture omits depth sidecar: depth/frames.jsonl", str(depth_sidecar))
-            else:
-                passed("default capture omits depth sidecar: depth/frames.jsonl")
-        elif depth_sidecar.exists() and depth_sidecar.stat().st_size > 0:
-            passed("legacy depth sidecar present: depth/frames.jsonl")
-        else:
-            warned("legacy depth sidecar absent: depth/frames.jsonl", "MP4 depth metadata should cover this")
+            passed(f"legacy debug artifact is not written: {rel}")
     if mp4.parent == session_dir:
         passed("MP4 co-located with session files", str(session_dir))
     elif allow_legacy_layout:
@@ -1296,16 +1257,6 @@ def check_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
                 f"capture option {key} is boolean",
                 repr(options.get(key)),
             )
-    # Body/motion capture is opt-in for CI because Pico requires worn external
-    # trackers. save_body_sidecar defaults OFF — the sidecar JSONL is only
-    # useful when frame-level body_flags + PICO velocity/acceleration extras
-    # are needed beyond the mp4 mett payload.
-    if "save_body_sidecar" in options:
-        if options.get("save_body_sidecar") is False:
-            passed("capture option save_body_sidecar=false (default)")
-        else:
-            warned("capture option save_body_sidecar=true",
-                   "sidecar JSONL will be written next to the mp4")
     observed_codec = normalize_codec(str(options.get("rgb_codec", "")))
     if observed_codec == expected_rgb_codec:
         passed("capture option rgb_codec", observed_codec)
@@ -1423,30 +1374,6 @@ def check_rgb_index_rows(rows: list[dict[str, Any]], eye: str, timebase: dict[st
             passed(f"{label} sensor-to-Godot offset matches timebase")
         else:
             failed(f"{label} sensor-to-Godot offset matches timebase", f"deltas={sorted(deltas)[:3]} expected={expected}")
-
-
-def check_rgb_index_sidecar(session_dir: Path, eye: str, timebase: dict[str, Any]) -> list[dict[str, Any]]:
-    path = session_dir / f"{eye}_camera_frames.jsonl"
-    rows = safe_jsonl(path)
-    if not rows:
-        warned(f"{eye} legacy RGB frame-index sidecar absent", str(path))
-        return rows
-    check_rgb_index_rows(rows, eye, timebase, f"{eye} legacy RGB frame-index sidecar")
-    return rows
-
-
-def check_depth(session_dir: Path) -> list[dict[str, Any]]:
-    rows = safe_jsonl(session_dir / "depth/frames.jsonl")
-    if rows:
-        passed("legacy depth frame-index sidecar non-empty", f"{len(rows)} records")
-        timestamps = [int(r["timestamp_ns"]) for r in rows if "timestamp_ns" in r]
-        if len(timestamps) == len(rows) and all(b >= a for a, b in zip(timestamps, timestamps[1:])):
-            passed("legacy depth sidecar timestamp_ns is monotonic")
-        else:
-            failed("legacy depth sidecar timestamp_ns is monotonic")
-    else:
-        warned("legacy depth frame-index sidecar absent", "depth MP4 stream + depth_frame_meta should cover this")
-    return rows
 
 
 def check_body_tracking_source(manifest: dict[str, Any], options: dict[str, Any]) -> None:
@@ -1994,7 +1921,6 @@ except Exception as exc:
 print(f"[validate] session={session_dir.name} mp4={mp4.name}")
 
 manifest_path = session_dir / "manifest.json"
-timebase_path = session_dir / "android_timebase.json"
 if not manifest_path.exists():
     failed("manifest.json exists", str(manifest_path))
     sys.exit(print_summary())
@@ -2007,22 +1933,12 @@ check_required_files(session_dir, mp4, options)
 mp4_info = check_mp4(mp4, options)
 operator_static = first_metadata_payload(load_json_metadata_frames(mp4, mp4_info, "operator_static"))
 embedded_timebase = operator_static.get("android_timebase") if isinstance(operator_static, dict) else None
-sidecar_timebase = safe_json(timebase_path) if timebase_path.exists() else None
-if isinstance(sidecar_timebase, dict):
-    check_timebase(sidecar_timebase, "legacy android_timebase sidecar")
-else:
-    warned("legacy android_timebase sidecar absent", "operator_static.android_timebase should cover this")
 if isinstance(embedded_timebase, dict):
     timebase = embedded_timebase
 else:
-    timebase = sidecar_timebase if isinstance(sidecar_timebase, dict) else {}
+    timebase = {}
     failed("operator_static.android_timebase usable", repr(embedded_timebase))
 check_self_contained_mp4_metadata(mp4, mp4_info, options, manifest, timebase)
-check_rgb_index_sidecar(session_dir, "left", timebase)
-if wants_stereo_rgb(options):
-    check_rgb_index_sidecar(session_dir, "right", timebase)
-if wants_depth(options):
-    check_depth(session_dir)
 check_mp4_device_tags(mp4, device)
 
 sys.exit(print_summary())

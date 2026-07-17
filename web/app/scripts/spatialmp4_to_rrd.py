@@ -27,11 +27,10 @@ viewer in the dashboard.
 Differences from the reference (deliberate):
   * **Ingest ships ``media.mp4`` + ``manifest.json``**. Camera2
     calibration and Android timebase are preferred from MP4 embedded
-    ``operator_static`` metadata, with old sidecar layouts kept as fallback.
+    ``operator_static`` metadata.
     Operator-specific JSON ``mett`` tracks such as ``motion_trackers`` are
     read directly from the MP4 with ffprobe until the SDK exposes typed APIs.
-    Depth spool sidecars (``depth/frames.jsonl``) are still skipped here; Quest
-    depth uses MP4-embedded ``depth_frame_meta`` when the recording has it.
+    Depth uses MP4-embedded ``depth_frame_meta`` when the recording has it.
     When Quest Camera2 metadata is missing, we use ``T_W_Srgb = T_W_H @
     T_I_Srgb`` straight out of the mp4's RGB extrinsics and accept the
     live-writer's documented ~10° X-axis bias.
@@ -51,17 +50,17 @@ Per-device branches (Quest vs Pico):
     1. **head mett track meaning** — Quest's ``head`` IS the IMU pose
        already; current Operator Pico captures also store ``head`` in the
        same raw Godot/OpenXR world basis as hand joints and RGB extrinsics.
-    2. **Pico RGB standoff** — Pico MP4 ``rgb_extrinsics`` already carries
-       the RGB camera RDF frame, so we do not apply SDK ``head_to_imu`` or
-       tmp_refer.md's fixed rotation again. We only apply the measured
-       head-model standoff magnitude along RGB camera +Z:
-       ``T_I_Srgb = T_I_Srgb @ Trans_camera([0, 0, norm(HEAD_MODEL_OFFSET)])``.
+    2. **Pico RGB projection** — Pico MP4 ``rgb_extrinsics`` already carries
+       the RGB camera frame, so we do not apply SDK ``head_to_imu`` or a
+       head-model standoff. For 2D hand overlays only, Pico raw OpenXR
+       head/hand samples are projected through the same Unity-compatible
+       axis conversion used by the native projection path.
     3. **Pinhole camera_xyz** — Quest = ``RDF`` (OpenCV); current Operator
        Pico captures also use ``RDF`` because their RGB local frame is already
        X-right/Y-down/Z-forward.
-  World coordinate system is ``RUB`` for both. Pico raw Godot/OpenXR
-  world samples (hands/controllers/head trajectory) stay in the same basis as
-  the camera path.
+  World coordinate system is ``RUB`` for both logged 3D tracks. Pico raw
+  Godot/OpenXR world samples stay in that basis for 3D visualization; the
+  Unity-compatible conversion is isolated to the RGB hand overlay.
 
 Coordinate conventions (mirrored from reference):
   * **world**: ``rr.ViewCoordinates.RUB``
@@ -347,7 +346,7 @@ class PoseLookup:
     """
 
     def __init__(self, frames: Sequence) -> None:
-        valid = [f for f in frames if f.timestamp > 0]
+        valid = [f for f in frames if f.timestamp >= 0]
         valid.sort(key=lambda f: f.timestamp)
         self._ts = [f.timestamp for f in valid]
         self._frames = valid
@@ -415,11 +414,12 @@ class DeviceProfile:
       * ``head_model_offset``  — translation offset supplied to the SDK
                                  conversion above for legacy/device-native
                                  captures that opt into ``head_to_imu``.
-      * ``rgb_head_model_forward`` — apply ``norm(HEAD_MODEL_OFFSET)`` as a
-                                 camera-local +Z translation to RGB
-                                 extrinsics. This matches the validated Pico
-                                 OpenCV/Numpy hand projection path without
-                                 reintroducing ``head_to_imu``'s basis remap.
+	      * ``rgb_head_model_forward`` — apply ``norm(HEAD_MODEL_OFFSET)`` as a
+	                                 camera-local +Z translation to RGB
+	                                 extrinsics. Legacy-only; current Pico
+	                                 captures keep this disabled and project
+	                                 hands through the Unity-compatible
+	                                 projection path instead.
       * ``extrinsic_perm``     — 4×4 axis swap applied to the composed
                                  ``T_W_S`` for both RGB and depth cameras
                                  before handing it to Rerun. Quest = None
@@ -456,12 +456,12 @@ class DeviceProfile:
 
 @dataclass(frozen=True)
 class Camera2ProjectionCalibration:
-    """Quest Camera2 sidecar calibration for accurate 2D RGB overlays.
+    """Quest Camera2 calibration for accurate 2D RGB overlays.
 
     The mp4 `ecam` descriptor is suitable for the 3D Rerun camera pose, but
-    Quest's Camera2 `lens_pose_*` sidecar needs the OpenQuest conversion used by
-    SpatialMP4's reference alignment tools before projecting world points into
-    the RGB image plane.
+    Quest's Camera2 `lens_pose_*` metadata needs the OpenQuest conversion used
+    by SpatialMP4's reference alignment tools before projecting world points
+    into the RGB image plane.
     """
     head_from_camera_unity: np.ndarray
     K_rgb: np.ndarray
@@ -479,6 +479,7 @@ class ResolvedIntrinsics:
 
 UNITY_FROM_GODOT_3 = np.diag([1.0, 1.0, -1.0])
 UNITY_FROM_GODOT_4 = np.diag([1.0, 1.0, -1.0, 1.0])
+PICO_UNITY_CAMERA_AXIS_ADJUSTMENT = np.diag([1.0, -1.0, -1.0, 1.0])
 QUEST_DEPTH_META_MATCH_MAX_DT = 0.060
 
 # Quest Environment Depth per-frame metadata reports local_from_depth_eye as a
@@ -540,11 +541,11 @@ PROFILE_PICO = DeviceProfile(
     # That is the same space `XRCamera3D.global_transform` tracks, so the
     # chain collapses to T_W_S = T_W_H @ T_I_S directly with T_H_I = identity.
     # No SDK head_to_imu axis swap is appropriate for this recording. The RGB
-    # standoff correction is applied to T_I_Srgb separately in
-    # rgb_extrinsics_for_profile().
+    # hand-image overlay is matched to the native Unity-compatible projection path
+    # separately; the 3D Rerun world tracks stay in raw OpenXR.
     head_is_imu=True,
     head_model_offset=None,
-    rgb_head_model_forward=True,
+    rgb_head_model_forward=False,
     extrinsic_perm=None,
     native_from_capture=None,
     # Pico's T_I_S rotation is R_x(180°), so the sensor's local frame is
@@ -568,10 +569,9 @@ def rgb_extrinsics_for_profile(
     """Return the RGB extrinsic used by this converter's projection chain.
 
     Current Operator Pico MP4s already store a head/view-relative RGB camera
-    transform with an RDF optical frame. The standalone
-    pico_hand_projection_video.py validation showed the remaining error is a
-    depth/standoff term, so we apply only the magnitude of SpatialMP4's
-    HEAD_MODEL_OFFSET along camera-local +Z.
+    transform. Modern Pico captures keep this raw value unchanged; the
+    head-model-forward branch remains only for legacy profiles that explicitly
+    opt into it.
     """
     if T_I_Srgb is None:
         return None, None
@@ -604,9 +604,8 @@ def detect_device_profile(
 ) -> DeviceProfile:
     """Resolve which profile to use, with these priorities:
       1. explicit ``--device-type`` CLI value (``quest`` / ``pico``)
-      2. mp4-embedded ``operator_static.provider`` (self-contained, so this
-         works even when the manifest sidecar is absent — the whole point of
-         the raw-mp4 metadata. ``provider`` is ``quest``/``pico``.)
+      2. mp4-embedded ``operator_static.provider`` (self-contained raw MP4
+         metadata. ``provider`` is ``quest``/``pico``.)
       3. manifest's ``device.device_type`` field, normalised
 
     An explicit/embedded/manifest hint that resolves to Android XR (or to any
@@ -645,7 +644,7 @@ def detect_device_profile(
     if candidate.startswith("pico"):
         info(
             "device profile: PICO "
-            "(T_W_S = T_W_H @ (T_I_Srgb @ HeadModelForward), sensor RDF)"
+            "(raw OpenXR 3D tracks, Unity-compatible Pico RGB hand overlay)"
         )
         return PROFILE_PICO
     if candidate.startswith("quest"):
@@ -683,6 +682,49 @@ def head_pose_matrix(pose, profile: DeviceProfile) -> np.ndarray:
 def godot_transform_to_unity(transform_godot: np.ndarray) -> np.ndarray:
     """Convert Godot/OpenXR RUB transform to Unity-style X-right/Y-up/Z-forward."""
     return UNITY_FROM_GODOT_4 @ transform_godot @ UNITY_FROM_GODOT_4
+
+
+def openxr_pose_to_unity_tracking_matrix(pose) -> np.ndarray:
+    """Match native_recording_pipeline.cpp::openxr_pose_to_unity_tracking."""
+    mat = np.eye(4, dtype=np.float64)
+    rot = Rotation.from_quat([pose.qx, pose.qy, -pose.qz, -pose.qw]).as_matrix()
+    mat[:3, :3] = rot
+    mat[:3, 3] = [pose.x, pose.y, -pose.z]
+    return mat
+
+
+def openxr_points_to_unity_tracking(points: np.ndarray) -> np.ndarray:
+    converted = np.array(points, dtype=np.float64, copy=True)
+    if converted.size:
+        converted[:, 2] *= -1.0
+    return converted
+
+
+def profile_uses_pico_unity_rgb_overlay(profile: DeviceProfile) -> bool:
+    return profile.name == "pico"
+
+
+def compose_rgb_image_projection_pose(
+    head_pose,
+    T_I_Srgb: np.ndarray,
+    profile: DeviceProfile,
+    fallback_T_W_Srgb_camera: np.ndarray,
+) -> np.ndarray:
+    """Camera pose used only for manual 2D projection into the RGB image.
+
+    Pico production captures project raw OpenXR hand/head data after converting
+    it into Unity tracking space and then multiplying an extra camera
+    R_x(180°) axis adjustment. Rerun's 3D world tracks remain in raw
+    OpenXR/Godot space, so this helper is intentionally not used for logging
+    world/camera Transform3D.
+    """
+    if profile_uses_pico_unity_rgb_overlay(profile):
+        return (
+            openxr_pose_to_unity_tracking_matrix(head_pose)
+            @ T_I_Srgb
+            @ PICO_UNITY_CAMERA_AXIS_ADJUSTMENT
+        )
+    return fallback_T_W_Srgb_camera
 
 
 def _camera2_characteristic_size(char: Dict[str, Any]) -> Tuple[int, int]:
@@ -820,27 +862,20 @@ def load_camera2_projection_calibration(
     """Load Quest Camera2 calibration for accurate RGB image projection.
 
     Mirrors SpatialMP4's `godot_depth_rgb_align._openquest_head_from_camera`.
-    This is intentionally Quest-only; Pico has different axis conventions and
-    currently no validated sidecar path in this web converter.
+    This is intentionally Quest-only; Pico has different axis conventions.
     """
     if profile.name != "quest":
         return None
 
     candidates, read_errors = camera2_metadata_candidates(input_path, operator_static, eye)
-    for characteristics, source_label, is_embedded in candidates:
+    for characteristics, _source_label, _is_embedded in candidates:
         projection = _camera2_projection_from_characteristics(characteristics, source_label)
         if projection is None:
             continue
-        if is_embedded:
-            info(
-                "loaded Quest Camera2 projection calibration from MP4 "
-                f"operator_static ({eye})"
-            )
-        else:
-            info(
-                f"loaded Quest Camera2 sidecar projection calibration: {source_label} "
-                "(RGB hand overlay uses OpenQuest Camera2 conversion)"
-            )
+        info(
+            "loaded Quest Camera2 projection calibration from MP4 "
+            f"operator_static ({eye})"
+        )
         return projection
 
     for read_error in read_errors:
@@ -848,7 +883,7 @@ def load_camera2_projection_calibration(
     if not candidates:
         info(
             f"Quest {eye} Camera2 characteristics are absent from MP4 operator_static "
-            "and no legacy sidecar exists; falling back to mp4 ecam projection"
+            "falling back to mp4 ecam projection"
         )
     return None
 
@@ -885,9 +920,8 @@ def compose_world_sensor_pose(
 
     For Quest and current Operator Pico captures, ``head_pose_matrix`` is the
     identity interpretation: the ``head`` track already lives in the same raw
-    world basis as the camera extrinsics. Pico's RGB head-model standoff is
-    applied once in ``rgb_extrinsics_for_profile`` before this function sees
-    ``T_I_S``.
+    world basis as the camera extrinsics. Pico's Unity-compatible RGB hand
+    overlay is handled separately by ``compose_rgb_image_projection_pose``.
 
     Returns ``(T_W_I, T_W_S_sensor, T_W_S_camera)``. The ``sensor`` matrix is
     the raw MP4 extrinsic composition. The ``camera`` matrix has only the
@@ -961,11 +995,14 @@ def project_capture_points_to_image(
     """Project raw capture-world points through the profile's RGB camera.
 
     ``capture_world_pts`` are the SDK hand joints (``T_W_hand`` points).
-    ``device_native_capture_points`` is a no-op for current Quest/Pico
-    captures, and only changes points for legacy profiles that explicitly set a
-    capture-to-native basis map.
+    Quest/legacy profiles use their device-native world. Pico production
+    captures mirror the native Unity-compatible projection path: hand joints are first
+    mapped from raw OpenXR tracking to Unity tracking before projection.
     """
-    world_pts = device_native_capture_points(capture_world_pts, profile)
+    if profile_uses_pico_unity_rgb_overlay(profile):
+        world_pts = openxr_points_to_unity_tracking(capture_world_pts)
+    else:
+        world_pts = device_native_capture_points(capture_world_pts, profile)
     return project_world_points_to_image(
         world_pts,
         T_W_S_camera,
@@ -974,6 +1011,7 @@ def project_capture_points_to_image(
         height,
         profile.camera_view_coord,
         image_rdf_from_camera=profile.image_rdf_from_camera,
+        flip_projected_y=profile_uses_pico_unity_rgb_overlay(profile),
     )
 
 
@@ -1694,7 +1732,8 @@ def _json_metadata_streams(input_path: Path, kind: str) -> List[Tuple[int, str]]
 
 
 # JSON `mett` tracks added by the self-contained raw-mp4 work. They carry
-# session calibration / per-frame index / event payloads, NOT poses. Some
+# session calibration / per-frame index / event payloads / legacy
+# RGB-synchronized pose samples. Some
 # SpatialMP4 SDK builds still return non-empty get_rigid_pose_frames() for
 # them, which mislabels operator_static / rgb_frame_index / ... as camera-pose
 # tracks and logs garbage 3D transforms (huge values -> float32 overflow and
@@ -1706,6 +1745,7 @@ JSON_METADATA_KINDS: Tuple[str, ...] = (
     "depth_frame_meta",
     "body_frame_meta",
     "motion_trackers",
+    "rgb_tracking_sample",
 )
 
 
@@ -2073,11 +2113,6 @@ def load_android_timebase_metadata(
     if metadata is not None and source == "mp4":
         info("loaded android_timebase from MP4 operator_static")
         return metadata
-    if metadata is not None:
-        info(f"loaded android_timebase sidecar: {source}")
-        return metadata
-    if error is not None:
-        info(f"android_timebase sidecar read failed ({source}): {error}")
     return None
 
 
@@ -2252,7 +2287,7 @@ def log_all_rigid_pose_tracks(
             # head is rendered as world/camera + world/trajectory below.
             continue
         for pose in reader.get_rigid_pose_frames(tid):
-            if pose.timestamp <= 0:
+            if pose.timestamp < 0:
                 continue
             set_time_seconds("time", pose.timestamp)
             log_rigid_pose(tid, pose, profile)
@@ -2265,7 +2300,7 @@ def log_all_hand_tracks(
 ) -> None:
     for tid in track_ids:
         for frame in reader.get_hand_joint_frames(tid):
-            if frame.timestamp <= 0:
+            if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
             log_hand_frame(tid, frame, profile)
@@ -2276,7 +2311,7 @@ def log_all_hand_tracks_head_relative(
 ) -> None:
     for tid in track_ids:
         for frame in reader.get_hand_joint_frames(tid):
-            if frame.timestamp <= 0:
+            if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
             log_hand_frame_head_relative(tid, frame, head_lookup)
@@ -2290,7 +2325,7 @@ def log_all_body_tracks(
     fallback_body_frames = fallback_body_frames or {}
     for tid in track_ids:
         for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
-            if frame.timestamp <= 0:
+            if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
             log_body_frame(frame)
@@ -2305,7 +2340,7 @@ def log_all_body_tracks_head_relative(
     fallback_body_frames = fallback_body_frames or {}
     for tid in track_ids:
         for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
-            if frame.timestamp <= 0:
+            if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
             log_body_frame_head_relative(frame, head_lookup)
@@ -2314,7 +2349,7 @@ def log_all_body_tracks_head_relative(
 def log_all_controller_input_tracks(reader, track_ids: Sequence[str]) -> None:
     for tid in track_ids:
         for frame in reader.get_controller_input_frames(tid):
-            if frame.timestamp <= 0:
+            if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
             rr.log(
@@ -2573,7 +2608,7 @@ def log_floor_grid(
 
 
 # ---------------------------------------------------------------------------
-# Depth helpers (mp4-only, no spool sidecar)
+# Depth helpers (MP4-only)
 # ---------------------------------------------------------------------------
 
 
@@ -2599,7 +2634,7 @@ class HandFrameLookup:
     """
 
     def __init__(self, frames: Sequence) -> None:
-        valid = [f for f in frames if f.timestamp > 0]
+        valid = [f for f in frames if f.timestamp >= 0]
         valid.sort(key=lambda f: f.timestamp)
         self._ts = [f.timestamp for f in valid]
         self._frames = valid
@@ -2740,7 +2775,7 @@ def log_all_body_hand_bridges(
         return
     for tid in track_ids:
         for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
-            if frame.timestamp <= 0:
+            if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
             log_body_hand_bridge_frame(
@@ -2763,7 +2798,7 @@ def log_all_body_hand_bridges_head_relative(
         return
     for tid in track_ids:
         for frame in _body_frames_for_track(reader, tid, fallback_body_frames):
-            if frame.timestamp <= 0:
+            if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
             log_body_hand_bridge_frame_head_relative(
@@ -2797,6 +2832,7 @@ def project_world_points_to_image(
     camera_view_coord: str,
     image_rdf_from_camera: Optional[np.ndarray] = None,
     z_near: float = 0.05,
+    flip_projected_y: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Project world-frame points into a 2D image given the camera
     extrinsic in the **device's native** orientation.
@@ -2838,6 +2874,8 @@ def project_world_points_to_image(
     with np.errstate(divide="ignore", invalid="ignore"):
         u = p_rdf[:, 0] * fx / z + cx
         v = p_rdf[:, 1] * fy / z + cy
+    if flip_projected_y:
+        v = (height - 1) - v
     inside = (u >= 0) & (u < width) & (v >= 0) & (v < height)
     mask = valid_z & inside & np.isfinite(u) & np.isfinite(v)
 
@@ -3348,18 +3386,6 @@ def run(args: argparse.Namespace) -> int:
     has_rgb = reader.has_rgb()
     has_depth = reader.has_depth() and not args.no_depth
     if not has_depth and not args.no_depth:
-        depth_sidecar_candidates = [
-            # Current co-located/uploaded layout: <session>/<video>.mp4 and
-            # <session>/depth/frames.jsonl.
-            input_path.parent / "depth" / "frames.jsonl",
-            # Historical local layout: <capture_root>/<session>.mp4 and
-            # <capture_root>/<session>/depth/frames.jsonl.
-            input_path.with_suffix("") / "depth" / "frames.jsonl",
-        ]
-        depth_sidecar = next(
-            (path for path in depth_sidecar_candidates if path.exists()),
-            depth_sidecar_candidates[0],
-        )
         if manifest_path is not None and manifest_path.exists():
             try:
                 mf = json.loads(manifest_path.read_text())
@@ -3367,18 +3393,9 @@ def run(args: argparse.Namespace) -> int:
             except (json.JSONDecodeError, OSError):
                 wants_depth = False
             if wants_depth:
-                if not depth_sidecar.exists():
-                    sidecar_note = f"; sidecar not found: {depth_sidecar}"
-                elif depth_sidecar.stat().st_size == 0:
-                    sidecar_note = f"; sidecar exists but is empty: {depth_sidecar}"
-                else:
-                    sidecar_note = (
-                        f"; sidecar exists: {depth_sidecar} "
-                        f"({depth_sidecar.stat().st_size:,} bytes)"
-                    )
                 info(
                     "depth requested in manifest, but this mp4 has no readable "
-                    f"depth stream{sidecar_note}. Rerun output will be RGB/pose only."
+                    "depth stream. Rerun output will be RGB/pose only."
                 )
 
     if not has_rgb and not has_depth:
@@ -3475,7 +3492,7 @@ def run(args: argparse.Namespace) -> int:
         raw_t = np.asarray(T_I_Srgb_raw, dtype=np.float64)[:3, 3]
         effective_t = np.asarray(T_I_Srgb, dtype=np.float64)[:3, 3]
         info(
-            "Pico RGB extrinsics: applied HEAD_MODEL_OFFSET magnitude along "
+            "RGB extrinsics: applied legacy HEAD_MODEL_OFFSET magnitude along "
             f"camera +Z ({rgb_head_model_forward_m:.6f}m); "
             f"raw_t={raw_t.tolist()} effective_t={effective_t.tolist()}"
         )
@@ -3886,6 +3903,12 @@ def run(args: argparse.Namespace) -> int:
                 T_I_Srgb,
                 profile,
             )
+            T_W_Srgb_image_projection = compose_rgb_image_projection_pose(
+                head_pose,
+                T_I_Srgb,
+                profile,
+                T_W_Srgb_camera,
+            )
             T_W_Srgb = device_logged_camera_pose(T_W_Srgb_sensor, profile)
             T_W_Srgb[:3, :3] = ensure_right_handed_rotation(T_W_Srgb[:3, :3])
 
@@ -3902,11 +3925,9 @@ def run(args: argparse.Namespace) -> int:
                 rr.Image(rgb_bgr, color_model="BGR").compress(jpeg_quality=args.jpeg_quality),
             )
 
-            # Hand-joint overlay onto the left RGB image. Hand joints
-            # arrive in capture/raw world; log_hand_joints_on_image
-            # uses the same RGB camera chain as pico_hand_projection_video.py:
-            # for Pico, raw hand points stay in capture world and T_I_Srgb has
-            # the camera-local head-model forward correction pre-applied.
+            # Hand-joint overlay onto the left RGB image. Pico uses the same
+            # Unity-compatible projection path as the native capture path,
+            # while 3D world tracks remain in raw OpenXR/Godot space.
             for tid, hl in hand_lookups.items():
                 hand_frame = hl.nearest_within(ts, HAND_FRAME_MATCH_MAX_DT)
                 if hand_frame is None:
@@ -3916,7 +3937,7 @@ def run(args: argparse.Namespace) -> int:
                     track_id=tid,
                     hand_frame=hand_frame,
                     profile=profile,
-                    T_W_Srgb_camera=T_W_Srgb_camera,
+                    T_W_Srgb_camera=T_W_Srgb_image_projection,
                     K_rgb=K_rgb,
                     rgb_w=rgb_w,
                     rgb_h=rgb_h,

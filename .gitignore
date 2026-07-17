@@ -126,3 +126,4 @@ cicd/logs
 # qa
 claw/qa-artifacts
 xr/artifacts/
+tests/logs
