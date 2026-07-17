@@ -16,6 +16,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstdint>
 #include <ctime>
 #include <cstring>
 #include <deque>
@@ -31,8 +33,18 @@ constexpr int kAvPacketFlagKey = 0x0001;
 // The NDK header in r26c omits the Java MediaCodec key-frame alias.  Bit 0 is
 // the stable sync/key-frame flag used by MediaCodec.BufferInfo.
 constexpr uint32_t kMediaCodecBufferFlagKeyFrame = 0x0001;
+constexpr int kTrackHeadPose = 0;
+constexpr int kTrackLeftHandJoints = 3;
+constexpr int kTrackRightHandJoints = 4;
 constexpr int kTrackRgbFrameIndexLeft = 9;
 constexpr int kTrackRgbFrameIndexRight = 10;
+constexpr int64_t kPoseSampleDurationUs = 11'111;
+constexpr int64_t kHandSampleDurationUs = 16'667;
+constexpr uint32_t kHjntMagic = 0x544E4A48; // "HJNT" little-endian.
+constexpr uint16_t kHjntVersion = 1;
+constexpr int kHjntHeaderBytes = 8;
+constexpr int kHjntJointRecordBytes = 36;
+constexpr int kHjntPayloadBytes = kHjntHeaderBytes + XR_HAND_JOINT_COUNT_EXT * kHjntJointRecordBytes;
 constexpr int64_t kMaxStereoDeltaNs = 20'000'000;
 constexpr auto kStartupTimeout = std::chrono::seconds(5);
 constexpr auto kRuntimeCameraIdleTimeout = std::chrono::seconds(2);
@@ -471,6 +483,164 @@ struct UploadedFrame {
 
 enum class UploadResult { None, Uploaded, Dropped };
 
+struct HandSample {
+	bool active = false;
+	XrTime locate_time = 0;
+	XrResult result = XR_ERROR_HANDLE_INVALID;
+	uint32_t tracked_joint_count = 0;
+	std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> joints{};
+};
+
+struct TrackingSample {
+	XrTime time = 0;
+	XrPosef head_pose{};
+	bool head_pose_valid = false;
+	HandSample left_hand{};
+	HandSample right_hand{};
+};
+
+bool location_has_position(XrSpaceLocationFlags flags) {
+	return (flags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+}
+
+bool location_has_orientation(XrSpaceLocationFlags flags) {
+	return (flags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0;
+}
+
+XrPosef pose_identity() {
+	return { { 0.0f, 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f } };
+}
+
+XrQuaternionf quaternion_multiply(const XrQuaternionf &a, const XrQuaternionf &b) {
+	return {
+		a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+		a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+		a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+		a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+	};
+}
+
+void encode_u16(uint8_t *dst, uint16_t value) {
+	dst[0] = static_cast<uint8_t>(value);
+	dst[1] = static_cast<uint8_t>(value >> 8);
+}
+
+void encode_u32(uint8_t *dst, uint32_t value) {
+	dst[0] = static_cast<uint8_t>(value);
+	dst[1] = static_cast<uint8_t>(value >> 8);
+	dst[2] = static_cast<uint8_t>(value >> 16);
+	dst[3] = static_cast<uint8_t>(value >> 24);
+}
+
+void encode_f32(uint8_t *dst, float value) {
+	std::memcpy(dst, &value, sizeof(value));
+}
+
+uint16_t godot_hand_flags(XrSpaceLocationFlags flags) {
+	uint16_t out = 0;
+	if (flags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) out |= 1;
+	if (flags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) out |= 2;
+	if (flags & XR_SPACE_LOCATION_POSITION_VALID_BIT) out |= 4;
+	if (flags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) out |= 8;
+	return out;
+}
+
+std::array<uint8_t, sizeof(double) * 7> pack_pose_binary(const XrPosef &pose) {
+	const double values[7] = {
+		static_cast<double>(pose.position.x),
+		static_cast<double>(pose.position.y),
+		static_cast<double>(pose.position.z),
+		static_cast<double>(pose.orientation.x),
+		static_cast<double>(pose.orientation.y),
+		static_cast<double>(pose.orientation.z),
+		static_cast<double>(pose.orientation.w),
+	};
+	std::array<uint8_t, sizeof(values)> out{};
+	std::memcpy(out.data(), values, sizeof(values));
+	return out;
+}
+
+bool pack_hand_hjnt(const HandSample &hand, std::array<uint8_t, kHjntPayloadBytes> &out) {
+	if (!hand.active || hand.tracked_joint_count == 0) {
+		return false;
+	}
+	encode_u32(out.data(), kHjntMagic);
+	encode_u16(out.data() + 4, kHjntVersion);
+	encode_u16(out.data() + 6, XR_HAND_JOINT_COUNT_EXT);
+	constexpr float sqrt_half = 0.7071067811865475f;
+	const XrQuaternionf bone_adjustment{ 0.0f, -sqrt_half, sqrt_half, 0.0f };
+	uint8_t *dst = out.data() + kHjntHeaderBytes;
+	for (uint16_t joint_index = 0; joint_index < XR_HAND_JOINT_COUNT_EXT; ++joint_index, dst += kHjntJointRecordBytes) {
+		const XrHandJointLocationEXT &joint = hand.joints[joint_index];
+		const XrQuaternionf rotation = quaternion_multiply(joint.pose.orientation, bone_adjustment);
+		encode_u16(dst, joint_index);
+		encode_u16(dst + 2, godot_hand_flags(joint.locationFlags));
+		encode_f32(dst + 4, joint.radius);
+		encode_f32(dst + 8, joint.pose.position.x);
+		encode_f32(dst + 12, joint.pose.position.y);
+		encode_f32(dst + 16, joint.pose.position.z);
+		encode_f32(dst + 20, rotation.x);
+		encode_f32(dst + 24, rotation.y);
+		encode_f32(dst + 28, rotation.z);
+		encode_f32(dst + 32, rotation.w);
+	}
+	return true;
+}
+
+bool locate_hand(const NativeRecordingPipeline::Config &config, XrHandTrackerEXT tracker, XrTime time, HandSample &out) {
+	out.locate_time = time;
+	if (!config.locate_hand_joints || tracker == XR_NULL_HAND_TRACKER_EXT || !config.base_space || time == 0) {
+		return false;
+	}
+	XrHandJointsLocateInfoEXT locate_info{
+		XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT,
+		nullptr,
+		config.base_space,
+		time,
+	};
+	XrHandJointLocationsEXT locations{
+		XR_TYPE_HAND_JOINT_LOCATIONS_EXT,
+		nullptr,
+		XR_FALSE,
+		XR_HAND_JOINT_COUNT_EXT,
+		out.joints.data(),
+	};
+	out.result = config.locate_hand_joints(tracker, &locate_info, &locations);
+	out.active = XR_SUCCEEDED(out.result) && locations.isActive == XR_TRUE;
+	out.tracked_joint_count = 0;
+	if (XR_SUCCEEDED(out.result)) {
+		for (const XrHandJointLocationEXT &joint : out.joints) {
+			if (location_has_position(joint.locationFlags)) {
+				++out.tracked_joint_count;
+			}
+		}
+	}
+	return out.tracked_joint_count > 0;
+}
+
+TrackingSample locate_tracking_sample(const NativeRecordingPipeline::Config &config, XrTime time) {
+	TrackingSample sample{};
+	sample.time = time;
+	if (config.locate_space && config.view_space && config.base_space && time != 0) {
+		XrSpaceLocation head_location{
+			XR_TYPE_SPACE_LOCATION,
+			nullptr,
+			0,
+			pose_identity(),
+		};
+		const XrResult result = config.locate_space(config.view_space, config.base_space, time, &head_location);
+		if (XR_SUCCEEDED(result) &&
+				location_has_position(head_location.locationFlags) &&
+				location_has_orientation(head_location.locationFlags)) {
+			sample.head_pose = head_location.pose;
+			sample.head_pose_valid = true;
+		}
+	}
+	locate_hand(config, config.left_hand_tracker, time, sample.left_hand);
+	locate_hand(config, config.right_hand_tracker, time, sample.right_hand);
+	return sample;
+}
+
 class FrameIndexFiles {
 public:
 	~FrameIndexFiles() { close(); }
@@ -513,10 +683,10 @@ UploadResult acquire_and_upload(
 		const NativeRecordingPipeline::Config &config,
 		XrCameraCaptureSessionPICO camera,
 		XrTime &last_capture_time,
-		GLuint texture,
-		std::vector<uint8_t> &staging,
-		std::atomic<int64_t> &staging_metric,
-		UploadedFrame &out) {
+			GLuint texture,
+			std::vector<uint8_t> &staging,
+			std::atomic<int64_t> &staging_metric,
+			UploadedFrame &out) {
 	if (!camera) return UploadResult::None;
 	XrCameraImageAcquireInfoPICO acquire_info{ XR_TYPE_CAMERA_IMAGE_ACQUIRE_INFO_PICO, nullptr, last_capture_time };
 	XrCameraImagePICO image{ XR_TYPE_CAMERA_IMAGE_PICO, nullptr, 0, 0 };
@@ -557,12 +727,12 @@ UploadResult acquire_and_upload(
 			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, raw.width, raw.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 			glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 			glBindTexture(GL_TEXTURE_2D, 0);
-			if (glGetError() == GL_NO_ERROR) {
-				last_capture_time = image.captureTime;
-				out.updated = true;
-				out.capture_time = image.captureTime;
-				result = UploadResult::Uploaded;
-			}
+				if (glGetError() == GL_NO_ERROR) {
+					last_capture_time = image.captureTime;
+					out.updated = true;
+					out.capture_time = image.captureTime;
+					result = UploadResult::Uploaded;
+				}
 		}
 	}
 	// glTexSubImage2D consumes client memory before returning, so the runtime
@@ -599,16 +769,46 @@ struct PendingFrameIndex {
 	XrTime left_capture_time = 0;
 	XrTime right_capture_time = 0;
 	int64_t submitted_pts_us = 0;
+	bool has_tracking_sample = false;
+	TrackingSample tracking_sample{};
 };
+
+bool write_rgb_tracking_to_pose_tracks(NativeMuxerApi &muxer, const PendingFrameIndex &frame,
+		const NativeRecordingPipeline::Config &config, std::string &error) {
+	if (!config.rgb_tracking_sample_metadata || !frame.has_tracking_sample) {
+		return true;
+	}
+	const int64_t left_godot_time_ns = frame.left_capture_time + config.xr_time_to_godot_ns;
+	const int64_t pts_us = left_godot_time_ns / 1'000;
+	if (config.rgb_tracking_sample_head && frame.tracking_sample.head_pose_valid) {
+		const auto payload = pack_pose_binary(frame.tracking_sample.head_pose);
+		if (!muxer.write_metadata(kTrackHeadPose, payload.data(), payload.size(), pts_us, kPoseSampleDurationUs)) {
+			error = "failed to write RGB-synchronized head pose into SpatialMP4 head track";
+			return false;
+		}
+	}
+	if (config.rgb_tracking_sample_hands) {
+		std::array<uint8_t, kHjntPayloadBytes> payload{};
+		if (pack_hand_hjnt(frame.tracking_sample.left_hand, payload) &&
+				!muxer.write_metadata(kTrackLeftHandJoints, payload.data(), payload.size(), pts_us, kHandSampleDurationUs)) {
+			error = "failed to write RGB-synchronized left hand joints into SpatialMP4 hand track";
+			return false;
+		}
+		if (pack_hand_hjnt(frame.tracking_sample.right_hand, payload) &&
+				!muxer.write_metadata(kTrackRightHandJoints, payload.data(), payload.size(), pts_us, kHandSampleDurationUs)) {
+			error = "failed to write RGB-synchronized right hand joints into SpatialMP4 hand track";
+			return false;
+		}
+	}
+	return true;
+}
 
 bool flush_encoded_frame_indices(
 		NativeSurfaceEncoder &encoder,
 		NativeMuxerApi &muxer,
 		FrameIndexFiles &files,
 		std::deque<PendingFrameIndex> &pending,
-		int64_t xr_time_to_godot_ns,
-		int width,
-		int height,
+		const NativeRecordingPipeline::Config &config,
 		int64_t duration_us,
 		int64_t &left_index,
 		int64_t &right_index,
@@ -645,17 +845,20 @@ bool flush_encoded_frame_indices(
 		const PendingFrameIndex frame = pending.front();
 		pending.pop_front();
 
-		const int64_t left_godot_time_ns = frame.left_capture_time + xr_time_to_godot_ns;
+		const int64_t left_godot_time_ns = frame.left_capture_time + config.xr_time_to_godot_ns;
 		if (!write_frame_index(muxer, files.for_eye(0), 0, left_index, frame.left_capture_time,
-				left_godot_time_ns, packet.pts_us, width, height, duration_us)) {
+				left_godot_time_ns, packet.pts_us, config.eye_width, config.eye_height, duration_us)) {
 			error = "failed to write native left RGB frame-index metadata or sidecar";
+			return false;
+		}
+		if (!write_rgb_tracking_to_pose_tracks(muxer, frame, config, error)) {
 			return false;
 		}
 		left_index++;
 		if (frame.stereo) {
-			const int64_t right_godot_time_ns = frame.right_capture_time + xr_time_to_godot_ns;
+			const int64_t right_godot_time_ns = frame.right_capture_time + config.xr_time_to_godot_ns;
 			if (!write_frame_index(muxer, files.for_eye(1), 1, right_index, frame.right_capture_time,
-					right_godot_time_ns, packet.pts_us, width, height, duration_us)) {
+					right_godot_time_ns, packet.pts_us, config.eye_width, config.eye_height, duration_us)) {
 				error = "failed to write native right RGB frame-index metadata or sidecar";
 				return false;
 			}
@@ -677,15 +880,26 @@ bool NativeRecordingPipeline::start(const Config &config) {
 	// A stopped worker can leave a final partial metrics interval behind.
 	// Do not attribute it to the next recording session.
 	(void)pop_metrics();
-	if (!config.session || !config.left_camera || config.eye_width <= 0 ||
-			config.eye_height <= 0 || !config.acquire_camera || !config.get_camera_data || !config.release_camera ||
-			config.left_frame_index_path.empty() || (config.stereo && config.right_frame_index_path.empty())) {
-		NC_LOGE("native pipeline rejected incomplete camera/OpenXR config");
-		std::lock_guard<std::mutex> lock(state_mutex_);
-		last_error_ = "native pipeline rejected incomplete camera/OpenXR config";
-		return false;
-	}
-	config_ = config;
+		if (!config.session || !config.left_camera || config.eye_width <= 0 ||
+				config.eye_height <= 0 || !config.acquire_camera || !config.get_camera_data || !config.release_camera ||
+				config.left_frame_index_path.empty() || (config.stereo && config.right_frame_index_path.empty())) {
+			NC_LOGE("native pipeline rejected incomplete camera/OpenXR config");
+			std::lock_guard<std::mutex> lock(state_mutex_);
+			last_error_ = "native pipeline rejected incomplete camera/OpenXR config";
+			return false;
+		}
+			const bool needs_head_tracking = config.rgb_tracking_sample_metadata && config.rgb_tracking_sample_head;
+			const bool needs_hand_tracking = config.rgb_tracking_sample_metadata && config.rgb_tracking_sample_hands;
+			if ((needs_head_tracking && (!config.base_space || !config.view_space || !config.locate_space)) ||
+					(needs_hand_tracking && (!config.base_space || !config.locate_hand_joints ||
+							config.left_hand_tracker == XR_NULL_HAND_TRACKER_EXT ||
+							config.right_hand_tracker == XR_NULL_HAND_TRACKER_EXT))) {
+				NC_LOGE("native pipeline rejected incomplete synchronized tracking config");
+				std::lock_guard<std::mutex> lock(state_mutex_);
+				last_error_ = "native pipeline rejected incomplete synchronized tracking config";
+				return false;
+			}
+		config_ = config;
 	{
 		std::lock_guard<std::mutex> lock(state_mutex_);
 		startup_complete_ = false;
@@ -805,10 +1019,10 @@ void NativeRecordingPipeline::camera_loop() {
 	auto process_encoded_packets = [&]() -> bool {
 		int64_t dropped_submissions = 0;
 		int64_t written_packets = 0;
-		std::string error;
-		if (!flush_encoded_frame_indices(encoder, muxer, frame_index_files, pending_indices,
-				config_.xr_time_to_godot_ns, config_.eye_width, config_.eye_height, duration_us,
-				left_index, right_index, dropped_submissions, written_packets, error)) {
+			std::string error;
+			if (!flush_encoded_frame_indices(encoder, muxer, frame_index_files, pending_indices,
+					config_, duration_us,
+					left_index, right_index, dropped_submissions, written_packets, error)) {
 			report_failure(error);
 			return false;
 		}
@@ -861,6 +1075,13 @@ void NativeRecordingPipeline::camera_loop() {
 				const int64_t delta = std::llabs(left.capture_time - right.capture_time);
 				if (delta <= kMaxStereoDeltaNs) {
 					const int64_t pts = std::min(left.capture_time, right.capture_time) + config_.xr_time_to_godot_ns;
+					const bool need_tracking_sample = config_.rgb_tracking_sample_metadata;
+					TrackingSample tracking{};
+					bool has_tracking_sample = false;
+					if (need_tracking_sample) {
+						tracking = locate_tracking_sample(config_, left.capture_time);
+						has_tracking_sample = true;
+					}
 					if (!encoder.present(true, pts)) {
 						report_failure(encoder.last_error().empty()
 								? "native camera encoder failed to present a stereo frame"
@@ -868,7 +1089,8 @@ void NativeRecordingPipeline::camera_loop() {
 						break;
 					}
 					metric_encoded_frames_.fetch_add(1, std::memory_order_relaxed);
-					pending_indices.push_back({ true, left.capture_time, right.capture_time, pts / 1'000 });
+					pending_indices.push_back({ true, left.capture_time, right.capture_time, pts / 1'000,
+							has_tracking_sample, tracking });
 					left.updated = false;
 					right.updated = false;
 					if (!process_encoded_packets()) break;
@@ -882,6 +1104,13 @@ void NativeRecordingPipeline::camera_loop() {
 			}
 		} else if (left.updated) {
 			const int64_t pts = left.capture_time + config_.xr_time_to_godot_ns;
+			const bool need_tracking_sample = config_.rgb_tracking_sample_metadata;
+			TrackingSample tracking{};
+			bool has_tracking_sample = false;
+			if (need_tracking_sample) {
+				tracking = locate_tracking_sample(config_, left.capture_time);
+				has_tracking_sample = true;
+			}
 			if (!encoder.present(false, pts)) {
 				report_failure(encoder.last_error().empty()
 						? "native camera encoder failed to present a mono frame"
@@ -889,7 +1118,8 @@ void NativeRecordingPipeline::camera_loop() {
 				break;
 			}
 			metric_encoded_frames_.fetch_add(1, std::memory_order_relaxed);
-			pending_indices.push_back({ false, left.capture_time, 0, pts / 1'000 });
+			pending_indices.push_back({ false, left.capture_time, 0, pts / 1'000,
+					has_tracking_sample, tracking });
 			left.updated = false;
 			if (!process_encoded_packets()) break;
 		}

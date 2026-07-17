@@ -46,7 +46,9 @@ public:
 	PackedInt32Array pump_camera_frames_to_sink();
 	bool start_native_recording_pipeline(String codec = "hevc", int bitrate = 8000000,
 			int64_t xr_time_to_godot_ns = 0, String left_frame_index_path = "",
-			String right_frame_index_path = "");
+			String right_frame_index_path = "", bool rgb_tracking_sample_metadata = true,
+			bool rgb_tracking_sample_head = true,
+			bool rgb_tracking_sample_hands = true, String tracking_coordinate_space = "openxr_play_space");
 	bool is_native_recording_pipeline_running() const;
 	String get_native_recording_pipeline_error() const;
 	Dictionary pop_native_recording_metrics();
@@ -90,6 +92,9 @@ private:
 		bool active = false;
 		XrResult last_result = XR_SUCCESS;
 		Dictionary metadata;
+		bool calibration_valid = false;
+		XrCameraIntrinsicsPICO intrinsics{};
+		XrCameraExtrinsicsPICO extrinsics{};
 	};
 
 	struct CameraImageCaptureConfig {
@@ -131,6 +136,10 @@ private:
 	void refresh_camera_image_info();
 	void reset_camera_image_state();
 	bool has_camera_image_functions() const;
+	bool ensure_native_recording_view_space();
+	void destroy_native_recording_view_space();
+	bool ensure_hand_trackers();
+	void destroy_hand_trackers();
 	bool ensure_body_tracker(const Dictionary &bone_lengths);
 	void destroy_body_tracker();
 	bool refresh_external_camera_info();
@@ -155,6 +164,7 @@ private:
 	bool motion_tracking_ext = false;
 	bool pico_body_tracking2_ext = false;
 	bool bd_body_tracking_ext = false;
+	bool hand_tracking_ext = false;
 
 	XrInstance instance = nullptr;
 	XrSession session = nullptr;
@@ -192,6 +202,9 @@ private:
 	PFN_xrLocateBodyJointsBD xrLocateBodyJointsBD_ptr = nullptr;
 	PFN_xrStartBodyTrackingCalibrationAppPICO xrStartBodyTrackingCalibrationAppPICO_ptr = nullptr;
 	PFN_xrGetBodyTrackingStatePICO xrGetBodyTrackingStatePICO_ptr = nullptr;
+	PFN_xrCreateHandTrackerEXT xrCreateHandTrackerEXT_ptr = nullptr;
+	PFN_xrDestroyHandTrackerEXT xrDestroyHandTrackerEXT_ptr = nullptr;
+	PFN_xrLocateHandJointsEXT xrLocateHandJointsEXT_ptr = nullptr;
 
 	// Core OpenXR ref-space probe; resolved at the same time as PICO extensions.
 	PFN_xrCreateReferenceSpace xrCreateReferenceSpace_ptr = nullptr;
@@ -214,6 +227,9 @@ private:
 	int camera_image_height = 480;
 	int camera_image_fps = 30;
 	NativeRecordingPipeline native_recording_pipeline;
+	XrSpace native_recording_view_space = nullptr;
+	XrHandTrackerEXT left_hand_tracker = XR_NULL_HAND_TRACKER_EXT;
+	XrHandTrackerEXT right_hand_tracker = XR_NULL_HAND_TRACKER_EXT;
 	mutable Dictionary cached_camera_image_info;
 
 	mutable Dictionary cached_external_camera_info;

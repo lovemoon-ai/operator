@@ -2435,13 +2435,23 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 	# report false.  This PICO-specific branch always binds PicoCapturePlugin,
 	# whose anchor maps OpenXR CLOCK_MONOTONIC timestamps to Godot process ticks.
 	var time_offset_ns := int(camera_plugin.call("getXrTimeToGodotTicksOffsetNs"))
+	var exact_head_samples := _stream_enabled("record_head_pose")
+	var exact_hand_samples := _stream_enabled("record_hand_data")
+	var tracking_coordinate_space := str(capture_options.get(
+		"export_coordinate_space_id",
+		OpenXRExportSpace.coordinate_space_id(
+			_capture_option("export_coordinate_space", OpenXRExportSpace.DEFAULT))))
 	var native_started := bool(pico_openxr_bridge.call(
 		"start_native_recording_pipeline",
 		str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)),
 		int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
 		time_offset_ns,
 		str(writer.get_session_dir_absolute()).path_join("left_camera_frames.jsonl"),
-		str(writer.get_session_dir_absolute()).path_join("right_camera_frames.jsonl") if stereo else ""
+		str(writer.get_session_dir_absolute()).path_join("right_camera_frames.jsonl") if stereo else "",
+		exact_head_samples or exact_hand_samples,
+		exact_head_samples,
+		exact_hand_samples,
+		tracking_coordinate_space
 	))
 	if not native_started:
 		var native_error := ""
