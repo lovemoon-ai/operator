@@ -1,12 +1,15 @@
 #include "pico_openxr_extension.h"
 
+#include <chrono>
+
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/core/object.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/quaternion.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <cmath>
 #include <limits>
@@ -84,6 +87,13 @@ void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_external_camera_info"), &PicoOpenXRExtension::get_external_camera_info);
 	ClassDB::bind_method(D_METHOD("start_camera_image_capture", "stereo", "width", "height", "fps"), &PicoOpenXRExtension::start_camera_image_capture, DEFVAL(true), DEFVAL(640), DEFVAL(480), DEFVAL(30));
 	ClassDB::bind_method(D_METHOD("poll_camera_image_frames"), &PicoOpenXRExtension::poll_camera_image_frames);
+	ClassDB::bind_method(D_METHOD("bind_camera_frame_sink", "sink"), &PicoOpenXRExtension::bind_camera_frame_sink);
+	ClassDB::bind_method(D_METHOD("pump_camera_frames_to_sink"), &PicoOpenXRExtension::pump_camera_frames_to_sink);
+	ClassDB::bind_method(D_METHOD("start_native_recording_pipeline", "codec", "bitrate", "xr_time_to_godot_ns", "left_frame_index_path", "right_frame_index_path"),
+			&PicoOpenXRExtension::start_native_recording_pipeline, DEFVAL("hevc"), DEFVAL(8000000), DEFVAL(0), DEFVAL(""), DEFVAL(""));
+	ClassDB::bind_method(D_METHOD("is_native_recording_pipeline_running"), &PicoOpenXRExtension::is_native_recording_pipeline_running);
+	ClassDB::bind_method(D_METHOD("get_native_recording_pipeline_error"), &PicoOpenXRExtension::get_native_recording_pipeline_error);
+	ClassDB::bind_method(D_METHOD("pop_native_recording_metrics"), &PicoOpenXRExtension::pop_native_recording_metrics);
 	ClassDB::bind_method(D_METHOD("stop_camera_image_capture"), &PicoOpenXRExtension::stop_camera_image_capture);
 	ClassDB::bind_method(D_METHOD("get_camera_image_info"), &PicoOpenXRExtension::get_camera_image_info);
 	ClassDB::bind_method(D_METHOD("request_motion_trackers", "count"), &PicoOpenXRExtension::request_motion_trackers);
@@ -328,6 +338,108 @@ Dictionary PicoOpenXRExtension::start_camera_image_capture(bool stereo, int widt
 	return cached_camera_image_info.duplicate(true);
 }
 
+PicoOpenXRExtension::CameraAcquire PicoOpenXRExtension::acquire_camera_frame(CameraImageEyeState &eye_state, AcquiredCameraFrame &out) {
+	if (!eye_state.active || !eye_state.capture_session) {
+		return CameraAcquire::NONE;
+	}
+
+	XrCameraImageAcquireInfoPICO acquire_info{
+		XR_TYPE_CAMERA_IMAGE_ACQUIRE_INFO_PICO,
+		nullptr,
+		eye_state.last_capture_time,
+	};
+	XrCameraImagePICO image{
+		XR_TYPE_CAMERA_IMAGE_PICO,
+		nullptr,
+		0,
+		0,
+	};
+	const XrResult acquire_result = xrAcquireCameraImagePICO_ptr(eye_state.capture_session, &acquire_info, &image);
+	eye_state.last_result = acquire_result;
+	last_camera_image_result = acquire_result;
+	if (acquire_result == XR_CAMERA_IMAGE_NO_UPDATE_PICO || XR_FAILED(acquire_result)) {
+		return CameraAcquire::NONE;
+	}
+
+	CameraAcquire outcome = CameraAcquire::NONE;
+	XrCameraImageDataRawBufferPICO raw_buffer{
+		XR_TYPE_CAMERA_IMAGE_DATA_RAW_BUFFER_PICO,
+		nullptr,
+		0,
+		0,
+		0,
+		0,
+		0,
+		0,
+		nullptr,
+	};
+	auto *base = reinterpret_cast<XrCameraImageDataBaseHeaderPICO *>(&raw_buffer);
+	const XrResult data_result = xrGetCameraImageDataPICO_ptr(eye_state.capture_session, image.imageId, base);
+	eye_state.last_result = data_result;
+	last_camera_image_result = data_result;
+	if (XR_SUCCEEDED(data_result) && raw_buffer.buffer && raw_buffer.bufferSize > 0 &&
+			(raw_buffer.width == 0 || raw_buffer.height == 0)) {
+		// Zero-dim frame with a non-empty buffer: unusable. The legacy
+		// GDScript pump filtered these before submit; drop + count here.
+		outcome = CameraAcquire::DROPPED;
+	} else if (XR_SUCCEEDED(data_result) && raw_buffer.buffer && raw_buffer.bufferSize > 0) {
+		uint32_t pixel_stride = raw_buffer.pixelStride > 0 ? raw_buffer.pixelStride : raw_buffer.bytesPerPixel;
+		if (pixel_stride == 0) {
+			pixel_stride = 4;
+		}
+		uint32_t source_bytes_per_pixel = raw_buffer.bytesPerPixel > 0 ? raw_buffer.bytesPerPixel : std::min(pixel_stride, 4u);
+		uint32_t row_stride = raw_buffer.stride > 0 ? raw_buffer.stride : raw_buffer.width * pixel_stride;
+		const uint64_t min_row_stride = static_cast<uint64_t>(raw_buffer.width) * pixel_stride;
+		if (row_stride < min_row_stride) {
+			row_stride = static_cast<uint32_t>(min_row_stride);
+		}
+		uint64_t required_size = 0;
+		if (raw_buffer.width > 0 && raw_buffer.height > 0) {
+			required_size = (static_cast<uint64_t>(raw_buffer.height) - 1) * row_stride +
+					(static_cast<uint64_t>(raw_buffer.width) - 1) * pixel_stride +
+					std::min(source_bytes_per_pixel, 4u);
+		}
+		bool layout_ok = true;
+		if (required_size > raw_buffer.bufferSize) {
+			const uint32_t compact_stride = raw_buffer.width * source_bytes_per_pixel;
+			const uint64_t compact_required_size = raw_buffer.width > 0 && raw_buffer.height > 0 ?
+					(static_cast<uint64_t>(raw_buffer.height) - 1) * compact_stride +
+							(static_cast<uint64_t>(raw_buffer.width) - 1) * source_bytes_per_pixel +
+							std::min(source_bytes_per_pixel, 4u) :
+					0;
+			if (compact_required_size <= raw_buffer.bufferSize) {
+				row_stride = compact_stride;
+				pixel_stride = source_bytes_per_pixel;
+			} else {
+				layout_ok = false;
+			}
+		}
+		if (layout_ok) {
+			out.bytes.resize(raw_buffer.bufferSize);
+			uint8_t *dst = out.bytes.ptrw();
+			if (dst) {
+				std::memcpy(dst, raw_buffer.buffer, raw_buffer.bufferSize);
+				out.capture_time = static_cast<int64_t>(image.captureTime);
+				out.camera_id = static_cast<int64_t>(eye_state.camera_id);
+				out.width = raw_buffer.width;
+				out.height = raw_buffer.height;
+				out.row_stride = row_stride;
+				out.pixel_stride = pixel_stride;
+				out.source_bytes_per_pixel = source_bytes_per_pixel;
+				out.source_stride = raw_buffer.stride;
+				out.source_pixel_stride = raw_buffer.pixelStride;
+				out.buffer_size = raw_buffer.bufferSize;
+				eye_state.last_capture_time = image.captureTime;
+				outcome = CameraAcquire::FRAME;
+			}
+		} else {
+			outcome = CameraAcquire::DROPPED;
+		}
+	}
+	xrReleaseCameraImagePICO_ptr(eye_state.capture_session, image.imageId);
+	return outcome;
+}
+
 Array PicoOpenXRExtension::poll_camera_image_frames() {
 	Array frames;
 	if (!camera_image_capture_active || !resolve_functions() || !has_camera_image_functions()) {
@@ -336,108 +448,159 @@ Array PicoOpenXRExtension::poll_camera_image_frames() {
 
 	CameraImageEyeState *eyes[] = { &camera_left, &camera_right };
 	for (CameraImageEyeState *eye_state : eyes) {
-		if (!eye_state->active || !eye_state->capture_session) {
+		AcquiredCameraFrame acquired;
+		if (acquire_camera_frame(*eye_state, acquired) != CameraAcquire::FRAME) {
 			continue;
 		}
-
-		XrCameraImageAcquireInfoPICO acquire_info{
-			XR_TYPE_CAMERA_IMAGE_ACQUIRE_INFO_PICO,
-			nullptr,
-			eye_state->last_capture_time,
-		};
-		XrCameraImagePICO image{
-			XR_TYPE_CAMERA_IMAGE_PICO,
-			nullptr,
-			0,
-			0,
-		};
-		const XrResult acquire_result = xrAcquireCameraImagePICO_ptr(eye_state->capture_session, &acquire_info, &image);
-		eye_state->last_result = acquire_result;
-		last_camera_image_result = acquire_result;
-		if (acquire_result == XR_CAMERA_IMAGE_NO_UPDATE_PICO) {
-			continue;
-		}
-		if (XR_FAILED(acquire_result)) {
-			continue;
-		}
-
-		XrCameraImageDataRawBufferPICO raw_buffer{
-			XR_TYPE_CAMERA_IMAGE_DATA_RAW_BUFFER_PICO,
-			nullptr,
-			0,
-			0,
-			0,
-			0,
-			0,
-			0,
-			nullptr,
-		};
-		auto *base = reinterpret_cast<XrCameraImageDataBaseHeaderPICO *>(&raw_buffer);
-		const XrResult data_result = xrGetCameraImageDataPICO_ptr(eye_state->capture_session, image.imageId, base);
-		eye_state->last_result = data_result;
-		last_camera_image_result = data_result;
-		if (XR_SUCCEEDED(data_result) && raw_buffer.buffer && raw_buffer.bufferSize > 0) {
-			uint32_t pixel_stride = raw_buffer.pixelStride > 0 ? raw_buffer.pixelStride : raw_buffer.bytesPerPixel;
-			if (pixel_stride == 0) {
-				pixel_stride = 4;
-			}
-			uint32_t source_bytes_per_pixel = raw_buffer.bytesPerPixel > 0 ? raw_buffer.bytesPerPixel : std::min(pixel_stride, 4u);
-			uint32_t row_stride = raw_buffer.stride > 0 ? raw_buffer.stride : raw_buffer.width * pixel_stride;
-			const uint64_t min_row_stride = static_cast<uint64_t>(raw_buffer.width) * pixel_stride;
-			if (row_stride < min_row_stride) {
-				row_stride = static_cast<uint32_t>(min_row_stride);
-			}
-			uint64_t required_size = 0;
-			if (raw_buffer.width > 0 && raw_buffer.height > 0) {
-				required_size = (static_cast<uint64_t>(raw_buffer.height) - 1) * row_stride +
-						(static_cast<uint64_t>(raw_buffer.width) - 1) * pixel_stride +
-						std::min(source_bytes_per_pixel, 4u);
-			}
-			if (required_size > raw_buffer.bufferSize) {
-				const uint32_t compact_stride = raw_buffer.width * source_bytes_per_pixel;
-				const uint64_t compact_required_size = raw_buffer.width > 0 && raw_buffer.height > 0 ?
-						(static_cast<uint64_t>(raw_buffer.height) - 1) * compact_stride +
-								(static_cast<uint64_t>(raw_buffer.width) - 1) * source_bytes_per_pixel +
-								std::min(source_bytes_per_pixel, 4u) :
-						0;
-				if (compact_required_size <= raw_buffer.bufferSize) {
-					row_stride = compact_stride;
-					pixel_stride = source_bytes_per_pixel;
-				} else {
-					xrReleaseCameraImagePICO_ptr(eye_state->capture_session, image.imageId);
-					continue;
-				}
-			}
-
-			PackedByteArray bytes;
-			bytes.resize(raw_buffer.bufferSize);
-			uint8_t *dst = bytes.ptrw();
-			if (dst) {
-				std::memcpy(dst, raw_buffer.buffer, raw_buffer.bufferSize);
-				Dictionary frame;
-				frame["eye"] = String(eye_state->eye);
-				frame["camera_id"] = static_cast<int64_t>(eye_state->camera_id);
-				frame["xr_time_ns"] = static_cast<int64_t>(image.captureTime);
-				frame["width"] = static_cast<int>(raw_buffer.width);
-				frame["height"] = static_cast<int>(raw_buffer.height);
-				frame["stride"] = static_cast<int>(row_stride);
-				frame["bytes_per_pixel"] = static_cast<int>(source_bytes_per_pixel);
-				frame["pixel_stride"] = static_cast<int>(raw_buffer.pixelStride);
-				frame["effective_pixel_stride"] = static_cast<int>(pixel_stride);
-				frame["source_stride"] = static_cast<int>(raw_buffer.stride);
-				frame["buffer_size"] = static_cast<int>(raw_buffer.bufferSize);
-				frame["format"] = "rgba8888";
-				frame["data"] = bytes;
-				frames.append(frame);
-				eye_state->last_capture_time = image.captureTime;
-			}
-		}
-		xrReleaseCameraImagePICO_ptr(eye_state->capture_session, image.imageId);
+		Dictionary frame;
+		frame["eye"] = String(eye_state->eye);
+		frame["camera_id"] = acquired.camera_id;
+		frame["xr_time_ns"] = acquired.capture_time;
+		frame["width"] = static_cast<int>(acquired.width);
+		frame["height"] = static_cast<int>(acquired.height);
+		frame["stride"] = static_cast<int>(acquired.row_stride);
+		frame["bytes_per_pixel"] = static_cast<int>(acquired.source_bytes_per_pixel);
+		frame["pixel_stride"] = static_cast<int>(acquired.source_pixel_stride);
+		frame["effective_pixel_stride"] = static_cast<int>(acquired.pixel_stride);
+		frame["source_stride"] = static_cast<int>(acquired.source_stride);
+		frame["buffer_size"] = static_cast<int>(acquired.buffer_size);
+		frame["format"] = "rgba8888";
+		frame["data"] = acquired.bytes;
+		frames.append(frame);
 	}
 	return frames;
 }
 
+void PicoOpenXRExtension::bind_camera_frame_sink(Object *p_sink) {
+	camera_sink_instance_id = p_sink != nullptr ? uint64_t(p_sink->get_instance_id()) : 0;
+}
+
+PackedInt32Array PicoOpenXRExtension::pump_camera_frames_to_sink() {
+	// Kotlin-direct path: submit each pending frame straight to the capture
+	// plugin (submitOpenXrRgbaFrame) with the exact argument list the legacy
+	// GDScript pump used — but without materializing per-frame Dictionaries.
+	// Each stereo call handles at most one eye and alternates priority. Pulling
+	// both full-resolution RGBA buffers in one render tick creates a large
+	// main-thread copy spike that starves OpenXR pose/hand updates.
+	int32_t ok_left = 0, ok_right = 0, fail_left = 0, fail_right = 0, skipped = 0;
+	int64_t acquire_us = 0, submit_us = 0;
+	Object *sink = camera_sink_instance_id != 0
+			? ObjectDB::get_instance(ObjectID(camera_sink_instance_id))
+			: nullptr;
+	if (!native_recording_pipeline.is_running() && sink != nullptr && camera_image_capture_active && resolve_functions() && has_camera_image_functions()) {
+		CameraImageEyeState *eyes[] = { &camera_left, &camera_right };
+		const int eye_count = camera_image_stereo ? 2 : 1;
+		const int first_eye = camera_pump_next_eye % eye_count;
+		bool consumed_frame = false;
+		for (int attempt = 0; attempt < eye_count; ++attempt) {
+			const int eye_index = (first_eye + attempt) % eye_count;
+			CameraImageEyeState *eye_state = eyes[eye_index];
+			AcquiredCameraFrame acquired;
+			const auto acquire_started = std::chrono::steady_clock::now();
+			const CameraAcquire acquire_outcome = acquire_camera_frame(*eye_state, acquired);
+			acquire_us += std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - acquire_started)
+					.count();
+			if (acquire_outcome == CameraAcquire::NONE) {
+				continue;
+			}
+			camera_pump_next_eye = (eye_index + 1) % eye_count;
+			consumed_frame = true;
+			if (acquire_outcome == CameraAcquire::DROPPED) {
+				skipped += 1;
+				break;
+			}
+			const auto submit_started = std::chrono::steady_clock::now();
+			const bool ok = bool(sink->call(
+					"submitOpenXrRgbaFrame",
+					String(eye_state->eye),
+					acquired.capture_time,
+					static_cast<int>(acquired.width),
+					static_cast<int>(acquired.height),
+					static_cast<int>(acquired.row_stride),
+					static_cast<int>(acquired.pixel_stride),
+					acquired.bytes));
+			submit_us += std::chrono::duration_cast<std::chrono::microseconds>(
+					std::chrono::steady_clock::now() - submit_started)
+					.count();
+			const bool is_right = eye_state == &camera_right;
+			if (ok) {
+				(is_right ? ok_right : ok_left) += 1;
+			} else {
+				(is_right ? fail_right : fail_left) += 1;
+			}
+			break;
+		}
+		if (!consumed_frame && eye_count > 1) {
+			// Both queues were empty. Rotate the first probe so a consistently
+			// earlier eye cannot monopolize the next available camera pair.
+			camera_pump_next_eye = (first_eye + 1) % eye_count;
+		}
+	}
+	PackedInt32Array counters;
+	counters.resize(7);
+	int32_t *w = counters.ptrw();
+	w[0] = ok_left;
+	w[1] = ok_right;
+	w[2] = fail_left;
+	w[3] = fail_right;
+	w[4] = skipped;
+	w[5] = static_cast<int32_t>(acquire_us);
+	w[6] = static_cast<int32_t>(submit_us);
+	return counters;
+}
+
+bool PicoOpenXRExtension::start_native_recording_pipeline(String codec, int bitrate,
+		int64_t xr_time_to_godot_ns, String left_frame_index_path, String right_frame_index_path) {
+	if (!camera_image_capture_active || !resolve_functions() || !has_camera_image_functions()) {
+		return false;
+	}
+	NativeRecordingPipeline::Config config;
+	config.session = current_session();
+	config.left_camera = camera_left.capture_session;
+	config.right_camera = camera_right.capture_session;
+	config.stereo = camera_image_stereo;
+	config.eye_width = camera_image_width;
+	config.eye_height = camera_image_height;
+	config.fps = camera_image_fps;
+	config.bitrate = std::max(bitrate, 1'000'000);
+	const CharString codec_utf8 = codec.to_lower().utf8();
+	config.codec = std::string(codec_utf8.get_data());
+	config.xr_time_to_godot_ns = xr_time_to_godot_ns;
+	const CharString left_path_utf8 = left_frame_index_path.utf8();
+	const CharString right_path_utf8 = right_frame_index_path.utf8();
+	config.left_frame_index_path = std::string(left_path_utf8.get_data());
+	config.right_frame_index_path = std::string(right_path_utf8.get_data());
+	config.acquire_camera = xrAcquireCameraImagePICO_ptr;
+	config.get_camera_data = xrGetCameraImageDataPICO_ptr;
+	config.release_camera = xrReleaseCameraImagePICO_ptr;
+	return native_recording_pipeline.start(config);
+}
+
+bool PicoOpenXRExtension::is_native_recording_pipeline_running() const {
+	return native_recording_pipeline.is_running();
+}
+
+String PicoOpenXRExtension::get_native_recording_pipeline_error() const {
+	return String::utf8(native_recording_pipeline.get_last_error().c_str());
+}
+
+Dictionary PicoOpenXRExtension::pop_native_recording_metrics() {
+	const NativeRecordingPipeline::Metrics metrics = native_recording_pipeline.pop_metrics();
+	Dictionary out;
+	out["native_camera_left"] = metrics.camera_left;
+	out["native_camera_right"] = metrics.camera_right;
+	out["native_camera_dropped"] = metrics.camera_dropped;
+	out["native_rgb_staging_copies"] = metrics.staging_copies;
+	out["native_encoded_frames"] = metrics.encoded_frames;
+	out["native_encoded_packets"] = metrics.encoded_packets;
+	return out;
+}
+
 void PicoOpenXRExtension::stop_camera_image_capture() {
+	// Join native OpenXR users before destroying camera sessions, hand
+	// trackers, play space, or the muxer writer they feed.
+	native_recording_pipeline.stop();
 	stop_camera_image_eye(camera_right);
 	stop_camera_image_eye(camera_left);
 	reset_camera_image_state();
@@ -704,7 +867,6 @@ bool PicoOpenXRExtension::resolve_functions() {
 		xrStartBodyTrackingCalibrationAppPICO_ptr = reinterpret_cast<PFN_xrStartBodyTrackingCalibrationAppPICO>(api->get_instance_proc_addr("xrStartBodyTrackingCalibrationAppPICO"));
 		xrGetBodyTrackingStatePICO_ptr = reinterpret_cast<PFN_xrGetBodyTrackingStatePICO>(api->get_instance_proc_addr("xrGetBodyTrackingStatePICO"));
 	}
-
 	// Core OpenXR reference-space + locate. Resolved unconditionally so the
 	// ad-hoc head-pose probe is always available.
 	xrCreateReferenceSpace_ptr = reinterpret_cast<PFN_xrCreateReferenceSpace>(api->get_instance_proc_addr("xrCreateReferenceSpace"));
@@ -1325,6 +1487,7 @@ void PicoOpenXRExtension::refresh_camera_image_info() {
 
 void PicoOpenXRExtension::reset_camera_image_state() {
 	camera_image_capture_active = false;
+	camera_pump_next_eye = 0;
 	camera_left.active = false;
 	camera_right.active = false;
 	camera_left.last_capture_time = 0;

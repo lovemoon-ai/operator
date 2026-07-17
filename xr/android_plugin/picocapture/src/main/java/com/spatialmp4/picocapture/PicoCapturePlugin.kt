@@ -95,6 +95,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var rgbBitrate = DEFAULT_RGB_BITRATE
     private var rgbFps = DEFAULT_RGB_FPS
     private var rgbCodec = RgbVideoCodec.HEVC.tag
+    @Volatile private var exportCoordinateSpace = "openxr_stage"
 
     @Volatile private var acceptingFrames = false
     @Volatile private var muxerSink: SpatialDataSink? = null
@@ -198,6 +199,18 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         this.recordMotionTrackers = recordMotionTrackers
         this.maxMotionTrackerCount = maxMotionTrackerCount.coerceIn(0, MAX_MOTION_TRACKERS)
         return true
+    }
+
+    @UsedByGodot
+    fun setExportCoordinateSpace(space: String): Boolean {
+        val normalized = space.trim().lowercase().replace('-', '_')
+        return when (normalized) {
+            "openxr_stage", "openxr_local", "openxr_local_floor" -> {
+                exportCoordinateSpace = normalized
+                true
+            }
+            else -> false
+        }
     }
 
     @UsedByGodot
@@ -473,6 +486,8 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             return false
         }
 
+        // Camera2 frames are encoded by the Kotlin path, so Kotlin also owns
+        // the matching frame-index sidecars for this branch.
         openFrameIndexWriter(root, "left")
         if (rightConfig != null) {
             openFrameIndexWriter(root, "right")
@@ -538,10 +553,11 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             return false
         }
 
-        openFrameIndexWriter(root, "left")
-        if (rightConfig != null) {
-            openFrameIndexWriter(root, "right")
-        } else {
+        // libpico_openxr owns both frame-index JSONL files in native OpenXR
+        // mode. A second buffered FileWriter on either path can truncate or
+        // overwrite metadata emitted for accepted encoded access units.
+        closeFrameIndexWriters()
+        if (rightConfig == null) {
             File(root, "right_camera_frames.jsonl").delete()
         }
         openXrCameraConfigs.clear()
@@ -901,25 +917,12 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             )
         }
         if (useGpuSurfaceEncoder) {
-            val encoder = GpuSurfaceStereoEncoder(
-                dataSink = sink,
-                eyeWidth = leftConfig.size.width,
-                eyeHeight = leftConfig.size.height,
-                fps = rgbFps,
-                bitrate = rgbBitrate,
-                stereo = rightConfig != null,
-                cameraIntrinsics = cameraIntrinsics,
-                rgbCodec = rgbCodec,
-                onError = { message -> emitSignal("camera_error", message) },
-                onPairEncoded = { metricEncoderPairsOffered.incrementAndGet() },
-                onMonoEncoded = { metricEncoderMonoOffered.incrementAndGet() },
-                onPacketEmitted = { metricEncoderPacketsOut.incrementAndGet() }
-            )
-            if (!startGpuSurfaceEncoderOnBackground(encoder)) {
-                sink.finishSession()
-                return false
-            }
-            gpuSurfaceEncoder = encoder
+            // XR_PICO_camera_image is encoded by libpico_openxr with NDK
+            // MediaCodec + an EGL input Surface.  Do not allocate a Java
+            // encoder here: raw RGBA must never cross Godot/JNI as byte[].
+            // The GDScript orchestrator starts the native worker immediately
+            // after this method returns, once the muxer handle is active.
+            gpuSurfaceEncoder = null
             hevcEncoder = null
         } else {
             val encoder = StereoHevcEncoder(
@@ -943,7 +946,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             hevcEncoder = encoder
             gpuSurfaceEncoder = null
         }
-        Log.i(TAG, "Pico SpatialMP4 writer started stereo=${rightConfig != null} gpuSurface=$useGpuSurfaceEncoder partial=${partialPath.absolutePath} final=${finalPath.absolutePath}")
+        Log.i(TAG, "Pico SpatialMP4 writer started stereo=${rightConfig != null} nativeOpenXr=$useGpuSurfaceEncoder partial=${partialPath.absolutePath} final=${finalPath.absolutePath}")
         return true
     }
 
@@ -1321,6 +1324,12 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return JSONObject()
             .put("schema", "spatialmp4.operator_static.session.v1")
             .put("provider", "pico")
+            .put("export_coordinate_space", exportCoordinateSpace)
+            .put("head_pose_space", exportCoordinateSpace)
+            .put("controller_pose_space", exportCoordinateSpace)
+            .put("hand_joint_space", exportCoordinateSpace)
+            .put("rgb_extrinsics_space", "head")
+            .put("rgb_camera_pose_composition", "T_export_camera=T_export_head*T_head_camera")
             .put("camera2_characteristics", cameras)
             .put("android_timebase", androidTimebase ?: JSONObject())
     }

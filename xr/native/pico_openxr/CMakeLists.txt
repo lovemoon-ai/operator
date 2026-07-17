@@ -32,6 +32,7 @@ set_target_properties(godot-cpp PROPERTIES
 add_library(pico_openxr SHARED
     src/register_types.cpp
     src/pico_openxr_extension.cpp
+    src/native_recording_pipeline.cpp
 )
 
 target_include_directories(pico_openxr PRIVATE
@@ -42,12 +43,21 @@ target_include_directories(pico_openxr PRIVATE
 
 target_link_libraries(pico_openxr PRIVATE
     godot-cpp
+    android
+    dl
+    mediandk
+    EGL
+    GLESv3
     log
 )
+
+target_link_options(pico_openxr PRIVATE "LINKER:--exclude-libs,ALL")
 
 set_target_properties(pico_openxr PROPERTIES
     OUTPUT_NAME "pico_openxr"
     PREFIX "lib"
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
 )
 
 install(TARGETS pico_openxr

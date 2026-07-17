@@ -64,10 +64,24 @@ target_link_libraries(ahb_decoder PRIVATE
     nativewindow  # AHardwareBuffer_describe etc. on API 26+
 )
 
+# Do not re-export symbols pulled from godot-cpp or the NDK's static runtime
+# archives.  The two public entry points live in this target's own object
+# files and are explicitly exported with GDE_EXPORT/JNIEXPORT.
+target_link_options(ahb_decoder PRIVATE "LINKER:--exclude-libs,ALL")
+
 # Make sure the SONAME is what the GDExtension manifest expects.
 set_target_properties(ahb_decoder PROPERTIES
     OUTPUT_NAME "ahb_decoder"
     PREFIX "lib"
+    # This library is loaded both by Godot as a GDExtension and by Android's
+    # System.loadLibrary() for the JNI AHardwareBuffer bridge.  Keep the
+    # statically linked godot-cpp implementation local to this DSO; otherwise
+    # its weak template symbols can preempt the copies in other GDExtensions
+    # and make ClassDB teardown operate on another library's state.
+    # ahb_decoder_init (GDE_EXPORT) and nativeImportAhb (JNIEXPORT) explicitly
+    # retain default visibility.
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
 )
 
 # Where to drop the .so so the Godot Android gradle build can pick it up.

@@ -67,9 +67,12 @@ target_link_libraries(godot_retargeting PRIVATE
     retargeting   # propagates Eigen / nlohmann includes + libmujoco.so
     log
 )
+target_link_options(godot_retargeting PRIVATE "LINKER:--exclude-libs,ALL")
 set_target_properties(godot_retargeting PROPERTIES
     OUTPUT_NAME "godot_retargeting"
-    PREFIX "lib")
+    PREFIX "lib"
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES)
 
 install(TARGETS godot_retargeting
     LIBRARY DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/../../android/build/libs/${ANDROID_ABI}")

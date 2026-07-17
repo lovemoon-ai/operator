@@ -78,14 +78,34 @@ mode intent extras, and routes to mode scenes.
 
 - `scripts/core/capture/` - session state machine, writer adapters, spool
   writers, and live writer adapters.
-- `scripts/core/sensors/` - pose, depth, controller, hand, body, and motion
-  frame primitives.
+- `scripts/core/sensors/` - pose, depth, and controller samplers plus the
+  GDScript decision logic for hand/body/motion capture.
 - `scripts/core/pipeline/stream_binding.gd` - binds capture streams to sinks.
 - `scripts/core/time/timebase.gd` - timestamp domains and conversion metadata.
 - `scripts/contracts/` - stable GDScript contracts used by modes, sinks, and
   tests.
 - `scripts/sinks/` - concrete outputs: SpatialMP4, upload queue, live stream,
   robot control, JSONL sidecar, and sink contract.
+- `native/hand_capture/` - GDExtension owning the hot joint-capture paths in
+  C++: `NativeOpenXRHandCapture` owns Quest/PICO `XR_EXT_hand_tracking`
+  trackers and writes MP4 HJNT on an independent 60 Hz worker clock;
+  `NativeHandSampler` handles render-driven live push + hands.jsonl;
+  `NativeBodyMotionWriter`
+  packs/serializes body joints and motion-tracker records (mp4 metadata JSON
+  + JSONL sidecars on a background thread). GDScript keeps only the
+  per-frame trigger, runtime selection, and diagnostics.
+- `native/pico_openxr/` - PICO OpenXR bridge; camera RGB frames are pumped
+  by a dedicated native worker: `XR_PICO_camera_image` raw RGBA pointer -> GLES
+  eye textures -> GPU stereo composition -> NDK MediaCodec input Surface ->
+  native SpatialMP4 ABI. The hot path never creates a GDScript
+  `PackedByteArray` or Java `ByteArray`; a reusable CPU staging buffer is used
+  only for an incompatible runtime pixel/row layout. The shared
+  `native/hand_capture` worker supplies the independent 60 Hz hand stream for
+  both Quest and PICO. GDScript starts/stops the workers, provides the
+  OpenXR-to-Godot clock offset, and drains small
+  `QcCamera` diagnostic counters only. The PICO API currently exposes raw RGBA
+  instead of a texture/AHardwareBuffer, so one native client-memory-to-GPU
+  upload remains unavoidable.
 
 ## Teleop Runtime
 
@@ -112,6 +132,21 @@ port and `transport` is `udp` or `auto`.
 - capture start/stop UI;
 - QR-based ingest configuration;
 - upload queue integration.
+
+The Output panel also owns the export reference-space contract. Operators
+choose `STAGE`, `LOCAL`, or `LOCAL_FLOOR`; before recording starts the app asks
+Godot's OpenXR interface to activate the corresponding play space and waits
+for the runtime to confirm it. Capture is blocked if the runtime falls back to
+a different space. Head and controller samples use their unadjusted `XRPose`
+transforms, while the independent native hand worker locates joints against
+that same active `XrSpace`. The selected value is fixed for the session and is
+stored in capture options and `operator_static` metadata.
+
+RGB calibration is intentionally not rebased: Camera2/OpenXR camera
+extrinsics remain `T_head_camera`. A reader obtains a camera pose in the chosen
+export space by composing
+`T_export_camera = T_export_head * T_head_camera`. `operator_static` declares
+both the export space and this head-relative extrinsics contract.
 
 Mode-specific composition chooses the sink chain:
 

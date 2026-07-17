@@ -41,6 +41,11 @@
         <meta-data
             android:name="com.oculus.supportedDevices"
             android:value="quest3|quest3s" />
+        <!-- Hand-tracking frequency meta-data (Hand_Tracking_HighFrequency /
+             com.oculus.handtracking.frequency) is injected at export time by
+             the godotopenxrvendors plugins with tools:node="replace" — set it
+             in export_presets.cfg (pico_xr_features/hand_tracking=2,
+             meta_xr_features/hand_tracking_frequency=1), NOT here. -->
         <profileable
             android:shell="true"
             android:enabled="true"

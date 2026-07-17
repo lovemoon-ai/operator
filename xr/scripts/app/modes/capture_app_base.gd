@@ -26,6 +26,7 @@ const DEFAULT_RGB_BITRATE := 24000000
 const DEFAULT_RGB_FPS := 30
 const DEFAULT_RGB_CODEC := "hevc"
 const PICO_DEFAULT_RGB_RESOLUTION := Vector2i(640, 480)
+const OPENXR_HAND_CAPTURE_SINGLETON := &"NativeOpenXRHandCapture"
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -0.86))
@@ -47,6 +48,7 @@ const PICO_BODY_STATUS_LIMITED := 2
 const XR_TRACKING_STABLE_SECONDS := 0.75
 const XR_TRACKING_WAIT_TIMEOUT_SECONDS := 15.0
 const XR_TRACKING_POLL_SECONDS := 0.1
+const EXPORT_SPACE_APPLY_TIMEOUT_SECONDS := 2.0
 const RUNTIME_DISPLAY_OPTION_KEYS := [
 	"show_hand_skeleton_overlay",
 ]
@@ -145,6 +147,7 @@ var live_pull_view: Node3D
 var capture_options := {
 	"interaction_mode": "controllers",
 	"stereo_rgb": true,
+	"export_coordinate_space": OpenXRExportSpace.DEFAULT,
 	"record_depth": true,
 	"record_head_pose": true,
 	"record_controller_pose": true,
@@ -203,10 +206,20 @@ var _audio_permission_wait_logged := false
 var _audio_permission_degraded_logged := false
 var _audio_permission_wait_started_ticks_us := 0
 var _active_capture_options := {}
+var _export_space_start_pending := false
 var _pico_camera_image_started := false
-# How often the pump polls the native bridge for new camera frames. We poll at
-# twice the camera fps so the runtime-side queue never holds more than ~one
-# frame of latency even when _process and the camera clock drift apart.
+var _pico_native_pipeline_started := false
+var _pico_native_metrics_accum: Dictionary = {}
+var _native_openxr_hand_capture: Object = null
+var _native_openxr_hand_recording_started := false
+# Kotlin-direct RGB pump state: the pico_openxr bridge holds the capture
+# plugin and submits frames in C++ (see _pump_pico_openxr_camera_frames).
+var _pico_camera_sink_bound := false
+var _pico_camera_pump_warned := false
+# How often the pump polls the native bridge for new camera frames. Each call
+# moves at most one eye, so stereo capture polls at twice the configured fps:
+# one left + one right transfer per camera-frame interval without bunching both
+# large RGBA copies into the same render tick.
 var _pico_camera_poll_interval_s := 0.5 / DEFAULT_RGB_FPS
 var _pico_camera_frame_accum_s := 0.0
 # Per-metrics-window pump counters (reset by _emit_metrics via
@@ -217,6 +230,8 @@ var _pico_camera_submit_ok_right := 0
 var _pico_camera_submit_fail_left := 0
 var _pico_camera_submit_fail_right := 0
 var _pico_camera_frames_skipped := 0
+var _pico_camera_acquire_us := 0
+var _pico_camera_submit_us := 0
 var _pico_camera_submit_fail_session := 0
 var _pico_camera_fail_count_at_last_warn := 0
 var _pico_camera_fail_warn_ticks_us := 0
@@ -267,6 +282,7 @@ var _audio_permission_prompt_fired := false
 var _stage_us_panel := 0
 var _stage_us_pointer := 0
 var _stage_us_record_ctl := 0
+var _stage_us_camera_pump := 0
 var _stage_us_pose_loop := 0
 var _stage_us_depth_pump := 0
 var _stage_us_emit_metrics := 0
@@ -331,7 +347,7 @@ func _ready() -> void:
 	# writer surfaces with identical args, so output formats are unchanged.
 	pose_sampler.set_frame_sink(_frame_sink)
 	depth_sampler.set_frame_sink(_frame_sink)
-	body_motion_sampler.set_frame_sink(_frame_sink)
+	_try_enable_native_hand_capture()
 	_setup_capture_controller(io)
 
 	if not _is_live_feed_mode():
@@ -447,7 +463,7 @@ func _start_capture_when_xr_tracking_ready(reason: String, auto_stop_seconds: fl
 		return
 	if _recording:
 		return
-	start_capture()
+	await start_capture()
 	if auto_stop_seconds > 0.0 and _recording:
 		_schedule_auto_stop_for_device_test(auto_stop_seconds)
 
@@ -535,7 +551,13 @@ func _capture_automation_options_from_args() -> Dictionary:
 func _apply_capture_automation_options(automation: Dictionary) -> void:
 	var changed := false
 	if automation.has("interaction_mode"):
-		capture_options["interaction_mode"] = automation["interaction_mode"]
+		var interaction_mode := str(automation["interaction_mode"])
+		capture_options["interaction_mode"] = interaction_mode
+		# Automation is parsed after the initial interaction setup in _ready().
+		# Apply the late override to the runtime and stream mutex as well as the
+		# manifest label; RGB-only overrides below intentionally remain stronger.
+		_sync_operator_interaction_override()
+		_apply_capture_interaction_mode(interaction_mode)
 		changed = true
 
 	# Host-driven RGB matrix tests only need the encoded camera stream and a
@@ -760,13 +782,29 @@ func _process(delta: float) -> void:
 		_stage_us_record_ctl += Time.get_ticks_usec() - t_record
 	if not _recording:
 		return
+	if _native_openxr_hand_recording_started \
+			and not bool(_native_openxr_hand_capture.call("is_recording")):
+		var hand_error := str(_native_openxr_hand_capture.call("get_last_error"))
+		_stop_native_openxr_hand_recording()
+		_abort_capture_start("Native 60 Hz hand recorder stopped unexpectedly: %s" % hand_error)
+		return
+	if _pico_native_pipeline_started \
+			and not bool(pico_openxr_bridge.call("is_native_recording_pipeline_running")):
+		var camera_error := "native PICO camera pipeline stopped unexpectedly"
+		if pico_openxr_bridge.has_method("get_native_recording_pipeline_error"):
+			camera_error += ": %s" % str(pico_openxr_bridge.call("get_native_recording_pipeline_error"))
+		_pico_native_pipeline_started = false
+		_abort_capture_start(camera_error)
+		return
 
 	if camera_plugin == null:
 		_bind_android_plugin()
 		if camera_plugin != null and not _camera_configured:
 			_start_camera_plugin()
 	_try_start_camera_plugin()
+	var t_camera_pump := Time.get_ticks_usec()
 	_pump_pico_openxr_camera_frames(delta)
+	_stage_us_camera_pump += Time.get_ticks_usec() - t_camera_pump
 	if _stream_enabled("record_depth"):
 		var t_depth := Time.get_ticks_usec()
 		depth_sampler.pump(delta)
@@ -870,6 +908,11 @@ func _emit_metrics(window_s: float) -> void:
 			var parsed_muxer: Variant = JSON.parse_string(String(raw_muxer))
 			if typeof(parsed_muxer) == TYPE_DICTIONARY:
 				muxer_metrics = parsed_muxer
+	if _native_openxr_hand_capture != null:
+		var hand_metrics: Variant = _native_openxr_hand_capture.call("pop_metrics")
+		if typeof(hand_metrics) == TYPE_DICTIONARY:
+			for key in (hand_metrics as Dictionary).keys():
+				plugin_metrics[key] = (hand_metrics as Dictionary)[key]
 	if writer != null and writer.has_method("pop_metrics"):
 		var writer_metrics: Dictionary = writer.pop_metrics()
 		for key in writer_metrics.keys():
@@ -879,10 +922,19 @@ func _emit_metrics(window_s: float) -> void:
 	var pump_metrics := _pop_pico_pump_metrics()
 	for key in pump_metrics.keys():
 		plugin_metrics["pump_%s" % key] = pump_metrics[key]
+	if not pump_metrics.is_empty():
+		# Keep camera attribution on its own short line. The full QcMetrics
+		# record can exceed Android logcat's per-line limit once OpenXR status
+		# dictionaries are included, which previously hid the pump breakdown.
+		print("QcCamera %.1fs pump=%s encoder=%s" % [
+			window_s,
+			_compact_dict(pump_metrics),
+			_compact_dict(plugin_metrics),
+		])
 	# Compact one-liner so it doesn't drown the rest of logcat. Tagged
 	# "QcMetrics" so adb logcat -s godot:V | grep QcMetrics gives a clean
 	# table.
-	print("QcMetrics %.1fs recording=%s engine_fps=%d process_fps=%.1f pose_loop_iters=%d stages_ms={panel=%.1f,pointer=%.1f,record=%.1f,pose=%.1f,depth=%.1f,metrics=%.1f} pose=%s depth=%s body_motion=%s plugin=%s muxer=%s" % [
+	print("QcMetrics %.1fs recording=%s engine_fps=%d process_fps=%.1f pose_loop_iters=%d stages_ms={panel=%.1f,pointer=%.1f,record=%.1f,camera=%.1f,pose=%.1f,depth=%.1f,metrics=%.1f} pose=%s depth=%s body_motion=%s plugin=%s muxer=%s" % [
 		window_s,
 		str(_recording),
 		engine_fps,
@@ -891,6 +943,7 @@ func _emit_metrics(window_s: float) -> void:
 		_stage_us_panel / 1000.0,
 		_stage_us_pointer / 1000.0,
 		_stage_us_record_ctl / 1000.0,
+		_stage_us_camera_pump / 1000.0,
 		_stage_us_pose_loop / 1000.0,
 		_stage_us_depth_pump / 1000.0,
 		_stage_us_emit_metrics / 1000.0,
@@ -905,6 +958,7 @@ func _emit_metrics(window_s: float) -> void:
 	_stage_us_panel = 0
 	_stage_us_pointer = 0
 	_stage_us_record_ctl = 0
+	_stage_us_camera_pump = 0
 	_stage_us_pose_loop = 0
 	_stage_us_depth_pump = 0
 	_stage_us_emit_metrics = 0
@@ -962,6 +1016,30 @@ func _reset_ui_input_state() -> void:
 	_release_ui_pointer()
 
 
+## Hand joints, body joints and motion trackers are captured/written by the
+## hand_capture GDExtension (C++): ego capture writes the mp4 tracks (muxer
+## plugin) + optional JSONL sidecars; live modes push hands via
+## writeHandJointsJson on the live server plugin (rate-limited in C++ to the
+## legacy 30 Hz wire cadence; body/motion never had live network streams).
+## Idempotent — safe to call again when a plugin singleton binds late.
+func _try_enable_native_hand_capture() -> void:
+	if pose_sampler == null:
+		return
+	if _native_openxr_hand_capture == null and Engine.has_singleton(OPENXR_HAND_CAPTURE_SINGLETON):
+		_native_openxr_hand_capture = Engine.get_singleton(OPENXR_HAND_CAPTURE_SINGLETON)
+	var live_target: Object = live_server_plugin if _is_live_feed_mode() else null
+	var muxer_target: Object = null if _is_live_feed_mode() else muxer_plugin
+	if muxer_target == null and live_target == null:
+		return
+	if not pose_sampler.has_native_hand_capture() \
+			and pose_sampler.enable_native_hand_capture(muxer_target, live_target):
+		print("Native hand capture enabled (hand_capture GDExtension, full XR frame rate)")
+	if muxer_target != null and body_motion_sampler != null \
+			and not body_motion_sampler.has_native_writer() \
+			and body_motion_sampler.enable_native_writer(muxer_target):
+		print("Native body/motion capture writer enabled (hand_capture GDExtension)")
+
+
 ## WP3/WP6: builds the CaptureSessionController via the mode's composition
 ## root. The stop chain preserves the legacy stop order exactly:
 ## body_motion.stop -> live-pull disconnect (non-live-feed only) ->
@@ -988,6 +1066,22 @@ func start_capture() -> void:
 		return
 	if _capture_controller == null:
 		return
+	if _export_space_start_pending:
+		return
+	_export_space_start_pending = true
+	var export_space := OpenXRExportSpace.normalize(
+		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
+	var export_space_ready := await _ensure_export_coordinate_space_ready(export_space)
+	_export_space_start_pending = false
+	if not export_space_ready:
+		push_error("Capture start blocked: OpenXR export coordinate space %s is unavailable" % export_space.to_upper())
+		return
+	capture_options["export_coordinate_space"] = export_space
+	capture_options["export_coordinate_space_id"] = OpenXRExportSpace.coordinate_space_id(export_space)
+	# RGB calibration remains a rigid transform relative to head. Consumers
+	# obtain the selected-space camera pose with
+	# T_export_camera = T_export_head * T_head_camera.
+	capture_options["rgb_extrinsics_space"] = "head"
 
 	# Normalize save_root before the options snapshot (the storage check —
 	# now run inside the controller's permission phase — used to do this
@@ -995,6 +1089,8 @@ func start_capture() -> void:
 	if not _is_live_feed_mode():
 		capture_options["save_root"] = _configured_save_root()
 	_active_capture_options = _effective_capture_options(capture_options)
+	# Late plugin binds can land between _configure and the first capture start.
+	_try_enable_native_hand_capture()
 	if not _capture_controller.request_start(_active_capture_options):
 		# Storage/permission failures log on their own; a writer failure was
 		# surfaced via session_error. Mirrors the legacy silent return.
@@ -1009,6 +1105,13 @@ func _on_capture_session_error(message: String) -> void:
 
 
 func _on_capture_session_started(_session_dir: String) -> void:
+	if pose_sampler != null and pose_sampler.has_method("on_session_started"):
+		pose_sampler.on_session_started(
+			_session_dir,
+			not _is_live_feed_mode() and _stream_enabled("record_hand_data")
+		)
+	if body_motion_sampler != null and body_motion_sampler.has_method("on_session_started"):
+		body_motion_sampler.on_session_started(_session_dir)
 	_start_live_pull()
 	_update_operator_interaction_state()
 	_pose_accum = 0.0
@@ -1021,12 +1124,18 @@ func _on_capture_session_started(_session_dir: String) -> void:
 	_audio_permission_degraded_logged = false
 	_audio_permission_wait_started_ticks_us = 0
 	_pico_camera_image_started = false
+	_pico_native_pipeline_started = false
+	_pico_native_metrics_accum.clear()
+	_native_openxr_hand_recording_started = false
+	_pico_camera_sink_bound = false
 	_pico_camera_frame_accum_s = 0.0
 	_pico_camera_submit_ok_left = 0
 	_pico_camera_submit_ok_right = 0
 	_pico_camera_submit_fail_left = 0
 	_pico_camera_submit_fail_right = 0
 	_pico_camera_frames_skipped = 0
+	_pico_camera_acquire_us = 0
+	_pico_camera_submit_us = 0
 	_pico_camera_submit_fail_session = 0
 	_pico_camera_fail_count_at_last_warn = 0
 	_pico_camera_fail_warn_ticks_us = 0
@@ -1073,6 +1182,10 @@ func stop_capture() -> void:
 
 
 func _on_capture_session_stopped(final_path: String) -> void:
+	if pose_sampler != null and pose_sampler.has_method("on_session_stopped"):
+		pose_sampler.on_session_stopped()
+	if body_motion_sampler != null and body_motion_sampler.has_method("on_session_stopped"):
+		body_motion_sampler.on_session_stopped()
 	var is_live_feed := _is_live_feed_mode()
 	var saved_session_dir := final_path
 	_update_operator_interaction_state()
@@ -1084,12 +1197,15 @@ func _on_capture_session_stopped(final_path: String) -> void:
 	_audio_permission_degraded_logged = false
 	_audio_permission_wait_started_ticks_us = 0
 	_pico_camera_image_started = false
+	_pico_camera_sink_bound = false
 	_pico_camera_frame_accum_s = 0.0
 	_pico_camera_submit_ok_left = 0
 	_pico_camera_submit_ok_right = 0
 	_pico_camera_submit_fail_left = 0
 	_pico_camera_submit_fail_right = 0
 	_pico_camera_frames_skipped = 0
+	_pico_camera_acquire_us = 0
+	_pico_camera_submit_us = 0
 	_pico_camera_submit_fail_session = 0
 	_pico_camera_fail_count_at_last_warn = 0
 	_pico_camera_fail_warn_ticks_us = 0
@@ -1677,6 +1793,9 @@ func _bind_android_plugin() -> void:
 			writer.set_muxer_plugin(muxer_plugin)
 		if writer != null and writer.has_method("set_live_server_plugin"):
 			writer.set_live_server_plugin(live_server_plugin)
+		# The muxer singleton can bind after _configure the samplers ran (plugin
+		# installs late) — retry the native hand-capture hookup here.
+		_try_enable_native_hand_capture()
 		return
 	if camera_plugin == null and not _camera_bind_warned:
 		_camera_bind_warned = true
@@ -1702,6 +1821,11 @@ func _start_camera_plugin() -> void:
 		str(_capture_option("audio_channel_layout", "stereo"))
 	)
 	var configured_result: Variant
+	var export_space_id := OpenXRExportSpace.coordinate_space_id(
+		_capture_option("export_coordinate_space", OpenXRExportSpace.DEFAULT))
+	# Both providers embed this declaration in operator_static. RGB
+	# extrinsics stay head-relative; only the head trajectory's base changes.
+	camera_plugin.call("setExportCoordinateSpace", export_space_id)
 	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
 		camera_plugin.call("setRgbVideoCodec", str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)))
 		configured_result = camera_plugin.call(
@@ -1841,20 +1965,67 @@ func _try_start_camera_plugin() -> void:
 		print("%s startCameras returned: %s" % [_provider_label(), started])
 	if not started:
 		_abort_capture_start("%s camera start failed" % _provider_label())
+		return
+	if not _start_native_openxr_hand_recording():
+		_abort_capture_start("Native 60 Hz hand recorder failed to start")
 
 
 func _stop_camera_plugin() -> void:
-	if camera_plugin != null:
-		camera_plugin.call("stopCameras")
+	# Native camera/hand workers hold OpenXR sessions and feed the
+	# active native writer. Join them before the provider finalizes that writer.
+	_stop_native_openxr_hand_recording()
 	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name) and pico_openxr_bridge != null and pico_openxr_bridge.has_method("stop_camera_image_capture"):
 		pico_openxr_bridge.call("stop_camera_image_capture")
+	if pose_sampler != null and pose_sampler.has_method("set_native_hand_muxer_writes_enabled"):
+		pose_sampler.set_native_hand_muxer_writes_enabled(true)
+	if camera_plugin != null:
+		camera_plugin.call("stopCameras")
 	_pico_camera_image_started = false
+	_pico_native_pipeline_started = false
+	_pico_camera_sink_bound = false
+
+
+func _start_native_openxr_hand_recording() -> bool:
+	if _is_live_feed_mode() or not _stream_enabled("record_hand_data"):
+		return true
+	_try_enable_native_hand_capture()
+	if _native_openxr_hand_capture == null:
+		push_error("NativeOpenXRHandCapture singleton is unavailable")
+		return false
+	var time_offset_ns := int(camera_plugin.call("getXrTimeToGodotTicksOffsetNs"))
+	var hands_jsonl_path := ""
+	if bool(_capture_option("save_controller_hand_sidecar", false)):
+		hands_jsonl_path = str(writer.get_session_dir_absolute()).path_join(SessionLayout.HANDS_JSONL)
+	var coordinate_space := OpenXRExportSpace.coordinate_space_id(
+		_capture_option("export_coordinate_space", OpenXRExportSpace.DEFAULT))
+	_native_openxr_hand_recording_started = bool(
+		_native_openxr_hand_capture.call(
+			"start_recording", time_offset_ns, hands_jsonl_path, coordinate_space)
+	)
+	if not _native_openxr_hand_recording_started:
+		push_error("Native OpenXR hand recorder start failed: %s" % str(
+			_native_openxr_hand_capture.call("get_last_error")
+		))
+		return false
+	if pose_sampler != null and pose_sampler.has_method("set_native_hand_muxer_writes_enabled"):
+		pose_sampler.set_native_hand_muxer_writes_enabled(false)
+	print("Native OpenXR hand recorder started at an independent 60 Hz (Quest/PICO)")
+	return true
+
+
+func _stop_native_openxr_hand_recording() -> void:
+	var was_started := _native_openxr_hand_recording_started
+	_native_openxr_hand_recording_started = false
+	if was_started and _native_openxr_hand_capture != null:
+		_native_openxr_hand_capture.call("stop_recording")
 
 
 func _on_openxr_session_begun() -> void:
 	if _xr_session_begun:
 		return
 	_xr_session_begun = true
+	_request_export_coordinate_space(
+		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
 	if keep_passthrough_visible:
 		_set_passthrough_visible(true)
 	if not keep_safety_zone_visible:
@@ -1921,6 +2092,9 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 		return
 	var prev_record_audio := bool(capture_options.get("record_audio", false))
 	_merge_capture_options(options)
+	capture_options["export_coordinate_space"] = OpenXRExportSpace.normalize(
+		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
+	_request_export_coordinate_space(capture_options["export_coordinate_space"])
 	capture_options["save_root"] = _configured_save_root()
 	_sync_operator_interaction_override()
 	_update_hand_skeleton_overlay_state()
@@ -2158,6 +2332,53 @@ func _capture_option(option: String, fallback: Variant = null) -> Variant:
 	return source.get(option, fallback)
 
 
+## Requests one of the three user-visible OpenXR reference-space types.
+## Godot applies the change on a subsequent XR frame, so callers that are
+## about to record must also wait for get_play_area_mode() to confirm it.
+func _request_export_coordinate_space(space: Variant) -> bool:
+	if xr_interface == null or not xr_interface.is_initialized():
+		return false
+	var normalized := OpenXRExportSpace.normalize(space)
+	var requested_mode := OpenXRExportSpace.play_area_mode(normalized)
+	if xr_interface.get_play_area_mode() == requested_mode:
+		print("OpenXR export coordinate space active: %s" % normalized.to_upper())
+		return true
+	var accepted := bool(xr_interface.set_play_area_mode(requested_mode))
+	if not accepted:
+		push_error("OpenXR runtime rejected export coordinate space %s" % normalized.to_upper())
+	return accepted
+
+
+## Fail closed rather than silently recording a mixture of the requested
+## space label and the runtime's LOCAL fallback. This runs only before a
+## capture starts; the active play space is never changed mid-recording.
+func _ensure_export_coordinate_space_ready(space: Variant) -> bool:
+	if xr_interface == null or not xr_interface.is_initialized():
+		# Editor/static harnesses have no OpenXR session. Android capture must
+		# always have one and therefore cannot bypass this check.
+		return not OS.has_feature("android")
+	var normalized := OpenXRExportSpace.normalize(space)
+	var requested_mode := OpenXRExportSpace.play_area_mode(normalized)
+	if xr_interface.get_play_area_mode() == requested_mode:
+		return true
+	if not _request_export_coordinate_space(normalized):
+		return false
+	var deadline_ms := Time.get_ticks_msec() + int(EXPORT_SPACE_APPLY_TIMEOUT_SECONDS * 1000.0)
+	while Time.get_ticks_msec() < deadline_ms:
+		await get_tree().process_frame
+		if xr_interface.get_play_area_mode() == requested_mode:
+			print("OpenXR export coordinate space active: %s" % normalized.to_upper())
+			return true
+	var actual := OpenXRExportSpace.from_play_area_mode(xr_interface.get_play_area_mode())
+	push_error(
+		"OpenXR export coordinate space did not become active: requested=%s actual=%s" % [
+			normalized.to_upper(),
+			actual.to_upper() if not actual.is_empty() else "UNKNOWN",
+		]
+	)
+	return false
+
+
 func _effective_capture_options(options: Dictionary) -> Dictionary:
 	if camera_plugin == null:
 		_bind_android_plugin()
@@ -2204,8 +2425,34 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 		camera_plugin.call("setOpenXrCameraImageInfoJson", JSON.stringify(info_dict))
 	var started: bool = bool(camera_plugin.call("startOpenXrCameraImageCapture", JSON.stringify(info_dict)))
 	print("%s startOpenXrCameraImageCapture returned: %s" % [_provider_label(), started])
-	_pico_camera_image_started = started
-	return started
+	if not started:
+		_pico_camera_image_started = false
+		return false
+	if not pico_openxr_bridge.has_method("start_native_recording_pipeline"):
+		push_error("pico_openxr bridge lacks the native camera/hand recording pipeline; rebuild the APK")
+		return false
+	# Android @UsedByGodot methods are callable even though has_method() may
+	# report false.  This PICO-specific branch always binds PicoCapturePlugin,
+	# whose anchor maps OpenXR CLOCK_MONOTONIC timestamps to Godot process ticks.
+	var time_offset_ns := int(camera_plugin.call("getXrTimeToGodotTicksOffsetNs"))
+	var native_started := bool(pico_openxr_bridge.call(
+		"start_native_recording_pipeline",
+		str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)),
+		int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
+		time_offset_ns,
+		str(writer.get_session_dir_absolute()).path_join("left_camera_frames.jsonl"),
+		str(writer.get_session_dir_absolute()).path_join("right_camera_frames.jsonl") if stereo else ""
+	))
+	if not native_started:
+		var native_error := ""
+		if pico_openxr_bridge.has_method("get_native_recording_pipeline_error"):
+			native_error = str(pico_openxr_bridge.call("get_native_recording_pipeline_error"))
+		push_error("Failed to start native PICO RGB encoder: %s" % native_error)
+		return false
+	_pico_camera_image_started = true
+	_pico_native_pipeline_started = true
+	print("PICO native recording pipeline started: OpenXR RGBA -> GLES -> NDK MediaCodec")
+	return true
 
 
 func _rgb_resolution_from_capture_options(fallback: Vector2i) -> Vector2i:
@@ -2244,48 +2491,45 @@ func _pump_pico_openxr_camera_frames(delta: float) -> void:
 		_pico_camera_frame_accum_s - _pico_camera_poll_interval_s,
 		_pico_camera_poll_interval_s
 	)
-	var frames: Variant = bridge.call("poll_camera_image_frames")
-	if typeof(frames) != TYPE_ARRAY:
+	# Native mode is independently clocked. This main-thread call only drains
+	# tiny counters for QcCamera; it never acquires, copies, or submits RGB.
+	if _pico_native_pipeline_started:
+		if bridge.has_method("pop_native_recording_metrics"):
+			var native_metrics: Variant = bridge.call("pop_native_recording_metrics")
+			if typeof(native_metrics) == TYPE_DICTIONARY:
+				for key in (native_metrics as Dictionary).keys():
+					_pico_native_metrics_accum[key] = int(_pico_native_metrics_accum.get(key, 0)) + int((native_metrics as Dictionary)[key])
 		return
-	for frame_variant in frames:
-		if typeof(frame_variant) != TYPE_DICTIONARY:
-			continue
-		var frame := frame_variant as Dictionary
-		var data: Variant = frame.get("data")
-		var width := int(frame.get("width", 0))
-		var height := int(frame.get("height", 0))
-		if typeof(data) != TYPE_PACKED_BYTE_ARRAY \
-				or (data as PackedByteArray).is_empty() \
-				or width <= 0 or height <= 0:
-			_pico_camera_frames_skipped += 1
-			continue
-		var eye := str(frame.get("eye", "left"))
-		# The native bridge always sets effective_pixel_stride; the chained
-		# fallbacks only run for older bridge builds.
-		var pixel_stride: Variant = frame.get("effective_pixel_stride")
-		if pixel_stride == null:
-			pixel_stride = frame.get("pixel_stride", frame.get("bytes_per_pixel", 4))
-		var ok: bool = bool(plugin.call(
-			"submitOpenXrRgbaFrame",
-			eye,
-			int(frame.get("xr_time_ns", 0)),
-			width,
-			height,
-			int(frame.get("stride", 0)),
-			int(pixel_stride),
-			data
-		))
-		if ok:
-			if eye == "right":
-				_pico_camera_submit_ok_right += 1
-			else:
-				_pico_camera_submit_ok_left += 1
-		else:
-			if eye == "right":
-				_pico_camera_submit_fail_right += 1
-			else:
-				_pico_camera_submit_fail_left += 1
-			_pico_camera_submit_fail_session += 1
+	# Kotlin-direct pump: the bridge submits frames to the capture plugin
+	# (submitOpenXrRgbaFrame) entirely in C++ — the large per-eye RGBA
+	# PackedByteArrays never round-trip through GDScript Dictionaries. This
+	# GDScript tick is one call + a compact counter array at ~60 Hz. The native
+	# pump moves at most one eye per call and alternates eyes.
+	if not _pico_camera_sink_bound:
+		if not bridge.has_method("bind_camera_frame_sink"):
+			# Bridge .so predates the direct pump; RGB capture requires the
+			# matching pico_openxr build (same APK ships both, so this only
+			# fires on a stale sideload).
+			if not _pico_camera_pump_warned:
+				_pico_camera_pump_warned = true
+				push_error("pico_openxr bridge lacks bind_camera_frame_sink — rebuild the APK (make build-pico); Pico RGB frames will not be recorded.")
+			return
+		bridge.call("bind_camera_frame_sink", plugin)
+		_pico_camera_sink_bound = true
+	var counters: Variant = bridge.call("pump_camera_frames_to_sink")
+	if counters is PackedInt32Array and (counters as PackedInt32Array).size() >= 5:
+		var c := counters as PackedInt32Array
+		_pico_camera_submit_ok_left += c[0]
+		_pico_camera_submit_ok_right += c[1]
+		_pico_camera_submit_fail_left += c[2]
+		_pico_camera_submit_fail_right += c[3]
+		_pico_camera_frames_skipped += c[4]
+		if c.size() >= 7:
+			_pico_camera_acquire_us += c[5]
+			_pico_camera_submit_us += c[6]
+		var failed := c[2] + c[3]
+		if failed > 0:
+			_pico_camera_submit_fail_session += failed
 			_maybe_warn_pico_submit_failures()
 
 
@@ -2301,9 +2545,14 @@ func _maybe_warn_pico_submit_failures() -> void:
 
 
 func _pop_pico_pump_metrics() -> Dictionary:
+	if not _pico_native_metrics_accum.is_empty():
+		var native_metrics := _pico_native_metrics_accum.duplicate()
+		_pico_native_metrics_accum.clear()
+		return native_metrics
 	if _pico_camera_submit_ok_left == 0 and _pico_camera_submit_ok_right == 0 \
 			and _pico_camera_submit_fail_left == 0 and _pico_camera_submit_fail_right == 0 \
-			and _pico_camera_frames_skipped == 0:
+			and _pico_camera_frames_skipped == 0 and _pico_camera_acquire_us == 0 \
+			and _pico_camera_submit_us == 0:
 		return {}
 	var metrics := {
 		"ok_l": _pico_camera_submit_ok_left,
@@ -2311,12 +2560,16 @@ func _pop_pico_pump_metrics() -> Dictionary:
 		"fail_l": _pico_camera_submit_fail_left,
 		"fail_r": _pico_camera_submit_fail_right,
 		"skip": _pico_camera_frames_skipped,
+		"acquire_ms": _pico_camera_acquire_us / 1000.0,
+		"submit_ms": _pico_camera_submit_us / 1000.0,
 	}
 	_pico_camera_submit_ok_left = 0
 	_pico_camera_submit_ok_right = 0
 	_pico_camera_submit_fail_left = 0
 	_pico_camera_submit_fail_right = 0
 	_pico_camera_frames_skipped = 0
+	_pico_camera_acquire_us = 0
+	_pico_camera_submit_us = 0
 	return metrics
 
 

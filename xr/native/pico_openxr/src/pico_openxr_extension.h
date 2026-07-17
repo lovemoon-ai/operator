@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pico_openxr_defs.h"
+#include "native_recording_pipeline.h"
 
 #include <godot_cpp/classes/open_xr_extension_wrapper_extension.hpp>
 #include <godot_cpp/classes/open_xrapi_extension.hpp>
@@ -8,6 +9,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 
 using namespace godot;
@@ -31,6 +33,23 @@ public:
 	Dictionary get_external_camera_info();
 	Dictionary start_camera_image_capture(bool stereo = true, int width = 640, int height = 480, int fps = 30);
 	Array poll_camera_image_frames();
+	// Kotlin-direct camera pump: binds the capture plugin (JNISingleton) so
+	// at most one pending eye frame is submitted via submitOpenXrRgbaFrame
+	// straight from C++ — no per-frame GDScript Dictionary/Array marshalling.
+	// Stereo calls alternate eyes to spread the two large RGBA copies across
+	// separate render ticks. Returns
+	// [ok_left, ok_right, fail_left, fail_right, skipped, acquire_us,
+	// submit_us] per pump call
+	// (skipped = frames dropped before submit: zero-dim or unusable layout,
+	// the same class the legacy GDScript pump counted as skip).
+	void bind_camera_frame_sink(Object *p_sink);
+	PackedInt32Array pump_camera_frames_to_sink();
+	bool start_native_recording_pipeline(String codec = "hevc", int bitrate = 8000000,
+			int64_t xr_time_to_godot_ns = 0, String left_frame_index_path = "",
+			String right_frame_index_path = "");
+	bool is_native_recording_pipeline_running() const;
+	String get_native_recording_pipeline_error() const;
+	Dictionary pop_native_recording_metrics();
 	void stop_camera_image_capture();
 	Dictionary get_camera_image_info() const;
 	bool request_motion_trackers(int count);
@@ -81,12 +100,33 @@ private:
 		XrCameraImageFpsPICO fps = XR_CAMERA_IMAGE_FPS_30_PICO;
 	};
 
+	// One normalized camera frame pulled from the PICO runtime (shared by
+	// the legacy Dictionary poll and the Kotlin-direct pump).
+	struct AcquiredCameraFrame {
+		PackedByteArray bytes;
+		int64_t capture_time = 0;
+		int64_t camera_id = 0;
+		uint32_t width = 0;
+		uint32_t height = 0;
+		uint32_t row_stride = 0;
+		uint32_t pixel_stride = 0;
+		uint32_t source_bytes_per_pixel = 0;
+		uint32_t source_stride = 0;
+		uint32_t source_pixel_stride = 0;
+		uint32_t buffer_size = 0;
+	};
+
 	bool resolve_functions();
 	bool wait_future_until_ready(XrFutureEXT future, XrResult &poll_result, int timeout_ms = 3000);
 	bool refresh_camera_image_camera_ids();
 	bool select_camera_image_config(XrCameraIdPICO camera_id, int preferred_width, int preferred_height, int preferred_fps, CameraImageCaptureConfig &config);
 	bool start_camera_image_eye(CameraImageEyeState &eye_state, const CameraImageCaptureConfig &config);
 	void stop_camera_image_eye(CameraImageEyeState &eye_state);
+	// NONE: no update / acquire failed. FRAME: `out` filled. DROPPED: a new
+	// image arrived but was unusable (zero-dim or layout larger than the
+	// buffer) — the class the capture pump reports as "skipped".
+	enum class CameraAcquire { NONE, FRAME, DROPPED };
+	CameraAcquire acquire_camera_frame(CameraImageEyeState &eye_state, AcquiredCameraFrame &out);
 	Dictionary camera_metadata_from_session(const CameraImageEyeState &eye_state, XrResult intrinsics_result, const XrCameraIntrinsicsPICO &intrinsics, XrResult extrinsics_result, const XrCameraExtrinsicsPICO &extrinsics) const;
 	void refresh_camera_image_info();
 	void reset_camera_image_state();
@@ -166,11 +206,14 @@ private:
 	Dictionary last_motion_power_key_event;
 	CameraImageEyeState camera_left{"left", 1};
 	CameraImageEyeState camera_right{"right", 2};
+	uint64_t camera_sink_instance_id = 0;
+	int camera_pump_next_eye = 0;
 	bool camera_image_capture_active = false;
 	bool camera_image_stereo = true;
 	int camera_image_width = 640;
 	int camera_image_height = 480;
 	int camera_image_fps = 30;
+	NativeRecordingPipeline native_recording_pipeline;
 	mutable Dictionary cached_camera_image_info;
 
 	mutable Dictionary cached_external_camera_info;

@@ -60,9 +60,13 @@ target_link_libraries(godot_mujoco PRIVATE
     log
 )
 
+target_link_options(godot_mujoco PRIVATE "LINKER:--exclude-libs,ALL")
+
 set_target_properties(godot_mujoco PROPERTIES
     OUTPUT_NAME "godot_mujoco"
     PREFIX "lib"
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
 )
 
 install(TARGETS godot_mujoco
