@@ -28,6 +28,9 @@ namespace {
 constexpr const char *kTag = "Operator-NativeCapture";
 constexpr int kColorFormatSurface = 0x7F000789;
 constexpr int kAvPacketFlagKey = 0x0001;
+// The NDK header in r26c omits the Java MediaCodec key-frame alias.  Bit 0 is
+// the stable sync/key-frame flag used by MediaCodec.BufferInfo.
+constexpr uint32_t kMediaCodecBufferFlagKeyFrame = 0x0001;
 constexpr int kTrackRgbFrameIndexLeft = 9;
 constexpr int kTrackRgbFrameIndexRight = 10;
 constexpr int64_t kMaxStereoDeltaNs = 20'000'000;
@@ -384,7 +387,7 @@ private:
 					AMediaCodec_releaseOutputBuffer(codec_, static_cast<size_t>(index), false);
 					return;
 				}
-				const int flags = (info.flags & AMEDIACODEC_BUFFER_FLAG_KEY_FRAME) ? kAvPacketFlagKey : 0;
+				const int flags = (info.flags & kMediaCodecBufferFlagKeyFrame) ? kAvPacketFlagKey : 0;
 				// Some encoders add a fixed offset to the first output PTS.  Remove it
 				// and map the relative codec clock back onto the OpenXR/Godot clock.
 				if (codec_output_origin_us_ < 0) codec_output_origin_us_ = info.presentationTimeUs;
