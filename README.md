@@ -238,7 +238,7 @@ Deeper docs live under `claw/`:
 
 We are active in xhs and wechat, please join us.
 
-You can find xhs group from [link](http://xhslink.com/o/6tz3pslhiBk), and wechat qr code below:
+You can get xhs group or wechat group QR code from this guy: 
 
 <table>
   <tr>
@@ -248,3 +248,6 @@ You can find xhs group from [link](http://xhslink.com/o/6tz3pslhiBk), and wechat
     </td>
   </tr>
 </table>
+
+> Sorry, because the group QR code expires easily, only the admin's WeChat has been provided. 
+> You can add him first and ask him to invite you into the group.
