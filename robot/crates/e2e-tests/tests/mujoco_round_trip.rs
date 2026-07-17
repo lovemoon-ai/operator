@@ -88,7 +88,7 @@ fn arm_config(python: &str, script: &str) -> ArmConfig {
             steps_per_write: 3,
             extra_args: vec![],
         }),
-        so101: None,
+        lerobot: None,
     }
 }
 
