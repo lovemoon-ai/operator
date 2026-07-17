@@ -23,7 +23,7 @@ signal error(message: String)
 
 # Bumped in lock-step with com.spatialmp4.contract.CONTRACT_VERSION. v5 embeds
 # raw-container replay metadata such as operator_static and rgb_frame_index in
-# MP4 so the archive remains self-contained without mandatory sidecars.
+# MP4 so the archive remains self-contained.
 const EXPECTED_CONTRACT_VERSION := 5
 
 var _plugin: Object

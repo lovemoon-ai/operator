@@ -3,31 +3,27 @@
 //
 // Why: the GDScript body path materialized up to 87 joints as ~261 nested
 // Dictionaries per 30 Hz sample, then re-walked and JSON.stringify'd the
-// whole record TWICE (mp4 `mett:body_joints` metadata track + JSONL
-// sidecar) on the main thread — the same shape that drove hand capture to
-// C++. Motion trackers did the dict-build + double-stringify at 90 Hz × N.
+// whole record on the main thread. Motion trackers did the same dict-build
+// work at 90 Hz × N.
 //
-// This class owns the write side in C++ (single-pass serialization, JSONL
-// on a background thread) and, for the Godot/Meta XRBodyTracker runtime,
-// the sampling too:
+// This class owns the write side in C++ (single-pass serialization) and, for
+// the Godot/Meta XRBodyTracker runtime, the sampling too:
 //
 //   - sample_body_tracker(ts): reads XRBodyTracker at /user/body_tracker
 //     directly (87 joints, no Variant dicts at all), packs the HJNT v1
 //     payload -> muxer.writeBodyJointsPayload, builds the metadata record
-//     JSON once -> muxer.writeBodyFrameMetadataJson + body_joints.jsonl.
+//     JSON once -> muxer.writeBodyFrameMetadataJson.
 //   - write_body_joints(...): PICO path — joints arrive as Variant dicts
 //     from the pico_openxr bridge; packed + serialized here in one pass.
 //   - write_motion_tracker_pose/_event(...): record JSON built once ->
-//     muxer.writeMotionTrackerMetadataJson + motion_trackers.jsonl.
+//     muxer.writeMotionTrackerMetadataJson.
 //
 // Output shapes are byte/shape-identical to the old session_spool_writer.gd
-// records (_body_metadata_record / _motion_tracker_pose_record /
-// _motion_tracker_event_record) and jsonl_sidecar_sink.gd lines.
+// metadata records (_body_metadata_record / _motion_tracker_pose_record /
+// _motion_tracker_event_record).
 
 #ifndef HAND_CAPTURE_NATIVE_BODY_MOTION_WRITER_H
 #define HAND_CAPTURE_NATIVE_BODY_MOTION_WRITER_H
-
-#include "background_jsonl_writer.h"
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -50,8 +46,7 @@ public:
     ~NativeBodyMotionWriter() override;
 
     void configure(Object *p_muxer_plugin);
-    // Either path may be empty (that sidecar stays disabled).
-    void begin_session(const String &p_body_jsonl_path, const String &p_motion_jsonl_path);
+    void begin_session();
     void end_session();
 
     // Godot/Meta XRBodyTracker path — fully native sampling + write.
@@ -92,12 +87,9 @@ private:
     uint64_t metric_motion_writes_ = 0;
     uint64_t metric_motion_event_writes_ = 0;
 
-    BackgroundJsonlWriter body_jsonl_;
-    BackgroundJsonlWriter motion_jsonl_;
-
     // Reused scratch buffers (main thread only). payload_scratch_ carries the
-    // HJNT bytes; json_scratch_ carries the record JSON shared between the
-    // muxer metadata track and the jsonl sidecar.
+    // HJNT bytes; json_scratch_ carries the record JSON for the muxer metadata
+    // tracks.
     PackedByteArray payload_scratch_;
     std::string json_scratch_;
 };

@@ -1,5 +1,8 @@
 class_name FrameWriterShim
 extends RefCounted
+
+const SensorFrameTypeScript := preload("res://scripts/contracts/sensor/frame_types.gd")
+
 ## v2 core/capture (WP4): adapter that consumes canonical SensorFrames and
 ## calls the existing writer surface (SessionSpoolWriter / LivePushWriter /
 ## LiveFeedNetworkWriter) with byte-identical arguments. This keeps WP4
@@ -23,26 +26,26 @@ func writer() -> Object:
 ## Routes one SensorFrame to the matching writer call. Returns the writer's
 ## return value (Variant: bool for input writes, null for the void
 ## pose/depth writes on the spool writer).
-func on_frame(frame: SensorFrame) -> Variant:
+func on_frame(frame: Object) -> Variant:
 	if _writer == null or frame == null:
 		return null
-	var p := frame.payload
+	var payload: Variant = frame.payload
+	var p: Dictionary = payload if payload is Dictionary else {}
 	match frame.frame_type:
-		SensorFrameType.POSE:
+		SensorFrameTypeScript.POSE:
 			return _writer.write_head_pose(
 				frame.timestamp_ns,
 				p.get("transform", Transform3D.IDENTITY) as Transform3D,
-				bool(p.get("tracking_valid", false)),
-				bool(p.get("write_jsonl", true))
+				bool(p.get("tracking_valid", false))
 			)
-		SensorFrameType.CONTROLLER:
+		SensorFrameTypeScript.CONTROLLER:
 			return _writer.write_controller_pose(
 				frame.source_id,
 				frame.timestamp_ns,
 				p.get("transform", Transform3D.IDENTITY) as Transform3D,
 				bool(p.get("tracking_valid", false))
 			)
-		SensorFrameType.INPUT_EVENT:
+		SensorFrameTypeScript.INPUT_EVENT:
 			return _writer.write_controller_input(
 				frame.source_id,
 				frame.timestamp_ns,
@@ -56,7 +59,7 @@ func on_frame(frame: SensorFrame) -> Variant:
 				p.get("thumbstick", Vector2.ZERO) as Vector2,
 				p.get("trackpad", Vector2.ZERO) as Vector2
 			)
-		SensorFrameType.DEPTH:
+		SensorFrameTypeScript.DEPTH:
 			return _writer.write_depth_frame(
 				frame.timestamp_ns,
 				str(p.get("eye", frame.source_id)),

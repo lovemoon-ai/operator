@@ -2,9 +2,8 @@ extends Node
 class_name BodyMotionSampler
 
 # Body joints and motion trackers are WRITTEN natively by the hand_capture
-# GDExtension's NativeBodyMotionWriter: HJNT payload packing, the mp4
-# metadata-JSON records and the JSONL sidecars are all serialized in C++
-# (sidecars on a background thread). On the Godot/Meta XRBodyTracker runtime
+# GDExtension's NativeBodyMotionWriter: HJNT payload packing and MP4
+# metadata-JSON records are serialized in C++. On the Godot/Meta XRBodyTracker runtime
 # the 87-joint SAMPLING is native too — GDScript never materializes joint
 # Dictionaries there. This script keeps the decision logic only: which
 # runtime to sample, readiness gating, diagnostics, and metrics.
@@ -132,20 +131,11 @@ func has_native_writer() -> bool:
 	return _native_writer != null
 
 
-## Session lifecycle for the native JSONL sidecars (same option gating the
-## legacy JsonlSidecarSink applied): body_motion/body_joints.jsonl needs
-## save_body_sidecar + record_body_tracking; motion_trackers.jsonl follows
-## record_motion_trackers directly.
+## Session lifecycle for the native writer.
 func on_session_started(session_dir: String) -> void:
 	if _native_writer == null or session_dir.is_empty():
 		return
-	var body_path := ""
-	if bool(_last_capture_options.get("save_body_sidecar", false)) and _record_body_tracking:
-		body_path = ProjectSettings.globalize_path(session_dir.path_join(SessionLayout.BODY_JOINTS_JSONL))
-	var motion_path := ""
-	if _record_motion_trackers:
-		motion_path = ProjectSettings.globalize_path(session_dir.path_join(SessionLayout.MOTION_TRACKERS_JSONL))
-	_native_writer.begin_session(body_path, motion_path)
+	_native_writer.begin_session()
 
 
 func on_session_stopped() -> void:
@@ -197,11 +187,7 @@ func pop_metrics() -> Dictionary:
 		"pico_openxr": _pico_bridge_status()
 	}
 	if _native_writer != null:
-		var native: Dictionary = _native_writer.pop_metrics()
-		metrics["body_jsonl_lines"] = int(native.get("body_jsonl_lines", 0))
-		metrics["body_jsonl_dropped"] = int(native.get("body_jsonl_dropped", 0))
-		metrics["motion_jsonl_lines"] = int(native.get("motion_jsonl_lines", 0))
-		metrics["motion_jsonl_dropped"] = int(native.get("motion_jsonl_dropped", 0))
+		_native_writer.pop_metrics()
 	_sample_count = 0
 	_body_writes = 0
 	_body_joint_count = 0

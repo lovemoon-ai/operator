@@ -19,11 +19,7 @@ class_name EgoUploader
 ##     Pico eMMC + Wi-Fi cannot sustain a 24 Mbps HEVC write AND a
 ##     TUS PATCH stream simultaneously without dropping recording
 ##     frames (see claw/issues/010-ego-data-upload.md, "Trip-wires").
-##   - We upload `manifest.json`, optional legacy/debug calibration sidecars,
-##     and `{session_id}.mp4`. Frame JSONL sidecar upload is deferred — the
-##     muxed mp4 tracks (`mett:head`, `mett:hand`, etc.) carry the same data,
-##     and those sidecars are documented as debug-only mirrors in
-##     `session_spool_writer.gd`.
+##   - We upload `manifest.json` and `<session_dir>/{session_id}.mp4`.
 ##
 ## Signals are emitted via call_deferred from the worker thread so
 ## listeners always see them on the main thread.
@@ -59,24 +55,6 @@ const MAX_TRANSIENT_ATTEMPTS_PER_JOB := 20
 # server can route each artifact to the right slot.
 const ARTIFACT_MANIFEST := "manifest"
 const ARTIFACT_MEDIA := "media"
-const ARTIFACT_LEFT_CAMERA_CHARACTERISTICS := "left_camera_characteristics"
-const ARTIFACT_RIGHT_CAMERA_CHARACTERISTICS := "right_camera_characteristics"
-const CAMERA_CHARACTERISTICS_UPLOADS := [
-	{
-		"kind": ARTIFACT_LEFT_CAMERA_CHARACTERISTICS,
-		"filename": "left_camera_characteristics.json"
-	},
-	{
-		"kind": ARTIFACT_RIGHT_CAMERA_CHARACTERISTICS,
-		"filename": "right_camera_characteristics.json"
-	},
-]
-const ARTIFACT_UPLOAD_ORDER := [
-	ARTIFACT_MANIFEST,
-	ARTIFACT_LEFT_CAMERA_CHARACTERISTICS,
-	ARTIFACT_RIGHT_CAMERA_CHARACTERISTICS,
-	ARTIFACT_MEDIA,
-]
 
 var _thread: Thread
 var _mutex: Mutex
@@ -148,17 +126,6 @@ func enqueue(session_dir: String, mp4_path: String, options: Dictionary) -> bool
 		ARTIFACT_MANIFEST: {"path": manifest_path, "tus_location": "", "offset": 0, "done": false},
 		ARTIFACT_MEDIA:    {"path": mp4_path,      "tus_location": "", "offset": 0, "done": false},
 	}
-	for sidecar in CAMERA_CHARACTERISTICS_UPLOADS:
-		var filename := str(sidecar.get("filename", ""))
-		var path := session_dir.path_join(filename)
-		if filename.is_empty() or not FileAccess.file_exists(path):
-			continue
-		artifacts[str(sidecar.get("kind", filename.get_basename()))] = {
-			"path": path,
-			"tus_location": "",
-			"offset": 0,
-			"done": false
-		}
 	var job := {
 		"session_id": session_id,
 		"session_dir": session_dir,
@@ -375,10 +342,8 @@ func _process_job(job: Dictionary) -> bool:
 		_cleanup_cancelled_job(job)
 		return false
 	var artifacts: Dictionary = job.get("artifacts", {})
-	# Manifest first so the server can allocate the session record before
-	# optional legacy sidecars and the much larger mp4 arrive. Keep sidecars
-	# ahead of media so older ingest workers that still consult them have the
-	# fallback files before media completion starts preview/Rerun work.
+		# Manifest first so the server can allocate the session record before
+		# the much larger mp4 arrives.
 	for kind in _artifact_upload_order(artifacts):
 		if not artifacts.has(kind):
 			continue
@@ -401,9 +366,10 @@ func _process_job(job: Dictionary) -> bool:
 
 func _artifact_upload_order(artifacts: Dictionary) -> Array:
 	var ordered: Array = []
-	for kind in ARTIFACT_UPLOAD_ORDER:
-		if artifacts.has(kind):
-			ordered.append(kind)
+	if artifacts.has(ARTIFACT_MANIFEST):
+		ordered.append(ARTIFACT_MANIFEST)
+	if artifacts.has(ARTIFACT_MEDIA):
+		ordered.append(ARTIFACT_MEDIA)
 	for kind in artifacts.keys():
 		if not ordered.has(kind):
 			ordered.append(kind)
@@ -884,9 +850,9 @@ func _file_size(path: String) -> int:
 
 
 func _cleanup_local_artifacts(session_dir: String, mp4_path: String) -> void:
-	# Only used when keep_local_after_upload=false. Remove the mp4 first
-	# so the user gets storage back fast; the session_dir (manifest +
-	# sidecars) is a separate pass.
+	# Only used when keep_local_after_upload=false. Remove the mp4 first so
+	# the user gets storage back fast, then remove the remaining session tree.
+	# This also handles queued jobs created with the historical sibling layout.
 	if FileAccess.file_exists(mp4_path):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(mp4_path))
 	if not session_dir.is_empty():

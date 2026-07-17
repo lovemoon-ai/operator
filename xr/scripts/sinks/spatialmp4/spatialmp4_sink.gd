@@ -5,7 +5,7 @@ extends SensorSink
 ## SessionSpoolWriter remains the engine (session dirs, manifest write +
 ## finalize-rewrite, sha256, muxer calls) so the on-disk format is
 ## byte-compatible per SpatialMp4ManifestContract; this sink owns the
-## SensorFrame -> muxer dispatch (JSONL sidecars moved to JsonlSidecarSink).
+## SensorFrame -> muxer dispatch.
 
 const SessionSpoolWriterScript := preload("res://scripts/core/capture/session_spool_writer.gd")
 
@@ -79,7 +79,8 @@ func health() -> Dictionary:
 func on_frame(frame: SensorFrame) -> Variant:
 	if _writer == null or frame == null:
 		return null
-	var p := frame.payload
+	var payload: Variant = frame.payload
+	var p: Dictionary = payload if payload is Dictionary else {}
 	match frame.frame_type:
 		SensorFrameType.POSE:
 			return _writer.write_head_pose(

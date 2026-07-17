@@ -31,10 +31,6 @@ inline Object *resolve_instance(uint64_t p_id) {
 
 } // namespace
 
-NativeHandSampler::~NativeHandSampler() {
-    end_jsonl();
-}
-
 void NativeHandSampler::_bind_methods() {
     ClassDB::bind_method(D_METHOD("configure", "muxer_plugin", "live_plugin", "xr_origin"),
                          &NativeHandSampler::configure);
@@ -42,11 +38,6 @@ void NativeHandSampler::_bind_methods() {
                          &NativeHandSampler::set_live_interval_us);
     ClassDB::bind_method(D_METHOD("set_muxer_writes_enabled", "enabled"),
                          &NativeHandSampler::set_muxer_writes_enabled);
-    ClassDB::bind_method(D_METHOD("begin_jsonl", "absolute_path"),
-                         &NativeHandSampler::begin_jsonl);
-    ClassDB::bind_method(D_METHOD("end_jsonl"), &NativeHandSampler::end_jsonl);
-    ClassDB::bind_method(D_METHOD("is_jsonl_active"),
-                         &NativeHandSampler::is_jsonl_active);
     ClassDB::bind_method(D_METHOD("sample", "timestamp_ns"),
                          &NativeHandSampler::sample);
     ClassDB::bind_method(D_METHOD("pop_metrics"),
@@ -72,18 +63,6 @@ void NativeHandSampler::set_muxer_writes_enabled(bool p_enabled) {
     muxer_writes_enabled_ = p_enabled;
 }
 
-bool NativeHandSampler::begin_jsonl(const String &p_absolute_path) {
-    return jsonl_.begin(p_absolute_path);
-}
-
-void NativeHandSampler::end_jsonl() {
-    jsonl_.end();
-}
-
-bool NativeHandSampler::is_jsonl_active() const {
-    return jsonl_.active();
-}
-
 int64_t NativeHandSampler::sample(int64_t p_timestamp_ns) {
     // XRHandTracker data advances once per rendered XR frame; the pose loop
     // can run more than one iteration per frame, so dedupe on the process
@@ -99,7 +78,7 @@ int64_t NativeHandSampler::sample(int64_t p_timestamp_ns) {
 
     Object *muxer = muxer_writes_enabled_ ? resolve_instance(muxer_instance_id_) : nullptr;
     Object *live = resolve_instance(live_instance_id_);
-    if (muxer == nullptr && live == nullptr && !jsonl_.active()) {
+    if (muxer == nullptr && live == nullptr) {
         return 0;
     }
 
@@ -137,10 +116,8 @@ int NativeHandSampler::sample_hand(Object *p_muxer, Object *p_live, bool p_live_
                                    int64_t p_timestamp_ns, bool &r_live_written) {
     const bool want_payload = p_muxer != nullptr;
     const bool want_live = p_live != nullptr && p_live_due;
-    // The joints JSON array is shared verbatim between the live wire format
-    // (legacy JSON.stringify(joints)) and the jsonl sidecar record, so it is
-    // built at most once per hand per frame.
-    const bool want_json = jsonl_.active() || want_live;
+    // The joints JSON array is built only when the live wire format needs it.
+    const bool want_json = want_live;
     if (!want_payload && !want_json) {
         // Nothing to emit this frame (e.g. live-only mode between throttle
         // slots): skip the joint read entirely and leave metrics untouched.
@@ -225,22 +202,6 @@ int NativeHandSampler::sample_hand(Object *p_muxer, Object *p_live, bool p_live_
     metric_hand_writes_ += 1;
     metric_hand_joints_ += joint_count;
 
-    if (jsonl_.active()) {
-        std::string &line = line_scratch_;
-        line.clear();
-        if (line.capacity() < joints_json.size() + 128) {
-            line.reserve(joints_json.size() + 128);
-        }
-        char head[96];
-        std::snprintf(head, sizeof(head),
-                      "{\"timestamp_ns\":%" PRId64 ",\"hand\":\"%s\",\"joint_count\":%d,\"joints\":",
-                      p_timestamp_ns, p_hand, joint_count);
-        line += head;
-        line += joints_json;
-        line += '}';
-        // Move, not copy: `line` is dead after this and cleared next use.
-        jsonl_.enqueue(std::move(line));
-    }
     return 1;
 }
 
@@ -249,8 +210,6 @@ Dictionary NativeHandSampler::pop_metrics() {
     metrics["hand_writes"] = static_cast<int64_t>(metric_hand_writes_);
     metrics["hand_joints"] = static_cast<int64_t>(metric_hand_joints_);
     metrics["live_writes"] = static_cast<int64_t>(metric_live_writes_);
-    metrics["jsonl_lines"] = static_cast<int64_t>(jsonl_.pop_lines());
-    metrics["jsonl_dropped"] = static_cast<int64_t>(jsonl_.pop_dropped());
     metric_hand_writes_ = 0;
     metric_hand_joints_ = 0;
     metric_live_writes_ = 0;

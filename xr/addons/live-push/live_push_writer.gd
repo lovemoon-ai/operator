@@ -99,7 +99,7 @@ func close() -> void:
 	saved_path = ""
 
 
-func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_jsonl: bool = true) -> bool:
+func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_metadata: bool = true) -> bool:
 	if live_server_plugin == null:
 		return false
 	var q := transform.basis.get_rotation_quaternion()
@@ -118,7 +118,7 @@ func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: 
 	))
 
 
-func write_controller_pose(source: String, timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_jsonl: bool = true) -> bool:
+func write_controller_pose(source: String, timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_metadata: bool = true) -> bool:
 	if live_server_plugin == null:
 		return false
 	var q := transform.basis.get_rotation_quaternion()

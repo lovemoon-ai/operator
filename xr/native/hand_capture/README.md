@@ -5,9 +5,8 @@ no GDScript fallback:
 
 - `NativeOpenXRHandCapture` — runtime-independent Quest/PICO MP4 hand capture
   through `XR_EXT_hand_tracking` on an independent 60 Hz worker clock.
-- `NativeHandSampler` — render-driven live hand JSON and optional
-  `poses/hands.jsonl`; it is also the explicit MP4 fallback before the 60 Hz
-  worker starts.
+- `NativeHandSampler` — render-driven live hand JSON; it is also the explicit
+  MP4 fallback before the 60 Hz worker starts.
 - `NativeBodyMotionWriter` — body joints + motion trackers (Meta/Godot
   XRBodyTracker sampling is native; PICO joints arrive from the
   pico_openxr bridge and are packed/serialized here). Replaces the old
@@ -28,12 +27,9 @@ consumer directly:
 - live push/feed: serializes the same joints to JSON and calls the live
   server plugin `writeHandJointsJson` (the exact wire shape the old
   `LivePushWriter` produced), rate-limited in C++ — default 30 Hz — to
-  preserve the network bandwidth contract (`set_live_interval_us`),
-- optional `poses/hands.jsonl` sidecar: render rate, serialized in C++ and
-  flushed on a background writer thread so file I/O never blocks the
-  render loop.
+  preserve the network bandwidth contract (`set_live_interval_us`).
 
-The live/sidecar joints JSON array is built at most once per hand per frame.
+The live joints JSON array is built at most once per hand per frame.
 The MP4 worker never calls a Godot Object, Variant, or Android Java method on
 its hot path.
 
