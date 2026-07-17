@@ -20,6 +20,7 @@ const HandSkeletonOverlayScript := preload("res://scripts/xr/hand_skeleton_overl
 const QR_SCANNER_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const QR_TARGET_UPLOAD_URL := "upload_url"
 const QR_TARGET_LIVE_SERVER := "live_server"
+const LAUNCHER_SCENE := "res://scenes/main.tscn"
 
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
@@ -237,6 +238,7 @@ var _pico_camera_fail_warn_ticks_us := 0
 const PICO_CAMERA_FAIL_WARN_EVERY := 100
 const PICO_CAMERA_FAIL_WARN_INTERVAL_US := 5_000_000
 var _passthrough_active := false
+var _scene_transition_target := ""
 var _previous_transparent_bg := false
 var _previous_environment_blend_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
 var _previous_background_mode := Environment.BG_CLEAR_COLOR
@@ -978,7 +980,13 @@ func _exit_tree() -> void:
 			interaction.call("set_busy", false)
 		if interaction.has_method("set_mode_override"):
 			interaction.call("set_mode_override", "")
-	_set_passthrough_visible(false)
+	# Keep passthrough alive while handing the already-running OpenXR session
+	# back to the launcher. Stopping it here and starting it again from the new
+	# scene races the vendor compositor; some runtimes do not recover passthrough
+	# inside the same session even though the launcher nodes finished loading.
+	# App shutdown and non-launcher transitions still perform normal cleanup.
+	if not _preserve_passthrough_for_transition():
+		_set_passthrough_visible(false)
 
 
 func _notification(what: int) -> void:
@@ -2176,12 +2184,37 @@ func _on_exit_requested() -> void:
 	# the app. The launcher's own Exit card is what actually quits the
 	# process (see scripts/app/launcher/mode_select.gd). Any active capture / live pull
 	# is stopped first so we don't leak an MP4 muxer or a network reader.
+	if not _scene_transition_target.is_empty():
+		return
+	print("[Operator] Capture exit requested — returning to mode select")
+	_scene_transition_target = LAUNCHER_SCENE
 	_release_ui_pointer()
 	if _recording:
 		stop_capture()
 	_stop_live_pull()
-	_set_passthrough_visible(false)
-	get_tree().change_scene_to_file("res://scenes/main.tscn")
+	# EgoUploader owns a worker thread. Ask it to leave any HTTP poll before
+	# change_scene tears down this node and waits for that thread in _exit_tree().
+	# Pending upload state is durable and resumes next time Ego is opened.
+	if ego_uploader != null and ego_uploader.has_method("request_shutdown"):
+		ego_uploader.call("request_shutdown")
+	# Defer the scene change out of the SubViewport button input callback. A
+	# direct change frees the panel while the same input event is still being
+	# dispatched, producing Viewport::_push_unhandled_input_internal errors.
+	call_deferred("_change_to_launcher")
+
+
+func _change_to_launcher() -> void:
+	await get_tree().process_frame
+	var err := get_tree().change_scene_to_file(LAUNCHER_SCENE)
+	if err != OK:
+		_scene_transition_target = ""
+		push_error("[Operator] Failed to return to launcher: %s" % err)
+
+
+func _preserve_passthrough_for_transition() -> bool:
+	return keep_passthrough_visible \
+			and _passthrough_active \
+			and _scene_transition_target == LAUNCHER_SCENE
 
 
 func _update_view_locked_panel() -> void:

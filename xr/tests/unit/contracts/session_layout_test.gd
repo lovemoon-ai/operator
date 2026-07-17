@@ -147,6 +147,20 @@ func run(ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		t.eq(str(upload_order.front()), "manifest", "uploader sends manifest first")
 		t.eq(str(upload_order.back()), "media", "uploader sends media last")
 
+	# Scene teardown must abort an in-flight HTTP wait instead of consuming the
+	# uploader's 15/60-second network timeout on the main thread.
+	var shutdown_uploader := EgoUploaderScript.new()
+	var future_deadline_ms := Time.get_ticks_msec() + 60000
+	t.is_false(
+		shutdown_uploader._http_wait_should_abort(future_deadline_ms),
+		"HTTP waits continue before uploader shutdown"
+	)
+	shutdown_uploader.request_shutdown()
+	t.is_true(
+		shutdown_uploader._http_wait_should_abort(future_deadline_ms),
+		"HTTP waits abort immediately after uploader shutdown"
+	)
+
 
 func _write_text(path: String, value: String) -> void:
 	var file := FileAccess.open(path, FileAccess.WRITE)
