@@ -236,19 +236,15 @@ Deeper docs live under `claw/`:
 
 ## Join group
 
-We are active in xhs and wechat, please join us:
+We are active in xhs and wechat, please join us.
+
+You can find xhs group from [link](http://xhslink.com/o/6tz3pslhiBk), and wechat qr code below:
 
 <table>
   <tr>
-    <td align="center" width="25%">
-      <img src="docs/figures/xhs-operator-group-qrcode.jpeg" alt="xhs" height="128"><br>
-      <strong>xhs</strong>
-    </td>
     <td align="center" width="25%">
       <img src="docs/figures/wechat-operator-group-qrcode.jpeg" alt="wechat" height="128"><br>
       <strong>wechat</strong>
     </td>
   </tr>
 </table>
-
-If qr code is out of date, please [create an issue](https://github.com/lovemoon-ai/operator/issues/new) for a new one.
