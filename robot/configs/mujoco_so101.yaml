@@ -90,4 +90,4 @@ bridge:
   pose_udp_port: 63902
   telemetry_port: 63903
   discovery_unicast_targets:
-    - 10.79.156.210
+    - 10.79.153.133
