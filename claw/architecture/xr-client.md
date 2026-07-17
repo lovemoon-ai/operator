@@ -153,6 +153,23 @@ Mode-specific composition chooses the sink chain:
 - Ego capture writes local SpatialMP4 artifacts and can upload through TUS.
 - Live Feed streams selected sensor/video data to a server through OLCP.
 
+Each local Ego recording is stored as one movable session directory:
+
+```text
+<capture_root>/
+  <session_id>/
+    <session_id>.mp4
+    manifest.json
+```
+
+This is the default complete recording. `poses/`, `body_motion/`, and `depth/`
+are created only when their explicit debug mirrors are enabled. Camera metadata
+sidecars (`android_timebase.json`, camera characteristics, and per-eye frame
+JSONL) are likewise opt-in through `save_camera_metadata_sidecars`; their
+canonical contents remain embedded in MP4. Local-session discovery continues
+to recognize the historical `<capture_root>/<session_id>.mp4` sibling layout so
+existing recordings remain available for preview, upload, and deletion.
+
 ## Ego Recording Container Contract
 
 Raw ego recordings should converge on a self-contained SpatialMP4 as the
@@ -190,14 +207,12 @@ Readers should use this precedence:
 3. Treat `manifest.json` as artifact inventory and integrity metadata, not as
    the source of geometry or timing needed to render the recording.
 
-Migration should be incremental. First embed `operator_static` and
-`rgb_frame_index` so Quest hand-to-RGB projection no longer depends on external
-Camera2 sidecars. Then embed `depth_frame_meta`, `body_frame_meta`, and
-`motion_trackers`. During migration, keep writing the current sidecars and keep
-reader fallback paths so existing recordings remain usable. Once the reader and
-ingest paths prefer embedded metadata, default uploads should only require
-`manifest.json` and `media.mp4`; debug sidecars become opt-in artifacts listed by
-the manifest.
+The migration is complete for current captures: readers and ingest prefer the
+embedded tracks, while legacy sidecar fallback paths keep old recordings usable.
+Default uploads require only `manifest.json` and `media.mp4`. Fixed-name debug
+sidecars are opt-in artifacts: when present they are inventoried and hashed in
+the manifest, then uploaded before the media artifact. Unbounded raw depth dumps
+remain local diagnostics and are not part of the upload artifact contract.
 
 ## Platform Registry
 

@@ -15,6 +15,8 @@ Runs on the host, no Godot required. Checks:
       integration case;
   (9) production presets (names without "Test") set
       operator_feature_test_harness=false.
+  (10) a test preset uses the same Android version code/name as its production
+       preset, so adb can replace the production APK without uninstalling it.
 
 Exits non-zero with itemized errors.
 """
@@ -76,13 +78,19 @@ def check_presets(errors):
         m = re.match(r"^\[preset\.(\d+)\]$", line)
         if m:
             current = int(m.group(1))
-            presets.setdefault(current, {"name": "", "harness": None})
+            presets.setdefault(
+                current,
+                {"name": "", "harness": None, "version_code": None, "version_name": None},
+            )
             in_options = None
             continue
         m = re.match(r"^\[preset\.(\d+)\.options\]$", line)
         if m:
             in_options = int(m.group(1))
-            presets.setdefault(in_options, {"name": "", "harness": None})
+            presets.setdefault(
+                in_options,
+                {"name": "", "harness": None, "version_code": None, "version_name": None},
+            )
             continue
         if line.startswith("["):
             in_options = None
@@ -93,6 +101,10 @@ def check_presets(errors):
         key, value = key.strip(), value.strip()
         if in_options is not None and key == "operator_feature_test_harness":
             presets[in_options]["harness"] = value.lower() == "true"
+        elif in_options is not None and key == "version/code":
+            presets[in_options]["version_code"] = value
+        elif in_options is not None and key == "version/name":
+            presets[in_options]["version_name"] = value.strip('"')
         elif current is not None and in_options is None and key == "name":
             presets[current]["name"] = value.strip('"')
     for idx, preset in sorted(presets.items()):
@@ -102,6 +114,28 @@ def check_presets(errors):
         elif "Test" not in pname and preset["harness"]:
             errors.append(
                 "(9) production preset '%s' enables operator_feature_test_harness" % pname)
+    by_name = {preset["name"]: preset for preset in presets.values() if preset["name"]}
+    for preset in presets.values():
+        pname = preset["name"]
+        if not pname.endswith(" Test"):
+            continue
+        production_name = pname.removesuffix(" Test")
+        production = by_name.get(production_name)
+        if production is None:
+            continue
+        for field, label in (("version_code", "version/code"), ("version_name", "version/name")):
+            if preset[field] != production[field]:
+                errors.append(
+                    "(10) test preset '%s' %s=%s must match '%s' %s=%s"
+                    % (
+                        pname,
+                        label,
+                        preset[field],
+                        production_name,
+                        label,
+                        production[field],
+                    )
+                )
 
 
 def main():

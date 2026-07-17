@@ -7,7 +7,7 @@ extends SensorSink
 ##   poses/head.jsonl              save_head_pose_sidecar && record_head_pose
 ##                                 (per-frame throttle via payload write_jsonl)
 ##   poses/controllers.jsonl       save_controller_hand_sidecar && record_controller_pose
-##   depth/frames.jsonl            record_depth
+##   depth/frames.jsonl            save_depth_sidecar && record_depth
 ##
 ## poses/hands.jsonl, body_motion/body_joints.jsonl and
 ## body_motion/motion_trackers.jsonl are NOT written here: the hand_capture
@@ -47,11 +47,12 @@ func start_in_session(session_dir: String, options: Dictionary) -> bool:
 		return false
 	var save_head_pose_sidecar := bool(_capture_options.get("save_head_pose_sidecar", false))
 	var save_controller_hand_sidecar := bool(_capture_options.get("save_controller_hand_sidecar", false))
+	var save_depth_sidecar := bool(_capture_options.get("save_depth_sidecar", false))
 	if save_head_pose_sidecar and _capture_enabled("record_head_pose"):
 		_head_file = FileAccess.open(_session_dir.path_join(SessionLayout.HEAD_JSONL), FileAccess.WRITE)
 	if save_controller_hand_sidecar and _capture_enabled("record_controller_pose"):
 		_controller_file = FileAccess.open(_session_dir.path_join(SessionLayout.CONTROLLERS_JSONL), FileAccess.WRITE)
-	if _capture_enabled("record_depth"):
+	if save_depth_sidecar and _capture_enabled("record_depth"):
 		_depth_file = FileAccess.open(_session_dir.path_join(SessionLayout.DEPTH_FRAMES_JSONL), FileAccess.WRITE)
 	return true
 

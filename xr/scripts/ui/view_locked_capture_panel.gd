@@ -1636,11 +1636,24 @@ func _mp4_path_for_local_session(root: String, session_id: String, manifest_path
 	var media: Dictionary = media_value if media_value is Dictionary else {}
 	var filename := str(media.get("filename", "")).strip_edges()
 	if not filename.is_empty():
-		var candidate := filename if filename.begins_with("/") else root.path_join(filename)
-		if _path_is_inside(candidate, root) and FileAccess.file_exists(candidate):
-			return candidate
+		if filename.begins_with("/"):
+			if _path_is_inside(filename, root) and FileAccess.file_exists(filename):
+				return filename
+		else:
+			# Current sessions keep media in the session directory. Fall back to
+			# the capture root for manifests written by the historical sibling
+			# MP4 layout.
+			var session_candidate := root.path_join(session_id).path_join(filename)
+			if _path_is_inside(session_candidate, root) and FileAccess.file_exists(session_candidate):
+				return session_candidate
+			var legacy_candidate := root.path_join(filename)
+			if _path_is_inside(legacy_candidate, root) and FileAccess.file_exists(legacy_candidate):
+				return legacy_candidate
 	var fallback := root.path_join("%s.mp4" % session_id)
-	return fallback if FileAccess.file_exists(fallback) else ""
+	if FileAccess.file_exists(fallback):
+		return fallback
+	var session_fallback := root.path_join(session_id).path_join("%s.mp4" % session_id)
+	return session_fallback if FileAccess.file_exists(session_fallback) else ""
 
 
 func _local_file_session_limit() -> int:

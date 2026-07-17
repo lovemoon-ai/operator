@@ -183,6 +183,12 @@ var capture_options := {
 	# JSONL (frame-level body_flags + PICO velocity/acceleration extras) is
 	# opt-in via the settings panel.
 	"save_body_sidecar": false,
+	# Depth pixels + timing metadata live in MP4; this enables only the legacy
+	# depth/frames.jsonl debug mirror.
+	"save_depth_sidecar": false,
+	# Camera characteristics, timebase, and per-frame index metadata are always
+	# embedded in the MP4. Their legacy JSON/JSONL mirrors are debug-only.
+	"save_camera_metadata_sidecars": false,
 	"save_root": DEFAULT_SAVE_ROOT
 }
 
@@ -1239,8 +1245,8 @@ func _on_capture_session_stopped(final_path: String) -> void:
 	if ego_uploader and writer:
 		# session_spool_writer.gd exposes get_session_dir_absolute() (an
 		# OS-absolute path on Android, e.g. /sdcard/DCIM/SpatialMP4/<id>/)
-		# and get_output_mp4_path_absolute() (the finalized mp4 sibling
-		# to that dir). Both are stable once writer.close() has returned.
+		# and get_output_mp4_path_absolute() (the finalized mp4 inside that
+		# directory). Both are stable once writer.close() has returned.
 		var session_dir_for_upload: String = writer.get_session_dir_absolute() if writer.has_method("get_session_dir_absolute") else writer.get_session_dir()
 		var mp4_for_upload: String = writer.get_output_mp4_path_absolute() if writer.has_method("get_output_mp4_path_absolute") else (saved_session_dir if saved_session_dir.ends_with(".mp4") else "")
 		var session_id_for_upload := mp4_for_upload.get_file().get_basename()
@@ -1814,6 +1820,12 @@ func _start_camera_plugin() -> void:
 	var output_mp4_absolute: String = writer.get_output_mp4_path_absolute()
 	var partial_mp4_absolute: String = writer.get_partial_mp4_path_absolute()
 	print("%s configure begin: %s" % [_provider_label(), output_mp4_absolute])
+	# Keep this call outside the provider branch: Quest and Pico expose the same
+	# option, and both must configure it before creating any session artifacts.
+	camera_plugin.call(
+		"setCameraMetadataSidecarsEnabled",
+		bool(_capture_option("save_camera_metadata_sidecars", false))
+	)
 	# Android Godot plugin singletons do not reliably report @UsedByGodot
 	# methods through has_method(), so call the compact JSON RPC directly.
 	var want_audio: bool = bool(_capture_option("record_audio", false))
@@ -2435,13 +2447,17 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 	# report false.  This PICO-specific branch always binds PicoCapturePlugin,
 	# whose anchor maps OpenXR CLOCK_MONOTONIC timestamps to Godot process ticks.
 	var time_offset_ns := int(camera_plugin.call("getXrTimeToGodotTicksOffsetNs"))
+	var write_camera_sidecars := bool(_capture_option("save_camera_metadata_sidecars", false))
+	var session_dir := str(writer.get_session_dir_absolute())
+	var left_frame_index_path := session_dir.path_join("left_camera_frames.jsonl") if write_camera_sidecars else ""
+	var right_frame_index_path := session_dir.path_join("right_camera_frames.jsonl") if write_camera_sidecars and stereo else ""
 	var native_started := bool(pico_openxr_bridge.call(
 		"start_native_recording_pipeline",
 		str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)),
 		int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
 		time_offset_ns,
-		str(writer.get_session_dir_absolute()).path_join("left_camera_frames.jsonl"),
-		str(writer.get_session_dir_absolute()).path_join("right_camera_frames.jsonl") if stereo else ""
+		left_frame_index_path,
+		right_frame_index_path
 	))
 	if not native_started:
 		var native_error := ""
