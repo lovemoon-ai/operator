@@ -1,6 +1,15 @@
 extends Node
 class_name BodyMotionSampler
 
+# Body joints and motion trackers are WRITTEN natively by the hand_capture
+# GDExtension's NativeBodyMotionWriter: HJNT payload packing, the mp4
+# metadata-JSON records and the JSONL sidecars are all serialized in C++
+# (sidecars on a background thread). On the Godot/Meta XRBodyTracker runtime
+# the 87-joint SAMPLING is native too — GDScript never materializes joint
+# Dictionaries there. This script keeps the decision logic only: which
+# runtime to sample, readiness gating, diagnostics, and metrics.
+const NATIVE_BODY_WRITER_CLASS := &"NativeBodyMotionWriter"
+
 const BODY_TRACKER_NAME := &"/user/body_tracker"
 const BODY_JOINT_COUNT := 87
 const BODY_SAMPLE_INTERVAL_US := 33333
@@ -35,11 +44,13 @@ const MOTION_TRACKER_CANDIDATES := [
 	&"/user/vive_tracker_htcx/role/right_foot"
 ]
 
-var writer: Object
-# WP4: canonical-frame sink (default: FrameWriterShim over `writer`).
-var _frame_sink: Object
 var pose_sampler: Object
 var pico_openxr_bridge: Object
+# NativeBodyMotionWriter instance — the only body/motion write path. Null
+# when the hand_capture extension is absent (body/motion not recorded).
+var _native_writer: Object = null
+var _native_writer_warned := false
+var _last_capture_options := {}
 var _record_body_tracking := false
 var _record_motion_trackers := false
 var _max_motion_trackers := DEFAULT_MOTION_TRACKERS
@@ -53,7 +64,7 @@ var _body_writes := 0
 var _body_joint_count := 0
 var _motion_writes := 0
 var _motion_event_writes := 0
-var _last_power_key_event_signature := ""
+var _last_power_key_event_hash := 0
 
 # Runtime that produced the most recently observed body-tracking sample.
 # This is what session_spool_writer writes into manifest.sources.body_tracking
@@ -90,16 +101,56 @@ func _log_body_diag_once(key: String, message: String) -> void:
 	push_warning("[BodyMotionSampler] %s" % message)
 
 
-func configure(p_writer: Object, p_pose_sampler: Object, p_pico_openxr_bridge: Object = null) -> void:
-	writer = p_writer
-	_frame_sink = FrameWriterShim.new(writer) if writer != null else null
+func configure(_p_writer: Object, p_pose_sampler: Object, p_pico_openxr_bridge: Object = null) -> void:
+	# _p_writer kept for call-site compatibility; all writes go through the
+	# native writer (enable_native_writer) since the C++ migration.
 	pose_sampler = p_pose_sampler
 	pico_openxr_bridge = p_pico_openxr_bridge
 	_refresh_motion_trackers()
 
 
-func set_frame_sink(sink: Object) -> void:
-	_frame_sink = sink
+## Wires the native body/motion write pipeline to the muxer plugin. Called
+## by capture_app_base for muxer-backed (ego) capture; live modes never had
+## body/motion network streams, so no native targets are wired there.
+func enable_native_writer(muxer_plugin: Object) -> bool:
+	if muxer_plugin == null:
+		return false
+	if not ClassDB.class_exists(NATIVE_BODY_WRITER_CLASS):
+		if not _native_writer_warned:
+			_native_writer_warned = true
+			push_warning("hand_capture GDExtension missing — body joints / motion trackers will not be recorded")
+		return false
+	if _native_writer == null:
+		_native_writer = ClassDB.instantiate(NATIVE_BODY_WRITER_CLASS)
+	if _native_writer == null:
+		return false
+	_native_writer.configure(muxer_plugin)
+	return true
+
+
+func has_native_writer() -> bool:
+	return _native_writer != null
+
+
+## Session lifecycle for the native JSONL sidecars (same option gating the
+## legacy JsonlSidecarSink applied): body_motion/body_joints.jsonl needs
+## save_body_sidecar + record_body_tracking; motion_trackers.jsonl follows
+## record_motion_trackers directly.
+func on_session_started(session_dir: String) -> void:
+	if _native_writer == null or session_dir.is_empty():
+		return
+	var body_path := ""
+	if bool(_last_capture_options.get("save_body_sidecar", false)) and _record_body_tracking:
+		body_path = ProjectSettings.globalize_path(session_dir.path_join(SessionLayout.BODY_JOINTS_JSONL))
+	var motion_path := ""
+	if _record_motion_trackers:
+		motion_path = ProjectSettings.globalize_path(session_dir.path_join(SessionLayout.MOTION_TRACKERS_JSONL))
+	_native_writer.begin_session(body_path, motion_path)
+
+
+func on_session_stopped() -> void:
+	if _native_writer != null:
+		_native_writer.end_session()
 
 
 func set_capture_options(options: Dictionary) -> void:
@@ -117,6 +168,7 @@ func set_capture_options(options: Dictionary) -> void:
 			"Pico body tracking is enabled; skipping independent motion tracker sampling to keep full-body capture mode.")
 		_record_motion_trackers = false
 	_max_motion_trackers = clampi(int(options.get("max_motion_trackers", DEFAULT_MOTION_TRACKERS)), 0, MAX_MOTION_TRACKERS)
+	_last_capture_options = options.duplicate(true)
 	if pico_openxr_bridge != null:
 		if _record_body_tracking and pico_openxr_bridge.has_method("start_body_tracking"):
 			pico_openxr_bridge.call("start_body_tracking", {})
@@ -131,7 +183,7 @@ func stop() -> void:
 		pico_openxr_bridge.call("stop_body_tracking")
 	_record_body_tracking = false
 	_record_motion_trackers = false
-	_last_power_key_event_signature = ""
+	_last_power_key_event_hash = 0
 
 
 func pop_metrics() -> Dictionary:
@@ -144,6 +196,12 @@ func pop_metrics() -> Dictionary:
 		"motion_trackers": _max_motion_trackers if _record_motion_trackers and _pico_motion_supported() else _motion_tracker_names.size(),
 		"pico_openxr": _pico_bridge_status()
 	}
+	if _native_writer != null:
+		var native: Dictionary = _native_writer.pop_metrics()
+		metrics["body_jsonl_lines"] = int(native.get("body_jsonl_lines", 0))
+		metrics["body_jsonl_dropped"] = int(native.get("body_jsonl_dropped", 0))
+		metrics["motion_jsonl_lines"] = int(native.get("motion_jsonl_lines", 0))
+		metrics["motion_jsonl_dropped"] = int(native.get("motion_jsonl_dropped", 0))
 	_sample_count = 0
 	_body_writes = 0
 	_body_joint_count = 0
@@ -153,7 +211,7 @@ func pop_metrics() -> Dictionary:
 
 
 func sample(timestamp_ns: int) -> void:
-	if _frame_sink == null:
+	if _native_writer == null:
 		return
 	if not _record_body_tracking and not _record_motion_trackers:
 		return
@@ -177,51 +235,38 @@ func _resolve_timestamp(default_ticks_ns: int) -> int:
 func _sample_body(timestamp_ns: int) -> void:
 	if _sample_pico_body(timestamp_ns):
 		return
-	# Diagnostic logs: pre-fix this code path silently returned three different
-	# ways ("no tracker", "wrong tracker type", "no tracking data"), so a Quest
-	# operator who saw no body in Rerun had no way to tell which one applied.
-	# We rate-limit so a sustained "no tracker" doesn't flood logcat.
-	var tracker := XRServer.get_tracker(BODY_TRACKER_NAME)
-	if tracker == null:
-		_log_body_diag_once("no_tracker",
-			"no XRBodyTracker registered at %s — Meta runtime did not initialize XR_FB_body_tracking (check BODY_TRACKING permission + meta_xr_features/body_tracking export flag)" % str(BODY_TRACKER_NAME))
-		return
-	if not (tracker is XRBodyTracker):
-		_log_body_diag_once("wrong_tracker_class",
-			"tracker at %s is %s, not XRBodyTracker" % [str(BODY_TRACKER_NAME), tracker.get_class()])
-		return
-	var body_tracker := tracker as XRBodyTracker
-	if not body_tracker.has_tracking_data:
-		_log_body_diag_once("no_tracking_data",
-			"XRBodyTracker present at %s but has_tracking_data=false; runtime body_flags=%d (UPPER/LOWER/HANDS support bits)" % [str(BODY_TRACKER_NAME), int(body_tracker.body_flags)])
-		return
-	var joints: Array = []
-	for joint in range(BODY_JOINT_COUNT):
-		var flags := int(body_tracker.get_joint_flags(joint))
-		if flags == 0:
-			continue
-		var transform := body_tracker.get_joint_transform(joint)
-		var q := transform.basis.get_rotation_quaternion()
-		var p := transform.origin
-		joints.append({
-			"joint": joint,
-			"flags": flags,
-			"radius_m": 0.0,
-			"position": {"x": p.x, "y": p.y, "z": p.z},
-			"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
-		})
-	if joints.is_empty():
-		return
-	_last_fallback_body_flags = int(body_tracker.body_flags)
-	if bool(_frame_sink.on_frame(BodyFrame.build(timestamp_ns, _last_fallback_body_flags, joints, "godot_xr_body_tracker"))):
-		if _observed_body_runtime != "godot_xr_body_tracker":
-			# First successful write — log so the operator can see body tracking
-			# really came online (and confirm the joint count matches their
-			# expectation, e.g. ~70 for FB upper-body vs ~84 for Meta full body).
-			print("[BodyMotionSampler] body tracking online via XRBodyTracker @ %s (%d joints, body_flags=%d)" % [str(BODY_TRACKER_NAME), joints.size(), _last_fallback_body_flags])
-		_observed_body_runtime = "godot_xr_body_tracker"
-		_body_writes += 1
-		_body_joint_count += joints.size()
+	# Godot/Meta XRBodyTracker path: joints are read, packed and serialized
+	# entirely in C++ — GDScript only interprets the status for diagnostics.
+	# The status is a self-describing string (see native_body_motion_writer.h)
+	# so there is no numeric enum to keep in sync across the FFI boundary.
+	# Diagnostic logs are rate-limited so a sustained "no tracker" doesn't
+	# flood logcat.
+	var result: Dictionary = _native_writer.sample_body_tracker(timestamp_ns)
+	match str(result.get("status", "no_tracker")):
+		"wrote":
+			_last_fallback_body_flags = int(result.get("body_flags", 0))
+			if _observed_body_runtime != "godot_xr_body_tracker":
+				# First successful write — log so the operator can see body
+				# tracking really came online (and confirm the joint count
+				# matches their expectation, e.g. ~70 for FB upper-body vs
+				# ~84 for Meta full body).
+				print("[BodyMotionSampler] body tracking online via XRBodyTracker @ %s (%d joints, body_flags=%d)" % [str(BODY_TRACKER_NAME), int(result.get("joint_count", 0)), _last_fallback_body_flags])
+			_observed_body_runtime = "godot_xr_body_tracker"
+			_body_writes += 1
+			_body_joint_count += int(result.get("joint_count", 0))
+		"no_tracker":
+			_log_body_diag_once("no_tracker",
+				"no XRBodyTracker registered at %s — Meta runtime did not initialize XR_FB_body_tracking (check BODY_TRACKING permission + meta_xr_features/body_tracking export flag)" % str(BODY_TRACKER_NAME))
+		"wrong_tracker_class":
+			_log_body_diag_once("wrong_tracker_class",
+				"tracker at %s is %s, not XRBodyTracker" % [str(BODY_TRACKER_NAME), str(result.get("tracker_class", "?"))])
+		"no_tracking_data":
+			_log_body_diag_once("no_tracking_data",
+				"XRBodyTracker present at %s but has_tracking_data=false; runtime body_flags=%d (UPPER/LOWER/HANDS support bits)" % [str(BODY_TRACKER_NAME), int(result.get("body_flags", 0))])
+		_:
+			# "no_joints" / "no_muxer": silent, matching the legacy behavior
+			# (empty joint set / writer not bound yet).
+			pass
 
 
 # Snapshot of the body-tracking runtime that produced the most recent samples.
@@ -270,7 +315,7 @@ func _sample_motion_trackers(timestamp_ns: int) -> void:
 		var pose_record := _tracker_pose_record(tracker)
 		if pose_record.is_empty():
 			continue
-		if bool(_frame_sink.on_frame(MotionTrackerFrame.build_pose(index, String(tracker_name), timestamp_ns, pose_record["transform"], true))):
+		if bool(_native_writer.write_motion_tracker_pose(index, String(tracker_name), timestamp_ns, pose_record["transform"], true, {})):
 			_motion_writes += 1
 
 
@@ -346,7 +391,7 @@ func _sample_pico_body(timestamp_ns: int) -> bool:
 	if not _pico_body_sample_ready(body, joints):
 		return true
 	var body_flags := int(body.get("body_flags", 0))
-	if bool(_frame_sink.on_frame(BodyFrame.build(timestamp_ns, body_flags, joints, "pico_bd", body))):
+	if bool(_native_writer.write_body_joints(timestamp_ns, body_flags, joints, body)):
 		_observed_body_runtime = "pico_bd"
 		_body_writes += 1
 		_body_joint_count += joints.size()
@@ -450,26 +495,23 @@ func _sample_pico_motion_trackers(timestamp_ns: int) -> bool:
 		var transform: Transform3D = record.get("transform", Transform3D.IDENTITY)
 		var tracker_index := int(record.get("tracker_index", 0))
 		var source := "pico_motion_tracker_%s" % str(record.get("id", tracker_index))
-		if bool(_frame_sink.on_frame(MotionTrackerFrame.build_pose(tracker_index, source, timestamp_ns, transform, tracking_valid, record))):
+		if bool(_native_writer.write_motion_tracker_pose(tracker_index, source, timestamp_ns, transform, tracking_valid, record)):
 			_motion_writes += 1
 	return true
 
 
 func _sample_pico_motion_power_key(timestamp_ns: int) -> void:
-	# Mirrors the legacy `writer.has_method("write_motion_tracker_event")`
-	# guard (LivePushWriter has no motion-tracker event surface).
-	if _frame_sink == null or not _frame_sink.has_method("supports_motion_tracker_events") \
-			or not _frame_sink.supports_motion_tracker_events():
-		return
 	var status := _pico_bridge_status()
 	var event: Variant = status.get("last_motion_power_key_event", {})
 	if typeof(event) != TYPE_DICTIONARY or (event as Dictionary).is_empty():
 		return
-	var signature := JSON.stringify(event)
-	if signature.is_empty() or signature == _last_power_key_event_signature:
+	# Cheap deep-hash dedupe — replaces the legacy JSON.stringify signature
+	# that serialized the event dict at 90 Hz just to compare it.
+	var event_hash := (event as Dictionary).hash()
+	if event_hash == _last_power_key_event_hash:
 		return
-	_last_power_key_event_signature = signature
-	if bool(_frame_sink.on_frame(MotionTrackerFrame.build_event(timestamp_ns, "power_key", event))):
+	_last_power_key_event_hash = event_hash
+	if bool(_native_writer.write_motion_tracker_event(timestamp_ns, "power_key", event)):
 		_motion_event_writes += 1
 
 

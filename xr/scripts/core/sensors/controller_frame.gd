@@ -3,7 +3,7 @@ extends RefCounted
 ## v2 core/sensors (WP4): controller pose + controller input-packet
 ## SensorFrame builders. Field names mirror the existing writer args exactly.
 
-const COORDINATE_SPACE := "operator_xr_world"
+const DEFAULT_COORDINATE_SPACE := "openxr_play_space"
 
 
 ## Controller grip pose. source = "left_controller" / "right_controller".
@@ -11,12 +11,13 @@ static func build_pose(
 	source: String,
 	timestamp_ns: int,
 	transform: Transform3D,
-	tracking_valid: bool
+	tracking_valid: bool,
+	coordinate_space: String = DEFAULT_COORDINATE_SPACE
 ) -> SensorFrame:
 	var frame := SensorFrame.new()
 	frame.frame_type = SensorFrameType.CONTROLLER
 	frame.timestamp_ns = timestamp_ns
-	frame.coordinate_space = COORDINATE_SPACE
+	frame.coordinate_space = coordinate_space
 	frame.source_id = source
 	frame.valid = tracking_valid
 	frame.payload = {

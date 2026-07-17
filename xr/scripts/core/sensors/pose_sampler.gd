@@ -1,18 +1,29 @@
 extends Node
 class_name PoseSampler
 
-const LEFT_HAND_TRACKER := &"/user/hand_tracker/left"
-const RIGHT_HAND_TRACKER := &"/user/hand_tracker/right"
-
 # Per-category JSONL write throttles. Head still goes to the mp4 `mett` stream
 # every sample() call (cheap JNI Enqueue), but the GDScript-side JSONL writes
 # are far more expensive (Dictionary build + JSON.stringify +
 # FileAccess.store_line per record). Capping them at ~30 Hz / 60 Hz keeps the
 # main thread fast enough for 72 Hz UI rendering without losing meaningful
-# offline-analysis fidelity for controllers / hands.
+# offline-analysis fidelity for controllers.
+#
+# Hands are NOT sampled in GDScript at all: the hand_capture GDExtension
+# owns the entire hand pipeline in C++. NativeOpenXRHandCapture writes MP4
+# HJNT and the optional hands.jsonl on an independent 60 Hz clock;
+# NativeHandSampler keeps only live push render-driven and off GDScript. Hand capture
+# therefore requires the extension (Android arm64); there is no hand-tracking
+# runtime in the desktop editor anyway.
 const HEAD_JSONL_INTERVAL_US := 16667        # 60 Hz
 const CONTROLLER_JSONL_INTERVAL_US := 33333  # 30 Hz
-const HAND_JSONL_INTERVAL_US := 33333        # 30 Hz
+# Controller-input capture is event-driven: XRController3D's button/float/
+# vector2 signals (connected in configure) call _sample_controller_input the
+# moment anything changes. The periodic poll below is only a snapshot
+# fallback for missed edges, so it runs at 10 Hz instead of the old
+# unconditional 90 Hz sweep (~20 button reads + a state Dictionary per
+# controller per call — ~3,600 engine polls/s saved on the main thread).
+const CONTROLLER_INPUT_SNAPSHOT_INTERVAL_US := 100000  # 10 Hz
+const NATIVE_HAND_SAMPLER_CLASS := &"NativeHandSampler"
 const INPUT_PACKET_SNAPSHOT := 1
 const INPUT_PACKET_EVENT := 2
 const INPUT_ANALOG_EPSILON := 0.01
@@ -51,7 +62,7 @@ var _record_controller_input := true
 var _record_hand_data := true
 var _last_head_jsonl_us := 0
 var _last_controller_jsonl_us := 0
-var _last_hand_jsonl_us := 0
+var _last_controller_input_poll_us := 0
 var _xr_display_time_provider: Object
 var _capture_provider: Object
 var _platform: Object
@@ -64,9 +75,14 @@ var _sample_count := 0
 var _head_count := 0
 var _controller_count := 0
 var _controller_input_count := 0
-var _hand_count := 0
-var _hand_joint_count := 0
 var _controller_input_states := {}
+# hand_capture GDExtension instance (NativeHandSampler) — the only hand
+# capture path (full XR frame rate, all serialization in C++). Null when the
+# extension is absent, in which case hands are not recorded.
+var _native_hand_sampler: Object = null
+var _native_hand_warned := false
+var _last_capture_options := {}
+var _coordinate_space := OpenXRExportSpace.coordinate_space_id(OpenXRExportSpace.DEFAULT)
 
 
 func pop_metrics() -> Dictionary:
@@ -75,15 +91,20 @@ func pop_metrics() -> Dictionary:
 		"head_writes": _head_count,
 		"controller_writes": _controller_count,
 		"controller_input_writes": _controller_input_count,
-		"hand_writes": _hand_count,
-		"hand_joints": _hand_joint_count
+		"hand_writes": 0,
+		"hand_joints": 0
 	}
+	if _native_hand_sampler != null:
+		var native: Dictionary = _native_hand_sampler.pop_metrics()
+		metrics["hand_writes"] = int(native.get("hand_writes", 0))
+		metrics["hand_joints"] = int(native.get("hand_joints", 0))
+		metrics["hand_live_writes"] = int(native.get("live_writes", 0))
+		metrics["hand_jsonl_lines"] = int(native.get("jsonl_lines", 0))
+		metrics["hand_jsonl_dropped"] = int(native.get("jsonl_dropped", 0))
 	_sample_count = 0
 	_head_count = 0
 	_controller_count = 0
 	_controller_input_count = 0
-	_hand_count = 0
-	_hand_joint_count = 0
 	return metrics
 
 
@@ -116,6 +137,61 @@ func configure(
 
 func set_frame_sink(sink: Object) -> void:
 	_frame_sink = sink
+
+
+## Wires the native hand pipeline (hand_capture GDExtension) to this mode's
+## write targets. Call after configure(). Ego capture passes the muxer
+## plugin; live modes pass the live server plugin (writeHandJointsJson wire,
+## rate-limited in C++ to the legacy 30 Hz network cadence). Either may be
+## null. Returns true when the native sampler is active.
+func enable_native_hand_capture(muxer_plugin: Object, live_plugin: Object = null) -> bool:
+	if muxer_plugin == null and live_plugin == null:
+		return false
+	if not ClassDB.class_exists(NATIVE_HAND_SAMPLER_CLASS):
+		if _record_hand_data and not _native_hand_warned:
+			_native_hand_warned = true
+			push_warning("hand_capture GDExtension missing — hand joints will not be recorded")
+		return false
+	if _native_hand_sampler == null:
+		_native_hand_sampler = ClassDB.instantiate(NATIVE_HAND_SAMPLER_CLASS)
+	if _native_hand_sampler == null:
+		return false
+	_native_hand_sampler.configure(muxer_plugin, live_plugin, xr_origin)
+	return true
+
+
+func has_native_hand_capture() -> bool:
+	return _native_hand_sampler != null
+
+
+## The shared Quest/PICO OpenXR worker writes the MP4 hand tracks at 60 Hz.
+## Keep this render-driven sampler alive for live JSON,
+## but do not let it duplicate packets into the same MP4 tracks.
+func set_native_hand_muxer_writes_enabled(enabled: bool) -> void:
+	if _native_hand_sampler != null and _native_hand_sampler.has_method("set_muxer_writes_enabled"):
+		_native_hand_sampler.set_muxer_writes_enabled(enabled)
+
+
+## Live/fallback lifecycle for the native hands.jsonl sidecar. Ego recording
+## delegates it to NativeOpenXRHandCapture so the sidecar shares the same
+## independent 60 Hz clock as the MP4 hand tracks.
+func on_session_started(session_dir: String, defer_hand_jsonl_to_openxr_worker := false) -> void:
+	if _native_hand_sampler == null or session_dir.is_empty():
+		return
+	if defer_hand_jsonl_to_openxr_worker:
+		_native_hand_sampler.end_jsonl()
+		return
+	if not bool(_last_capture_options.get("save_controller_hand_sidecar", false)):
+		return
+	if not bool(_last_capture_options.get("record_hand_data", true)):
+		return
+	_native_hand_sampler.begin_jsonl(
+		ProjectSettings.globalize_path(session_dir.path_join(SessionLayout.HANDS_JSONL)))
+
+
+func on_session_stopped() -> void:
+	if _native_hand_sampler != null:
+		_native_hand_sampler.end_jsonl()
 
 
 func resolve_pose_timestamp_ns(default_ticks_ns: int) -> int:
@@ -160,6 +236,9 @@ func set_capture_options(options: Dictionary) -> void:
 	_record_controller_pose = bool(options.get("record_controller_pose", true))
 	_record_controller_input = bool(options.get("record_controller_input", _record_controller_pose))
 	_record_hand_data = bool(options.get("record_hand_data", true))
+	_coordinate_space = OpenXRExportSpace.coordinate_space_id(
+		options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
+	_last_capture_options = options.duplicate(true)
 	_controller_input_states.clear()
 
 
@@ -174,73 +253,73 @@ func sample(timestamp_ns: int) -> void:
 	if _record_head_pose and hmd_camera:
 		# mp4 mett stream gets every sample (cheap JNI). JSONL is throttled
 		# so GDScript JSON.stringify does not dominate the main thread.
-		var head_jsonl: bool = (now_us - _last_head_jsonl_us) >= HEAD_JSONL_INTERVAL_US
-		_frame_sink.on_frame(PoseFrame.build(resolved_ts, hmd_camera.global_transform, true, head_jsonl))
-		_head_count += 1
-		if head_jsonl:
-			_last_head_jsonl_us = now_us
+		var head_pose := _head_openxr_pose()
+		if head_pose != null:
+			var head_jsonl: bool = (now_us - _last_head_jsonl_us) >= HEAD_JSONL_INTERVAL_US
+			_frame_sink.on_frame(PoseFrame.build(
+				resolved_ts,
+				head_pose.get_transform(),
+				head_pose.get_has_tracking_data(),
+				head_jsonl,
+				_coordinate_space
+			))
+			_head_count += 1
+			if head_jsonl:
+				_last_head_jsonl_us = now_us
 
 	var controller_jsonl: bool = (now_us - _last_controller_jsonl_us) >= CONTROLLER_JSONL_INTERVAL_US
 	if _record_controller_pose and left_controller and controller_jsonl:
-		_frame_sink.on_frame(ControllerFrame.build_pose(
-			"left_controller",
-			resolved_ts,
-			left_controller.global_transform,
-			left_controller.get_has_tracking_data()
-		))
-		_controller_count += 1
+		var left_pose := left_controller.get_pose()
+		if left_pose != null:
+			_frame_sink.on_frame(ControllerFrame.build_pose(
+				"left_controller",
+				resolved_ts,
+				left_pose.get_transform(),
+				left_pose.get_has_tracking_data(),
+				_coordinate_space
+			))
+			_controller_count += 1
 
 	if _record_controller_pose and right_controller and controller_jsonl:
-		_frame_sink.on_frame(ControllerFrame.build_pose(
-			"right_controller",
-			resolved_ts,
-			right_controller.global_transform,
-			right_controller.get_has_tracking_data()
-		))
-		_controller_count += 1
+		var right_pose := right_controller.get_pose()
+		if right_pose != null:
+			_frame_sink.on_frame(ControllerFrame.build_pose(
+				"right_controller",
+				resolved_ts,
+				right_pose.get_transform(),
+				right_pose.get_has_tracking_data(),
+				_coordinate_space
+			))
+			_controller_count += 1
 	if controller_jsonl and _record_controller_pose:
 		_last_controller_jsonl_us = now_us
 
-	if _record_controller_input and left_controller:
-		_sample_controller_input("left_controller", left_controller, resolved_ts)
-	if _record_controller_input and right_controller:
-		_sample_controller_input("right_controller", right_controller, resolved_ts)
+	# Event path (signals) carries input changes immediately; this is only
+	# the low-rate snapshot fallback for anything the signals missed.
+	if _record_controller_input \
+			and (now_us - _last_controller_input_poll_us) >= CONTROLLER_INPUT_SNAPSHOT_INTERVAL_US:
+		_last_controller_input_poll_us = now_us
+		if left_controller:
+			_sample_controller_input("left_controller", left_controller, resolved_ts)
+		if right_controller:
+			_sample_controller_input("right_controller", right_controller, resolved_ts)
 
-	if _record_hand_data:
-		var hand_jsonl: bool = (now_us - _last_hand_jsonl_us) >= HAND_JSONL_INTERVAL_US
-		if hand_jsonl:
-			_sample_hand("left", LEFT_HAND_TRACKER, resolved_ts)
-			_sample_hand("right", RIGHT_HAND_TRACKER, resolved_ts)
-			_last_hand_jsonl_us = now_us
+	if _record_hand_data and _native_hand_sampler != null:
+		# Render-driven live/fallback capture in C++. MP4 and ego-sidecar writes on this sampler
+		# are disabled while the independent 60 Hz OpenXR recorder is active.
+		# NativeHandSampler dedupes extra pose-loop iterations per process frame.
+		_native_hand_sampler.sample(resolved_ts)
 
 
-func _sample_hand(hand: String, tracker_name: StringName, timestamp_ns: int) -> void:
-	var tracker := XRServer.get_tracker(tracker_name)
-	if tracker == null or not (tracker is XRHandTracker):
-		return
-
-	var hand_tracker := tracker as XRHandTracker
-	if not hand_tracker.has_tracking_data:
-		return
-
-	var joints: Array = []
-	for joint in range(XRHandTracker.HAND_JOINT_MAX):
-		var transform := hand_tracker.get_hand_joint_transform(joint)
-		if xr_origin != null:
-			transform = xr_origin.global_transform * transform
-		var q := transform.basis.get_rotation_quaternion()
-		var p := transform.origin
-		joints.append({
-			"joint": joint,
-			"flags": hand_tracker.get_hand_joint_flags(joint),
-			"radius_m": hand_tracker.get_hand_joint_radius(joint),
-			"position": {"x": p.x, "y": p.y, "z": p.z},
-			"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
-		})
-
-	_frame_sink.on_frame(HandFrame.build(hand, timestamp_ns, joints))
-	_hand_count += 1
-	_hand_joint_count += joints.size()
+## XRCamera3D applies XRPose.get_adjusted_transform() to its Node3D transform,
+## which includes XRServer.reference_frame and world_scale. Recording needs the
+## unadjusted pose: Godot's OpenXR backend populated it from
+## xrLocateSpace(VIEW, play_space, predictedDisplayTime).
+func _head_openxr_pose() -> XRPose:
+	var tracker := XRServer.get_tracker(&"head") as XRPositionalTracker
+	if tracker == null or not tracker.has_pose(&"default"):
+		return null
+	return tracker.get_pose(&"default")
 
 
 func _connect_controller_input_signals(controller: XRController3D, source: String) -> void:

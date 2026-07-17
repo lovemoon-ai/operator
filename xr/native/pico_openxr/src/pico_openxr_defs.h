@@ -33,6 +33,8 @@ struct XrSpace_T;
 struct XrBodyTrackerBD_T;
 struct XrCameraDevicePICO_T;
 struct XrCameraCaptureSessionPICO_T;
+struct XrHandTrackerEXT_T;
+struct timespec;
 
 using XrInstance = XrInstance_T *;
 using XrSession = XrSession_T *;
@@ -40,6 +42,7 @@ using XrSpace = XrSpace_T *;
 using XrBodyTrackerBD = XrBodyTrackerBD_T *;
 using XrCameraDevicePICO = XrCameraDevicePICO_T *;
 using XrCameraCaptureSessionPICO = XrCameraCaptureSessionPICO_T *;
+using XrHandTrackerEXT = XrHandTrackerEXT_T *;
 using XrFutureEXT = uint64_t;
 using XrMotionTrackerIdPICO = uint64_t;
 using XrCameraIdPICO = uint64_t;
@@ -63,6 +66,7 @@ static constexpr XrBool32 XR_TRUE = 1;
 static constexpr XrBodyTrackerBD XR_NULL_BODY_TRACKER_BD = nullptr;
 static constexpr XrCameraDevicePICO XR_NULL_CAMERA_DEVICE_PICO = nullptr;
 static constexpr XrCameraCaptureSessionPICO XR_NULL_CAMERA_CAPTURE_SESSION_PICO = nullptr;
+static constexpr XrHandTrackerEXT XR_NULL_HAND_TRACKER_EXT = nullptr;
 static constexpr XrFutureEXT XR_NULL_FUTURE_EXT = 0;
 
 #define XR_FAILED(result) ((result) < 0)
@@ -125,6 +129,9 @@ static constexpr XrStructureType XR_TYPE_CAMERA_CAPABILITY_IMAGE_FORMAT_PICO = 1
 static constexpr XrStructureType XR_TYPE_CAMERA_CAPABILITY_CAMERA_MODEL_PICO = 1010033015;
 static constexpr XrStructureType XR_TYPE_CAMERA_CAPABILITY_IMAGE_FPS_PICO = 1010033017;
 static constexpr XrStructureType XR_TYPE_CAMERA_CAPABILITIES_PICO = 1010033028;
+static constexpr XrStructureType XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT = 1000051001;
+static constexpr XrStructureType XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT = 1000051002;
+static constexpr XrStructureType XR_TYPE_HAND_JOINT_LOCATIONS_EXT = 1000051003;
 
 static constexpr const char *XR_PICO_EXTERNAL_CAMERA_EXTENSION_NAME = "XR_PICO_external_camera";
 static constexpr const char *XR_EXT_FUTURE_EXTENSION_NAME = "XR_EXT_future";
@@ -132,6 +139,8 @@ static constexpr const char *XR_PICO_CAMERA_IMAGE_EXTENSION_NAME = "XR_PICO_came
 static constexpr const char *XR_PICO_MOTION_TRACKING_EXTENSION_NAME = "XR_PICO_motion_tracking";
 static constexpr const char *XR_PICO_BODY_TRACKING2_EXTENSION_NAME = "XR_PICO_body_tracking2";
 static constexpr const char *XR_BD_BODY_TRACKING_EXTENSION_NAME = "XR_BD_body_tracking";
+static constexpr const char *XR_EXT_HAND_TRACKING_EXTENSION_NAME = "XR_EXT_hand_tracking";
+static constexpr const char *XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME = "XR_KHR_convert_timespec_time";
 
 static constexpr uint32_t XR_MOTION_TRACKER_MAX_SIZE_PICO = 6;
 static constexpr uint32_t XR_BODY_JOINT_COUNT_BD = 24;
@@ -296,6 +305,48 @@ struct XrQuaternionf {
 struct XrPosef {
 	XrQuaternionf orientation;
 	XrVector3f position;
+};
+
+// XR_EXT_hand_tracking.  Keep the declarations local just like the PICO
+// vendor declarations above; this GDExtension resolves every entry point via
+// OpenXRAPIExtension and never links an OpenXR loader itself.
+enum XrHandEXT : int32_t {
+	XR_HAND_LEFT_EXT = 1,
+	XR_HAND_RIGHT_EXT = 2,
+};
+
+enum XrHandJointSetEXT : int32_t {
+	XR_HAND_JOINT_SET_DEFAULT_EXT = 0,
+};
+
+static constexpr uint32_t XR_HAND_JOINT_COUNT_EXT = 26;
+
+struct XrHandTrackerCreateInfoEXT {
+	XrStructureType type;
+	const void *XR_MAY_ALIAS next;
+	XrHandEXT hand;
+	XrHandJointSetEXT handJointSet;
+};
+
+struct XrHandJointsLocateInfoEXT {
+	XrStructureType type;
+	const void *XR_MAY_ALIAS next;
+	XrSpace baseSpace;
+	XrTime time;
+};
+
+struct XrHandJointLocationEXT {
+	XrSpaceLocationFlags locationFlags;
+	XrPosef pose;
+	float radius;
+};
+
+struct XrHandJointLocationsEXT {
+	XrStructureType type;
+	void *XR_MAY_ALIAS next;
+	XrBool32 isActive;
+	uint32_t jointCount;
+	XrHandJointLocationEXT *jointLocations;
 };
 
 struct XrSystemBodyTrackingPropertiesBD {
@@ -707,6 +758,10 @@ using PFN_xrDestroyBodyTrackerBD = XrResult(XRAPI_PTR)(XrBodyTrackerBD bodyTrack
 using PFN_xrLocateBodyJointsBD = XrResult(XRAPI_PTR)(XrBodyTrackerBD bodyTracker, const XrBodyJointsLocateInfoBD *locateInfo, XrBodyJointLocationsBD *locations);
 using PFN_xrStartBodyTrackingCalibrationAppPICO = XrResult(XRAPI_PTR)(XrSession session);
 using PFN_xrGetBodyTrackingStatePICO = XrResult(XRAPI_PTR)(XrSession session, XrBodyTrackingStatePICO *state);
+using PFN_xrCreateHandTrackerEXT = XrResult(XRAPI_PTR)(XrSession session, const XrHandTrackerCreateInfoEXT *createInfo, XrHandTrackerEXT *handTracker);
+using PFN_xrDestroyHandTrackerEXT = XrResult(XRAPI_PTR)(XrHandTrackerEXT handTracker);
+using PFN_xrLocateHandJointsEXT = XrResult(XRAPI_PTR)(XrHandTrackerEXT handTracker, const XrHandJointsLocateInfoEXT *locateInfo, XrHandJointLocationsEXT *locations);
+using PFN_xrConvertTimespecTimeToTimeKHR = XrResult(XRAPI_PTR)(XrInstance instance, const struct timespec *timespecTime, XrTime *time);
 
 // --- Core OpenXR 1.0 reference-space symbols used by the ad-hoc head-pose probe. ---
 // These are exposed by every conformant runtime; the loader resolves them by name.

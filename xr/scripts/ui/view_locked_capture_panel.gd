@@ -80,6 +80,7 @@ const RGB_CODEC_HEVC := "hevc"
 const RGB_CODEC_H264 := "h264"
 const RGB_CODEC_VALUES := [RGB_CODEC_HEVC, RGB_CODEC_H264]
 const DEFAULT_RGB_CODEC := RGB_CODEC_HEVC
+const DEFAULT_EXPORT_COORDINATE_SPACE := OpenXRExportSpace.DEFAULT
 
 # Auto-detected input source ("hands" or "controllers") used for the title-bar
 # indicator + record-stream defaults. The current pointer mode is still owned
@@ -141,6 +142,9 @@ var _rgb_fps_button: Button
 var _rgb_fps_menu: VBoxContainer
 var _rgb_codec_button: Button
 var _rgb_codec_menu: VBoxContainer
+var _export_coordinate_space_button: Button
+var _export_coordinate_space_menu: VBoxContainer
+var _requested_export_coordinate_space := DEFAULT_EXPORT_COORDINATE_SPACE
 var _requested_rgb_resolution := ""
 var _requested_rgb_fps := DEFAULT_RGB_FPS
 var _requested_rgb_codec := DEFAULT_RGB_CODEC
@@ -218,6 +222,7 @@ func get_options() -> Dictionary:
 	# runtime hand/controller detection is kept out of saved settings.
 	var options := {
 		"stereo_rgb": _toggle_enabled("stereo_rgb"),
+		"export_coordinate_space": OpenXRExportSpace.normalize(_requested_export_coordinate_space),
 		# NOTE: deliberately NOT gated on _depth_supported. capture_app.gd owns
 		# depth gating for unsupported providers (Pico) via its
 		# _update_depth_support_flag()/_effective_capture_options() force-off,
@@ -296,7 +301,10 @@ func set_options(options: Dictionary) -> void:
 	_requested_rgb_resolution = _resolution_from_options(options)
 	_requested_rgb_fps = int(options.get("rgb_fps", DEFAULT_RGB_FPS))
 	_requested_rgb_codec = _normalize_rgb_codec(str(options.get("rgb_codec", DEFAULT_RGB_CODEC)))
+	_requested_export_coordinate_space = OpenXRExportSpace.normalize(
+		options.get("export_coordinate_space", DEFAULT_EXPORT_COORDINATE_SPACE))
 	_refresh_rgb_selects()
+	_refresh_export_coordinate_space_select()
 	if _save_root != null:
 		var save_root := str(options.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
 		_save_root.text = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
@@ -441,6 +449,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	# --- Outputs group -----------------------------------------------------
 	var outputs := register_group("outputs", "UI_OUTPUTS", "check")
+	_add_export_coordinate_space_control(outputs)
 	_add_rgb_recording_controls(outputs)
 	# Controller/hand poses always go into the MP4 mett tracks. This toggle only
 	# controls whether they are ALSO written as separate JSONL sidecar files for
@@ -798,6 +807,56 @@ func _refresh_rgb_selects() -> void:
 	_refreshing_rgb_selects = false
 
 
+func _add_export_coordinate_space_control(parent: VBoxContainer) -> void:
+	_add_field_label(parent, tr("UI_EXPORT_COORDINATE_SPACE"))
+	_export_coordinate_space_button = _make_rgb_dropdown_button()
+	_export_coordinate_space_button.tooltip_text = tr("UI_EXPORT_COORDINATE_SPACE_TOOLTIP")
+	_export_coordinate_space_button.pressed.connect(_on_export_coordinate_space_button_pressed)
+	add_interactive(parent, _export_coordinate_space_button)
+	_export_coordinate_space_menu = _make_rgb_dropdown_menu()
+	parent.add_child(_export_coordinate_space_menu)
+	_refresh_export_coordinate_space_select()
+
+
+func _refresh_export_coordinate_space_select() -> void:
+	if _export_coordinate_space_button == null:
+		return
+	_requested_export_coordinate_space = OpenXRExportSpace.normalize(_requested_export_coordinate_space)
+	_clear_rgb_menu(_export_coordinate_space_menu)
+	for space in OpenXRExportSpace.VALUES:
+		var normalized := OpenXRExportSpace.normalize(space)
+		_add_rgb_menu_option(
+			_export_coordinate_space_menu,
+			OpenXRExportSpace.display_label(normalized),
+			_on_export_coordinate_space_option_pressed.bind(normalized)
+		)
+	_export_coordinate_space_button.text = OpenXRExportSpace.display_label(
+		_requested_export_coordinate_space)
+	if _export_coordinate_space_menu != null:
+		_export_coordinate_space_menu.visible = false
+
+
+func _on_export_coordinate_space_button_pressed() -> void:
+	if _export_coordinate_space_menu == null:
+		return
+	_export_coordinate_space_menu.visible = not _export_coordinate_space_menu.visible
+	if _rgb_resolution_menu != null:
+		_rgb_resolution_menu.visible = false
+	if _rgb_fps_menu != null:
+		_rgb_fps_menu.visible = false
+	if _rgb_codec_menu != null:
+		_rgb_codec_menu.visible = false
+
+
+func _on_export_coordinate_space_option_pressed(space: String) -> void:
+	_requested_export_coordinate_space = OpenXRExportSpace.normalize(space)
+	if _export_coordinate_space_button != null:
+		_export_coordinate_space_button.text = OpenXRExportSpace.display_label(
+			_requested_export_coordinate_space)
+	if _export_coordinate_space_menu != null:
+		_export_coordinate_space_menu.visible = false
+
+
 func _rebuild_rgb_resolution_select() -> void:
 	if _rgb_resolution_button == null:
 		return
@@ -945,6 +1004,8 @@ func _on_rgb_resolution_button_pressed() -> void:
 		_rgb_fps_menu.visible = false
 	if _rgb_codec_menu != null:
 		_rgb_codec_menu.visible = false
+	if _export_coordinate_space_menu != null:
+		_export_coordinate_space_menu.visible = false
 
 
 func _on_rgb_fps_button_pressed() -> void:
@@ -955,6 +1016,8 @@ func _on_rgb_fps_button_pressed() -> void:
 		_rgb_resolution_menu.visible = false
 	if _rgb_codec_menu != null:
 		_rgb_codec_menu.visible = false
+	if _export_coordinate_space_menu != null:
+		_export_coordinate_space_menu.visible = false
 
 
 func _on_rgb_codec_button_pressed() -> void:
@@ -965,6 +1028,8 @@ func _on_rgb_codec_button_pressed() -> void:
 		_rgb_resolution_menu.visible = false
 	if _rgb_fps_menu != null:
 		_rgb_fps_menu.visible = false
+	if _export_coordinate_space_menu != null:
+		_export_coordinate_space_menu.visible = false
 
 
 func _on_rgb_resolution_option_pressed(text: String) -> void:
@@ -1680,6 +1745,7 @@ static func _default_options() -> Dictionary:
 		"rgb_resolution": "",
 		"rgb_fps": DEFAULT_RGB_FPS,
 		"rgb_codec": DEFAULT_RGB_CODEC,
+		"export_coordinate_space": DEFAULT_EXPORT_COORDINATE_SPACE,
 		"server_host": DEFAULT_LIVE_SERVER_HOST,
 		"server_port": DEFAULT_LIVE_SERVER_PORT,
 		"server_result_port": DEFAULT_LIVE_RESULT_PORT,
