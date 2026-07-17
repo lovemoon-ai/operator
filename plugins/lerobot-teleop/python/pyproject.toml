@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# The distribution name is load-bearing twice over:
+#   * the `lerobot_teleoperator_` prefix is how `register_third_party_plugins()`
+#     spots this package among installed distributions;
+#   * that function then does `importlib.import_module(dist_name)`, so the
+#     distribution name must be importable verbatim -- underscores, not hyphens.
+name = "lerobot_teleoperator_vr_operator"
+version = "0.1.0"
+description = "LeRobot teleoperator plugin driving an SO-101 from an Operator XR headset"
+readme = "README.md"
+# Tracks LeRobot's own floor: 0.6.x uses `type X = ...` aliases (PEP 695), so it
+# does not import on 3.11 or older. Declaring anything lower just lets pip
+# resolve an ancient LeRobot instead of failing honestly.
+requires-python = ">=3.12"
+
+dependencies = [
+    # >=0.6.0 is a hard floor, not caution. `register_third_party_plugins()` --
+    # the entire out-of-tree discovery mechanism this plugin relies on -- does
+    # not exist before it, so on e.g. 0.4.1 `--teleop.type=vr_operator` fails as
+    # an unknown choice with no hint as to why. `lerobot.types` and
+    # `lerobot.robots.so_follower` are likewise absent there.
+    #
+    # `kinematics` pulls placo, which `lerobot.model.kinematics.RobotKinematics`
+    # needs for the IK this plugin runs.
+    "lerobot[kinematics]>=0.6.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+# Explicit include: without it, `tests` would also be picked up as a top-level
+# package and installed into site-packages.
+include = ["lerobot_teleoperator_vr_operator*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

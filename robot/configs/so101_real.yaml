@@ -1,18 +1,45 @@
-# robot-service config - drives a real SO-101 arm over the Feetech serial bus.
+# robot-service config - drives a real SO-101 arm via LeRobot.
 #
-# Run from the `robot/` directory:
+# This is a TWO-PROCESS setup. robot-service does not touch the serial bus and
+# does not spawn Python; it listens on `arm.lerobot.endpoint`, and a LeRobot
+# `vr_operator` teleoperator plugin dials in.
+#
+# Terminal 1 (from `robot/`):
 #
 #     cargo run -p robot-service -- --config configs/so101_real.yaml
 #
+# Terminal 2 (in the venv that has the plugin installed):
+#
+#     lerobot-teleoperate \
+#       --teleop.type=vr_operator \
+#       --teleop.endpoint=uds:/tmp/lerobot-vr.sock \
+#       --teleop.urdf_path=/path/to/so101_new_calib.urdf \
+#       --robot.type=so101_follower \
+#       --robot.port=/dev/ttyACM0 \
+#       --robot.max_relative_target=5 \
+#       --fps=60
+#
+# Start order does not matter; either side reconnects. robot-service's device
+# connect blocks until the plugin says Hello, because the plugin's forward
+# kinematics snapshot is what driver-side IK mode needs to seed itself.
+#
 # Required Python environment:
 #
-# - `lerobot` importable by the configured `python`
-# - access to the Feetech serial port in `arm.so101.port`
+# - `pip install -e plugins/lerobot-teleop/python`  (pulls lerobot[kinematics])
+# - `so101_new_calib.urdf` fetched from the SO-ARM100 repo (not vendored by LeRobot)
+# - access to the Feetech serial port, passed to LeRobot via `--robot.port`
 #
-# The adapter component spawns
-# `python scripts/so101_real_control.py control --port ...`.
-# That Python control process owns hardware calibration, conservative servo
-# parameters, current/load reflexes, and one-step-per-frame setpoint limiting.
+# Division of labour (see crates/robot-adapter/src/control/drivers/lerobot_link.rs):
+#
+# - Rust owns the operator->robot retarget (PoseMapper). It sits ABOVE the driver
+#   boundary and is shared byte-for-byte with the MuJoCo sim path, so sim and
+#   real cannot drift apart.
+# - Python owns IK (LeRobot's placo-backed RobotKinematics), the Feetech bus,
+#   and calibration.
+#
+# BOOTSTRAP CAVEAT: the plugin's Hello reports FK(home_joints), which only
+# matches reality if the arm is actually near home. Press reset (XR button B)
+# before the first enable, and keep --robot.max_relative_target set.
 
 adapter_link:
   endpoint: "tcp:127.0.0.1:63910"
@@ -22,19 +49,17 @@ adapter:
   descriptor_file: "configs/so101_real_descriptor.yaml"
 
   arm:
-    driver: "so101_real"
-    serial_port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA101992-if00"
-    baudrate: 0
+    driver: "lerobot_link"
 
     # SO-101 has 6 actuators (5 arm joints + 1 gripper). servo_ids sizes the
-    # PoseMapper output vector; the hardware control process maps fixed Feetech IDs 1-6.
+    # PoseMapper output vector; LeRobot's so101_follower owns the actual bus IDs.
     servo_ids: [1, 2, 3, 4, 5, 6]
 
-    so101:
-      python: "/home/duino/code/github/lerobot/.venv/bin/python"
-      script: "scripts/so101_real_control.py"
-      port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_58FA101992-if00"
-      extra_args: []
+    lerobot:
+      # Must match the plugin's --teleop.endpoint.
+      endpoint: "uds:/tmp/lerobot-vr.sock"
+      # How long device connect waits for the plugin to show up.
+      hello_timeout_ms: 60000
 
     safety:
       joint_limits_deg:
@@ -43,20 +68,21 @@ adapter:
         - [ -92.0,   92.0]    # elbow_flex
         - [ -90.0,   90.0]    # wrist_flex
         - [-150.0,  155.0]    # wrist_roll
-        - [   0.0,  100.0]    # gripper normalized by LeRobot range mode
+        - [   0.0,  100.0]    # gripper - RANGE_0_100 on the LeRobot side, not degrees
       max_velocity_deg_s: 90.0
       max_acceleration_deg_s2: 180.0
 
     pose_mapping:
-      # Real hardware uses driver-side IK in the Python control process. Controller-space
-      # deltas become SO-101 base-frame end-effector target deltas, then MuJoCo
-      # Jacobian IK solves the five arm joints before hardware step limiting.
+      # Controller-space deltas become SO-101 base-frame end-effector target
+      # deltas in Rust; the plugin then solves the five arm joints with placo.
       mode: "ik"
       scale: 0.5
       mirror: true
 
-    # Serial bus round-trips plus reflex checks are slower than the sim.
-    driver_write_timeout_ms: 250
+    # Writes to the link never block on the plugin (targets are latest-wins), so
+    # this only bounds the local channel publish. It no longer has to absorb a
+    # serial round trip the way the old so101_real driver's 250 ms did.
+    driver_write_timeout_ms: 20
 
 bridge:
   name: "so101-real"
@@ -65,3 +91,9 @@ bridge:
   discovery_port: 63900
   pose_udp_port: 63902
   telemetry_port: 63903
+  # The headset finds the host via a UDP broadcast beacon, which many corporate
+  # / guest WiFi networks drop (client isolation). List the headset's IP here to
+  # also send the beacon unicast. Machine-specific: update it for your headset
+  # (`adb shell ip addr show wlan0`), same as configs/mujoco_so101.yaml.
+  discovery_unicast_targets:
+    - 10.79.153.133

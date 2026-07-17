@@ -42,13 +42,15 @@ pub struct AdapterConfig {
 /// Robotic arm configuration. Ported from `robot/src/config.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArmConfig {
-    /// Driver type. `"mujoco_so101"` drives the simulator; `"so101_real"`
-    /// drives a real SO-101 through the Python/LeRobot Feetech bridge.
+    /// Driver type. `"mujoco_so101"` drives the simulator; `"lerobot_link"`
+    /// drives real hardware via a LeRobot `vr_operator` teleoperator plugin.
     pub driver: String,
-    /// Serial port path (e.g. `/dev/ttyUSB0`). Unused by the MuJoCo driver.
+    /// Serial port path (e.g. `/dev/ttyUSB0`). Unused by both shipped drivers:
+    /// the MuJoCo driver has no bus, and `lerobot_link` leaves serial I/O to
+    /// the LeRobot follower (`--robot.port`). Kept for config compatibility.
     #[serde(default)]
     pub serial_port: String,
-    /// Serial baud rate. Unused by the MuJoCo driver.
+    /// Serial baud rate. Unused by both shipped drivers; see `serial_port`.
     #[serde(default)]
     pub baudrate: u32,
     /// List of servo IDs on the bus. Sizes the PoseMapper output vector.
@@ -65,10 +67,10 @@ pub struct ArmConfig {
     /// `driver == "mujoco_so101"`, ignored otherwise.
     #[serde(default)]
     pub mujoco: Option<MujocoConfig>,
-    /// Real SO-101 bridge settings. Required when `driver == "so101_real"`,
+    /// LeRobot plugin link settings. Required when `driver == "lerobot_link"`,
     /// ignored otherwise.
     #[serde(default)]
-    pub so101: Option<So101Config>,
+    pub lerobot: Option<LerobotConfig>,
 }
 
 /// Two independent SO-101 arms controlled from one XR session.
@@ -113,27 +115,35 @@ fn default_mujoco_steps() -> u32 {
     3
 }
 
-/// Settings for the real SO-101 hardware driver (`driver = "so101_real"`).
-/// The adapter spawns `<python> <script> control [extra_args ...]` and the
-/// Python control process owns LeRobot/Feetech serial bus I/O plus hardware
-/// reflexes.
+/// Settings for the LeRobot link driver (`driver = "lerobot_link"`).
+///
+/// Unlike the MuJoCo driver, the adapter does **not** spawn Python here. It
+/// listens on `endpoint`, and a separate `lerobot-teleoperate
+/// --teleop.type=vr_operator` process dials in. Serial port, calibration, IK,
+/// and the URDF all live on the LeRobot side; this block only describes the
+/// rendezvous.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct So101Config {
-    /// Python interpreter to invoke. Default `"python3"`. Use a venv that has
-    /// `lerobot` and Feetech motor support installed.
-    #[serde(default = "default_so101_python")]
-    pub python: String,
-    /// Path to `scripts/so101_real_control.py`.
-    pub script: String,
-    /// Serial port path for the Feetech bus, e.g. `/dev/ttyACM0`.
-    pub port: String,
-    /// Extra args passed after `control --port <port>`.
-    #[serde(default)]
-    pub extra_args: Vec<String>,
+pub struct LerobotConfig {
+    /// Endpoint the adapter listens on for the `vr_operator` plugin, as
+    /// `"uds:<path>"` or `"tcp:<addr>"`. Must match the plugin's
+    /// `--teleop.endpoint`. Give each arm its own endpoint in dual-arm setups.
+    #[serde(with = "endpoint_serde", default = "default_lerobot_endpoint")]
+    pub endpoint: Endpoint,
+    /// How long `enable_torque` waits for the plugin's `Hello` before failing
+    /// the device connect. The plugin's `Hello` carries the forward-kinematics
+    /// snapshot that driver-side IK mode requires, so there is nothing sensible
+    /// to do without it. Default 60 s — generous, because the operator normally
+    /// starts `robot-service` first and `lerobot-teleoperate` second.
+    #[serde(default = "default_hello_timeout_ms")]
+    pub hello_timeout_ms: u64,
 }
 
-fn default_so101_python() -> String {
-    "python3".to_string()
+fn default_lerobot_endpoint() -> Endpoint {
+    Endpoint::from_str("uds:/tmp/lerobot-vr.sock").expect("valid default endpoint")
+}
+
+fn default_hello_timeout_ms() -> u64 {
+    60_000
 }
 
 /// Joint safety limits (degrees).
@@ -362,8 +372,7 @@ arm:
 endpoint: "tcp:127.0.0.1:63910"
 device_type: "so101_real"
 arm:
-  driver: "so101_real"
-  serial_port: "/dev/ttyACM0"
+  driver: "lerobot_link"
   servo_ids: [1, 2, 3, 4, 5, 6]
   safety:
     joint_limits_deg: [[-105.0, 105.0], [-95.0, 95.0]]
@@ -373,21 +382,25 @@ arm:
     mode: "direct"
     scale: 0.35
     mirror: true
-  driver_write_timeout_ms: 250
-  so101:
-    python: "python3"
-    script: "scripts/so101_real_control.py"
-    port: "/dev/ttyACM0"
+  driver_write_timeout_ms: 20
+  lerobot:
+    endpoint: "uds:/tmp/lerobot-vr.sock"
 "#;
         let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();
         assert_eq!(cfg.device_type, "so101_real");
         let arm = cfg.arm.as_ref().expect("arm section present");
-        assert_eq!(arm.driver, "so101_real");
+        assert_eq!(arm.driver, "lerobot_link");
         assert_eq!(arm.servo_ids.len(), 6);
-        assert_eq!(arm.driver_write_timeout_ms, 250);
-        let so101 = arm.so101.as_ref().expect("so101 block present");
-        assert_eq!(so101.port, "/dev/ttyACM0");
-        assert!(so101.script.ends_with("so101_real_control.py"));
+        assert_eq!(arm.driver_write_timeout_ms, 20);
+        let lerobot = arm.lerobot.as_ref().expect("lerobot block present");
+        assert_eq!(
+            lerobot.endpoint,
+            Endpoint::from_str("uds:/tmp/lerobot-vr.sock").unwrap()
+        );
+        assert_eq!(
+            lerobot.hello_timeout_ms, 60_000,
+            "hello_timeout_ms should default when omitted"
+        );
         let desc = cfg.builtin_descriptor();
         assert_eq!(desc.device.device_type, "robot_arm");
     }
@@ -399,7 +412,7 @@ endpoint: "tcp:127.0.0.1:63910"
 device_type: "so101_dual_real"
 dual_arm:
   left:
-    driver: "so101_real"
+    driver: "lerobot_link"
     servo_ids: [1, 2, 3, 4, 5, 6]
     safety:
       joint_limits_deg: [[-105.0, 105.0], [-95.0, 95.0], [-92.0, 92.0], [-90.0, 90.0], [-150.0, 155.0], [0.0, 100.0]]
@@ -409,13 +422,11 @@ dual_arm:
       mode: "ik"
       scale: 0.5
       mirror: false
-    driver_write_timeout_ms: 250
-    so101:
-      python: "python3"
-      script: "scripts/so101_real_control.py"
-      port: "/dev/ttyLEFT"
+    driver_write_timeout_ms: 20
+    lerobot:
+      endpoint: "uds:/tmp/lerobot-vr-left.sock"
   right:
-    driver: "so101_real"
+    driver: "lerobot_link"
     servo_ids: [1, 2, 3, 4, 5, 6]
     safety:
       joint_limits_deg: [[-105.0, 105.0], [-95.0, 95.0], [-92.0, 92.0], [-90.0, 90.0], [-150.0, 155.0], [0.0, 100.0]]
@@ -425,18 +436,28 @@ dual_arm:
       mode: "ik"
       scale: 0.5
       mirror: true
-    driver_write_timeout_ms: 250
-    so101:
-      python: "python3"
-      script: "scripts/so101_real_control.py"
-      port: "/dev/ttyRIGHT"
+    driver_write_timeout_ms: 20
+    lerobot:
+      endpoint: "uds:/tmp/lerobot-vr-right.sock"
 "#;
         let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();
         assert_eq!(cfg.device_type, "so101_dual_real");
         let dual = cfg.dual_arm.as_ref().expect("dual_arm section present");
-        assert_eq!(dual.left.driver, "so101_real");
-        assert_eq!(dual.left.so101.as_ref().unwrap().port, "/dev/ttyLEFT");
-        assert_eq!(dual.right.so101.as_ref().unwrap().port, "/dev/ttyRIGHT");
+        assert_eq!(dual.left.driver, "lerobot_link");
+        // Each arm must land on its own endpoint: one lerobot-teleoperate
+        // process per follower.
+        assert_eq!(
+            dual.left.lerobot.as_ref().unwrap().endpoint,
+            Endpoint::from_str("uds:/tmp/lerobot-vr-left.sock").unwrap()
+        );
+        assert_eq!(
+            dual.right.lerobot.as_ref().unwrap().endpoint,
+            Endpoint::from_str("uds:/tmp/lerobot-vr-right.sock").unwrap()
+        );
+        assert_ne!(
+            dual.left.lerobot.as_ref().unwrap().endpoint,
+            dual.right.lerobot.as_ref().unwrap().endpoint
+        );
         assert_eq!(
             cfg.builtin_descriptor().device.device_type,
             "so101_dual_arm"
@@ -515,11 +536,9 @@ adapter:
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../configs/so101_real.yaml");
         let cfg = AdapterConfig::from_yaml_file(path).expect("shipped config parses");
         assert_eq!(cfg.device_type, "so101_real");
-        assert!(cfg
-            .arm
-            .as_ref()
-            .and_then(|arm| arm.so101.as_ref())
-            .is_some());
+        let arm = cfg.arm.as_ref().expect("arm section present");
+        assert_eq!(arm.driver, "lerobot_link");
+        assert!(arm.lerobot.is_some(), "lerobot block present");
         let desc_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../configs/so101_real_descriptor.yaml"

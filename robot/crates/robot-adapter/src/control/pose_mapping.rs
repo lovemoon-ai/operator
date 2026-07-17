@@ -471,6 +471,80 @@ mod tests {
         assert!((target.position[2] - 3.0).abs() < 1e-9);
     }
 
+    /// The operator->robot axis convention is encoded **twice** in this file,
+    /// in two independent forms:
+    ///
+    /// * positions: a hand-written index shuffle in `controller_delta_robot`
+    ///   (`-z_op, ±x_op, y_op`);
+    /// * rotations: the `operator_to_robot_rotation()` basis matrix.
+    ///
+    /// Nothing else forces them to agree, so changing one and not the other
+    /// would silently split translation from orientation. This pins them
+    /// together through the public API — if you edit one path, this fails.
+    ///
+    /// `mirror = true` is the case where the two agree exactly; `mirror =
+    /// false` deliberately flips the lateral axis relative to the basis (see
+    /// `mirror_flips_only_the_lateral_axis` below).
+    #[test]
+    fn position_axis_map_agrees_with_the_rotation_basis() {
+        let basis = operator_to_robot_rotation();
+
+        for axis in [
+            [1.0, 0.0, 0.0], // operator right
+            [0.0, 1.0, 0.0], // operator up
+            [0.0, 0.0, 1.0], // operator backward
+        ] {
+            let mut m = ik_mapper(true, 1.0);
+            // Identity operator frame + zero base, so the mapped target *is*
+            // the retargeted delta.
+            m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+            m.set_reference_frame(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+            m.set_base_end_effector_pose(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+
+            let target = m.map_end_effector_target(&pose(axis, IDENTITY_QUAT));
+            let expected = basis * Vector3::new(axis[0], axis[1], axis[2]);
+
+            for i in 0..3 {
+                assert!(
+                    (target.position[i] - expected[i]).abs() < 1e-9,
+                    "operator axis {axis:?}: position path gave {:?}, rotation basis gives {:?}",
+                    target.position,
+                    expected
+                );
+            }
+        }
+    }
+
+    /// Guards the one intentional divergence from the basis matrix: `mirror`
+    /// negates the lateral (robot Y) axis and must leave forward/up alone.
+    #[test]
+    fn mirror_flips_only_the_lateral_axis() {
+        let mut mirrored = ik_mapper(true, 1.0);
+        let mut plain = ik_mapper(false, 1.0);
+        for m in [&mut mirrored, &mut plain] {
+            m.set_reference(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+            m.set_reference_frame(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+            m.set_base_end_effector_pose(&pose([0.0, 0.0, 0.0], IDENTITY_QUAT));
+        }
+
+        let probe = pose([0.3, 0.5, 0.7], IDENTITY_QUAT);
+        let a = mirrored.map_end_effector_target(&probe);
+        let b = plain.map_end_effector_target(&probe);
+
+        assert!(
+            (a.position[0] - b.position[0]).abs() < 1e-9,
+            "forward must not depend on mirror"
+        );
+        assert!(
+            (a.position[1] + b.position[1]).abs() < 1e-9,
+            "lateral must invert with mirror"
+        );
+        assert!(
+            (a.position[2] - b.position[2]).abs() < 1e-9,
+            "up must not depend on mirror"
+        );
+    }
+
     #[test]
     fn end_effector_target_applies_relative_controller_rotation() {
         let mut m = ik_mapper(false, 1.0);

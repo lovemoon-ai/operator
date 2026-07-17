@@ -2,19 +2,26 @@
 //!
 //! The `ArmDriver` trait defines the interface that all arm drivers must
 //! implement. SO-101 is supported through either the MuJoCo simulator driver
-//! or a Python/LeRobot Feetech bridge for real hardware.
+//! or the LeRobot link driver, which hands targets to a `vr_operator`
+//! teleoperator plugin in a separate `lerobot-teleoperate` process.
+//!
+//! Both drivers sit *below* [`crate::control::pose_mapping::PoseMapper`], so
+//! the operator→robot retarget stays a single implementation shared by sim and
+//! real hardware. A driver only ever receives robot base-frame targets.
 
+pub mod lerobot_link;
 pub mod mujoco_so101;
-pub mod so101_real;
+
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use teleop_protocol::Pose6D;
 
-use crate::config::{MujocoConfig, So101Config};
+use crate::config::{LerobotConfig, MujocoConfig};
 use crate::control::JointAngles;
+use lerobot_link::LerobotLinkDriver;
 use mujoco_so101::MujocoSo101Driver;
-use so101_real::So101RealDriver;
 
 /// Trait for controlling a robotic arm.
 ///
@@ -72,11 +79,12 @@ pub trait ArmDriver: Send {
 /// Create a driver instance based on configuration.
 ///
 /// Supports `driver_type == "mujoco_so101"` for the simulator and
-/// `driver_type == "so101_real"` for a real Feetech/LeRobot SO-101.
+/// `driver_type == "lerobot_link"` for real hardware driven by a LeRobot
+/// `vr_operator` plugin.
 pub fn create_driver(
     driver_type: &str,
     mujoco_cfg: Option<&MujocoConfig>,
-    so101_cfg: Option<&So101Config>,
+    lerobot_cfg: Option<&LerobotConfig>,
 ) -> Result<Box<dyn ArmDriver>> {
     if driver_type == "mujoco_so101" {
         let cfg = mujoco_cfg.ok_or_else(|| {
@@ -99,24 +107,32 @@ pub fn create_driver(
         return Ok(Box::new(driver));
     }
 
-    if driver_type == "so101_real" {
-        let cfg = so101_cfg.ok_or_else(|| {
+    if driver_type == "lerobot_link" {
+        let cfg = lerobot_cfg.ok_or_else(|| {
             anyhow::anyhow!(
-                "driver 'so101_real' requires an [arm.so101] block in config (script and port are mandatory)"
+                "driver 'lerobot_link' requires an [arm.lerobot] block in config (endpoint is mandatory)"
             )
         })?;
-        let driver = So101RealDriver::new(&cfg.script, &cfg.python, &cfg.port, &cfg.extra_args)
-            .with_context(|| {
-                format!(
-                    "failed to spawn SO-101 hardware control process: python={} script={} port={}",
-                    cfg.python, cfg.script, cfg.port
-                )
-            })?;
+        let driver =
+            LerobotLinkDriver::new(&cfg.endpoint, Duration::from_millis(cfg.hello_timeout_ms))
+                .with_context(|| format!("failed to start LeRobot link on {}", cfg.endpoint))?;
         return Ok(Box::new(driver));
+    }
+
+    if driver_type == "so101_real" {
+        anyhow::bail!(
+            "driver 'so101_real' has been removed. Real SO-101 hardware is now driven by the \
+             LeRobot `vr_operator` teleoperator plugin instead of the bundled \
+             scripts/so101_real_control.py.\n\
+             Migrate the config: set `arm.driver: \"lerobot_link\"` and replace the \
+             `arm.so101:` block with `arm.lerobot:\\n  endpoint: \"uds:/tmp/lerobot-vr.sock\"`, \
+             then run `lerobot-teleoperate --teleop.type=vr_operator` alongside robot-service. \
+             See configs/so101_real.yaml."
+        )
     }
 
     anyhow::bail!(
         "unsupported driver type '{driver_type}' in robot-adapter \
-         (supported: 'mujoco_so101', 'so101_real')"
+         (supported: 'mujoco_so101', 'lerobot_link')"
     )
 }
