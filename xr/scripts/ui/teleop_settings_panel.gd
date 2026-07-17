@@ -144,11 +144,6 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_port_input.add_theme_font_size_override("font_size", 21)
 	add_interactive(connection, _port_input)
 
-	var keyboard := VirtualKeyboardBar.new()
-	connection.add_child(keyboard)
-	keyboard.attach(_ip_input)
-	keyboard.attach(_port_input)
-
 	var status_row := HBoxContainer.new()
 	status_row.add_theme_constant_override("separation", 10)
 	status_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -302,6 +297,10 @@ func _apply_mode_lock() -> void:
 	var manual := _discovery_option.selected <= 0
 	_ip_input.editable = manual
 	_port_input.editable = manual
+	# A discovery beacon can auto-select a robot — and so flip these to
+	# read-only — while the operator is still typing in one of them. No focus
+	# change occurs, so the keyboard would stay up and silently eat keys.
+	refresh_keyboard()
 
 
 # --- IP reachability test ----------------------------------------------------
@@ -314,6 +313,15 @@ func _apply_mode_lock() -> void:
 func _process(delta: float) -> void:
 	super._process(delta)
 	_poll_ip_test()
+
+
+func _exit_tree() -> void:
+	# Scene teardown (e.g. Exit → change_scene) can land here mid-probe. The
+	# RefCounted peer would close on free anyway, but drop it explicitly so we
+	# never depend on GC timing for the socket.
+	if _ip_test_peer != null:
+		_ip_test_peer.disconnect_from_host()
+		_ip_test_peer = null
 
 
 func _on_ip_test_pressed() -> void:

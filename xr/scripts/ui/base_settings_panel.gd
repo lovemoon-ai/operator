@@ -31,6 +31,8 @@ var _panel_tween: Tween
 var _icon_cache: Dictionary = {}
 var _title_row: HBoxContainer
 var _actions_row: HBoxContainer
+# In-panel soft keyboard, shared by every text field in this panel.
+var _keyboard: VirtualKeyboardBar
 
 # Title-bar indicator that surfaces the auto-detected input source (hand vs
 # controller). Subclasses don't need to know it exists; capture and teleop
@@ -203,6 +205,10 @@ static func _decode_setting_secret(encoded: String) -> String:
 func open() -> void:
 	# 开启面板：缩放 + 淡入
 	visible = true
+	# close() only hides the 3D quad — the 2D tree inside the SubViewport keeps
+	# its focus and visibility — so clear the keyboard explicitly on reopen.
+	if _keyboard:
+		_keyboard.reset()
 	_play_ui_sound("hover")
 	if _panel == null:
 		return
@@ -399,12 +405,24 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 		_scroll_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		_scroll_container.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 		_scroll_container.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+		# Keep a tapped field on screen once the keyboard claims its space.
+		_scroll_container.follow_focus = true
 		root.add_child(_scroll_container)
 		_scroll_container.add_child(_content)
 	else:
 		root.add_child(_content)
 
 	_build_settings_content(_content)
+
+	# Soft keyboard. An immersive OpenXR session can't raise the Android IME,
+	# and panel UI renders into an offscreen SubViewport, so every text field
+	# needs an in-panel keyboard. Mounted panel-level (between the content and
+	# the action row) and auto-attached to every LineEdit the subclass built,
+	# so panels never wire this up themselves. Only the active group's fields
+	# are focusable, so one shared bar serves the whole panel.
+	_keyboard = VirtualKeyboardBar.new()
+	root.add_child(_keyboard)
+	_attach_keyboard_to_line_edits(_content)
 
 	var actions := HBoxContainer.new()
 	_actions_row = actions
@@ -436,6 +454,28 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 	exit_button.pressed.connect(_on_exit_button_pressed)
 	var exit_slot := add_interactive(actions, exit_button)
 	_configure_action_slot(exit_slot)
+
+
+## Walk the built content and hand every text field to the shared keyboard.
+## Recurses into containers, so fields nested in rows are covered without the
+## subclass opting in. `include_internal` is required: SpinBox mounts its
+## LineEdit as an internal child, which plain get_children() skips — without
+## it the port fields would silently have no keyboard.
+func _attach_keyboard_to_line_edits(node: Node) -> void:
+	for child in node.get_children(true):
+		if child is LineEdit:
+			_keyboard.attach(child as LineEdit)
+		else:
+			_attach_keyboard_to_line_edits(child)
+
+
+## Re-evaluate the soft keyboard against the fields' current state. Call after
+## programmatically flipping a field's `editable`: LineEdit has no
+## editable_changed signal, so the bar cannot notice on its own and would sit
+## there visible but inert.
+func refresh_keyboard() -> void:
+	if _keyboard:
+		_keyboard.refresh()
 
 
 func _set_panel_chrome_visible(visible_value: bool) -> void:
