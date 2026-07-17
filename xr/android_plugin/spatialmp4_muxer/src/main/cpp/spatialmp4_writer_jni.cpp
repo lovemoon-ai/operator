@@ -402,6 +402,12 @@ class LiveSpatialMp4Writer {
                    duration_us > 0 ? duration_us : kDefaultRgbDurationUs, flags);
   }
 
+  bool WriteRgbBytes(const uint8_t* data, size_t size, int64_t pts_us,
+                     int64_t duration_us, int flags) {
+    return Enqueue(PacketKind::kRgb, -1, data, size, pts_us,
+                   duration_us > 0 ? duration_us : kDefaultRgbDurationUs, flags);
+  }
+
   // v3: configure the AAC audio stream once, when the MediaCodec encoder
   // emits its first codec-config blob. Mirrors ConfigureRgb shape -- creates
   // the AVStream, copies CSD into extradata, tags the channel layout in
@@ -532,6 +538,15 @@ class LiveSpatialMp4Writer {
                    duration_us > 0 ? duration_us : kDefaultPoseDurationUs, AV_PKT_FLAG_KEY);
   }
 
+  bool WriteTimedMetadataBytes(int track_id, const uint8_t* data, size_t size,
+                               int64_t pts_us, int64_t duration_us) {
+    if (track_id < 0 || track_id >= kTimedTrackCount) {
+      return Fail("invalid timed metadata track id");
+    }
+    return Enqueue(PacketKind::kTimedMetadata, track_id, data, size, pts_us,
+                   duration_us > 0 ? duration_us : kDefaultPoseDurationUs, AV_PKT_FLAG_KEY);
+  }
+
   bool Finish() {
     // Request orderly drain: io thread will finish processing every queued
     // packet (and the deferred batch), set drained_, and we then take
@@ -630,7 +645,12 @@ class LiveSpatialMp4Writer {
 
   bool Enqueue(PacketKind kind, int timed_track_id, const std::vector<uint8_t>& data,
                int64_t pts_us, int64_t duration_us, int flags) {
-    if (data.empty()) {
+    return Enqueue(kind, timed_track_id, data.data(), data.size(), pts_us, duration_us, flags);
+  }
+
+  bool Enqueue(PacketKind kind, int timed_track_id, const uint8_t* data, size_t size,
+               int64_t pts_us, int64_t duration_us, int flags) {
+    if (!data || size == 0) {
       return true;
     }
     PendingPacket packet;
@@ -639,7 +659,11 @@ class LiveSpatialMp4Writer {
     packet.pts_us = pts_us;
     packet.duration_us = duration_us;
     packet.flags = flags;
-    packet.data = data;
+    // The producer releases MediaCodec/OpenXR-owned memory immediately after
+    // this call, so one ownership copy into the asynchronous mux queue is
+    // required. The native pointer overload avoids the former temporary
+    // vector plus second queue copy.
+    packet.data.assign(data, data + size);
     {
       std::lock_guard<std::mutex> qlock(queue_mutex_);
       if (shutdown_requested_ || finish_requested_) {
@@ -710,7 +734,16 @@ class LiveSpatialMp4Writer {
 
       {
         std::lock_guard<std::mutex> flock(format_mutex_);
-        first_pts_us_writer_ = first_pts_snapshot;
+        // The MP4 timeline origin becomes part of every track as soon as the
+        // header is written. A later producer can enqueue an older absolute
+        // timestamp (for example, independently-clocked hand and camera
+        // workers); changing the origin after that point would collapse all
+        // subsequent packet PTS values against a moving base. Keep tracking
+        // the earliest timestamp only while the header is still deferred,
+        // then freeze it for the lifetime of the file.
+        if (!header_written_) {
+          first_pts_us_writer_ = first_pts_snapshot;
+        }
         if (finish_now && !header_written_) {
           DropUnconfiguredOptionalStreamsForFinish_Locked();
         }
@@ -1252,6 +1285,21 @@ LiveSpatialMp4Writer* FromHandle(jlong handle) {
   return reinterpret_cast<LiveSpatialMp4Writer*>(handle);
 }
 
+// The PICO OpenXR GDExtension lives in a different .so but in the same
+// process.  It resolves the small C ABI below with dlsym and feeds native
+// MediaCodec output / HJNT packets straight into this writer.  Keeping the
+// active handle here removes both Godot Variant marshalling and Java byte[]
+// from the hot paths.  Session teardown stops the PICO workers before
+// nativeFinish/nativeClose, so calls cannot race deletion.
+std::atomic<LiveSpatialMp4Writer*> g_active_writer{nullptr};
+
+std::vector<uint8_t> BytesToVector(const uint8_t* data, size_t size) {
+  if (!data || size == 0) {
+    return {};
+  }
+  return std::vector<uint8_t>(data, data + size);
+}
+
 std::vector<uint8_t> PackPose(double px, double py, double pz, double qx, double qy, double qz, double qw) {
   const double values[7] = {px, py, pz, qx, qy, qz, qw};
   std::vector<uint8_t> out(sizeof(values));
@@ -1313,6 +1361,7 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeStart(
       JStringToString(env, device_manufacturer),
       audio_expected == JNI_TRUE,
       static_cast<int>(audio_channel_layout_code));
+  g_active_writer.store(writer, std::memory_order_release);
   return reinterpret_cast<jlong>(writer);
 }
 
@@ -1544,6 +1593,8 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeFinish(JNIEnv*, jclass, jlong h
 extern "C" JNIEXPORT void JNICALL
 Java_com_spatialmp4_muxer_SpatialMp4Native_nativeClose(JNIEnv*, jclass, jlong handle) {
   auto* writer = FromHandle(handle);
+  LiveSpatialMp4Writer* expected = writer;
+  g_active_writer.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
   delete writer;
 }
 
@@ -1554,4 +1605,33 @@ Java_com_spatialmp4_muxer_SpatialMp4Native_nativeGetLastError(JNIEnv* env, jclas
     return StringToJString(env, "writer handle is null");
   }
   return StringToJString(env, writer->LastError());
+}
+
+// Native producer ABI.  These symbols intentionally avoid exposing C++
+// types so libpico_openxr can discover them at runtime without a link-time
+// dependency on the FFmpeg writer AAR.
+extern "C" __attribute__((visibility("default"))) bool
+spatialmp4_active_writer_available() {
+  return g_active_writer.load(std::memory_order_acquire) != nullptr;
+}
+
+extern "C" __attribute__((visibility("default"))) bool
+spatialmp4_configure_rgb_native(const char* codec, const uint8_t* csd, size_t csd_size) {
+  auto* writer = g_active_writer.load(std::memory_order_acquire);
+  return writer && writer->ConfigureRgb(codec ? codec : "hevc", BytesToVector(csd, csd_size));
+}
+
+extern "C" __attribute__((visibility("default"))) bool
+spatialmp4_write_rgb_native(const uint8_t* data, size_t size, int64_t pts_us,
+                            int64_t duration_us, int flags) {
+  auto* writer = g_active_writer.load(std::memory_order_acquire);
+  return writer && writer->WriteRgbBytes(data, size, pts_us, duration_us, flags);
+}
+
+extern "C" __attribute__((visibility("default"))) bool
+spatialmp4_write_timed_metadata_native(int track_id, const uint8_t* data, size_t size,
+                                       int64_t pts_us, int64_t duration_us) {
+  auto* writer = g_active_writer.load(std::memory_order_acquire);
+  return writer && writer->WriteTimedMetadataBytes(
+      track_id, data, size, pts_us, duration_us);
 }

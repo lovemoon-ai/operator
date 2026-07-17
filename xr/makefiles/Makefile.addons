@@ -75,6 +75,9 @@ AHB_DIR      := native/ahb_decoder
 AHB_SRC      := $(AHB_DIR)/CMakeLists.txt $(AHB_DIR)/build.sh $(shell find $(AHB_DIR)/src -type f 2>/dev/null)
 AHB_ADDON_SO := addons/ahb_decoder/libahb_decoder.so
 AHB_JNI_SO   := android/build/libs/release/arm64-v8a/libahb_decoder.so
+HAND_CAPTURE_DIR      := native/hand_capture
+HAND_CAPTURE_SRC      := $(HAND_CAPTURE_DIR)/CMakeLists.txt $(HAND_CAPTURE_DIR)/build.sh $(shell find $(HAND_CAPTURE_DIR)/src -type f 2>/dev/null)
+HAND_CAPTURE_ADDON_SO := addons/hand_capture/libhand_capture.so
 GODOT_MUJOCO_DIR      := native/godot_mujoco
 GODOT_MUJOCO_SRC      := $(GODOT_MUJOCO_DIR)/CMakeLists.txt $(GODOT_MUJOCO_DIR)/build.sh $(shell find $(GODOT_MUJOCO_DIR)/src -type f 2>/dev/null)
 GODOT_MUJOCO_ADDON_SO := addons/godot_mujoco/bin/libgodot_mujoco.so
@@ -186,11 +189,7 @@ prepare-android-libs:
 # doesn't get in the way.
 $(AHB_ADDON_SO): $(AHB_SRC)
 	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
-	    if [ -f "$@" ]; then \
-	        echo "[ahb] sources newer than $@ but ANDROID_NDK not set — keeping stale .so. 'export ANDROID_NDK=…' to rebuild."; \
-	        exit 0; \
-	    fi; \
-	    echo "[ahb] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
+	    echo "[ahb] sources require rebuilding $@, but ANDROID_NDK (or ANDROID_NDK_HOME) is not set" >&2; \
 	    exit 1; \
 	fi; \
 	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(AHB_DIR)/build.sh Release
@@ -201,6 +200,20 @@ $(AHB_JNI_SO): $(AHB_ADDON_SO)
 	@echo "[ahb] installed $@"
 
 build-ahb: $(AHB_ADDON_SO) $(AHB_JNI_SO)
+
+# ---------------------------------------------------------------------------
+# hand_capture GDExtension (native/hand_capture)
+# ---------------------------------------------------------------------------
+# Full-rate XRHandTracker capture (NativeHandSampler). Same staleness rules
+# as build-ahb: sources newer than the .so re-run build.sh (needs ANDROID_NDK).
+$(HAND_CAPTURE_ADDON_SO): $(HAND_CAPTURE_SRC)
+	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
+	    echo "[hand_capture] sources require rebuilding $@, but ANDROID_NDK (or ANDROID_NDK_HOME) is not set" >&2; \
+	    exit 1; \
+	fi; \
+	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(HAND_CAPTURE_DIR)/build.sh Release
+
+build-hand-capture: $(HAND_CAPTURE_ADDON_SO)
 
 # ---------------------------------------------------------------------------
 # Godot MuJoCo GDExtension (native/godot_mujoco)
@@ -238,11 +251,7 @@ build-godot-mujoco: $(GODOT_MUJOCO_ADDON_SO) $(GODOT_MUJOCO_ADDON_LIB) $(GODOT_M
 # Rebuild it for Pico exports so Godot does not package a stale addon .so.
 $(PICO_OPENXR_ADDON_SO): $(PICO_OPENXR_SRC)
 	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
-	    if [ -f "$@" ]; then \
-	        echo "[pico-openxr] sources newer than $@ but ANDROID_NDK not set — keeping stale .so. 'export ANDROID_NDK=…' to rebuild."; \
-	        exit 0; \
-	    fi; \
-	    echo "[pico-openxr] ANDROID_NDK (or ANDROID_NDK_HOME) must be set to build $@" >&2; \
+	    echo "[pico-openxr] sources require rebuilding $@, but ANDROID_NDK (or ANDROID_NDK_HOME) is not set" >&2; \
 	    exit 1; \
 	fi; \
 	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(PICO_OPENXR_DIR)/build.sh Release
@@ -448,10 +457,12 @@ clean-addons:
 		android_plugin/qrscanner/build \
 		native/godot_mujoco/build-* \
 		native/pico_openxr/build-* \
-		native/godot_pinocchio/build-*
+		native/godot_pinocchio/build-* \
+		native/hand_capture/build-*
 		# $(GODOT_CPP_BUILD_DIR)
 	rm -f \
 		addons/ahb_decoder/*.so \
+		addons/hand_capture/*.so \
 		addons/godot_mujoco/bin/*.so \
 		addons/pico_openxr/*.so \
 		addons/pinocchio/*.so \

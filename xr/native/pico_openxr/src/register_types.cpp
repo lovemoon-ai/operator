@@ -28,12 +28,18 @@ static void initialize(ModuleInitializationLevel level) {
 static void uninitialize(ModuleInitializationLevel level) {
 	if (level == MODULE_INITIALIZATION_LEVEL_SCENE) {
 		if (pico_openxr_singleton) {
+			// Stop native camera/hand workers while the OpenXR session and the
+			// Android media stack are still alive. The wrapper itself remains
+			// owned by OpenXRAPI after register_extension_wrapper().
+			pico_openxr_singleton->stop_camera_image_capture();
 			Engine::get_singleton()->unregister_singleton(PICO_OPENXR_SINGLETON_NAME);
 		}
 		return;
 	}
 	if (level == MODULE_INITIALIZATION_LEVEL_CORE && pico_openxr_singleton) {
-		memdelete(pico_openxr_singleton);
+		// OpenXRAPI::cleanup_extension_wrappers() deletes registered wrappers
+		// during OpenXR module teardown. Deleting it again here destroys the
+		// same Object mutex twice on Godot's VkThread.
 		pico_openxr_singleton = nullptr;
 	}
 }

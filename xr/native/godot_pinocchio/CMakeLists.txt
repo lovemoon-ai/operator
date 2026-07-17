@@ -88,6 +88,8 @@ target_link_libraries(pinocchio_gd PRIVATE
     log                    # __android_log_print
 )
 
+target_link_options(pinocchio_gd PRIVATE "LINKER:--exclude-libs,ALL")
+
 # Pinocchio's headers compile cleanly only at -O2+ on some Boost versions; we
 # leave optimization to CMAKE_BUILD_TYPE but turn off Pinocchio's most spammy
 # deprecation warnings so the CI log stays readable.
@@ -100,6 +102,8 @@ target_compile_definitions(pinocchio_gd PRIVATE
 set_target_properties(pinocchio_gd PROPERTIES
     OUTPUT_NAME "pinocchio_gd"
     PREFIX "lib"
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN YES
 )
 
 # Drop the .so where the Godot Android gradle build can pick it up. build.sh

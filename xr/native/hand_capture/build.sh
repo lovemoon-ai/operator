@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
-# Build libahb_decoder.so for arm64-v8a and install it where the
-# Godot Android export and the Kotlin System.loadLibrary() call both
-# expect to find it.
+# Build libhand_capture.so for arm64-v8a and install it where the Godot
+# Android export expects it (same pattern as native/ahb_decoder/build.sh).
 #
 # Requirements:
 #   - $ANDROID_NDK pointing at an NDK r25+ install
 #   - godot-cpp synced by scripts/sync_deps.sh into
-#     $OPERATOR_DEPS_CACHE_ROOT/src/godot-cpp (defaults to .deps/src/godot-cpp;
-#     set OPERATOR_DEPS_CACHE_ROOT=~/.cache/operator/deps to share the source
-#     and build artifacts across branches/worktrees).
+#     $OPERATOR_DEPS_CACHE_ROOT/src/godot-cpp (defaults to .deps/src/godot-cpp)
 #
 # Usage:
-#   xr/native/ahb_decoder/build.sh [Debug|Release]   # default Release
+#   xr/native/hand_capture/build.sh [Debug|Release]   # default Release
 
 set -euo pipefail
 
 BUILD_TYPE="${1:-Release}"
-BUILD_JOBS="${AHB_BUILD_JOBS:-4}"
+BUILD_JOBS="${HAND_CAPTURE_BUILD_JOBS:-4}"
 case "$BUILD_TYPE" in
     Debug)
         GODOTCPP_TARGET="template_debug"
@@ -62,16 +59,9 @@ ensure_godot_cpp_link() {
     fi
 
     if [[ -e "$GODOT_CPP_LINK" ]]; then
-        if [[ -f "$GODOT_CPP_LINK/SConstruct" && ! -e "$GODOT_CPP_SOURCE" ]]; then
-            echo "Migrating local godot-cpp checkout to .deps/src/godot-cpp..." >&2
-            mv "$GODOT_CPP_LINK" "$GODOT_CPP_SOURCE"
-        elif [[ -d "$GODOT_CPP_LINK" && -z "$(find "$GODOT_CPP_LINK" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
-            rmdir "$GODOT_CPP_LINK"
-        else
-            echo "ERROR: $GODOT_CPP_LINK exists and is not the expected symlink." >&2
-            echo "Move it to $GODOT_CPP_SOURCE or remove it, then rerun build.sh." >&2
-            exit 1
-        fi
+        echo "ERROR: $GODOT_CPP_LINK exists and is not the expected symlink." >&2
+        echo "Remove it, then rerun build.sh." >&2
+        exit 1
     fi
 
     ln -s "$GODOT_CPP_LINK_TARGET" "$GODOT_CPP_LINK"
@@ -83,16 +73,8 @@ fi
 
 ensure_godot_cpp_link
 
-# Pass the symlink's real path (not the per-worktree symlink itself) to cmake
-# so CMakeFiles/.../depend.make + .o object recipes inside the SHARED
-# godot-cpp build dir record a stable source path. Without this, every new
-# worktree gives cmake a different GODOT_CPP_DIR string (its own symlink
-# location), and cmake regenerates the entire godot-cpp build (~2.5 min)
-# even though the .a files in the cache are perfectly reusable.
-#
-# `set -e` does NOT trigger when a command substitution in an assignment
-# fails, so we check the result explicitly — a broken symlink here would
-# otherwise surface as a confusing "godot-cpp not found" from cmake.
+# Resolve the symlink so the shared godot-cpp build dir records a stable
+# source path across worktrees (see ahb_decoder/build.sh for the rationale).
 GODOT_CPP_DIR_REAL="$(cd "$GODOT_CPP_LINK" && pwd -P)"
 if [[ -z "$GODOT_CPP_DIR_REAL" ]]; then
     echo "ERROR: failed to resolve $GODOT_CPP_LINK to a real path" >&2
@@ -112,26 +94,18 @@ cmake -B "$BUILD_DIR" \
 
 cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
 
-SO="$BUILD_DIR/libahb_decoder.so"
+SO="$BUILD_DIR/libhand_capture.so"
 if [[ ! -s "$SO" ]]; then
     echo "ERROR: build produced empty $SO" >&2
     exit 1
 fi
 
-# Install to:
-#   1. addons/ahb_decoder/  — referenced by ahb_decoder.gdextension
-#   2. android/build/libs/arm64-v8a/  — picked up by Kotlin
-#      System.loadLibrary("ahb_decoder")
-ADDON_DST="$SCRIPT_DIR/../../addons/ahb_decoder/libahb_decoder.so"
-JNI_DST="$SCRIPT_DIR/../../android/build/libs/arm64-v8a/libahb_decoder.so"
-
+# Install to addons/hand_capture/ — referenced by hand_capture.gdextension.
+ADDON_DST="$SCRIPT_DIR/../../addons/hand_capture/libhand_capture.so"
 mkdir -p "$(dirname "$ADDON_DST")"
-mkdir -p "$(dirname "$JNI_DST")"
 cp "$SO" "$ADDON_DST"
-cp "$SO" "$JNI_DST"
 
 echo
-echo "Built $(stat -f '%z' "$SO" 2>/dev/null || stat -c '%s' "$SO") byte libahb_decoder.so"
+echo "Built $(stat -f '%z' "$SO" 2>/dev/null || stat -c '%s' "$SO") byte libhand_capture.so"
 echo "Installed:"
 echo "  $ADDON_DST"
-echo "  $JNI_DST"

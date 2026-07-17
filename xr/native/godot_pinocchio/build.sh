@@ -20,6 +20,18 @@ set -euo pipefail
 
 BUILD_TYPE="${1:-Release}"
 BUILD_JOBS="${PINOCCHIO_BUILD_JOBS:-4}"
+case "$BUILD_TYPE" in
+    Debug)
+        GODOTCPP_TARGET="template_debug"
+        ;;
+    Release|RelWithDebInfo|MinSizeRel)
+        GODOTCPP_TARGET="template_release"
+        ;;
+    *)
+        echo "ERROR: unsupported build type '$BUILD_TYPE'" >&2
+        exit 1
+        ;;
+esac
 ANDROID_ABI="${PINOCCHIO_ANDROID_ABI:-arm64-v8a}"
 ANDROID_PLATFORM_LEVEL="${PINOCCHIO_ANDROID_API:-android-29}"
 
@@ -134,6 +146,7 @@ cmake -B "$BUILD_DIR" \
     -DANDROID_PLATFORM="$ANDROID_PLATFORM_LEVEL" \
     -DANDROID_STL=c++_shared \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DGODOTCPP_TARGET="$GODOTCPP_TARGET" \
     -DCMAKE_PREFIX_PATH="$PINOCCHIO_INSTALL_DIR;$VCPKG_INSTALLED_DIR" \
     -DCMAKE_FIND_ROOT_PATH="$PINOCCHIO_INSTALL_DIR;$VCPKG_INSTALLED_DIR;$ANDROID_NDK/toolchains/llvm/prebuilt/$(uname | tr A-Z a-z)-x86_64/sysroot" \
     -DPINOCCHIO_INSTALL_DIR="$PINOCCHIO_INSTALL_DIR" \

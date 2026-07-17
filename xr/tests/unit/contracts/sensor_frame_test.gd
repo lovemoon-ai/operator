@@ -8,8 +8,23 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	# A well-formed pose frame validates clean.
 	var pose := PoseFrame.build(1_000, Transform3D.IDENTITY, true)
 	t.eq(pose.validate().size(), 0, "valid pose frame must have no validation errors")
-	t.eq(pose.coordinate_space, "operator_xr_world", "pose frames use the operator world space")
+	t.eq(pose.coordinate_space, "openxr_play_space", "pose frames default to the active OpenXR play space")
 	t.eq(pose.frame_type, SensorFrameType.POSE, "PoseFrame builds a POSE frame")
+	var local_pose := PoseFrame.build(
+		1_001, Transform3D.IDENTITY, true, false,
+		OpenXRExportSpace.coordinate_space_id(OpenXRExportSpace.LOCAL))
+	t.eq(local_pose.coordinate_space, "openxr_local", "pose builder preserves the selected reference space")
+	var floor_controller := ControllerFrame.build_pose(
+		"left_controller", 1_002, Transform3D.IDENTITY, true,
+		OpenXRExportSpace.coordinate_space_id(OpenXRExportSpace.LOCAL_FLOOR))
+	t.eq(floor_controller.coordinate_space, "openxr_local_floor",
+		"controller builder preserves the selected reference space")
+	t.eq(OpenXRExportSpace.play_area_mode(OpenXRExportSpace.STAGE), XRInterface.XR_PLAY_AREA_STAGE,
+		"STAGE maps to Godot's stage play-area mode")
+	t.eq(OpenXRExportSpace.play_area_mode(OpenXRExportSpace.LOCAL), XRInterface.XR_PLAY_AREA_SITTING,
+		"LOCAL maps to Godot's sitting/local play-area mode")
+	t.eq(OpenXRExportSpace.play_area_mode(OpenXRExportSpace.LOCAL_FLOOR), XRInterface.XR_PLAY_AREA_ROOMSCALE,
+		"LOCAL_FLOOR maps to Godot's roomscale/local-floor play-area mode")
 
 	# Unknown frame type rejected.
 	var unknown := SensorFrame.new()

@@ -14,8 +14,8 @@ var timestamp_ns := 0
 var xr_timestamp_ns := 0
 ## Device/sensor hardware timestamp ns when available, else 0.
 var device_timestamp_ns := 0
-## Coordinate space the spatial payload is expressed in (e.g.
-## "operator_xr_world"). Required for pose-like frames.
+## Coordinate space the spatial payload is expressed in (for example,
+## "openxr_stage"). Required for pose-like frames.
 var coordinate_space := ""
 ## Stable source identifier (e.g. "head", "left_controller", tracker name).
 var source_id := ""

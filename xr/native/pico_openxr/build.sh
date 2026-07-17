@@ -6,6 +6,18 @@ set -euo pipefail
 
 BUILD_TYPE="${1:-Release}"
 BUILD_JOBS="${PICO_OPENXR_BUILD_JOBS:-4}"
+case "$BUILD_TYPE" in
+	Debug)
+		GODOTCPP_TARGET="template_debug"
+		;;
+	Release|RelWithDebInfo|MinSizeRel)
+		GODOTCPP_TARGET="template_release"
+		;;
+	*)
+		echo "ERROR: unsupported build type '$BUILD_TYPE'" >&2
+		exit 1
+		;;
+esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 OPERATOR_DEPS_CACHE_ROOT="${OPERATOR_DEPS_CACHE_ROOT:-${DEPS_ROOT:-$REPO_ROOT/.deps}}"
@@ -69,6 +81,7 @@ cmake -B "$BUILD_DIR" \
 	-DANDROID_ABI=arm64-v8a \
 	-DANDROID_PLATFORM=android-29 \
 	-DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+	-DGODOTCPP_TARGET="$GODOTCPP_TARGET" \
 	-DGODOT_CPP_DIR="$GODOT_CPP_DIR_REAL" \
 	-DGODOT_CPP_BUILD_DIR="$GODOT_CPP_BUILD"
 

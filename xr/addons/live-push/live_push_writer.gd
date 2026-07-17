@@ -138,12 +138,6 @@ func write_controller_pose(source: String, timestamp_ns: int, transform: Transfo
 	))
 
 
-func write_hand_joints(hand: String, timestamp_ns: int, joints: Array) -> void:
-	if live_server_plugin == null:
-		return
-	live_server_plugin.call("writeHandJointsJson", hand, timestamp_ns, JSON.stringify(joints))
-
-
 func write_controller_input(
 	controller: String,
 	timestamp_ns: int,
