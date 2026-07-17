@@ -749,7 +749,12 @@ parse_stopped_session() {
   fi
   if printf '%s\n' "$path" | grep -q '\.mp4$'; then
     REMOTE_FINAL_MP4="$path"
-    REMOTE_CAPTURE_ROOT="$(dirname "$path")"
+    # The current layout finalizes inside REMOTE_SESSION_DIR. Keep the capture
+    # root learned from the start marker; dirname(mp4) is now the session dir.
+    if [ -z "$REMOTE_SESSION_DIR" ]; then
+      REMOTE_SESSION_DIR="$(dirname "$path")"
+      REMOTE_CAPTURE_ROOT="$(dirname "$REMOTE_SESSION_DIR")"
+    fi
   else
     REMOTE_SESSION_DIR="$path"
     REMOTE_CAPTURE_ROOT="$(dirname "$path")"
@@ -781,9 +786,13 @@ wait_for_session_start() {
 }
 
 remote_final_mp4s() {
-  run_adb shell "ls '$REMOTE_CAPTURE_ROOT'/*.mp4 2>/dev/null" \
-    | tr -d '\r' \
-    | grep -v '\.partial\.mp4$' || true
+  {
+    if [ -n "$REMOTE_SESSION_DIR" ]; then
+      run_adb shell "ls '$REMOTE_SESSION_DIR'/*.mp4 2>/dev/null" || true
+    fi
+    # Historical recordings stored the MP4 beside the session directory.
+    run_adb shell "ls '$REMOTE_CAPTURE_ROOT'/*.mp4 2>/dev/null" || true
+  } | tr -d '\r' | grep -v '\.partial\.mp4$' || true
 }
 
 wait_for_session_stop() {
@@ -841,7 +850,7 @@ validate_capture() {
   if [ "$SKIP_DEVICE" = "1" ]; then
     local_root="$OUTPUT_DIR/session/SpatialMP4"
   fi
-  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" "$EXPECTED_DEVICE_PREFIX" "$EXPECT_AUDIO" "$EXPECT_BODY_TRACKING" "$EXPECT_MOTION_TRACKERS" "$EXPECT_RGB_CODEC" "$EXPECT_RGB_RESOLUTION" "$EXPECT_RGB_FPS" <<'PY'
+  "$PYTHON" - "$local_root" "${FFPROBE:-}" "$CAPTURE_SECONDS" "$MIN_MP4_BYTES" "$MIN_RGB_FRAMES" "$MIN_RGB_FPS" "$EXPECTED_DEVICE_PREFIX" "$EXPECT_AUDIO" "$EXPECT_BODY_TRACKING" "$EXPECT_MOTION_TRACKERS" "$EXPECT_RGB_CODEC" "$EXPECT_RGB_RESOLUTION" "$EXPECT_RGB_FPS" "$SKIP_DEVICE" <<'PY'
 from __future__ import annotations
 
 import json
@@ -863,6 +872,7 @@ expect_body_tracking = (sys.argv[9] if len(sys.argv) > 9 else "0") == "1"
 expect_motion_trackers = (sys.argv[10] if len(sys.argv) > 10 else "0") == "1"
 expected_rgb_resolution = (sys.argv[12] if len(sys.argv) > 12 else "").strip().lower()
 expected_rgb_fps = float(sys.argv[13] if len(sys.argv) > 13 else "30")
+allow_legacy_layout = (sys.argv[14] if len(sys.argv) > 14 else "0") == "1"
 dense_start_limit_us = 750_000 if expected_device_prefix == "pico" else 500_000
 dense_start_limit_ms = dense_start_limit_us // 1000
 
@@ -926,12 +936,14 @@ def pick_latest_session(root: Path) -> tuple[Path, Path]:
     for child in root.iterdir():
         if not child.is_dir():
             continue
-        mp4 = root / f"{child.name}.mp4"
-        if mp4.exists():
-            candidates.append((max(child.stat().st_mtime, mp4.stat().st_mtime), child, mp4))
+        # Current layout first, then the historical sibling layout so old
+        # pulled recordings remain inspectable by this validator.
+        for mp4 in (child / f"{child.name}.mp4", root / f"{child.name}.mp4"):
+            if mp4.exists():
+                candidates.append((max(child.stat().st_mtime, mp4.stat().st_mtime), child, mp4))
     if not candidates:
         names = ", ".join(sorted(p.name for p in root.iterdir())) if root.exists() else "<missing>"
-        raise FileNotFoundError(f"no <session>/<session>.mp4 pair under {root}; got {names}")
+        raise FileNotFoundError(f"no session directory with a matching MP4 under {root}; got {names}")
     candidates.sort(reverse=True)
     return candidates[0][1], candidates[0][2]
 
@@ -1172,27 +1184,59 @@ def wants_head_pose(options: dict[str, Any]) -> bool:
 
 def check_required_files(session_dir: Path, mp4: Path, options: dict[str, Any]) -> None:
     required = ["manifest.json"]
-    optional = [
+    camera_sidecars = [
         "android_timebase.json",
         "left_camera_characteristics.json",
         "left_camera_frames.jsonl",
     ]
     if wants_stereo_rgb(options):
-        optional += ["right_camera_characteristics.json", "right_camera_frames.jsonl"]
-    if wants_depth(options):
-        optional += ["depth/frames.jsonl"]
+        camera_sidecars += ["right_camera_characteristics.json", "right_camera_frames.jsonl"]
     for rel in required:
         path = session_dir / rel
         if path.exists() and path.stat().st_size > 0:
             passed(f"file present: {rel}")
         else:
             failed(f"file present: {rel}", str(path))
-    for rel in optional:
+    camera_sidecar_mode = options.get("save_camera_metadata_sidecars")
+    for rel in camera_sidecars:
         path = session_dir / rel
-        if path.exists() and path.stat().st_size > 0:
-            passed(f"optional legacy sidecar present: {rel}")
+        if camera_sidecar_mode is True:
+            if path.exists() and path.stat().st_size > 0:
+                passed(f"requested camera sidecar present: {rel}")
+            else:
+                failed(f"requested camera sidecar present: {rel}", str(path))
+        elif camera_sidecar_mode is False:
+            if path.exists():
+                failed(f"default capture omits camera sidecar: {rel}", str(path))
+            else:
+                passed(f"default capture omits camera sidecar: {rel}")
+        elif path.exists() and path.stat().st_size > 0:
+            passed(f"legacy camera sidecar present: {rel}")
         else:
-            warned(f"optional legacy sidecar absent: {rel}", "self-contained MP4 metadata should cover this")
+            warned(f"legacy camera sidecar absent: {rel}", "self-contained MP4 metadata should cover this")
+    if wants_depth(options):
+        depth_sidecar = session_dir / "depth/frames.jsonl"
+        depth_sidecar_mode = options.get("save_depth_sidecar")
+        if depth_sidecar_mode is True:
+            if depth_sidecar.exists() and depth_sidecar.stat().st_size > 0:
+                passed("requested depth sidecar present: depth/frames.jsonl")
+            else:
+                failed("requested depth sidecar present: depth/frames.jsonl", str(depth_sidecar))
+        elif depth_sidecar_mode is False:
+            if depth_sidecar.exists():
+                failed("default capture omits depth sidecar: depth/frames.jsonl", str(depth_sidecar))
+            else:
+                passed("default capture omits depth sidecar: depth/frames.jsonl")
+        elif depth_sidecar.exists() and depth_sidecar.stat().st_size > 0:
+            passed("legacy depth sidecar present: depth/frames.jsonl")
+        else:
+            warned("legacy depth sidecar absent: depth/frames.jsonl", "MP4 depth metadata should cover this")
+    if mp4.parent == session_dir:
+        passed("MP4 co-located with session files", str(session_dir))
+    elif allow_legacy_layout:
+        warned("MP4 uses historical sibling layout", f"mp4={mp4} session={session_dir}")
+    else:
+        failed("MP4 co-located with session files", f"mp4={mp4} session={session_dir}")
     if mp4.exists() and mp4.stat().st_size >= min_mp4_bytes:
         passed("final MP4 size", f"{mp4.stat().st_size:,} bytes")
     elif mp4.exists():

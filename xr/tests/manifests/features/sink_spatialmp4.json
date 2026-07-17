@@ -27,6 +27,13 @@
       "module": "core/capture",
       "fixture": "synthetic_walk_pose_stream",
       "script": "res://tests/integration/capture/sink_failure_during_recording_test.gd"
+    },
+    {
+      "id": "storage.session_layout",
+      "level": "unit",
+      "suite": "storage.layout",
+      "module": "sinks/spatialmp4",
+      "script": "res://tests/unit/contracts/session_layout_test.gd"
     }
   ]
 }

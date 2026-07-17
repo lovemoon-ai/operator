@@ -110,6 +110,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from spatialmp4_metadata import (
+    RERUN_FRAME_METADATA_KINDS,
+    camera2_metadata_candidates,
+    resolve_android_timebase_metadata,
+)
+
 
 # ---------------------------------------------------------------------------
 # SpatialMP4 SDK bootstrap
@@ -805,54 +811,6 @@ def _camera2_projection_from_characteristics(
     )
 
 
-def _extract_camera2_characteristics(
-    operator_static: Optional[Dict[str, Any]],
-    eye: str,
-) -> Optional[Dict[str, Any]]:
-    if not isinstance(operator_static, dict):
-        return None
-    eye_keys = (eye, f"{eye}_camera_characteristics", f"{eye}_camera2_characteristics")
-    for key in eye_keys:
-        value = operator_static.get(key)
-        if isinstance(value, dict):
-            return value
-
-    container_keys = (
-        "camera2",
-        "camera2_characteristics",
-        "camera_characteristics",
-        "camera2_calibration",
-        "cameras",
-    )
-    for container_key in container_keys:
-        container = operator_static.get(container_key)
-        if isinstance(container, dict):
-            for eye_key in eye_keys:
-                value = container.get(eye_key)
-                if isinstance(value, dict):
-                    return value
-            for nested_key in ("characteristics", "camera_characteristics", "camera2_characteristics"):
-                nested = container.get(nested_key)
-                if not isinstance(nested, dict):
-                    continue
-                for eye_key in eye_keys:
-                    value = nested.get(eye_key)
-                    if isinstance(value, dict):
-                        return value
-        elif isinstance(container, list):
-            for item in container:
-                if not isinstance(item, dict):
-                    continue
-                item_eye = str(item.get("eye") or item.get("camera") or item.get("camera_id") or "").lower()
-                if item_eye == eye:
-                    for nested_key in ("characteristics", "camera_characteristics", "camera2_characteristics"):
-                        nested = item.get(nested_key)
-                        if isinstance(nested, dict):
-                            return nested
-                    return item
-    return None
-
-
 def load_camera2_projection_calibration(
     input_path: Path,
     profile: DeviceProfile,
@@ -868,44 +826,31 @@ def load_camera2_projection_calibration(
     if profile.name != "quest":
         return None
 
-    embedded_char = _extract_camera2_characteristics(operator_static, eye)
-    if embedded_char is not None:
-        projection = _camera2_projection_from_characteristics(
-            embedded_char,
-            f"MP4 operator_static {eye} Camera2 characteristics",
-        )
-        if projection is not None:
+    candidates, read_errors = camera2_metadata_candidates(input_path, operator_static, eye)
+    for characteristics, source_label, is_embedded in candidates:
+        projection = _camera2_projection_from_characteristics(characteristics, source_label)
+        if projection is None:
+            continue
+        if is_embedded:
             info(
                 "loaded Quest Camera2 projection calibration from MP4 "
                 f"operator_static ({eye})"
             )
-            return projection
+        else:
+            info(
+                f"loaded Quest Camera2 sidecar projection calibration: {source_label} "
+                "(RGB hand overlay uses OpenQuest Camera2 conversion)"
+            )
+        return projection
 
-    sidecar_filename = f"{eye}_camera_characteristics.json"
-    sidecar_candidates = [
-        # On-device/local layout: <capture_root>/<session>.mp4 plus
-        # <capture_root>/<session>/<eye>_camera_characteristics.json.
-        input_path.with_suffix("") / sidecar_filename,
-        # Uploaded layout: <data>/<session>/media.mp4 plus sidecars stored as
-        # sibling artifacts in the same session directory.
-        input_path.parent / sidecar_filename,
-    ]
-    sidecar_path = next((p for p in sidecar_candidates if p.exists()), None)
-    if sidecar_path is None:
-        return None
-    try:
-        sidecar_char: Dict[str, Any] = json.loads(sidecar_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        info(f"Camera2 sidecar read failed ({sidecar_path}): {exc}; falling back to mp4 ecam projection")
-        return None
-    projection = _camera2_projection_from_characteristics(sidecar_char, str(sidecar_path))
-    if projection is None:
-        return None
-    info(
-        f"loaded Quest Camera2 sidecar projection calibration: {sidecar_path} "
-        "(RGB hand overlay uses OpenQuest Camera2 conversion)"
-    )
-    return projection
+    for read_error in read_errors:
+        info(f"{read_error}; falling back to mp4 ecam projection")
+    if not candidates:
+        info(
+            f"Quest {eye} Camera2 characteristics are absent from MP4 operator_static "
+            "and no legacy sidecar exists; falling back to mp4 ecam projection"
+        )
+    return None
 
 
 def device_native_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.ndarray:
@@ -2120,42 +2065,20 @@ def load_operator_static_metadata(input_path: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _extract_android_timebase(operator_static: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not isinstance(operator_static, dict):
-        return None
-    for key in ("android_timebase", "timebase"):
-        value = operator_static.get(key)
-        if isinstance(value, dict):
-            return value
-    return None
-
-
 def load_android_timebase_metadata(
     input_path: Path,
     operator_static: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    embedded = _extract_android_timebase(operator_static)
-    if embedded is not None:
+    metadata, source, error = resolve_android_timebase_metadata(input_path, operator_static)
+    if metadata is not None and source == "mp4":
         info("loaded android_timebase from MP4 operator_static")
-        return embedded
-
-    sidecar_candidates = [
-        input_path.with_suffix("") / "android_timebase.json",
-        input_path.parent / "android_timebase.json",
-    ]
-    sidecar_path = next((p for p in sidecar_candidates if p.exists()), None)
-    if sidecar_path is None:
-        return None
-    try:
-        decoded = json.loads(sidecar_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        info(f"android_timebase sidecar read failed ({sidecar_path}): {exc}")
-        return None
-    if not isinstance(decoded, dict):
-        info(f"android_timebase sidecar is not a JSON object: {sidecar_path}")
-        return None
-    info(f"loaded android_timebase sidecar: {sidecar_path}")
-    return decoded
+        return metadata
+    if metadata is not None:
+        info(f"loaded android_timebase sidecar: {source}")
+        return metadata
+    if error is not None:
+        info(f"android_timebase sidecar read failed ({source}): {error}")
+    return None
 
 
 def _parse_hjnt_packet(raw: bytes, timestamp: float, track_id: str) -> Optional[_TimedJointFrame]:
@@ -3388,7 +3311,7 @@ def run(args: argparse.Namespace) -> int:
     _android_timebase = load_android_timebase_metadata(input_path, operator_static)
     json_metadata_tracks = {
         kind: load_json_metadata_frames_from_mp4(input_path, kind)
-        for kind in ("rgb_frame_index", "depth_frame_meta", "body_frame_meta", "motion_trackers")
+        for kind in RERUN_FRAME_METADATA_KINDS
     }
     profile = detect_device_profile(args.device_type, manifest_path, operator_static)
     # Profile wins over CLI default for camera_xyz (the user almost
@@ -3425,7 +3348,18 @@ def run(args: argparse.Namespace) -> int:
     has_rgb = reader.has_rgb()
     has_depth = reader.has_depth() and not args.no_depth
     if not has_depth and not args.no_depth:
-        depth_sidecar = input_path.with_suffix("") / "depth" / "frames.jsonl"
+        depth_sidecar_candidates = [
+            # Current co-located/uploaded layout: <session>/<video>.mp4 and
+            # <session>/depth/frames.jsonl.
+            input_path.parent / "depth" / "frames.jsonl",
+            # Historical local layout: <capture_root>/<session>.mp4 and
+            # <capture_root>/<session>/depth/frames.jsonl.
+            input_path.with_suffix("") / "depth" / "frames.jsonl",
+        ]
+        depth_sidecar = next(
+            (path for path in depth_sidecar_candidates if path.exists()),
+            depth_sidecar_candidates[0],
+        )
         if manifest_path is not None and manifest_path.exists():
             try:
                 mf = json.loads(manifest_path.read_text())
@@ -3433,11 +3367,15 @@ def run(args: argparse.Namespace) -> int:
             except (json.JSONDecodeError, OSError):
                 wants_depth = False
             if wants_depth:
-                sidecar_note = (
-                    f"; sidecar exists but is empty: {depth_sidecar}"
-                    if depth_sidecar.exists() and depth_sidecar.stat().st_size == 0
-                    else f"; sidecar not found: {depth_sidecar}"
-                )
+                if not depth_sidecar.exists():
+                    sidecar_note = f"; sidecar not found: {depth_sidecar}"
+                elif depth_sidecar.stat().st_size == 0:
+                    sidecar_note = f"; sidecar exists but is empty: {depth_sidecar}"
+                else:
+                    sidecar_note = (
+                        f"; sidecar exists: {depth_sidecar} "
+                        f"({depth_sidecar.stat().st_size:,} bytes)"
+                    )
                 info(
                     "depth requested in manifest, but this mp4 has no readable "
                     f"depth stream{sidecar_note}. Rerun output will be RGB/pose only."

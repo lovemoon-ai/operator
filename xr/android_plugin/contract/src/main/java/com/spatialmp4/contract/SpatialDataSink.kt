@@ -438,9 +438,9 @@ interface SpatialDataSink {
 
     // ---- v5 self-contained ego metadata ----------------------------------
     //
-    // Default no-ops keep older sinks bind-compatible. Providers still write
-    // sidecar JSON files as before; these hooks mirror the same data into MP4
-    // `mett` tracks so a raw MP4 can stand alone.
+    // Default no-ops keep older sinks bind-compatible. Providers always send
+    // these records to MP4 `mett` tracks so a raw MP4 can stand alone; JSON
+    // sidecars are optional debug mirrors controlled by capture options.
 
     /**
      * One-shot session-static JSON. The muxer writes it to the

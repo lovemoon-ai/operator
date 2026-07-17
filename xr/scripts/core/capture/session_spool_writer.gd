@@ -2,16 +2,6 @@ extends RefCounted
 class_name SessionSpoolWriter
 
 const DEFAULT_CAPTURE_ROOT := "/sdcard/DCIM/SpatialMP4"
-const CAMERA_CHARACTERISTICS_ARTIFACTS := [
-	{
-		"kind": "left_camera_characteristics",
-		"filename": "left_camera_characteristics.json"
-	},
-	{
-		"kind": "right_camera_characteristics",
-		"filename": "right_camera_characteristics.json"
-	},
-]
 
 var session_id := ""
 var session_dir := ""
@@ -65,31 +55,62 @@ func start_session(options: Dictionary = {}) -> bool:
 	_muxer_contract_version_cache = -1
 	session_start_unix_us = Time.get_unix_time_from_system() * 1000000
 	session_start_ticks_us = Time.get_ticks_usec()
-	session_id = _make_session_id()
 	saved_path = ""
 	var capture_root := str(capture_options.get("save_root", DEFAULT_CAPTURE_ROOT)).strip_edges()
 	if capture_root.is_empty():
 		capture_root = DEFAULT_CAPTURE_ROOT
+	# Preserve the historical second-resolution session id for compatibility,
+	# but never reuse a directory left by an earlier capture/retry. Collisions
+	# receive a deterministic numeric suffix instead of overwriting artifacts.
+	session_id = _make_unique_session_id(capture_root, _make_session_id())
 	session_dir = capture_root.path_join(session_id)
-	output_mp4_path = capture_root.path_join("%s.mp4" % session_id)
-	partial_mp4_path = capture_root.path_join("%s.partial.mp4" % session_id)
+	# Keep every durable artifact from one recording under one directory. The
+	# native muxer still receives absolute final/partial paths, so moving the
+	# MP4 below session_dir does not change its encoding or finalize contract.
+	output_mp4_path = SessionLayout.final_mp4_path(session_dir, session_id)
+	partial_mp4_path = SessionLayout.partial_mp4_path(session_dir, session_id)
 
 	if _make_dir(session_dir) != OK:
 		push_error("Unable to create capture session directory: %s" % session_dir)
 		session_dir = ""
 		return false
-	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
-		if _make_dir("%s/poses" % session_dir) != OK:
+	# Pose samples always live in MP4 metadata tracks. Create the optional
+	# sidecar directory only when at least one JSONL mirror is requested.
+	var save_head_pose_sidecar := bool(capture_options.get("save_head_pose_sidecar", false))
+	var save_controller_hand_sidecar := bool(
+		capture_options.get("save_controller_hand_sidecar", false)
+	)
+	var writes_pose_sidecar := (
+		(save_head_pose_sidecar and _capture_enabled("record_head_pose"))
+		or (
+			save_controller_hand_sidecar
+			and (
+				_capture_enabled("record_controller_pose")
+				or _capture_enabled("record_hand_data")
+			)
+		)
+	)
+	if writes_pose_sidecar:
+		if _make_dir(session_dir.path_join(SessionLayout.POSES_DIR)) != OK:
 			return false
 	var save_body_sidecar := bool(capture_options.get("save_body_sidecar", false))
-	if (save_body_sidecar and _capture_enabled("record_body_tracking")) or _capture_enabled("record_motion_trackers"):
-		if _make_dir("%s/body_motion" % session_dir) != OK:
+	var writes_body_sidecar := (
+		save_body_sidecar
+		and (
+			_capture_enabled("record_body_tracking")
+			or _capture_enabled("record_motion_trackers")
+		)
+	)
+	if writes_body_sidecar:
+		if _make_dir(session_dir.path_join(SessionLayout.BODY_MOTION_DIR)) != OK:
 			return false
-	if _capture_enabled("record_depth"):
-		if _make_dir("%s/depth" % session_dir) != OK:
+	var save_depth_sidecar := bool(capture_options.get("save_depth_sidecar", false))
+	var dump_raw_depth := bool(capture_options.get("dump_raw_depth", false))
+	if _capture_enabled("record_depth") and (save_depth_sidecar or dump_raw_depth):
+		if _make_dir(session_dir.path_join(SessionLayout.DEPTH_DIR)) != OK:
 			return false
 		# Opt-in raw payload dump for offline lossless verification (default off).
-		if bool(capture_options.get("dump_raw_depth", false)):
+		if dump_raw_depth:
 			_depth_raw_dir = "%s/depth/raw" % session_dir
 			_depth_raw_index = 0
 			if _make_dir(_depth_raw_dir) != OK:
@@ -257,7 +278,7 @@ func _rewrite_manifest_after_finalize(media_path: String, media_sha256: String) 
 			media_artifact["sha256"] = media_sha256
 			media_artifact["hash_algo"] = "sha256"
 		artifacts["media"] = media_artifact
-	for sidecar in CAMERA_CHARACTERISTICS_ARTIFACTS:
+	for sidecar in SessionLayout.DEBUG_SIDECAR_ARTIFACTS:
 		var filename := str(sidecar.get("filename", ""))
 		var sidecar_path := session_dir.path_join(filename)
 		if filename.is_empty() or not FileAccess.file_exists(sidecar_path):
@@ -369,10 +390,10 @@ func _rgb_confirmation_record(
 
 
 func _actual_rgb_recording_geometry() -> Dictionary:
-	var left := _camera_recording_size("left_camera_characteristics.json")
+	var left := _camera_recording_size("left", "left_camera_characteristics.json")
 	if left.is_empty():
 		return {}
-	var right := _camera_recording_size("right_camera_characteristics.json")
+	var right := _camera_recording_size("right", "right_camera_characteristics.json")
 	var left_width := int(left.get("width", 0))
 	var left_height := int(left.get("height", 0))
 	var camera_count := 1
@@ -394,15 +415,37 @@ func _actual_rgb_recording_geometry() -> Dictionary:
 	}
 
 
-func _camera_recording_size(filename: String) -> Dictionary:
+func _camera_recording_size(eye: String, legacy_filename: String) -> Dictionary:
+	# The provider keeps the same Camera2 metadata in memory that it embeds in
+	# MP4 operator_static. Prefer it so manifest finalization does not depend on
+	# legacy JSON files being enabled.
+	if android_plugin != null:
+		var method_name := (
+			"getLeftCameraMetadataJson" if eye == "left" else "getRightCameraMetadataJson"
+		)
+		var native_size := _camera_recording_size_from_json(
+			str(android_plugin.call(method_name))
+		)
+		if not native_size.is_empty():
+			return native_size
+
+	# Backward compatibility for old plugin AARs and existing recordings/tests.
+	var filename := legacy_filename
 	var path := session_dir.path_join(filename)
 	if not FileAccess.file_exists(path):
 		return {}
 	var reader := FileAccess.open(path, FileAccess.READ)
 	if reader == null:
 		return {}
-	var parsed: Variant = JSON.parse_string(reader.get_as_text())
+	var raw := reader.get_as_text()
 	reader.close()
+	return _camera_recording_size_from_json(raw)
+
+
+func _camera_recording_size_from_json(raw: String) -> Dictionary:
+	if raw.is_empty():
+		return {}
+	var parsed: Variant = JSON.parse_string(raw)
 	if not (parsed is Dictionary):
 		return {}
 	var metadata: Dictionary = parsed
@@ -581,11 +624,11 @@ func write_depth_frame(
 				raw_file.store_buffer(depth_u16_mm)
 				raw_file.close()
 				_depth_raw_index += 1
-	# Counts every depth frame handed to the writer; feeds the manifest
-	# stream_confirmations.depth.sidecar_frame_count with the same per-call
-	# semantics as before WP5 (the depth/frames.jsonl line itself is written
-	# by JsonlSidecarSink).
-	_depth_sidecar_frame_count += 1
+	# Count frames mirrored to the opt-in depth JSONL for the manifest's
+	# stream_confirmations.depth.sidecar_frame_count. The line itself is owned
+	# by JsonlSidecarSink.
+	if bool(capture_options.get("save_depth_sidecar", false)):
+		_depth_sidecar_frame_count += 1
 
 
 # Body joints and motion trackers are written by the hand_capture
@@ -736,6 +779,30 @@ func _make_session_id() -> String:
 		dt.minute,
 		dt.second
 	]
+
+
+func _make_unique_session_id(capture_root: String, base_session_id: String) -> String:
+	var candidate := base_session_id
+	var suffix := 1
+	while _session_id_exists(capture_root, candidate):
+		candidate = "%s_%03d" % [base_session_id, suffix]
+		suffix += 1
+	return candidate
+
+
+func _session_id_exists(capture_root: String, candidate: String) -> bool:
+	var candidate_dir := capture_root.path_join(candidate)
+	var absolute_dir := ProjectSettings.globalize_path(candidate_dir)
+	if DirAccess.dir_exists_absolute(absolute_dir) or FileAccess.file_exists(candidate_dir):
+		return true
+	# Also avoid colliding with incomplete/historical sibling-layout captures.
+	for filename in [
+		SessionLayout.final_mp4_name(candidate),
+		SessionLayout.partial_mp4_name(candidate),
+	]:
+		if FileAccess.file_exists(capture_root.path_join(filename)):
+			return true
+	return false
 
 
 func _make_dir(path: String) -> Error:
