@@ -5,6 +5,10 @@ extends Node
 ##   Haptics.fire_both("error", left_controller, right_controller)
 ##   Haptics.fire_confirm(controller)  # 双段确认
 
+# Godot 用这个字符串（而非空串）表示「该 tracker 未绑定 interaction profile」。
+# 见 openxr_interface.cpp 的 INTERACTION_PROFILE_NONE。
+const INTERACTION_PROFILE_NONE := "/interaction_profiles/none"
+
 # 事件 -> [amplitude, duration]
 # 注：confirm_a/confirm_b 通常通过 fire_confirm() 一起触发
 const PROFILES: Dictionary = {
@@ -102,10 +106,19 @@ func should_use_controller_feedback(controller: XRController3D) -> bool:
 		# SOURCE_UNKNOWN：不支持 XR_EXT_hand_tracking_data_source 的 runtime
 		# （如 Pico OS）不上报 source。Pico 在握着手柄时也会上报光学手部
 		# 数据，所以不能一概当裸手——改由位姿的 interaction profile 判断：
-		# 真实手柄 profile（如 pico4_controller）说明手里握着手柄；profile
-		# 为空说明位姿不是手柄驱动的，按裸手处理。
-		return not profile.is_empty()
+		# 真实手柄 profile（如 pico4_controller）说明手里握着手柄；没有绑定
+		# profile 说明位姿不是手柄驱动的，按裸手处理。
+		#
+		# 注意：Godot 不会用空串表示「无 profile」，而是 INTERACTION_PROFILE_NONE
+		# （"/interaction_profiles/none"）——建 tracker 时就是这个值，profile RID
+		# 变 null 时也会重置回它（openxr_interface.cpp）。只判 is_empty() 永远
+		# 匹配不到，会把「未绑定」误判成实体手柄。
+		return not _profile_is_unbound(profile)
 	return true
+
+
+func _profile_is_unbound(profile: String) -> bool:
+	return profile.is_empty() or profile == INTERACTION_PROFILE_NONE
 
 
 func _pose_profile_for_controller(controller: XRController3D) -> String:
