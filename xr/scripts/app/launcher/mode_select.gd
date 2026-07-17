@@ -18,6 +18,8 @@ const MODE_VR := "vr"
 const MODE_MUJOCO := "mujoco"
 const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
+const HEAD_TRACKING_WAIT_FRAMES := 30
+const FALLBACK_EYE_HEIGHT := 1.5
 const LAUNCHER_CARDS_CONFIGURED_FEATURE := "operator_launcher_cards_configured"
 const EXIT_CARD_FEATURE := "operator_launcher_card_exit"
 const DEFAULT_LAUNCHER_CARD_MODES := [MODE_EGO_CAPTURE, MODE_EXIT]
@@ -94,8 +96,15 @@ func _ready() -> void:
 
 	if _start_xr:
 		_start_xr.xr_started.connect(_on_xr_started)
-		if _start_xr.has_signal("xr_failed"):
-			_start_xr.xr_failed.connect(_on_xr_failed)
+		if _start_xr.has_signal("xr_failed_to_initialize"):
+			_start_xr.xr_failed_to_initialize.connect(_on_xr_failed)
+		# XRToolsStartXR keeps its active state in a static flag. On a scene
+		# transition the replacement StartXR node does not receive another
+		# focused-state signal, so waiting only for xr_started always falls into
+		# the 2-second fallback. Finish launcher setup immediately when the
+		# existing OpenXR session is already active.
+		if XRToolsStartXR.is_xr_active():
+			call_deferred("_on_xr_started")
 	else:
 		call_deferred("_on_xr_started")
 
@@ -290,10 +299,14 @@ func _on_xr_started() -> void:
 		return
 	_xr_started = true
 	_configure_passthrough()
-	# Wait one frame so the OpenXR runtime has a chance to push its first
-	# tracked head pose into XRCamera3D — otherwise the anchor snapshot
-	# would still be the identity transform from before tracking began.
-	await get_tree().process_frame
+	# A replacement scene can enter while the OpenXR session is already active.
+	# Quest usually updates the new XRCamera3D immediately; PICO can take a few
+	# frames. Wait for the actual head XRPose instead of inferring validity from
+	# camera height (PICO LOCAL space may legitimately report y < 0.5 m).
+	for _frame in range(HEAD_TRACKING_WAIT_FRAMES):
+		await get_tree().process_frame
+		if _head_pose_is_tracked():
+			break
 	_anchor_cards_to_camera()
 	for entry in _cards:
 		entry.quad.visible = true
@@ -336,22 +349,33 @@ func _anchor_cards_to_camera() -> void:
 
 
 func _compute_launch_anchor() -> Transform3D:
-	# If XR hasn't reported a real head pose yet (origin still at floor),
-	# fall back to eye-height at origin facing -Z so the launcher is at
-	# least somewhere reasonable instead of buried in the floor.
-	const FALLBACK_EYE_HEIGHT := 1.5
 	if _camera == null:
+		return _launch_anchor_from_camera(Transform3D.IDENTITY, false)
+	return _launch_anchor_from_camera(_camera.transform, _head_pose_is_tracked())
+
+
+static func _launch_anchor_from_camera(camera_xf: Transform3D, head_pose_tracked: bool) -> Transform3D:
+	# Height is not a tracking-validity signal. Quest STAGE space normally has
+	# floor-relative eye height, while PICO may reuse LOCAL space after a scene
+	# change and report a valid head pose near y=0. Replacing every y<0.5 value
+	# with 1.5 put the world-locked launcher more than a metre above PICO users.
+	if not head_pose_tracked:
 		return Transform3D(Basis.IDENTITY, Vector3(0.0, FALLBACK_EYE_HEIGHT, 0.0))
-	var camera_xf := _camera.transform
 	var origin := camera_xf.origin
-	if origin.y < 0.5:
-		origin.y = FALLBACK_EYE_HEIGHT
 	# Extract yaw only — pitch / roll would tilt the card row, which we
 	# don't want for a static menu standing in front of the operator.
 	# `basis.get_euler()` returns (pitch, yaw, roll); we rebuild a basis
 	# from yaw alone so the launcher always stands upright.
 	var yaw := camera_xf.basis.get_euler().y
 	return Transform3D(Basis.from_euler(Vector3(0.0, yaw, 0.0)), origin)
+
+
+func _head_pose_is_tracked() -> bool:
+	var tracker := XRServer.get_tracker(&"head") as XRPositionalTracker
+	if tracker == null or not tracker.has_pose(&"default"):
+		return false
+	var pose := tracker.get_pose(&"default")
+	return pose != null and pose.get_has_tracking_data()
 
 
 func _wire_card_ui(entry: CardEntry) -> void:
