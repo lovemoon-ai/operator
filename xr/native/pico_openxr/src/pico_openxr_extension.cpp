@@ -75,10 +75,12 @@ PicoOpenXRExtension::PicoOpenXRExtension() :
 	request_extensions[XR_PICO_MOTION_TRACKING_EXTENSION_NAME] = &motion_tracking_ext;
 	request_extensions[XR_PICO_BODY_TRACKING2_EXTENSION_NAME] = &pico_body_tracking2_ext;
 	request_extensions[XR_BD_BODY_TRACKING_EXTENSION_NAME] = &bd_body_tracking_ext;
+	request_extensions[XR_EXT_HAND_TRACKING_EXTENSION_NAME] = &hand_tracking_ext;
 }
 
 PicoOpenXRExtension::~PicoOpenXRExtension() {
 	stop_camera_image_capture();
+	destroy_hand_trackers();
 	destroy_body_tracker();
 }
 
@@ -89,8 +91,8 @@ void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("poll_camera_image_frames"), &PicoOpenXRExtension::poll_camera_image_frames);
 	ClassDB::bind_method(D_METHOD("bind_camera_frame_sink", "sink"), &PicoOpenXRExtension::bind_camera_frame_sink);
 	ClassDB::bind_method(D_METHOD("pump_camera_frames_to_sink"), &PicoOpenXRExtension::pump_camera_frames_to_sink);
-	ClassDB::bind_method(D_METHOD("start_native_recording_pipeline", "codec", "bitrate", "xr_time_to_godot_ns", "left_frame_index_path", "right_frame_index_path"),
-			&PicoOpenXRExtension::start_native_recording_pipeline, DEFVAL("hevc"), DEFVAL(8000000), DEFVAL(0), DEFVAL(""), DEFVAL(""));
+	ClassDB::bind_method(D_METHOD("start_native_recording_pipeline", "codec", "bitrate", "xr_time_to_godot_ns", "left_frame_index_path", "right_frame_index_path", "rgb_tracking_sample_metadata", "rgb_tracking_sample_head", "rgb_tracking_sample_hands", "tracking_coordinate_space"),
+			&PicoOpenXRExtension::start_native_recording_pipeline, DEFVAL("hevc"), DEFVAL(8000000), DEFVAL(0), DEFVAL(""), DEFVAL(""), DEFVAL(true), DEFVAL(true), DEFVAL(true), DEFVAL("openxr_play_space"));
 	ClassDB::bind_method(D_METHOD("is_native_recording_pipeline_running"), &PicoOpenXRExtension::is_native_recording_pipeline_running);
 	ClassDB::bind_method(D_METHOD("get_native_recording_pipeline_error"), &PicoOpenXRExtension::get_native_recording_pipeline_error);
 	ClassDB::bind_method(D_METHOD("pop_native_recording_metrics"), &PicoOpenXRExtension::pop_native_recording_metrics);
@@ -128,14 +130,16 @@ void PicoOpenXRExtension::_on_instance_created(uint64_t p_instance) {
 	function_resolution_attempted = false;
 	resolve_functions();
 	UtilityFunctions::print("PicoOpenXRExtension instance created; XR_EXT_future=", future_ext,
-			" XR_PICO_camera_image=", camera_image_ext,
-			" XR_PICO_motion_tracking=", motion_tracking_ext,
-			" XR_PICO_body_tracking2=", pico_body_tracking2_ext,
-			" XR_BD_body_tracking=", bd_body_tracking_ext);
+				" XR_PICO_camera_image=", camera_image_ext,
+				" XR_PICO_motion_tracking=", motion_tracking_ext,
+				" XR_PICO_body_tracking2=", pico_body_tracking2_ext,
+				" XR_BD_body_tracking=", bd_body_tracking_ext,
+				" XR_EXT_hand_tracking=", hand_tracking_ext);
 }
 
 void PicoOpenXRExtension::_on_instance_destroyed() {
 	stop_camera_image_capture();
+	destroy_hand_trackers();
 	destroy_body_tracker();
 	instance = nullptr;
 	session = nullptr;
@@ -168,6 +172,9 @@ void PicoOpenXRExtension::_on_instance_destroyed() {
 	xrLocateBodyJointsBD_ptr = nullptr;
 	xrStartBodyTrackingCalibrationAppPICO_ptr = nullptr;
 	xrGetBodyTrackingStatePICO_ptr = nullptr;
+	xrCreateHandTrackerEXT_ptr = nullptr;
+	xrDestroyHandTrackerEXT_ptr = nullptr;
+	xrLocateHandJointsEXT_ptr = nullptr;
 }
 
 void PicoOpenXRExtension::_on_session_created(uint64_t p_session) {
@@ -181,6 +188,7 @@ void PicoOpenXRExtension::_on_session_created(uint64_t p_session) {
 
 void PicoOpenXRExtension::_on_session_destroyed() {
 	stop_camera_image_capture();
+	destroy_hand_trackers();
 	destroy_body_tracker();
 	session = nullptr;
 	motion_tracker_ids.clear();
@@ -551,9 +559,23 @@ PackedInt32Array PicoOpenXRExtension::pump_camera_frames_to_sink() {
 }
 
 bool PicoOpenXRExtension::start_native_recording_pipeline(String codec, int bitrate,
-		int64_t xr_time_to_godot_ns, String left_frame_index_path, String right_frame_index_path) {
+			int64_t xr_time_to_godot_ns, String left_frame_index_path, String right_frame_index_path,
+			bool rgb_tracking_sample_metadata, bool rgb_tracking_sample_head, bool rgb_tracking_sample_hands,
+			String tracking_coordinate_space) {
 	if (!camera_image_capture_active || !resolve_functions() || !has_camera_image_functions()) {
 		return false;
+	}
+	const bool needs_head_tracking = rgb_tracking_sample_metadata && rgb_tracking_sample_head;
+	const bool needs_hand_tracking = rgb_tracking_sample_metadata && rgb_tracking_sample_hands;
+	if (needs_head_tracking || needs_hand_tracking) {
+		native_recording_pipeline.stop();
+		destroy_native_recording_view_space();
+		if (!ensure_native_recording_view_space()) {
+			return false;
+		}
+		if (needs_hand_tracking && !ensure_hand_trackers()) {
+			return false;
+		}
 	}
 	NativeRecordingPipeline::Config config;
 	config.session = current_session();
@@ -571,9 +593,22 @@ bool PicoOpenXRExtension::start_native_recording_pipeline(String codec, int bitr
 	const CharString right_path_utf8 = right_frame_index_path.utf8();
 	config.left_frame_index_path = std::string(left_path_utf8.get_data());
 	config.right_frame_index_path = std::string(right_path_utf8.get_data());
+	config.rgb_tracking_sample_metadata = rgb_tracking_sample_metadata;
+	config.rgb_tracking_sample_head = rgb_tracking_sample_head;
+	config.rgb_tracking_sample_hands = rgb_tracking_sample_hands;
+	const CharString coordinate_space_utf8 = tracking_coordinate_space.strip_edges().utf8();
+	config.tracking_coordinate_space = coordinate_space_utf8.length() > 0
+			? std::string(coordinate_space_utf8.get_data())
+			: std::string("openxr_play_space");
+	config.base_space = current_play_space();
+	config.view_space = native_recording_view_space;
+	config.left_hand_tracker = left_hand_tracker;
+	config.right_hand_tracker = right_hand_tracker;
 	config.acquire_camera = xrAcquireCameraImagePICO_ptr;
 	config.get_camera_data = xrGetCameraImageDataPICO_ptr;
 	config.release_camera = xrReleaseCameraImagePICO_ptr;
+	config.locate_space = xrLocateSpace_ptr;
+	config.locate_hand_joints = xrLocateHandJointsEXT_ptr;
 	return native_recording_pipeline.start(config);
 }
 
@@ -601,6 +636,7 @@ void PicoOpenXRExtension::stop_camera_image_capture() {
 	// Join native OpenXR users before destroying camera sessions, hand
 	// trackers, play space, or the muxer writer they feed.
 	native_recording_pipeline.stop();
+	destroy_native_recording_view_space();
 	stop_camera_image_eye(camera_right);
 	stop_camera_image_eye(camera_left);
 	reset_camera_image_state();
@@ -867,6 +903,11 @@ bool PicoOpenXRExtension::resolve_functions() {
 		xrStartBodyTrackingCalibrationAppPICO_ptr = reinterpret_cast<PFN_xrStartBodyTrackingCalibrationAppPICO>(api->get_instance_proc_addr("xrStartBodyTrackingCalibrationAppPICO"));
 		xrGetBodyTrackingStatePICO_ptr = reinterpret_cast<PFN_xrGetBodyTrackingStatePICO>(api->get_instance_proc_addr("xrGetBodyTrackingStatePICO"));
 	}
+	if (hand_tracking_ext) {
+		xrCreateHandTrackerEXT_ptr = reinterpret_cast<PFN_xrCreateHandTrackerEXT>(api->get_instance_proc_addr("xrCreateHandTrackerEXT"));
+		xrDestroyHandTrackerEXT_ptr = reinterpret_cast<PFN_xrDestroyHandTrackerEXT>(api->get_instance_proc_addr("xrDestroyHandTrackerEXT"));
+		xrLocateHandJointsEXT_ptr = reinterpret_cast<PFN_xrLocateHandJointsEXT>(api->get_instance_proc_addr("xrLocateHandJointsEXT"));
+	}
 	// Core OpenXR reference-space + locate. Resolved unconditionally so the
 	// ad-hoc head-pose probe is always available.
 	xrCreateReferenceSpace_ptr = reinterpret_cast<PFN_xrCreateReferenceSpace>(api->get_instance_proc_addr("xrCreateReferenceSpace"));
@@ -898,6 +939,77 @@ bool PicoOpenXRExtension::has_camera_image_functions() const {
 			xrAcquireCameraImagePICO_ptr &&
 			xrGetCameraImageDataPICO_ptr &&
 			xrReleaseCameraImagePICO_ptr;
+}
+
+bool PicoOpenXRExtension::ensure_native_recording_view_space() {
+	if (native_recording_view_space) {
+		return true;
+	}
+	if (!session || !xrCreateReferenceSpace_ptr) {
+		return false;
+	}
+	XrReferenceSpaceCreateInfo create_info{
+		XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
+		nullptr,
+		XR_REFERENCE_SPACE_TYPE_VIEW,
+		{ { 0.0f, 0.0f, 0.0f, 1.0f }, { 0.0f, 0.0f, 0.0f } },
+	};
+	const XrResult result = xrCreateReferenceSpace_ptr(session, &create_info, &native_recording_view_space);
+	if (XR_FAILED(result) || !native_recording_view_space) {
+		native_recording_view_space = nullptr;
+		return false;
+	}
+	return true;
+}
+
+void PicoOpenXRExtension::destroy_native_recording_view_space() {
+	if (native_recording_view_space && xrDestroySpace_ptr) {
+		xrDestroySpace_ptr(native_recording_view_space);
+	}
+	native_recording_view_space = nullptr;
+}
+
+bool PicoOpenXRExtension::ensure_hand_trackers() {
+	if (left_hand_tracker != XR_NULL_HAND_TRACKER_EXT && right_hand_tracker != XR_NULL_HAND_TRACKER_EXT) {
+		return true;
+	}
+	if (!resolve_functions() || !hand_tracking_ext || !xrCreateHandTrackerEXT_ptr ||
+			!xrDestroyHandTrackerEXT_ptr || !xrLocateHandJointsEXT_ptr || !current_session()) {
+		return false;
+	}
+	destroy_hand_trackers();
+	XrHandTrackerCreateInfoEXT left_info{
+		XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT,
+		nullptr,
+		XR_HAND_LEFT_EXT,
+		XR_HAND_JOINT_SET_DEFAULT_EXT,
+	};
+	XrHandTrackerCreateInfoEXT right_info{
+		XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT,
+		nullptr,
+		XR_HAND_RIGHT_EXT,
+		XR_HAND_JOINT_SET_DEFAULT_EXT,
+	};
+	XrResult left_result = xrCreateHandTrackerEXT_ptr(current_session(), &left_info, &left_hand_tracker);
+	XrResult right_result = xrCreateHandTrackerEXT_ptr(current_session(), &right_info, &right_hand_tracker);
+	if (XR_FAILED(left_result) || XR_FAILED(right_result) ||
+			left_hand_tracker == XR_NULL_HAND_TRACKER_EXT ||
+			right_hand_tracker == XR_NULL_HAND_TRACKER_EXT) {
+		destroy_hand_trackers();
+		return false;
+	}
+	return true;
+}
+
+void PicoOpenXRExtension::destroy_hand_trackers() {
+	if (left_hand_tracker != XR_NULL_HAND_TRACKER_EXT && xrDestroyHandTrackerEXT_ptr) {
+		xrDestroyHandTrackerEXT_ptr(left_hand_tracker);
+	}
+	if (right_hand_tracker != XR_NULL_HAND_TRACKER_EXT && xrDestroyHandTrackerEXT_ptr) {
+		xrDestroyHandTrackerEXT_ptr(right_hand_tracker);
+	}
+	left_hand_tracker = XR_NULL_HAND_TRACKER_EXT;
+	right_hand_tracker = XR_NULL_HAND_TRACKER_EXT;
 }
 
 bool PicoOpenXRExtension::wait_future_until_ready(XrFutureEXT future, XrResult &poll_result, int timeout_ms) {
@@ -1387,6 +1499,9 @@ bool PicoOpenXRExtension::start_camera_image_eye(CameraImageEyeState &eye_state,
 	};
 	const XrResult extrinsics_result = xrGetCameraExtrinsicsPICO_ptr(eye_state.capture_session, &extrinsics);
 	eye_state.metadata = camera_metadata_from_session(eye_state, intrinsics_result, intrinsics, extrinsics_result, extrinsics);
+	eye_state.intrinsics = intrinsics;
+	eye_state.extrinsics = extrinsics;
+	eye_state.calibration_valid = XR_SUCCEEDED(intrinsics_result) && XR_SUCCEEDED(extrinsics_result);
 
 	XrCameraCaptureBeginInfoPICO begin_info{
 		XR_TYPE_CAMERA_CAPTURE_BEGIN_INFO_PICO,
@@ -1420,6 +1535,9 @@ void PicoOpenXRExtension::stop_camera_image_eye(CameraImageEyeState &eye_state) 
 	eye_state.fps = 0;
 	eye_state.active = false;
 	eye_state.metadata.clear();
+	eye_state.calibration_valid = false;
+	eye_state.intrinsics = XrCameraIntrinsicsPICO{};
+	eye_state.extrinsics = XrCameraExtrinsicsPICO{};
 }
 
 Dictionary PicoOpenXRExtension::camera_metadata_from_session(const CameraImageEyeState &eye_state, XrResult intrinsics_result, const XrCameraIntrinsicsPICO &intrinsics, XrResult extrinsics_result, const XrCameraExtrinsicsPICO &extrinsics) const {
