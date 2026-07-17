@@ -196,6 +196,8 @@ func _build_detail(split: HBoxContainer) -> void:
 	_detail_scroll = ScrollContainer.new()
 	_detail_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 	_detail_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	# Keep a tapped field on screen once the keyboard claims its space.
+	_detail_scroll.follow_focus = true
 	_detail_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_detail_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	detail_margin.add_child(_detail_scroll)
