@@ -22,12 +22,23 @@ const HAND_JOINT_INDEX_FINGER_TIP := 10
 # Trackers driven by XR_EXT_hand_interaction are bare hands even though they
 # look like active XRController3D poses to Godot.
 const HAND_INTERACTION_PROFILE_HINT := "hand_interaction"
+# Godot reports "no interaction profile" as this literal string, NOT as an empty
+# string: OpenXRInterface seeds every tracker with set_tracker_profile(
+# INTERACTION_PROFILE_NONE) and resets it to the same value whenever the profile
+# RID goes null (openxr_interface.cpp, INTERACTION_PROFILE_NONE =
+# "/interaction_profiles/none"). An unbound tracker is neither a hand nor a
+# controller, so it must be excluded explicitly -- an is_empty() test never
+# matches it and silently classifies it as a physical controller.
+const INTERACTION_PROFILE_NONE := "/interaction_profiles/none"
 
-# On-device interaction debug log. Release builds keep user:// in private app
-# storage; on a rooted development headset pull it from
-# /data/user/0/com.lovemoon.operator/files/interaction_debug.log.
-const DEBUG_LOG_ENABLED := true
-const DEBUG_LOG_PATH := "user://interaction_debug.log"
+# On-device interaction debug log. OPT-IN ONLY — it records a snapshot every
+# second, so it must not run (or write to shared storage) on a normal release
+# build. Enable it for a diagnostic session with:
+#   adb shell am start -n <pkg>/<activity> --es operator.interaction_debug 1
+# then read it back without root or a debuggable build via:
+#   adb pull /sdcard/Android/data/com.lovemoon.operator/files/interaction_debug.log
+# Falls back to user:// (private app storage) off Android.
+const DEBUG_LOG_FILENAME := "interaction_debug.log"
 const DEBUG_LOG_MAX_BYTES := 262144
 const DEBUG_LOG_SNAPSHOT_INTERVAL_S := 1.0
 
@@ -36,8 +47,16 @@ var busy := false
 
 var _last_controller_input_msec := 0
 var _debug_log_accum_s := 0.0
+var _debug_log_path_cache := ""
+var _debug_log_enabled := false
 
 var _mode_override := ""
+# Last pose action that actually carried tracking data, per tracker. Used to
+# hold a stable selection while tracking is momentarily lost.
+var _preferred_pose_cache := {}
+# Instance id of the XRPositionalTracker each cache entry was derived from, so
+# the cache can be dropped when the runtime rebuilds the tracker.
+var _pose_cache_tracker_ids := {}
 var _router: Node
 var _pointer_visual: Node3D
 var _origin: XROrigin3D
@@ -54,17 +73,39 @@ var _pico_head_probe_bridge: Object
 
 
 func _ready() -> void:
+	_debug_log_enabled = _interaction_debug_requested()
+	if _debug_log_enabled:
+		print("[Operator] Interaction debug log: %s" % _debug_log_path())
 	_router = SettingsInteractionRouterScript.new()
 	_router.name = "OperatorInteractionRouter"
 	add_child(_router)
 	set_process(true)
 
 
+func _interaction_debug_requested() -> bool:
+	## Mirrors the launcher's argument handling: `--es operator.interaction_debug 1`
+	## arrives as either a user arg or a plain cmdline arg depending on the
+	## Android launch path.
+	var all_args: Array = []
+	all_args.append_array(OS.get_cmdline_user_args())
+	all_args.append_array(OS.get_cmdline_args())
+	for raw in all_args:
+		var arg := String(raw).strip_edges()
+		if arg == "--interaction-debug":
+			return true
+		for prefix in ["operator.interaction_debug=", "operator_interaction_debug=",
+				"--interaction-debug="]:
+			if arg.begins_with(prefix):
+				var value := arg.substr(prefix.length()).strip_edges().to_lower()
+				return value in ["1", "true", "yes", "on"]
+	return false
+
+
 func _process(delta: float) -> void:
 	_sync_rig()
 	_update_mode()
 	_update_targets()
-	if DEBUG_LOG_ENABLED:
+	if _debug_log_enabled:
 		_debug_log_accum_s += delta
 		if _debug_log_accum_s >= DEBUG_LOG_SNAPSHOT_INTERVAL_S:
 			_debug_log_accum_s = 0.0
@@ -183,19 +224,75 @@ func _sync_rig() -> void:
 func _preferred_pointer_pose(tracker_name: StringName) -> StringName:
 	var tracker := XRServer.get_tracker(tracker_name)
 	if not (tracker is XRPositionalTracker):
-		return &"aim"
+		return _cached_pointer_pose(tracker_name)
 	var positional := tracker as XRPositionalTracker
-	# Quest publishes both actions. Pico 4 Ultra only publishes `default` when
-	# default_pose and aim_pose are suggested for the same /input/aim/pose path.
-	# Prefer the explicit aim action when it exists, then use the equivalent
-	# default action for physical-controller profiles.
-	if positional.has_pose(&"aim"):
+	_reset_pose_cache_if_tracker_replaced(tracker_name, positional)
+
+	# While a tracker has no interaction profile, OpenXRInterface::handle_tracker()
+	# early-returns (`if (p_tracker->interaction_profile.is_null()) return;`), so
+	# it neither refreshes nor invalidates any XRPose. Every has_tracking_data
+	# keeps whatever value it last had — frozen, not live. Re-deriving a selection
+	# from those values would latch onto a pose that is stale but still reads as
+	# tracked, so hold the last real choice until the runtime rebinds a profile.
+	if _profile_is_none(String(positional.profile)):
+		return _cached_pointer_pose(tracker_name)
+
+	# Select on LIVE tracking data only. Deliberately NOT on has_pose(), and
+	# deliberately NOT gated on the profile string:
+	#
+	# - has_pose() is a latch. XRPositionalTracker only ever inserts into its
+	#   pose map; nothing in the engine erases an entry (no poses.erase/clear
+	#   exists), and invalidate_pose() keeps the entry while only clearing
+	#   has_tracking_data. So once `aim` has been published once it reports
+	#   has_pose() == true forever. (Verified against Godot 4.5-stable.)
+	# - The profile string cannot gate the `default` fallback either. If the
+	#   runtime keeps reporting a hand profile after the user picks up a
+	#   controller, a profile-gated fallback would refuse `default` and hand back
+	#   a dead `aim`. Live pose data is the only signal that stays correct when
+	#   the profile is wrong or late.
+	#
+	# `aim` still wins whenever it is live, so a hand that publishes both poses
+	# keeps its pointing ray; `default` is only reached once `aim` is genuinely
+	# dead, and the hand path then falls back to _hand_joint_ray() in the router.
+	#
+	# NOTE: which poses Pico actually publishes per profile (the older comment
+	# above claims controllers only get `default`) is inherited from that comment
+	# and has NOT been measured on device. This selection deliberately does not
+	# depend on that claim being true — it just takes whichever pose is live.
+	if _pose_is_tracked(positional, &"aim"):
+		_preferred_pose_cache[tracker_name] = &"aim"
 		return &"aim"
-	var profile := String(positional.profile)
-	if profile.find(HAND_INTERACTION_PROFILE_HINT) == -1 \
-			and positional.has_pose(&"default"):
+	if _pose_is_tracked(positional, &"default"):
+		_preferred_pose_cache[tracker_name] = &"default"
 		return &"default"
-	return &"aim"
+	# Nothing is tracked right now (idle controller, hand out of view). Keep the
+	# last known good pose so the selection does not flap while tracking is
+	# reacquired.
+	return _cached_pointer_pose(tracker_name)
+
+
+func _cached_pointer_pose(tracker_name: StringName) -> StringName:
+	return _preferred_pose_cache.get(tracker_name, &"aim")
+
+
+func _reset_pose_cache_if_tracker_replaced(
+		tracker_name: StringName,
+		positional: XRPositionalTracker
+) -> void:
+	# An action-map reload or uninitialize() runs free_trackers(), which destroys
+	# and rebuilds the XRControllerTracker — the one path that really does reset
+	# has_pose(). The rebuilt tracker has no poses yet, so a cached selection from
+	# the previous instance would be handed out instead of being re-derived.
+	var instance_id := positional.get_instance_id()
+	if _pose_cache_tracker_ids.get(tracker_name) == instance_id:
+		return
+	_pose_cache_tracker_ids[tracker_name] = instance_id
+	_preferred_pose_cache.erase(tracker_name)
+
+
+func _pose_is_tracked(positional: XRPositionalTracker, pose_name: StringName) -> bool:
+	var pose := positional.get_pose(pose_name)
+	return pose != null and pose.has_tracking_data
 
 
 func _ensure_pointer_visual() -> void:
@@ -243,7 +340,7 @@ func _update_mode() -> void:
 	release_pointer()
 	input_mode_changed.emit(current_mode)
 	print("[Operator] Global interaction mode: %s" % current_mode)
-	if DEBUG_LOG_ENABLED:
+	if _debug_log_enabled:
 		_append_debug_line("%d MODE -> %s" % [Time.get_ticks_msec(), current_mode])
 
 
@@ -262,18 +359,24 @@ func _detect_mode() -> String:
 	# what previously disabled the controller.
 	if controller_input:
 		return MODE_CONTROLLERS
+	# A physical-controller interaction profile on EITHER side means a controller
+	# is in hand, and is authoritative even while the runtime is reacquiring its
+	# pose (PICO 4 Ultra keeps publishing button actions during that window).
+	#
+	# This is checked BEFORE the bare-hand profile test on purpose. The profile is
+	# per top-level path, so picking controllers up one at a time — the natural
+	# motion — leaves the still-bare hand reporting hand_interaction while the
+	# other side already reports pico4_controller. Testing hands first let that
+	# one bare hand pin the whole app to MODE_HANDS and starved the live
+	# controller, until the user happened to press a trigger.
+	if _tracker_profile_is_controller(_left_pointer) \
+			or _tracker_profile_is_controller(_right_pointer):
+		return MODE_CONTROLLERS
 	# XR_EXT_hand_interaction is an unambiguous bare-hand profile. It is checked
 	# before generic pose tracking because Godot exposes it through the same
 	# left_hand/right_hand XRController3D nodes.
 	if _tracker_profile_is_hand(_left_pointer) or _tracker_profile_is_hand(_right_pointer):
 		return MODE_HANDS
-	# An active physical-controller profile is authoritative even while the
-	# runtime is reacquiring its pose. PICO 4 Ultra continues to publish button
-	# actions during that window; requiring pose tracking first made it
-	# impossible for those actions to switch the router back to controllers.
-	if _tracker_profile_is_controller(_left_pointer) \
-			or _tracker_profile_is_controller(_right_pointer):
-		return MODE_CONTROLLERS
 	# A live non-hand controller pose remains in controller mode without a time
 	# limit. This prevents the pointer from disappearing after an idle timeout.
 	if controller_tracking:
@@ -356,7 +459,13 @@ func _tracker_profile_is_hand(pointer: XRController3D) -> bool:
 
 func _tracker_profile_is_controller(pointer: XRController3D) -> bool:
 	var profile := _tracker_profile(pointer)
-	return not profile.is_empty() and profile.find(HAND_INTERACTION_PROFILE_HINT) == -1
+	if profile.is_empty() or _profile_is_none(profile):
+		return false
+	return profile.find(HAND_INTERACTION_PROFILE_HINT) == -1
+
+
+func _profile_is_none(profile: String) -> bool:
+	return profile == INTERACTION_PROFILE_NONE
 
 
 func _write_debug_snapshot() -> void:
@@ -388,10 +497,11 @@ func _pointer_debug(pointer: XRController3D) -> String:
 	if pointer == null:
 		return "null"
 	var profile := _tracker_profile(pointer)
-	return "act=%d trk=%d prof=%s trig=%.2f poses=%s" % [
+	return "act=%d trk=%d prof=%s sel=%s trig=%.2f poses=%s" % [
 		int(pointer.get_is_active()),
 		int(pointer.get_has_tracking_data()),
 		profile.get_file() if not profile.is_empty() else "-",
+		String(pointer.pose),
 		pointer.get_float(&"trigger"),
 		_tracker_pose_debug(pointer),
 	]
@@ -427,18 +537,33 @@ func _hand_debug(tracker_path: StringName) -> String:
 	return "data src=%d pinch=%.3f" % [hand.hand_tracking_source, _pinch_distance(hand)]
 
 
+func _debug_log_path() -> String:
+	if not _debug_log_path_cache.is_empty():
+		return _debug_log_path_cache
+	_debug_log_path_cache = "user://".path_join(DEBUG_LOG_FILENAME)
+	if OS.get_name() == "Android":
+		# shared_storage = false resolves to getExternalFilesDir(), i.e.
+		# /sdcard/Android/data/<package>/files — readable over adb without root
+		# and without a debuggable build, unlike user:// (private app storage).
+		var external := OS.get_system_dir(OS.SYSTEM_DIR_DESKTOP, false)
+		if not external.is_empty():
+			_debug_log_path_cache = external.path_join(DEBUG_LOG_FILENAME)
+	return _debug_log_path_cache
+
+
 func _append_debug_line(line: String) -> void:
+	var path := _debug_log_path()
 	var file: FileAccess = null
-	if FileAccess.file_exists(DEBUG_LOG_PATH):
-		file = FileAccess.open(DEBUG_LOG_PATH, FileAccess.READ_WRITE)
+	if FileAccess.file_exists(path):
+		file = FileAccess.open(path, FileAccess.READ_WRITE)
 		if file != null:
 			if file.get_length() > DEBUG_LOG_MAX_BYTES:
 				file.close()
-				file = FileAccess.open(DEBUG_LOG_PATH, FileAccess.WRITE)
+				file = FileAccess.open(path, FileAccess.WRITE)
 			else:
 				file.seek_end()
 	else:
-		file = FileAccess.open(DEBUG_LOG_PATH, FileAccess.WRITE)
+		file = FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		return
 	file.store_line(line)
