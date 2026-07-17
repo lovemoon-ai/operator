@@ -79,12 +79,23 @@ func _ready() -> void:
 
 
 func _exit_tree() -> void:
+	request_shutdown()
+	if _thread and _thread.is_started():
+		_thread.wait_to_finish()
+
+
+## Signal the worker before scene teardown reaches _exit_tree(). Scene changes
+## are synchronous on the main thread, so waiting there while an HTTP poll is
+## still using its full timeout makes returning from Ego look frozen.
+func request_shutdown() -> void:
+	if _mutex == null:
+		_exit_requested = true
+		return
 	_mutex.lock()
 	_exit_requested = true
 	_mutex.unlock()
-	_wake.post()
-	if _thread and _thread.is_started():
-		_thread.wait_to_finish()
+	if _wake != null:
+		_wake.post()
 
 
 ## Pause the worker while recording is active. The current PATCH (if any)
@@ -398,6 +409,8 @@ func _artifact_upload_order(artifacts: Dictionary) -> Array:
 
 
 func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bool:
+	if _shutdown_requested():
+		return false
 	var session_id := str(job.get("session_id", ""))
 	if _is_cancel_requested(session_id):
 		return false
@@ -642,6 +655,8 @@ func _connect_to(job: Dictionary) -> HTTPClient:
 
 
 func _connect_to_url(url: String) -> HTTPClient:
+	if _shutdown_requested():
+		return null
 	var parsed := _parse_url(url)
 	if parsed.is_empty():
 		return null
@@ -654,12 +669,12 @@ func _connect_to_url(url: String) -> HTTPClient:
 
 	var deadline_ms: int = Time.get_ticks_msec() + int(HTTP_CONNECT_TIMEOUT_S * 1000.0)
 	while true:
+		if _http_wait_should_abort(deadline_ms):
+			return null
 		var status := http.get_status()
 		if status == HTTPClient.STATUS_CONNECTED:
 			return http
 		if status == HTTPClient.STATUS_CANT_CONNECT or status == HTTPClient.STATUS_CANT_RESOLVE or status == HTTPClient.STATUS_DISCONNECTED or status == HTTPClient.STATUS_TLS_HANDSHAKE_ERROR:
-			return null
-		if Time.get_ticks_msec() > deadline_ms:
 			return null
 		http.poll()
 		OS.delay_msec(20)
@@ -671,12 +686,12 @@ func _connect_to_url(url: String) -> HTTPClient:
 func _drive_http(http: HTTPClient) -> int:
 	var deadline_ms: int = Time.get_ticks_msec() + int(HTTP_POLL_TIMEOUT_S * 1000.0)
 	while true:
+		if _http_wait_should_abort(deadline_ms):
+			return -1
 		var status := http.get_status()
 		if status == HTTPClient.STATUS_BODY or status == HTTPClient.STATUS_CONNECTED:
 			return int(http.get_response_code())
 		if status == HTTPClient.STATUS_DISCONNECTED or status == HTTPClient.STATUS_CONNECTION_ERROR or status == HTTPClient.STATUS_CANT_RESOLVE or status == HTTPClient.STATUS_CANT_CONNECT or status == HTTPClient.STATUS_TLS_HANDSHAKE_ERROR:
-			return -1
-		if Time.get_ticks_msec() > deadline_ms:
 			return -1
 		http.poll()
 		OS.delay_msec(5)
@@ -688,23 +703,36 @@ func _drain_body(http: HTTPClient) -> void:
 		return
 	var deadline_ms: int = Time.get_ticks_msec() + int(HTTP_POLL_TIMEOUT_S * 1000.0)
 	while http.get_status() == HTTPClient.STATUS_BODY:
+		if _http_wait_should_abort(deadline_ms):
+			return
 		http.poll()
 		var _chunk: PackedByteArray = http.read_response_body_chunk()
-		if Time.get_ticks_msec() > deadline_ms:
-			return
 
 
 func _body_text(http: HTTPClient) -> String:
 	var buf := PackedByteArray()
 	var deadline_ms: int = Time.get_ticks_msec() + int(HTTP_POLL_TIMEOUT_S * 1000.0)
 	while http.get_status() == HTTPClient.STATUS_BODY:
+		if _http_wait_should_abort(deadline_ms):
+			break
 		http.poll()
 		var chunk: PackedByteArray = http.read_response_body_chunk()
 		if chunk.size() > 0:
 			buf.append_array(chunk)
-		if Time.get_ticks_msec() > deadline_ms:
-			break
 	return buf.get_string_from_utf8().substr(0, 200)
+
+
+func _http_wait_should_abort(deadline_ms: int) -> bool:
+	return _shutdown_requested() or Time.get_ticks_msec() > deadline_ms
+
+
+func _shutdown_requested() -> bool:
+	if _mutex == null:
+		return _exit_requested
+	_mutex.lock()
+	var requested := _exit_requested
+	_mutex.unlock()
+	return requested
 
 
 func _response_header(http: HTTPClient, name_lower: String) -> String:
@@ -906,6 +934,11 @@ func _recursive_delete(dir_path: String) -> void:
 ## 401-Authorization failures, blocking every subsequent recording from ever
 ## uploading until the user manually wiped user://ego_upload_queue.json).
 func _fail(job: Dictionary, kind: String, message: String, permanent: bool = false) -> void:
+	# Shutdown is a lifecycle event, not an upload failure. The queue remains on
+	# disk and resumes when Ego is opened again, so do not surface a false error
+	# while the old scene is being destroyed.
+	if _shutdown_requested():
+		return
 	push_warning("[EgoUploader] %s/%s: %s%s" % [
 		str(job.get("session_id", "?")),
 		kind,
