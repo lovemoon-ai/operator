@@ -2,16 +2,6 @@ extends RefCounted
 class_name SessionSpoolWriter
 
 const DEFAULT_CAPTURE_ROOT := "/sdcard/DCIM/SpatialMP4"
-const CAMERA_CHARACTERISTICS_ARTIFACTS := [
-	{
-		"kind": "left_camera_characteristics",
-		"filename": "left_camera_characteristics.json"
-	},
-	{
-		"kind": "right_camera_characteristics",
-		"filename": "right_camera_characteristics.json"
-	},
-]
 
 var session_id := ""
 var session_dir := ""
@@ -27,9 +17,7 @@ var android_plugin: Object
 # is kept only for legacy callers and to query camera intrinsics if needed.
 var muxer_plugin: Object
 
-# WP5: the JSONL sidecar files (poses/*.jsonl, body_motion/*.jsonl,
-# depth/frames.jsonl) moved verbatim to sinks/jsonl/jsonl_sidecar_sink.gd.
-# This writer keeps the mp4/muxer engine: session dirs, manifest write +
+# This writer owns the mp4/muxer engine: session dirs, manifest write +
 # finalize rewrite, sha256, and all native write* calls.
 # Body-tracking runtime info captured at close() time so the manifest reflects
 # which extension actually fed samples (PICO BD vs Meta XR_FB / full_body).
@@ -42,7 +30,6 @@ var _body_tracking_runtime_info: Dictionary = {}
 # checked bit-for-bit offline (scripts/verify_depth_ffv1.py --reference).
 var _depth_raw_dir := ""
 var _depth_raw_index := 0
-var _depth_sidecar_frame_count := 0
 var _depth_mp4_write_count := 0
 var _depth_mp4_write_failed_count := 0
 var _depth_last_mp4_write_error := ""
@@ -58,38 +45,37 @@ func start_session(options: Dictionary = {}) -> bool:
 	_body_tracking_runtime_info = {}
 	_depth_raw_dir = ""
 	_depth_raw_index = 0
-	_depth_sidecar_frame_count = 0
 	_depth_mp4_write_count = 0
 	_depth_mp4_write_failed_count = 0
 	_depth_last_mp4_write_error = ""
 	_muxer_contract_version_cache = -1
 	session_start_unix_us = Time.get_unix_time_from_system() * 1000000
 	session_start_ticks_us = Time.get_ticks_usec()
-	session_id = _make_session_id()
 	saved_path = ""
 	var capture_root := str(capture_options.get("save_root", DEFAULT_CAPTURE_ROOT)).strip_edges()
 	if capture_root.is_empty():
 		capture_root = DEFAULT_CAPTURE_ROOT
+	# Preserve the historical second-resolution session id for compatibility,
+	# but never reuse a directory left by an earlier capture/retry. Collisions
+	# receive a deterministic numeric suffix instead of overwriting artifacts.
+	session_id = _make_unique_session_id(capture_root, _make_session_id())
 	session_dir = capture_root.path_join(session_id)
-	output_mp4_path = capture_root.path_join("%s.mp4" % session_id)
-	partial_mp4_path = capture_root.path_join("%s.partial.mp4" % session_id)
+	# Keep every durable artifact from one recording under one directory. The
+	# native muxer still receives absolute final/partial paths, so moving the
+	# MP4 below session_dir does not change its encoding or finalize contract.
+	output_mp4_path = SessionLayout.final_mp4_path(session_dir, session_id)
+	partial_mp4_path = SessionLayout.partial_mp4_path(session_dir, session_id)
 
 	if _make_dir(session_dir) != OK:
 		push_error("Unable to create capture session directory: %s" % session_dir)
 		session_dir = ""
 		return false
-	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
-		if _make_dir("%s/poses" % session_dir) != OK:
-			return false
-	var save_body_sidecar := bool(capture_options.get("save_body_sidecar", false))
-	if (save_body_sidecar and _capture_enabled("record_body_tracking")) or _capture_enabled("record_motion_trackers"):
-		if _make_dir("%s/body_motion" % session_dir) != OK:
-			return false
-	if _capture_enabled("record_depth"):
-		if _make_dir("%s/depth" % session_dir) != OK:
+	var dump_raw_depth := bool(capture_options.get("dump_raw_depth", false))
+	if _capture_enabled("record_depth") and dump_raw_depth:
+		if _make_dir(session_dir.path_join(SessionLayout.DEPTH_DIR)) != OK:
 			return false
 		# Opt-in raw payload dump for offline lossless verification (default off).
-		if bool(capture_options.get("dump_raw_depth", false)):
+		if dump_raw_depth:
 			_depth_raw_dir = "%s/depth/raw" % session_dir
 			_depth_raw_index = 0
 			if _make_dir(_depth_raw_dir) != OK:
@@ -119,8 +105,8 @@ func start_session(options: Dictionary = {}) -> bool:
 			"joint_set": "",
 			"joint_count": 0
 		}
-	if _capture_enabled("record_motion_trackers"):
-		sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored in the mp4 `motion_trackers` metadata track with optional body_motion/motion_trackers.jsonl debug mirror"
+		if _capture_enabled("record_motion_trackers"):
+			sources["motion_trackers"] = "PICO OpenXR XR_PICO_motion_tracking tracker poses, velocities, accelerations, battery state, and power-key events when available; stored in the mp4 `motion_trackers` metadata track"
 	# v3 spatial audio. The audio path is provider-driven (AudioRecord ->
 	# MediaCodec AAC-LC -> SpatialDataSink), so GDScript never sees a frame;
 	# we just record the configured shape in the manifest. The same fields
@@ -167,10 +153,7 @@ func start_session(options: Dictionary = {}) -> bool:
 	})
 
 	# Every pose stream (head, controllers, hands) flows into the MP4's `mett`
-	# tracks via the muxer plugin. The JSONL sidecars are debug-only mirrors
-	# and are owned by JsonlSidecarSink since WP5 (identical filenames,
-	# option gating, and line shapes; SpoolWriterAdapter opens it right after
-	# this returns).
+	# tracks via the muxer plugin.
 	return true
 
 
@@ -257,20 +240,6 @@ func _rewrite_manifest_after_finalize(media_path: String, media_sha256: String) 
 			media_artifact["sha256"] = media_sha256
 			media_artifact["hash_algo"] = "sha256"
 		artifacts["media"] = media_artifact
-	for sidecar in CAMERA_CHARACTERISTICS_ARTIFACTS:
-		var filename := str(sidecar.get("filename", ""))
-		var sidecar_path := session_dir.path_join(filename)
-		if filename.is_empty() or not FileAccess.file_exists(sidecar_path):
-			continue
-		var sidecar_hash := _compute_file_sha256(sidecar_path)
-		var sidecar_artifact := {
-			"filename": filename,
-			"bytes": _file_length(sidecar_path)
-		}
-		if not sidecar_hash.is_empty():
-			sidecar_artifact["sha256"] = sidecar_hash
-			sidecar_artifact["hash_algo"] = "sha256"
-		artifacts[str(sidecar.get("kind", filename.get_basename()))] = sidecar_artifact
 	if not artifacts.is_empty():
 		manifest["artifacts"] = artifacts
 	var rgb_actual := _actual_rgb_recording_geometry()
@@ -369,10 +338,10 @@ func _rgb_confirmation_record(
 
 
 func _actual_rgb_recording_geometry() -> Dictionary:
-	var left := _camera_recording_size("left_camera_characteristics.json")
+	var left := _camera_recording_size("left")
 	if left.is_empty():
 		return {}
-	var right := _camera_recording_size("right_camera_characteristics.json")
+	var right := _camera_recording_size("right")
 	var left_width := int(left.get("width", 0))
 	var left_height := int(left.get("height", 0))
 	var camera_count := 1
@@ -394,15 +363,27 @@ func _actual_rgb_recording_geometry() -> Dictionary:
 	}
 
 
-func _camera_recording_size(filename: String) -> Dictionary:
-	var path := session_dir.path_join(filename)
-	if not FileAccess.file_exists(path):
+func _camera_recording_size(eye: String) -> Dictionary:
+	# The provider keeps the same Camera2 metadata in memory that it embeds in
+	# MP4 operator_static, so manifest finalization does not depend on external
+	# JSON files.
+	if android_plugin != null:
+		var method_name := (
+			"getLeftCameraMetadataJson" if eye == "left" else "getRightCameraMetadataJson"
+		)
+		var native_size := _camera_recording_size_from_json(
+			str(android_plugin.call(method_name))
+		)
+		if not native_size.is_empty():
+			return native_size
+
+	return {}
+
+
+func _camera_recording_size_from_json(raw: String) -> Dictionary:
+	if raw.is_empty():
 		return {}
-	var reader := FileAccess.open(path, FileAccess.READ)
-	if reader == null:
-		return {}
-	var parsed: Variant = JSON.parse_string(reader.get_as_text())
-	reader.close()
+	var parsed: Variant = JSON.parse_string(raw)
 	if not (parsed is Dictionary):
 		return {}
 	var metadata: Dictionary = parsed
@@ -457,16 +438,14 @@ func _depth_confirmation_record(finalized: bool, media_path: String) -> Dictiona
 		"mp4_path": media_path,
 		"mp4_write_count": _depth_mp4_write_count,
 		"mp4_write_failed_count": _depth_mp4_write_failed_count,
-		"sidecar_frame_count": _depth_sidecar_frame_count,
 		"raw_dump_count": _depth_raw_index
 	}
 
 
-func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_jsonl_sidecar: bool = true) -> void:
+func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_metadata: bool = true) -> void:
 	# The mp4 `mett` head-pose stream is always fed at the caller's sample
-	# rate via a fast JNI Enqueue (~50 µs). The JSONL sidecar (and its
-	# throttle flag, kept here for signature compat) lives in
-	# JsonlSidecarSink since WP5.
+	# rate via a fast JNI Enqueue (~50 µs). The unused boolean is kept for
+	# signature compatibility with older callers.
 	if muxer_plugin != null:
 		var q := transform.basis.get_rotation_quaternion()
 		var p := transform.origin
@@ -484,7 +463,7 @@ func write_head_pose(timestamp_ns: int, transform: Transform3D, tracking_valid: 
 		)
 
 
-func write_controller_pose(source: String, timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_jsonl_sidecar: bool = true) -> void:
+func write_controller_pose(source: String, timestamp_ns: int, transform: Transform3D, tracking_valid: bool, _write_metadata: bool = true) -> void:
 	if muxer_plugin != null:
 		var q := transform.basis.get_rotation_quaternion()
 		var p := transform.origin
@@ -581,16 +560,8 @@ func write_depth_frame(
 				raw_file.store_buffer(depth_u16_mm)
 				raw_file.close()
 				_depth_raw_index += 1
-	# Counts every depth frame handed to the writer; feeds the manifest
-	# stream_confirmations.depth.sidecar_frame_count with the same per-call
-	# semantics as before WP5 (the depth/frames.jsonl line itself is written
-	# by JsonlSidecarSink).
-	_depth_sidecar_frame_count += 1
-
-
 # Body joints and motion trackers are written by the hand_capture
-# GDExtension's NativeBodyMotionWriter (HJNT payload + metadata JSON + JSONL
-# sidecars, serialized in C++) — no GDScript write surface remains for them.
+# GDExtension's NativeBodyMotionWriter (HJNT payload + metadata JSON).
 
 
 func ticks_us_to_session_us(ticks_us: int) -> int:
@@ -738,6 +709,30 @@ func _make_session_id() -> String:
 	]
 
 
+func _make_unique_session_id(capture_root: String, base_session_id: String) -> String:
+	var candidate := base_session_id
+	var suffix := 1
+	while _session_id_exists(capture_root, candidate):
+		candidate = "%s_%03d" % [base_session_id, suffix]
+		suffix += 1
+	return candidate
+
+
+func _session_id_exists(capture_root: String, candidate: String) -> bool:
+	var candidate_dir := capture_root.path_join(candidate)
+	var absolute_dir := ProjectSettings.globalize_path(candidate_dir)
+	if DirAccess.dir_exists_absolute(absolute_dir) or FileAccess.file_exists(candidate_dir):
+		return true
+	# Also avoid colliding with incomplete/historical sibling-layout captures.
+	for filename in [
+		SessionLayout.final_mp4_name(candidate),
+		SessionLayout.partial_mp4_name(candidate),
+	]:
+		if FileAccess.file_exists(capture_root.path_join(filename)):
+			return true
+	return false
+
+
 func _make_dir(path: String) -> Error:
 	var absolute := ProjectSettings.globalize_path(path)
 	return DirAccess.make_dir_recursive_absolute(absolute)
@@ -753,7 +748,7 @@ func _capture_enabled(option: String) -> bool:
 
 
 # Mirror of the headset identity that the muxer writes into the mp4 moov/udta
-# metadata, so the session manifest.json sidecar carries the same device_type
+# metadata, so the session manifest carries the same device_type
 # (pico4_ultra / quest3 / quest3s / ...) without having to demux the mp4.
 #
 # When the Android plugin isn't wired up (desktop editor / unit tests / old

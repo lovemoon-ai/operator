@@ -11,7 +11,6 @@ const MODE_EGO_CAPTURE := 1
 const MODE_LIVE_FEED := 2
 const MODE_VR := 3
 const SINK_SPATIALMP4 := 4
-const SINK_JSONL := 5
 const SINK_LIVE_STREAM := 6
 const SINK_UPLOAD := 7
 const ROBOT_CONTROL := 8
@@ -25,7 +24,6 @@ const _ID_TO_STRING := {
 	MODE_LIVE_FEED: "mode_live_feed",
 	MODE_VR: "mode_vr",
 	SINK_SPATIALMP4: "sink_spatialmp4",
-	SINK_JSONL: "sink_jsonl",
 	SINK_LIVE_STREAM: "sink_live_stream",
 	SINK_UPLOAD: "sink_upload",
 	ROBOT_CONTROL: "robot_control",

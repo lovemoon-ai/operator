@@ -1,6 +1,5 @@
 #pragma once
 
-#include "background_jsonl_writer.h"
 #include "openxr_hand_defs.h"
 
 #include <godot_cpp/classes/open_xr_extension_wrapper_extension.hpp>
@@ -34,9 +33,7 @@ public:
 	void _on_session_created(uint64_t p_session) override;
 	void _on_session_destroyed() override;
 
-	bool start_recording(int64_t p_xr_time_to_godot_ns = 0,
-			const String &p_hands_jsonl_path = String(),
-			const String &p_coordinate_space = String("openxr_play_space"));
+		bool start_recording(int64_t p_xr_time_to_godot_ns = 0);
 	void stop_recording();
 	bool is_recording() const;
 	Dictionary pop_metrics();
@@ -69,13 +66,10 @@ private:
 	PFN_xrConvertTimespecTimeToTimeKHR convert_timespec_time_ = nullptr;
 	std::array<XrHandTrackerEXT, 2> trackers_{ XR_NULL_HAND_TRACKER_EXT, XR_NULL_HAND_TRACKER_EXT };
 
-	void *muxer_library_ = nullptr;
-	ActiveWriterFn active_writer_ = nullptr;
-	WriteMetadataFn write_metadata_ = nullptr;
-	BackgroundJsonlWriter jsonl_;
-	String coordinate_space_{ "openxr_play_space" };
-
-	int64_t xr_time_to_godot_ns_ = 0;
+		void *muxer_library_ = nullptr;
+		ActiveWriterFn active_writer_ = nullptr;
+		WriteMetadataFn write_metadata_ = nullptr;
+		int64_t xr_time_to_godot_ns_ = 0;
 	std::atomic<bool> stop_requested_{ false };
 	std::atomic<bool> running_{ false };
 	std::thread worker_;

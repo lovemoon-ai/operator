@@ -2,8 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 # hand_capture — full-rate hand-joint capture GDExtension.
 # Reads XRHandTracker joints once per XR frame, packs the HJNT v1 payload
-# in C++ and mirrors the optional hands.jsonl sidecar on a background
-# thread, replacing the 30 Hz GDScript hand path in pose_sampler.gd.
+# in C++, replacing the 30 Hz GDScript hand path in pose_sampler.gd.
 
 project(hand_capture
     LANGUAGES CXX
@@ -42,7 +41,6 @@ set_target_properties(godot-cpp PROPERTIES
 # --- Library ------------------------------------------------------
 add_library(hand_capture SHARED
     src/register_types.cpp
-    src/background_jsonl_writer.cpp
     src/variant_json.cpp
     src/native_hand_sampler.cpp
     src/native_body_motion_writer.cpp

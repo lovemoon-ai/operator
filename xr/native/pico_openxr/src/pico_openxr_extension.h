@@ -45,8 +45,7 @@ public:
 	void bind_camera_frame_sink(Object *p_sink);
 	PackedInt32Array pump_camera_frames_to_sink();
 	bool start_native_recording_pipeline(String codec = "hevc", int bitrate = 8000000,
-			int64_t xr_time_to_godot_ns = 0, String left_frame_index_path = "",
-			String right_frame_index_path = "", bool rgb_tracking_sample_metadata = true,
+			int64_t xr_time_to_godot_ns = 0, bool rgb_tracking_sample_metadata = true,
 			bool rgb_tracking_sample_head = true,
 			bool rgb_tracking_sample_hands = true, String tracking_coordinate_space = "openxr_play_space");
 	bool is_native_recording_pipeline_running() const;

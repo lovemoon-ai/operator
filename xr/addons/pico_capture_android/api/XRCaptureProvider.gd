@@ -48,7 +48,7 @@ func set_body_motion_capture_options(record_body_tracking: bool, record_motion_t
 func configure_spatialmp4_session(
 	output_mp4_path: String,
 	partial_mp4_path: String,
-	sidecar_path: String,
+	session_dir: String,
 	session_start_unix_us: int,
 	session_start_godot_ticks_us: int,
 	configure_godot_ticks_us: int,
@@ -63,10 +63,10 @@ func configure_spatialmp4_session(
 	if _plugin == null:
 		return false
 	return bool(_plugin.call(
-		"configureSpatialMp4SessionWithTime",
-		output_mp4_path,
-		partial_mp4_path,
-		sidecar_path,
+			"configureSpatialMp4SessionWithTime",
+			output_mp4_path,
+			partial_mp4_path,
+			session_dir,
 		session_start_unix_us,
 		session_start_godot_ticks_us,
 		configure_godot_ticks_us,

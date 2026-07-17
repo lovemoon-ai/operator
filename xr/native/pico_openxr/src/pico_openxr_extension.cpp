@@ -91,8 +91,8 @@ void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("poll_camera_image_frames"), &PicoOpenXRExtension::poll_camera_image_frames);
 	ClassDB::bind_method(D_METHOD("bind_camera_frame_sink", "sink"), &PicoOpenXRExtension::bind_camera_frame_sink);
 	ClassDB::bind_method(D_METHOD("pump_camera_frames_to_sink"), &PicoOpenXRExtension::pump_camera_frames_to_sink);
-	ClassDB::bind_method(D_METHOD("start_native_recording_pipeline", "codec", "bitrate", "xr_time_to_godot_ns", "left_frame_index_path", "right_frame_index_path", "rgb_tracking_sample_metadata", "rgb_tracking_sample_head", "rgb_tracking_sample_hands", "tracking_coordinate_space"),
-			&PicoOpenXRExtension::start_native_recording_pipeline, DEFVAL("hevc"), DEFVAL(8000000), DEFVAL(0), DEFVAL(""), DEFVAL(""), DEFVAL(true), DEFVAL(true), DEFVAL(true), DEFVAL("openxr_play_space"));
+	ClassDB::bind_method(D_METHOD("start_native_recording_pipeline", "codec", "bitrate", "xr_time_to_godot_ns", "rgb_tracking_sample_metadata", "rgb_tracking_sample_head", "rgb_tracking_sample_hands", "tracking_coordinate_space"),
+			&PicoOpenXRExtension::start_native_recording_pipeline, DEFVAL("hevc"), DEFVAL(8000000), DEFVAL(0), DEFVAL(true), DEFVAL(true), DEFVAL(true), DEFVAL("openxr_play_space"));
 	ClassDB::bind_method(D_METHOD("is_native_recording_pipeline_running"), &PicoOpenXRExtension::is_native_recording_pipeline_running);
 	ClassDB::bind_method(D_METHOD("get_native_recording_pipeline_error"), &PicoOpenXRExtension::get_native_recording_pipeline_error);
 	ClassDB::bind_method(D_METHOD("pop_native_recording_metrics"), &PicoOpenXRExtension::pop_native_recording_metrics);
@@ -559,8 +559,8 @@ PackedInt32Array PicoOpenXRExtension::pump_camera_frames_to_sink() {
 }
 
 bool PicoOpenXRExtension::start_native_recording_pipeline(String codec, int bitrate,
-			int64_t xr_time_to_godot_ns, String left_frame_index_path, String right_frame_index_path,
-			bool rgb_tracking_sample_metadata, bool rgb_tracking_sample_head, bool rgb_tracking_sample_hands,
+			int64_t xr_time_to_godot_ns, bool rgb_tracking_sample_metadata,
+			bool rgb_tracking_sample_head, bool rgb_tracking_sample_hands,
 			String tracking_coordinate_space) {
 	if (!camera_image_capture_active || !resolve_functions() || !has_camera_image_functions()) {
 		return false;
@@ -589,10 +589,6 @@ bool PicoOpenXRExtension::start_native_recording_pipeline(String codec, int bitr
 	const CharString codec_utf8 = codec.to_lower().utf8();
 	config.codec = std::string(codec_utf8.get_data());
 	config.xr_time_to_godot_ns = xr_time_to_godot_ns;
-	const CharString left_path_utf8 = left_frame_index_path.utf8();
-	const CharString right_path_utf8 = right_frame_index_path.utf8();
-	config.left_frame_index_path = std::string(left_path_utf8.get_data());
-	config.right_frame_index_path = std::string(right_path_utf8.get_data());
 	config.rgb_tracking_sample_metadata = rgb_tracking_sample_metadata;
 	config.rgb_tracking_sample_head = rgb_tracking_sample_head;
 	config.rgb_tracking_sample_hands = rgb_tracking_sample_hands;

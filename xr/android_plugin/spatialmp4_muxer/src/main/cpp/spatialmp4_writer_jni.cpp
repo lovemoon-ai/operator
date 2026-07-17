@@ -936,7 +936,7 @@ class LiveSpatialMp4Writer {
     }
     // Replay-critical JSON metadata tracks. These make a raw SpatialMP4
     // self-contained while the external manifest stays responsible for file
-    // inventory, hashes, and optional debug sidecars.
+    // inventory and hashes.
     AddTimedMetadataStream(kTrackOperatorStatic, "session", "operator_static",
                            "spatialmp4.operator_static.session.v1", "application/json", "session");
     AddTimedMetadataStream(kTrackRgbFrameIndexLeft, "left", "rgb_frame_index",

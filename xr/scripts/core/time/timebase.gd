@@ -4,12 +4,12 @@ extends RefCounted
 ##
 ## All capture timestamps live in the Godot-ticks-ns domain, which is
 ## CLOCK_MONOTONIC ns offset to process start. The Android capture plugins
-## record the anchors in `android_timebase.json`; this class mirrors those
-## offsets on the GDScript side so core/ code can convert without touching
-## vendor singletons (platform adapters from WP2 feed the offsets in).
+## embed the anchors in MP4 `operator_static`; this class mirrors those offsets
+## on the GDScript side so core/ code can convert without touching vendor
+## singletons (platform adapters from WP2 feed the offsets in).
 ##
-## Keys emitted by to_android_timebase_dict() exactly match the
-## android_timebase.json record written by QuestCapturePlugin/PicoCapturePlugin.
+## Keys emitted by to_android_timebase_dict() exactly match the embedded
+## `android_timebase` record written by QuestCapturePlugin/PicoCapturePlugin.
 
 const PTS_DOMAIN := "godot_ticks_ns"
 const PTS_CLOCK := "clock_monotonic_ns"
@@ -52,7 +52,7 @@ func set_xr_time_offset_ns(offset_ns: int) -> void:
 		clock_monotonic_to_godot_ticks_ns_offset = offset_ns
 
 
-## Produces exactly the key set of the on-device android_timebase.json.
+## Produces exactly the key set of the embedded `android_timebase` record.
 func to_android_timebase_dict() -> Dictionary:
 	return {
 		"session_start_unix_us": session_start_unix_us,

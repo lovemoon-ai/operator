@@ -1,5 +1,9 @@
 class_name ControllerFrame
 extends RefCounted
+
+const SensorFrameScript := preload("res://scripts/contracts/sensor/sensor_frame.gd")
+const SensorFrameTypeScript := preload("res://scripts/contracts/sensor/frame_types.gd")
+
 ## v2 core/sensors (WP4): controller pose + controller input-packet
 ## SensorFrame builders. Field names mirror the existing writer args exactly.
 
@@ -13,9 +17,9 @@ static func build_pose(
 	transform: Transform3D,
 	tracking_valid: bool,
 	coordinate_space: String = DEFAULT_COORDINATE_SPACE
-) -> SensorFrame:
-	var frame := SensorFrame.new()
-	frame.frame_type = SensorFrameType.CONTROLLER
+) -> Object:
+	var frame := SensorFrameScript.new()
+	frame.frame_type = SensorFrameTypeScript.CONTROLLER
 	frame.timestamp_ns = timestamp_ns
 	frame.coordinate_space = coordinate_space
 	frame.source_id = source
@@ -36,9 +40,9 @@ static func build_input(
 	packet_type: int,
 	state: Dictionary,
 	changed_mask: int
-) -> SensorFrame:
-	var frame := SensorFrame.new()
-	frame.frame_type = SensorFrameType.INPUT_EVENT
+) -> Object:
+	var frame := SensorFrameScript.new()
+	frame.frame_type = SensorFrameTypeScript.INPUT_EVENT
 	frame.timestamp_ns = timestamp_ns
 	frame.source_id = source
 	frame.payload = {

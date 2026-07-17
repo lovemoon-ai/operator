@@ -15,7 +15,7 @@ func _ensure_bridge() -> Object:
 	if bridge != null:
 		return bridge
 	# WP2: vendor singleton probing delegated to the platform layer.
-	var adapter := PlatformRegistry.shared().pico_adapter()
+	var adapter: Object = PlatformRegistry.shared().pico_adapter()
 	bridge = adapter.openxr_bridge_native()
 	if bridge != null:
 		print("PicoOpenXRExtension bridge bound from native singleton")

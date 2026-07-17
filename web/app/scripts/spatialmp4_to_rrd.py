@@ -27,11 +27,10 @@ viewer in the dashboard.
 Differences from the reference (deliberate):
   * **Ingest ships ``media.mp4`` + ``manifest.json``**. Camera2
     calibration and Android timebase are preferred from MP4 embedded
-    ``operator_static`` metadata, with old sidecar layouts kept as fallback.
+    ``operator_static`` metadata.
     Operator-specific JSON ``mett`` tracks such as ``motion_trackers`` are
     read directly from the MP4 with ffprobe until the SDK exposes typed APIs.
-    Depth spool sidecars (``depth/frames.jsonl``) are still skipped here; Quest
-    depth uses MP4-embedded ``depth_frame_meta`` when the recording has it.
+    Depth uses MP4-embedded ``depth_frame_meta`` when the recording has it.
     When Quest Camera2 metadata is missing, we use ``T_W_Srgb = T_W_H @
     T_I_Srgb`` straight out of the mp4's RGB extrinsics and accept the
     live-writer's documented ~10° X-axis bias.
@@ -55,7 +54,7 @@ Per-device branches (Quest vs Pico):
        the RGB camera frame, so we do not apply SDK ``head_to_imu`` or a
        head-model standoff. For 2D hand overlays only, Pico raw OpenXR
        head/hand samples are projected through the same Unity-compatible
-       axis conversion used by the native debug sidecar.
+       axis conversion used by the native projection path.
     3. **Pinhole camera_xyz** — Quest = ``RDF`` (OpenCV); current Operator
        Pico captures also use ``RDF`` because their RGB local frame is already
        X-right/Y-down/Z-forward.
@@ -109,6 +108,12 @@ import sysconfig
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from spatialmp4_metadata import (
+    RERUN_FRAME_METADATA_KINDS,
+    camera2_metadata_candidates,
+    resolve_android_timebase_metadata,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -409,12 +414,12 @@ class DeviceProfile:
       * ``head_model_offset``  — translation offset supplied to the SDK
                                  conversion above for legacy/device-native
                                  captures that opt into ``head_to_imu``.
-      * ``rgb_head_model_forward`` — apply ``norm(HEAD_MODEL_OFFSET)`` as a
-                                 camera-local +Z translation to RGB
-                                 extrinsics. Legacy-only; current Pico
-                                 captures keep this disabled and project
-                                 hands through the Unity-compatible sidecar
-                                 path instead.
+	      * ``rgb_head_model_forward`` — apply ``norm(HEAD_MODEL_OFFSET)`` as a
+	                                 camera-local +Z translation to RGB
+	                                 extrinsics. Legacy-only; current Pico
+	                                 captures keep this disabled and project
+	                                 hands through the Unity-compatible
+	                                 projection path instead.
       * ``extrinsic_perm``     — 4×4 axis swap applied to the composed
                                  ``T_W_S`` for both RGB and depth cameras
                                  before handing it to Rerun. Quest = None
@@ -451,12 +456,12 @@ class DeviceProfile:
 
 @dataclass(frozen=True)
 class Camera2ProjectionCalibration:
-    """Quest Camera2 sidecar calibration for accurate 2D RGB overlays.
+    """Quest Camera2 calibration for accurate 2D RGB overlays.
 
     The mp4 `ecam` descriptor is suitable for the 3D Rerun camera pose, but
-    Quest's Camera2 `lens_pose_*` sidecar needs the OpenQuest conversion used by
-    SpatialMP4's reference alignment tools before projecting world points into
-    the RGB image plane.
+    Quest's Camera2 `lens_pose_*` metadata needs the OpenQuest conversion used
+    by SpatialMP4's reference alignment tools before projecting world points
+    into the RGB image plane.
     """
     head_from_camera_unity: np.ndarray
     K_rgb: np.ndarray
@@ -536,7 +541,7 @@ PROFILE_PICO = DeviceProfile(
     # That is the same space `XRCamera3D.global_transform` tracks, so the
     # chain collapses to T_W_S = T_W_H @ T_I_S directly with T_H_I = identity.
     # No SDK head_to_imu axis swap is appropriate for this recording. The RGB
-    # hand-image overlay is matched to the native Unity-compatible sidecar path
+    # hand-image overlay is matched to the native Unity-compatible projection path
     # separately; the 3D Rerun world tracks stay in raw OpenXR.
     head_is_imu=True,
     head_model_offset=None,
@@ -599,9 +604,8 @@ def detect_device_profile(
 ) -> DeviceProfile:
     """Resolve which profile to use, with these priorities:
       1. explicit ``--device-type`` CLI value (``quest`` / ``pico``)
-      2. mp4-embedded ``operator_static.provider`` (self-contained, so this
-         works even when the manifest sidecar is absent — the whole point of
-         the raw-mp4 metadata. ``provider`` is ``quest``/``pico``.)
+      2. mp4-embedded ``operator_static.provider`` (self-contained raw MP4
+         metadata. ``provider`` is ``quest``/``pico``.)
       3. manifest's ``device.device_type`` field, normalised
 
     An explicit/embedded/manifest hint that resolves to Android XR (or to any
@@ -708,7 +712,7 @@ def compose_rgb_image_projection_pose(
 ) -> np.ndarray:
     """Camera pose used only for manual 2D projection into the RGB image.
 
-    Pico production sidecars project raw OpenXR hand/head data after converting
+    Pico production captures project raw OpenXR hand/head data after converting
     it into Unity tracking space and then multiplying an extra camera
     R_x(180°) axis adjustment. Rerun's 3D world tracks remain in raw
     OpenXR/Godot space, so this helper is intentionally not used for logging
@@ -849,54 +853,6 @@ def _camera2_projection_from_characteristics(
     )
 
 
-def _extract_camera2_characteristics(
-    operator_static: Optional[Dict[str, Any]],
-    eye: str,
-) -> Optional[Dict[str, Any]]:
-    if not isinstance(operator_static, dict):
-        return None
-    eye_keys = (eye, f"{eye}_camera_characteristics", f"{eye}_camera2_characteristics")
-    for key in eye_keys:
-        value = operator_static.get(key)
-        if isinstance(value, dict):
-            return value
-
-    container_keys = (
-        "camera2",
-        "camera2_characteristics",
-        "camera_characteristics",
-        "camera2_calibration",
-        "cameras",
-    )
-    for container_key in container_keys:
-        container = operator_static.get(container_key)
-        if isinstance(container, dict):
-            for eye_key in eye_keys:
-                value = container.get(eye_key)
-                if isinstance(value, dict):
-                    return value
-            for nested_key in ("characteristics", "camera_characteristics", "camera2_characteristics"):
-                nested = container.get(nested_key)
-                if not isinstance(nested, dict):
-                    continue
-                for eye_key in eye_keys:
-                    value = nested.get(eye_key)
-                    if isinstance(value, dict):
-                        return value
-        elif isinstance(container, list):
-            for item in container:
-                if not isinstance(item, dict):
-                    continue
-                item_eye = str(item.get("eye") or item.get("camera") or item.get("camera_id") or "").lower()
-                if item_eye == eye:
-                    for nested_key in ("characteristics", "camera_characteristics", "camera2_characteristics"):
-                        nested = item.get(nested_key)
-                        if isinstance(nested, dict):
-                            return nested
-                    return item
-    return None
-
-
 def load_camera2_projection_calibration(
     input_path: Path,
     profile: DeviceProfile,
@@ -906,50 +862,30 @@ def load_camera2_projection_calibration(
     """Load Quest Camera2 calibration for accurate RGB image projection.
 
     Mirrors SpatialMP4's `godot_depth_rgb_align._openquest_head_from_camera`.
-    This is intentionally Quest-only; Pico has different axis conventions and
-    currently no validated sidecar path in this web converter.
+    This is intentionally Quest-only; Pico has different axis conventions.
     """
     if profile.name != "quest":
         return None
 
-    embedded_char = _extract_camera2_characteristics(operator_static, eye)
-    if embedded_char is not None:
-        projection = _camera2_projection_from_characteristics(
-            embedded_char,
-            f"MP4 operator_static {eye} Camera2 characteristics",
+    candidates, read_errors = camera2_metadata_candidates(input_path, operator_static, eye)
+    for characteristics, _source_label, _is_embedded in candidates:
+        projection = _camera2_projection_from_characteristics(characteristics, source_label)
+        if projection is None:
+            continue
+        info(
+            "loaded Quest Camera2 projection calibration from MP4 "
+            f"operator_static ({eye})"
         )
-        if projection is not None:
-            info(
-                "loaded Quest Camera2 projection calibration from MP4 "
-                f"operator_static ({eye})"
-            )
-            return projection
+        return projection
 
-    sidecar_filename = f"{eye}_camera_characteristics.json"
-    sidecar_candidates = [
-        # On-device/local layout: <capture_root>/<session>.mp4 plus
-        # <capture_root>/<session>/<eye>_camera_characteristics.json.
-        input_path.with_suffix("") / sidecar_filename,
-        # Uploaded layout: <data>/<session>/media.mp4 plus sidecars stored as
-        # sibling artifacts in the same session directory.
-        input_path.parent / sidecar_filename,
-    ]
-    sidecar_path = next((p for p in sidecar_candidates if p.exists()), None)
-    if sidecar_path is None:
-        return None
-    try:
-        sidecar_char: Dict[str, Any] = json.loads(sidecar_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        info(f"Camera2 sidecar read failed ({sidecar_path}): {exc}; falling back to mp4 ecam projection")
-        return None
-    projection = _camera2_projection_from_characteristics(sidecar_char, str(sidecar_path))
-    if projection is None:
-        return None
-    info(
-        f"loaded Quest Camera2 sidecar projection calibration: {sidecar_path} "
-        "(RGB hand overlay uses OpenQuest Camera2 conversion)"
-    )
-    return projection
+    for read_error in read_errors:
+        info(f"{read_error}; falling back to mp4 ecam projection")
+    if not candidates:
+        info(
+            f"Quest {eye} Camera2 characteristics are absent from MP4 operator_static "
+            "falling back to mp4 ecam projection"
+        )
+    return None
 
 
 def device_native_camera_pose(T_W_S: np.ndarray, profile: DeviceProfile) -> np.ndarray:
@@ -1060,7 +996,7 @@ def project_capture_points_to_image(
 
     ``capture_world_pts`` are the SDK hand joints (``T_W_hand`` points).
     Quest/legacy profiles use their device-native world. Pico production
-    captures mirror the native Unity debug sidecar: hand joints are first
+    captures mirror the native Unity-compatible projection path: hand joints are first
     mapped from raw OpenXR tracking to Unity tracking before projection.
     """
     if profile_uses_pico_unity_rgb_overlay(profile):
@@ -2169,42 +2105,15 @@ def load_operator_static_metadata(input_path: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _extract_android_timebase(operator_static: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not isinstance(operator_static, dict):
-        return None
-    for key in ("android_timebase", "timebase"):
-        value = operator_static.get(key)
-        if isinstance(value, dict):
-            return value
-    return None
-
-
 def load_android_timebase_metadata(
     input_path: Path,
     operator_static: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    embedded = _extract_android_timebase(operator_static)
-    if embedded is not None:
+    metadata, source, error = resolve_android_timebase_metadata(input_path, operator_static)
+    if metadata is not None and source == "mp4":
         info("loaded android_timebase from MP4 operator_static")
-        return embedded
-
-    sidecar_candidates = [
-        input_path.with_suffix("") / "android_timebase.json",
-        input_path.parent / "android_timebase.json",
-    ]
-    sidecar_path = next((p for p in sidecar_candidates if p.exists()), None)
-    if sidecar_path is None:
-        return None
-    try:
-        decoded = json.loads(sidecar_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        info(f"android_timebase sidecar read failed ({sidecar_path}): {exc}")
-        return None
-    if not isinstance(decoded, dict):
-        info(f"android_timebase sidecar is not a JSON object: {sidecar_path}")
-        return None
-    info(f"loaded android_timebase sidecar: {sidecar_path}")
-    return decoded
+        return metadata
+    return None
 
 
 def _parse_hjnt_packet(raw: bytes, timestamp: float, track_id: str) -> Optional[_TimedJointFrame]:
@@ -2699,7 +2608,7 @@ def log_floor_grid(
 
 
 # ---------------------------------------------------------------------------
-# Depth helpers (mp4-only, no spool sidecar)
+# Depth helpers (MP4-only)
 # ---------------------------------------------------------------------------
 
 
@@ -3440,7 +3349,7 @@ def run(args: argparse.Namespace) -> int:
     _android_timebase = load_android_timebase_metadata(input_path, operator_static)
     json_metadata_tracks = {
         kind: load_json_metadata_frames_from_mp4(input_path, kind)
-        for kind in ("rgb_frame_index", "depth_frame_meta", "body_frame_meta", "motion_trackers")
+        for kind in RERUN_FRAME_METADATA_KINDS
     }
     profile = detect_device_profile(args.device_type, manifest_path, operator_static)
     # Profile wins over CLI default for camera_xyz (the user almost
@@ -3477,7 +3386,6 @@ def run(args: argparse.Namespace) -> int:
     has_rgb = reader.has_rgb()
     has_depth = reader.has_depth() and not args.no_depth
     if not has_depth and not args.no_depth:
-        depth_sidecar = input_path.with_suffix("") / "depth" / "frames.jsonl"
         if manifest_path is not None and manifest_path.exists():
             try:
                 mf = json.loads(manifest_path.read_text())
@@ -3485,14 +3393,9 @@ def run(args: argparse.Namespace) -> int:
             except (json.JSONDecodeError, OSError):
                 wants_depth = False
             if wants_depth:
-                sidecar_note = (
-                    f"; sidecar exists but is empty: {depth_sidecar}"
-                    if depth_sidecar.exists() and depth_sidecar.stat().st_size == 0
-                    else f"; sidecar not found: {depth_sidecar}"
-                )
                 info(
                     "depth requested in manifest, but this mp4 has no readable "
-                    f"depth stream{sidecar_note}. Rerun output will be RGB/pose only."
+                    "depth stream. Rerun output will be RGB/pose only."
                 )
 
     if not has_rgb and not has_depth:
@@ -4023,7 +3926,7 @@ def run(args: argparse.Namespace) -> int:
             )
 
             # Hand-joint overlay onto the left RGB image. Pico uses the same
-            # Unity-compatible projection path as the native debug sidecar,
+            # Unity-compatible projection path as the native capture path,
             # while 3D world tracks remain in raw OpenXR/Godot space.
             for tid, hl in hand_lookups.items():
                 hand_frame = hl.nearest_within(ts, HAND_FRAME_MATCH_MAX_DT)

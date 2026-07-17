@@ -641,44 +641,6 @@ TrackingSample locate_tracking_sample(const NativeRecordingPipeline::Config &con
 	return sample;
 }
 
-class FrameIndexFiles {
-public:
-	~FrameIndexFiles() { close(); }
-
-	bool open(const NativeRecordingPipeline::Config &config, std::string &error) {
-		close();
-		if (!config.left_frame_index_path.empty()) {
-			left_ = std::fopen(config.left_frame_index_path.c_str(), "w");
-			if (!left_) {
-				error = "failed to open left camera frame-index sidecar: " + config.left_frame_index_path;
-				return false;
-			}
-		}
-		if (config.stereo && !config.right_frame_index_path.empty()) {
-			right_ = std::fopen(config.right_frame_index_path.c_str(), "w");
-			if (!right_) {
-				error = "failed to open right camera frame-index sidecar: " + config.right_frame_index_path;
-				close();
-				return false;
-			}
-		}
-		return true;
-	}
-
-	FILE *for_eye(int eye) const { return eye == 0 ? left_ : right_; }
-
-private:
-	void close() {
-		if (left_) std::fclose(left_);
-		if (right_) std::fclose(right_);
-		left_ = nullptr;
-		right_ = nullptr;
-	}
-
-	FILE *left_ = nullptr;
-	FILE *right_ = nullptr;
-};
-
 UploadResult acquire_and_upload(
 		const NativeRecordingPipeline::Config &config,
 		XrCameraCaptureSessionPICO camera,
@@ -741,7 +703,7 @@ UploadResult acquire_and_upload(
 	return result;
 }
 
-bool write_frame_index(NativeMuxerApi &muxer, FILE *sidecar, int eye, int64_t index, XrTime xr_time,
+bool write_frame_index(NativeMuxerApi &muxer, int eye, int64_t index, XrTime xr_time,
 		int64_t godot_time_ns, int64_t encoded_pts_us, int width, int height, int64_t duration_us) {
 	char json[512];
 	const char *eye_name = eye == 0 ? "left" : "right";
@@ -752,14 +714,8 @@ bool write_frame_index(NativeMuxerApi &muxer, FILE *sidecar, int eye, int64_t in
 			static_cast<long long>(index), eye_name, static_cast<long long>(godot_time_ns),
 			static_cast<long long>(xr_time), eye_name, width, height);
 	if (length > 0 && static_cast<size_t>(length) < sizeof(json)) {
-		const bool muxer_written = muxer.write_metadata(eye == 0 ? kTrackRgbFrameIndexLeft : kTrackRgbFrameIndexRight,
+		return muxer.write_metadata(eye == 0 ? kTrackRgbFrameIndexLeft : kTrackRgbFrameIndexRight,
 				reinterpret_cast<const uint8_t *>(json), static_cast<size_t>(length), encoded_pts_us, duration_us);
-		bool sidecar_written = true;
-		if (sidecar) {
-			sidecar_written = std::fwrite(json, 1, static_cast<size_t>(length), sidecar) == static_cast<size_t>(length) &&
-					std::fputc('\n', sidecar) != EOF && std::fflush(sidecar) == 0;
-		}
-		return muxer_written && sidecar_written;
 	}
 	return false;
 }
@@ -806,7 +762,6 @@ bool write_rgb_tracking_to_pose_tracks(NativeMuxerApi &muxer, const PendingFrame
 bool flush_encoded_frame_indices(
 		NativeSurfaceEncoder &encoder,
 		NativeMuxerApi &muxer,
-		FrameIndexFiles &files,
 		std::deque<PendingFrameIndex> &pending,
 		const NativeRecordingPipeline::Config &config,
 		int64_t duration_us,
@@ -846,9 +801,9 @@ bool flush_encoded_frame_indices(
 		pending.pop_front();
 
 		const int64_t left_godot_time_ns = frame.left_capture_time + config.xr_time_to_godot_ns;
-		if (!write_frame_index(muxer, files.for_eye(0), 0, left_index, frame.left_capture_time,
+		if (!write_frame_index(muxer, 0, left_index, frame.left_capture_time,
 				left_godot_time_ns, packet.pts_us, config.eye_width, config.eye_height, duration_us)) {
-			error = "failed to write native left RGB frame-index metadata or sidecar";
+			error = "failed to write native left RGB frame-index metadata";
 			return false;
 		}
 		if (!write_rgb_tracking_to_pose_tracks(muxer, frame, config, error)) {
@@ -857,9 +812,9 @@ bool flush_encoded_frame_indices(
 		left_index++;
 		if (frame.stereo) {
 			const int64_t right_godot_time_ns = frame.right_capture_time + config.xr_time_to_godot_ns;
-			if (!write_frame_index(muxer, files.for_eye(1), 1, right_index, frame.right_capture_time,
+			if (!write_frame_index(muxer, 1, right_index, frame.right_capture_time,
 					right_godot_time_ns, packet.pts_us, config.eye_width, config.eye_height, duration_us)) {
-				error = "failed to write native right RGB frame-index metadata or sidecar";
+				error = "failed to write native right RGB frame-index metadata";
 				return false;
 			}
 			right_index++;
@@ -880,26 +835,25 @@ bool NativeRecordingPipeline::start(const Config &config) {
 	// A stopped worker can leave a final partial metrics interval behind.
 	// Do not attribute it to the next recording session.
 	(void)pop_metrics();
-		if (!config.session || !config.left_camera || config.eye_width <= 0 ||
-				config.eye_height <= 0 || !config.acquire_camera || !config.get_camera_data || !config.release_camera ||
-				config.left_frame_index_path.empty() || (config.stereo && config.right_frame_index_path.empty())) {
-			NC_LOGE("native pipeline rejected incomplete camera/OpenXR config");
-			std::lock_guard<std::mutex> lock(state_mutex_);
-			last_error_ = "native pipeline rejected incomplete camera/OpenXR config";
-			return false;
-		}
-			const bool needs_head_tracking = config.rgb_tracking_sample_metadata && config.rgb_tracking_sample_head;
-			const bool needs_hand_tracking = config.rgb_tracking_sample_metadata && config.rgb_tracking_sample_hands;
-			if ((needs_head_tracking && (!config.base_space || !config.view_space || !config.locate_space)) ||
-					(needs_hand_tracking && (!config.base_space || !config.locate_hand_joints ||
-							config.left_hand_tracker == XR_NULL_HAND_TRACKER_EXT ||
-							config.right_hand_tracker == XR_NULL_HAND_TRACKER_EXT))) {
-				NC_LOGE("native pipeline rejected incomplete synchronized tracking config");
-				std::lock_guard<std::mutex> lock(state_mutex_);
-				last_error_ = "native pipeline rejected incomplete synchronized tracking config";
-				return false;
-			}
-		config_ = config;
+	if (!config.session || !config.left_camera || config.eye_width <= 0 ||
+			config.eye_height <= 0 || !config.acquire_camera || !config.get_camera_data || !config.release_camera) {
+		NC_LOGE("native pipeline rejected incomplete camera/OpenXR config");
+		std::lock_guard<std::mutex> lock(state_mutex_);
+		last_error_ = "native pipeline rejected incomplete camera/OpenXR config";
+		return false;
+	}
+	const bool needs_head_tracking = config.rgb_tracking_sample_metadata && config.rgb_tracking_sample_head;
+	const bool needs_hand_tracking = config.rgb_tracking_sample_metadata && config.rgb_tracking_sample_hands;
+	if ((needs_head_tracking && (!config.base_space || !config.view_space || !config.locate_space)) ||
+			(needs_hand_tracking && (!config.base_space || !config.locate_hand_joints ||
+					config.left_hand_tracker == XR_NULL_HAND_TRACKER_EXT ||
+					config.right_hand_tracker == XR_NULL_HAND_TRACKER_EXT))) {
+		NC_LOGE("native pipeline rejected incomplete synchronized tracking config");
+		std::lock_guard<std::mutex> lock(state_mutex_);
+		last_error_ = "native pipeline rejected incomplete synchronized tracking config";
+		return false;
+	}
+	config_ = config;
 	{
 		std::lock_guard<std::mutex> lock(state_mutex_);
 		startup_complete_ = false;
@@ -984,12 +938,6 @@ void NativeRecordingPipeline::camera_loop() {
 		complete_startup(false, "native camera encoder initialization failed");
 		return;
 	}
-	FrameIndexFiles frame_index_files;
-	std::string sidecar_error;
-	if (!frame_index_files.open(config_, sidecar_error)) {
-		complete_startup(false, sidecar_error);
-		return;
-	}
 	running_.store(true, std::memory_order_release);
 
 	XrTime left_last = 0;
@@ -1020,7 +968,7 @@ void NativeRecordingPipeline::camera_loop() {
 		int64_t dropped_submissions = 0;
 		int64_t written_packets = 0;
 			std::string error;
-			if (!flush_encoded_frame_indices(encoder, muxer, frame_index_files, pending_indices,
+			if (!flush_encoded_frame_indices(encoder, muxer, pending_indices,
 					config_, duration_us,
 					left_index, right_index, dropped_submissions, written_packets, error)) {
 			report_failure(error);

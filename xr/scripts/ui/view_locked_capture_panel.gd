@@ -32,7 +32,7 @@ const SECTION := "capture"
 # (record_controller_pose) describe two physically incompatible input
 # regimes -- the operator is either driving with bare hands or with the
 # Touch / PICO controllers, never both at once. Recording both at the
-# same time produces sidecar data that downstream consumers can't make
+# same time produces pose data that downstream consumers can't make
 # sense of (which transform "owns" the wrist at frame T?), so the
 # toggles are wired as a mutex: enabling one auto-disables the other
 # and we never let set_options leave both enabled. The pair is declared
@@ -259,8 +259,6 @@ func get_options() -> Dictionary:
 		options["server_port"] = _configured_server_port()
 		options["server_result_port"] = _configured_result_port()
 		options["server_auth_token"] = _server_token.text.strip_edges() if _server_token != null else ""
-		options["save_controller_hand_sidecar"] = false
-		options["save_body_sidecar"] = false
 		options["save_root"] = ""
 		options["upload_url"] = ""
 		options["upload_token"] = ""
@@ -268,8 +266,6 @@ func get_options() -> Dictionary:
 		options["keep_local_after_upload"] = true
 	else:
 		options["show_hand_skeleton_overlay"] = _toggle_enabled_or_default("show_hand_skeleton_overlay")
-		options["save_controller_hand_sidecar"] = _toggle_enabled("save_controller_hand_sidecar")
-		options["save_body_sidecar"] = _toggle_enabled("save_body_sidecar")
 		options["save_root"] = _configured_save_root()
 		options["upload_url"] = _upload_url.text.strip_edges() if _upload_url else ""
 		options["upload_token"] = _upload_token
@@ -451,15 +447,6 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	var outputs := register_group("outputs", "UI_OUTPUTS", "check")
 	_add_export_coordinate_space_control(outputs)
 	_add_rgb_recording_controls(outputs)
-	# Controller/hand poses always go into the MP4 mett tracks. This toggle only
-	# controls whether they are ALSO written as separate JSONL sidecar files for
-	# debugging. Default off to avoid the extra main-thread JSON cost.
-	_add_stream_toggle(outputs, "save_controller_hand_sidecar", tr("UI_CONTROLLER_HAND_SIDECAR"), false)
-	# Body joints likewise always land in the MP4 mett body_joints track; this
-	# toggle only adds the JSONL sidecar (the one place the frame-level
-	# body_flags + PICO velocity/acceleration extras are preserved).
-	_add_stream_toggle(outputs, "save_body_sidecar", tr("UI_BODY_SIDECAR"), false)
-
 	# --- Storage group -----------------------------------------------------
 	var storage := register_group("storage", "UI_GROUP_STORAGE", "plug")
 
@@ -1636,11 +1623,24 @@ func _mp4_path_for_local_session(root: String, session_id: String, manifest_path
 	var media: Dictionary = media_value if media_value is Dictionary else {}
 	var filename := str(media.get("filename", "")).strip_edges()
 	if not filename.is_empty():
-		var candidate := filename if filename.begins_with("/") else root.path_join(filename)
-		if _path_is_inside(candidate, root) and FileAccess.file_exists(candidate):
-			return candidate
+		if filename.begins_with("/"):
+			if _path_is_inside(filename, root) and FileAccess.file_exists(filename):
+				return filename
+		else:
+			# Current sessions keep media in the session directory. Fall back to
+			# the capture root for manifests written by the historical sibling
+			# MP4 layout.
+			var session_candidate := root.path_join(session_id).path_join(filename)
+			if _path_is_inside(session_candidate, root) and FileAccess.file_exists(session_candidate):
+				return session_candidate
+			var legacy_candidate := root.path_join(filename)
+			if _path_is_inside(legacy_candidate, root) and FileAccess.file_exists(legacy_candidate):
+				return legacy_candidate
 	var fallback := root.path_join("%s.mp4" % session_id)
-	return fallback if FileAccess.file_exists(fallback) else ""
+	if FileAccess.file_exists(fallback):
+		return fallback
+	var session_fallback := root.path_join(session_id).path_join("%s.mp4" % session_id)
+	return session_fallback if FileAccess.file_exists(session_fallback) else ""
 
 
 func _local_file_session_limit() -> int:
@@ -1750,8 +1750,6 @@ static func _default_options() -> Dictionary:
 		"server_port": DEFAULT_LIVE_SERVER_PORT,
 		"server_result_port": DEFAULT_LIVE_RESULT_PORT,
 		"server_auth_token": "",
-		"save_controller_hand_sidecar": false,
-		"save_body_sidecar": false,
 		"save_root": DEFAULT_SAVE_ROOT,
 		"upload_url": "",
 		"upload_token": "",

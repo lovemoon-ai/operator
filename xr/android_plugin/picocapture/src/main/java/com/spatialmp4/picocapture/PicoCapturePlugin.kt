@@ -46,9 +46,7 @@ import org.godotengine.godot.plugin.SignalInfo
 import org.godotengine.godot.plugin.UsedByGodot
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedWriter
 import java.io.File
-import java.io.FileWriter
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -66,7 +64,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var cameraManager: CameraManager? = null
 
     private val sessions = ConcurrentHashMap<String, EyeCameraSession>()
-    private val frameIndexWriters = ConcurrentHashMap<String, BufferedWriter>()
     private val frameIndexCounters = ConcurrentHashMap<String, AtomicLong>()
     private var finalMp4Path: File? = null
     private var partialMp4Path: File? = null
@@ -102,7 +99,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
 
     private val metricCameraFramesLeft = AtomicLong(0L)
     private val metricCameraFramesRight = AtomicLong(0L)
-    private val metricFrameIndexWrites = AtomicLong(0L)
     private val metricEncoderPairsOffered = AtomicLong(0L)
     private val metricEncoderMonoOffered = AtomicLong(0L)
     private val metricEncoderPacketsOut = AtomicLong(0L)
@@ -156,7 +152,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     fun configureSpatialMp4SessionWithTime(
         finalPath: String,
         partialPath: String,
-        sidecarPath: String,
+        sessionPath: String,
         sessionStartUnixUs: Long,
         sessionStartGodotTicksUs: Long,
         configureGodotTicksUs: Long,
@@ -173,7 +169,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             Log.i(TAG, "Pico 4 Ultra depth capture requested; ignoring because the platform has no depth camera stream")
         }
         return configureSessionInternal(
-            sidecarPath,
+            sessionPath,
             sessionStartUnixUs,
             sessionStartGodotTicksUs,
             configureGodotTicksUs,
@@ -297,10 +293,11 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         this.stereoRgb = stereoRgb
         this.rgbBitrate = if (rgbBitrate > 0) rgbBitrate else DEFAULT_RGB_BITRATE
         this.rgbFps = if (rgbFps > 0) rgbFps else DEFAULT_RGB_FPS
+        leftMetadata = "{}"
+        rightMetadata = "{}"
         configureClockMonotonicNs = System.nanoTime()
         configureElapsedRealtimeNs = SystemClock.elapsedRealtimeNanos()
         configureUnixTimeMs = System.currentTimeMillis()
-        writeAndroidTimebase(dir, leftTimestampSource = null, rightTimestampSource = null)
         return true
     }
 
@@ -474,25 +471,15 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         val rightRecordingMetadata = rightConfig?.let { recordingCameraMetadata(it) }
         leftMetadata = leftRecordingMetadata.toString()
         rightMetadata = rightRecordingMetadata?.toString() ?: "{}"
-        writeText(File(root, "left_camera_characteristics.json"), leftMetadata)
-        if (rightConfig != null) {
-            writeText(File(root, "right_camera_characteristics.json"), rightMetadata)
-        } else {
-            File(root, "right_camera_characteristics.json").delete()
-        }
-        val androidTimebase = writeAndroidTimebase(root, leftConfig.timestampSource, rightConfig?.timestampSource)
+        val androidTimebase = buildAndroidTimebase(leftConfig.timestampSource, rightConfig?.timestampSource)
 
         if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase, useGpuSurfaceEncoder = false)) {
             return false
         }
 
-        // Camera2 frames are encoded by the Kotlin path, so Kotlin also owns
-        // the matching frame-index sidecars for this branch.
         openFrameIndexWriter(root, "left")
         if (rightConfig != null) {
             openFrameIndexWriter(root, "right")
-        } else {
-            File(root, "right_camera_frames.jsonl").delete()
         }
 
         acceptingFrames = true
@@ -540,25 +527,17 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         val rightRecordingMetadata = rightConfig?.let { recordingCameraMetadata(it) }
         leftMetadata = leftRecordingMetadata.toString()
         rightMetadata = rightRecordingMetadata?.toString() ?: "{}"
-        writeText(File(root, "left_camera_characteristics.json"), leftMetadata)
-        if (rightConfig != null) {
-            writeText(File(root, "right_camera_characteristics.json"), rightMetadata)
-        } else {
-            File(root, "right_camera_characteristics.json").delete()
-        }
-        val androidTimebase = writeAndroidTimebase(root, leftTimestampSource = null, rightTimestampSource = null)
+        val androidTimebase = buildAndroidTimebase(leftTimestampSource = null, rightTimestampSource = null)
 
         ensureBackgroundThread()
         if (!startNativeWriter(root, leftConfig, rightConfig, androidTimebase, useGpuSurfaceEncoder = true)) {
             return false
         }
 
-        // libpico_openxr owns both frame-index JSONL files in native OpenXR
-        // mode. A second buffered FileWriter on either path can truncate or
-        // overwrite metadata emitted for accepted encoded access units.
         closeFrameIndexWriters()
-        if (rightConfig == null) {
-            File(root, "right_camera_frames.jsonl").delete()
+        openFrameIndexWriter(root, "left")
+        if (rightConfig != null) {
+            openFrameIndexWriter(root, "right")
         }
         openXrCameraConfigs.clear()
         openXrCameraConfigs["left"] = leftConfig
@@ -739,7 +718,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return JSONObject()
             .put("cam_frames_left", metricCameraFramesLeft.getAndSet(0L))
             .put("cam_frames_right", metricCameraFramesRight.getAndSet(0L))
-            .put("frame_index_writes", metricFrameIndexWrites.getAndSet(0L))
             .put("enc_pairs_in", metricEncoderPairsOffered.getAndSet(0L))
             .put("enc_mono_in", metricEncoderMonoOffered.getAndSet(0L))
             .put("enc_packets_out", metricEncoderPacketsOut.getAndSet(0L))
@@ -1171,26 +1149,11 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
     }
 
-    private fun openFrameIndexWriter(root: File, eye: String) {
-        try {
-            val target = File(root, "${eye}_camera_frames.jsonl")
-            target.parentFile?.mkdirs()
-            frameIndexWriters[eye] = BufferedWriter(FileWriter(target, false))
-            frameIndexCounters[eye] = AtomicLong(0L)
-        } catch (error: Exception) {
-            Log.w(TAG, "Failed to open ${eye}_camera_frames.jsonl: ${error.message}")
-        }
+    private fun openFrameIndexWriter(@Suppress("UNUSED_PARAMETER") root: File, eye: String) {
+        frameIndexCounters[eye] = AtomicLong(0L)
     }
 
     private fun closeFrameIndexWriters() {
-        frameIndexWriters.values.forEach { writer ->
-            try {
-                writer.flush()
-                writer.close()
-            } catch (_: Exception) {
-            }
-        }
-        frameIndexWriters.clear()
         frameIndexCounters.clear()
     }
 
@@ -1202,8 +1165,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         width: Int,
         height: Int
     ) {
-        val counter = frameIndexCounters[eye] ?: return
-        val index = counter.getAndIncrement()
+        val index = frameIndexCounters[eye]?.getAndIncrement() ?: return
         val record = JSONObject()
             .put("frame_index", index)
             .put("eye", eye)
@@ -1216,18 +1178,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("raw_path", "")
             .put("planes", JSONArray())
         val recordText = record.toString()
-        val writer = frameIndexWriters[eye]
-        try {
-            if (writer != null) {
-                synchronized(writer) {
-                    writer.write(recordText)
-                    writer.write("\n")
-                }
-                metricFrameIndexWrites.incrementAndGet()
-            }
-        } catch (error: Exception) {
-            Log.w(TAG, "Failed to append ${eye}_camera_frames.jsonl: ${error.message}")
-        }
         try {
             activeDataSink()?.onRgbFrameIndex(
                 eye,
@@ -1280,7 +1230,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         }
     }
 
-    private fun writeAndroidTimebase(dir: File, leftTimestampSource: Int?, rightTimestampSource: Int?): JSONObject {
+    private fun buildAndroidTimebase(leftTimestampSource: Int?, rightTimestampSource: Int?): JSONObject {
         val configureGodotTicksNs = configureGodotTicksUs * 1000L
         val monoToGodotOffsetNs = if (configureClockMonotonicNs > 0L) configureGodotTicksNs - configureClockMonotonicNs else 0L
         val boottimeToGodotOffsetNs = if (configureElapsedRealtimeNs > 0L) configureGodotTicksNs - configureElapsedRealtimeNs else 0L
@@ -1293,7 +1243,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             rgbSources.put("right", timestampSourceName(rightTimestampSource))
             rgbSources.put("right_code", rightTimestampSource)
         }
-        val record = JSONObject()
+        return JSONObject()
             .put("session_start_unix_us", sessionStartUnixUs)
             .put("session_start_godot_ticks_us", sessionStartGodotTicksUs)
             .put("configure_godot_ticks_us", configureGodotTicksUs)
@@ -1307,8 +1257,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             .put("openxr_xr_time_domain", "clock_monotonic_ns")
             .put("openxr_xr_time_to_godot_ticks_ns_offset", monoToGodotOffsetNs)
             .put("rgb_sensor_timestamp_sources", rgbSources)
-        writeText(File(dir, "android_timebase.json"), record.toString(2))
-        return record
     }
 
     private fun buildOperatorStaticMetadata(
@@ -1433,11 +1381,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private fun requiredRuntimePermissions(): List<String> = listOf(Manifest.permission.CAMERA)
 
     private fun ensureDirectory(path: File): Boolean = path.isDirectory || path.mkdirs()
-
-    private fun writeText(path: File, text: String) {
-        path.parentFile?.mkdirs()
-        path.writeText(text)
-    }
 
     private fun requireContext(): Context {
         return mainActivity ?: throw IllegalStateException("Godot activity is not available")

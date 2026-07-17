@@ -1,7 +1,7 @@
 extends Node3D
 
 const LivePullDenseMapViewScript := preload("res://addons/live-pull/live_pull_dense_map_view.gd")
-const PoseSamplerScript := preload("res://scripts/core/sensors/pose_sampler.gd")
+const POSE_SAMPLER_PATH := "res://scripts/core/sensors/pose_sampler.gd"
 const DepthSamplerScript := preload("res://scripts/core/sensors/depth_sampler.gd")
 const BodyMotionSamplerScript := preload("res://scripts/core/sensors/body_motion_sampler.gd")
 const BodyPoseProviderScript := preload("res://scripts/robot_constraint/body_pose_provider.gd")
@@ -91,13 +91,13 @@ var writer: Object
 # WP5: shared canonical-frame fanout (StreamBinding over the sinks below)
 # injected into the samplers so all sensor writes flow through SensorFrames.
 var _frame_sink: Object
-# WP5 sinks. Spool mode: SpatialMp4Sink (SessionSpoolWriter engine) +
-# JsonlSidecarSink. Live mode: LiveStreamSink (LivePushWriter engine).
+# WP5 sinks. Spool mode: SpatialMp4Sink (SessionSpoolWriter engine).
+# Live mode: LiveStreamSink (LivePushWriter engine).
 var _spatialmp4_sink: SpatialMp4Sink = null
-var _jsonl_sink: JsonlSidecarSink = null
 var _live_stream_sink: LiveStreamSink = null
 var _upload_sink: UploadQueueSink = null
 var pose_sampler: Node
+var _pose_sampler_script: Script
 var _body_pose_debug_started_pico_body := false
 var _body_pose_debug_tracking_provider: Node = null
 var _body_pose_debug_provider: Node = null
@@ -178,11 +178,6 @@ var capture_options := {
 	"server_host": "127.0.0.1",
 	"server_port": 63910,
 	"server_result_port": 63912,
-	"save_controller_hand_sidecar": false,
-	# Body joints always go into the MP4 mett body_joints track; the sidecar
-	# JSONL (frame-level body_flags + PICO velocity/acceleration extras) is
-	# opt-in via the settings panel.
-	"save_body_sidecar": false,
 	"save_root": DEFAULT_SAVE_ROOT
 }
 
@@ -318,7 +313,6 @@ func _ready() -> void:
 	writer = io.get("writer")
 	_frame_sink = io.get("frame_sink")
 	_spatialmp4_sink = io.get("spatialmp4_sink")
-	_jsonl_sink = io.get("jsonl_sink")
 	_live_stream_sink = io.get("live_stream_sink")
 	_upload_sink = io.get("upload_sink")
 	# _bind_android_plugin ran above when `writer` was still null, so its own
@@ -332,7 +326,11 @@ func _ready() -> void:
 		writer.set_muxer_plugin(muxer_plugin)
 	if live_server_plugin != null and writer.has_method("set_live_server_plugin"):
 		writer.set_live_server_plugin(live_server_plugin)
-	pose_sampler = PoseSamplerScript.new()
+	_pose_sampler_script = load(POSE_SAMPLER_PATH) as Script
+	if _pose_sampler_script == null:
+		push_error("Failed to load PoseSampler script: %s" % POSE_SAMPLER_PATH)
+		return
+	pose_sampler = _pose_sampler_script.new()
 	depth_sampler = DepthSamplerScript.new()
 	body_motion_sampler = BodyMotionSamplerScript.new()
 
@@ -574,8 +572,6 @@ func _apply_capture_automation_options(automation: Dictionary) -> void:
 			"record_motion_trackers": false,
 			"record_audio": false,
 			"show_hand_skeleton_overlay": false,
-			"save_controller_hand_sidecar": false,
-			"save_body_sidecar": false,
 			"upload_on_finalize": false,
 		}
 		_merge_capture_options(rgb_only_overrides)
@@ -1017,8 +1013,8 @@ func _reset_ui_input_state() -> void:
 
 
 ## Hand joints, body joints and motion trackers are captured/written by the
-## hand_capture GDExtension (C++): ego capture writes the mp4 tracks (muxer
-## plugin) + optional JSONL sidecars; live modes push hands via
+## hand_capture GDExtension (C++): ego capture writes the MP4 metadata tracks
+## through the muxer plugin; live modes push hands via
 ## writeHandJointsJson on the live server plugin (rate-limited in C++ to the
 ## legacy 30 Hz wire cadence; body/motion never had live network streams).
 ## Idempotent — safe to call again when a plugin singleton binds late.
@@ -1239,8 +1235,8 @@ func _on_capture_session_stopped(final_path: String) -> void:
 	if ego_uploader and writer:
 		# session_spool_writer.gd exposes get_session_dir_absolute() (an
 		# OS-absolute path on Android, e.g. /sdcard/DCIM/SpatialMP4/<id>/)
-		# and get_output_mp4_path_absolute() (the finalized mp4 sibling
-		# to that dir). Both are stable once writer.close() has returned.
+		# and get_output_mp4_path_absolute() (the finalized mp4 inside that
+		# directory). Both are stable once writer.close() has returned.
 		var session_dir_for_upload: String = writer.get_session_dir_absolute() if writer.has_method("get_session_dir_absolute") else writer.get_session_dir()
 		var mp4_for_upload: String = writer.get_output_mp4_path_absolute() if writer.has_method("get_output_mp4_path_absolute") else (saved_session_dir if saved_session_dir.ends_with(".mp4") else "")
 		var session_id_for_upload := mp4_for_upload.get_file().get_basename()
@@ -1678,12 +1674,14 @@ func _initialize_openxr() -> void:
 	if xr_interface:
 		xr_interface.session_begun.connect(_on_openxr_session_begun)
 		xr_interface.session_stopping.connect(_on_openxr_session_stopping)
+		var viewport := get_viewport()
+		if viewport != null:
+			viewport.use_xr = true
 	if xr_interface and not xr_interface.is_initialized():
 		xr_interface.initialize()
 
 	if xr_interface and xr_interface.is_initialized():
 		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
-		get_viewport().use_xr = true
 		call_deferred("_mark_openxr_session_active_if_needed")
 	else:
 		push_warning("OpenXR is not initialized; capture will only produce local test files.")
@@ -1849,7 +1847,7 @@ func _start_camera_plugin() -> void:
 		var session_config := {
 			"final_path": output_mp4_absolute,
 			"partial_path": partial_mp4_absolute,
-			"sidecar_path": session_dir_absolute,
+			"session_dir": session_dir_absolute,
 			"session_start_unix_us": writer.get_session_start_unix_us(),
 			"session_start_godot_ticks_us": writer.get_session_start_ticks_us(),
 			"configure_godot_ticks_us": Time.get_ticks_usec(),
@@ -1993,14 +1991,9 @@ func _start_native_openxr_hand_recording() -> bool:
 		push_error("NativeOpenXRHandCapture singleton is unavailable")
 		return false
 	var time_offset_ns := int(camera_plugin.call("getXrTimeToGodotTicksOffsetNs"))
-	var hands_jsonl_path := ""
-	if bool(_capture_option("save_controller_hand_sidecar", false)):
-		hands_jsonl_path = str(writer.get_session_dir_absolute()).path_join(SessionLayout.HANDS_JSONL)
-	var coordinate_space := OpenXRExportSpace.coordinate_space_id(
-		_capture_option("export_coordinate_space", OpenXRExportSpace.DEFAULT))
 	_native_openxr_hand_recording_started = bool(
 		_native_openxr_hand_capture.call(
-			"start_recording", time_offset_ns, hands_jsonl_path, coordinate_space)
+			"start_recording", time_offset_ns)
 	)
 	if not _native_openxr_hand_recording_started:
 		push_error("Native OpenXR hand recorder start failed: %s" % str(
@@ -2024,6 +2017,9 @@ func _on_openxr_session_begun() -> void:
 	if _xr_session_begun:
 		return
 	_xr_session_begun = true
+	var viewport := get_viewport()
+	if viewport != null:
+		viewport.use_xr = true
 	_request_export_coordinate_space(
 		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
 	if keep_passthrough_visible:
@@ -2446,8 +2442,6 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 		str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)),
 		int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
 		time_offset_ns,
-		str(writer.get_session_dir_absolute()).path_join("left_camera_frames.jsonl"),
-		str(writer.get_session_dir_absolute()).path_join("right_camera_frames.jsonl") if stereo else "",
 		exact_head_samples or exact_hand_samples,
 		exact_head_samples,
 		exact_hand_samples,
