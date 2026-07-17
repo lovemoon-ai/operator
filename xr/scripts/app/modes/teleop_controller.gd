@@ -57,10 +57,10 @@ var _settings_panel: Node3D
 var _settings_button: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
-
-## Selected by the user in the Settings UI; used as a hint until the
-## DeviceDescriptor arrives and overrides it.
-var _user_robot_type_hint: String = "robot_arm"
+# True while the settings panel is open: teleop is suspended — no commands
+# stream to the robot and the controller overlay is hidden — so the panel
+# owns the controllers exclusively.
+var _teleop_suspended := false
 
 var _xr_started: bool = false
 var _launch_window_active: bool = false
@@ -128,7 +128,6 @@ func _ready() -> void:
 	# user's preferred orientation (face-locked vs world-locked) without
 	# waiting for a fresh OK press.
 	var persisted: Dictionary = SettingsUI.load_settings()
-	_user_robot_type_hint = persisted.get("robot_type", "robot_arm")
 	if _robot_view:
 		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
 		# `show_video_panel` defaults to false: a fresh install should NOT
@@ -263,6 +262,8 @@ func _create_settings_ui_nodes() -> void:
 func _update_teleop_controller_panel() -> void:
 	if _teleop_controller_panel == null:
 		return
+	if _teleop_suspended:
+		return
 	var controller_active := _is_right_controller_mode_active()
 	_teleop_controller_panel.call("set_controller_active", controller_active)
 	_update_teleop_controller_panel_transform(controller_active)
@@ -343,13 +344,13 @@ func _configure_passthrough() -> void:
 
 ## Called by SettingsUI when the user presses Confirm.
 ## Saves the panel state, hides it, then connects/reconnects with the chosen
-## endpoint. robot_type is a hint that the descriptor will override on handshake.
-func _on_settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool) -> void:
-	print("[Operator] Settings applied: ip=%s port=%d type=%s face_locked=%s show_video=%s show_on_launch=%s" % [
-		ip, port, robot_type, video_face_locked, show_video_panel, show_on_launch,
+## endpoint. The robot type is not a client setting — the DeviceDescriptor
+## received on handshake defines what the client sends and displays.
+func _on_settings_applied(ip: String, port: int, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool) -> void:
+	print("[Operator] Settings applied: ip=%s port=%d face_locked=%s show_video=%s show_on_launch=%s" % [
+		ip, port, video_face_locked, show_video_panel, show_on_launch,
 	])
 	_cancel_launch_window()
-	_user_robot_type_hint = robot_type
 
 	# Apply video window mode immediately.
 	if _robot_view:
@@ -401,7 +402,25 @@ func _on_settings_exit_requested() -> void:
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 
+## Pause/resume teleop around the settings panel. While suspended no
+## DeviceCommands stream to the robot (the robot-side deadman/watchdog holds
+## the arm) and the controller overlay hides, so panel interaction can't
+## move the arm or show stale grip/trigger hints.
+func _set_teleop_suspended(suspended: bool) -> void:
+	if _teleop_suspended == suspended:
+		return
+	_teleop_suspended = suspended
+	if _robot_control_sink:
+		if suspended:
+			_robot_control_sink.set_sending(false)
+		elif _tcp_handler and _tcp_handler.is_connected_to_robot():
+			_robot_control_sink.set_sending(true)
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_suspended"):
+		_teleop_controller_panel.call("set_suspended", suspended)
+
+
 func _show_settings_panel() -> void:
+	_set_teleop_suspended(true)
 	_release_global_interaction_pointer()
 	# Re-push the latest discovery snapshot every time we open the panel —
 	# robots may have appeared / disappeared while it was closed.
@@ -427,6 +446,7 @@ func _hide_settings_panel() -> void:
 	else:
 		_settings_panel.visible = false
 	_settings_button.visible = true
+	_set_teleop_suspended(false)
 
 
 # --- Launch decision (D: hybrid auto-discover) -------------------------------
@@ -512,13 +532,12 @@ func _is_loopback_host(host: String) -> bool:
 func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> void:
 	# Mirror what _on_settings_applied does for the connection bits, minus
 	# the panel-hide step (panel was never shown). Also apply persisted
-	# video mode + type hint so the auto-path matches what OK would do.
+	# video mode so the auto-path matches what OK would do.
 	var persisted: Dictionary = SettingsUI.load_settings()
 	if _robot_view:
 		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
 		if _robot_view.has_method("set_show_video_panel"):
 			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
-	_user_robot_type_hint = String(info.get("device_type", persisted.get("robot_type", "robot_arm")))
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
 
@@ -527,11 +546,13 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	else:
 		_settings_panel.visible = false
 	_settings_button.visible = true
+	_set_teleop_suspended(false)
 	print("[Operator] Auto-connecting to discovered robot @ %s:%d" % [ip, port])
 	_connect_to_robot(ip, port)
 
 
 func _show_settings_panel_with_status(text: String) -> void:
+	_set_teleop_suspended(true)
 	_push_discovery_to_settings_ui()
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
@@ -545,6 +566,7 @@ func _show_settings_panel_with_status(text: String) -> void:
 
 
 func _show_settings_panel_discovering() -> void:
+	_set_teleop_suspended(true)
 	_push_discovery_to_settings_ui()
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
@@ -666,12 +688,12 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	var device_name: String = descriptor.get("device", {}).get("name", tr("UI_UNKNOWN"))
 	var device_type: String = descriptor.get("device", {}).get("type", tr("UI_UNKNOWN"))
 	_set_status(tr("UI_DRIVER_ACTIVE") % [device_name, _robot_type_display(device_type)])
-	if device_type != _user_robot_type_hint:
-		print("[Operator] Robot type hint (%s) differs from descriptor (%s) — descriptor wins" % [
-			_user_robot_type_hint, device_type,
-		])
+	print("[Operator] Connected to %s (type=%s per descriptor)" % [device_name, device_type])
 	_robot_control_sink.configure_for_device(descriptor)
-	_robot_control_sink.set_sending(true)
+	# If the settings panel is up, stay paused; _set_teleop_suspended(false)
+	# re-enables sending when it closes.
+	if not _teleop_suspended:
+		_robot_control_sink.set_sending(true)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_update_teleop_controller_panel()

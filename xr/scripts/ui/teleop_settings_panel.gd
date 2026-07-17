@@ -1,16 +1,14 @@
 extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name TeleopSettingsPanel
 
-signal settings_applied(ip: String, port: int, robot_type: String, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool)
+signal settings_applied(ip: String, port: int, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool)
 signal close_requested
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
 const SECTION := "settings"
 
-const ROBOT_TYPES: Array[String] = ["robot_arm", "rc_car"]
 const DEFAULT_IP: String = "127.0.0.1"
 const DEFAULT_PORT: int = 63901
-const DEFAULT_TYPE: String = "robot_arm"
 const DEFAULT_FACE_LOCKED: bool = true
 # Default OFF so a freshly installed app doesn't blast a placeholder quad in
 # front of the user. Showing the panel requires both this opt-in AND the robot
@@ -53,10 +51,18 @@ class DiscoverySpinner:
 		draw_arc(center, radius, 0.0, PI * 2.0, 40, base_color, 3.0, true)
 		draw_arc(center, radius, _angle, _angle + PI * 1.45, 28, accent_color, 3.4, true)
 
+const IP_TEST_TIMEOUT_MSEC := 2000
+const IP_TEST_RESULT_SECS := 3.0
+const COL_IP_TEST_OK := Color(0.14, 0.82, 0.45)
+const COL_IP_TEST_FAIL := Color(1.0, 0.36, 0.30)
+
 var _discovery_option: OptionButton
 var _ip_input: LineEdit
+var _ip_test_button: Button
+var _ip_test_peer: StreamPeerTCP
+var _ip_test_deadline_msec := 0
+var _ip_test_token := 0
 var _port_input: LineEdit
-var _type_option: OptionButton
 var _video_face_toggle: CheckButton
 var _show_video_panel_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
@@ -111,12 +117,25 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_discovery_option.item_selected.connect(_on_discovery_selected)
 	add_interactive(connection, _discovery_option)
 
+	var ip_row := HBoxContainer.new()
+	ip_row.add_theme_constant_override("separation", 10)
+	ip_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	connection.add_child(ip_row)
+
 	_ip_input = LineEdit.new()
 	_ip_input.placeholder_text = tr("UI_ROBOT_IP")
 	_ip_input.text = DEFAULT_IP
 	_ip_input.custom_minimum_size.y = 55
 	_ip_input.add_theme_font_size_override("font_size", 21)
-	add_interactive(connection, _ip_input)
+	add_interactive(ip_row, _ip_input)
+
+	_ip_test_button = Button.new()
+	_ip_test_button.text = tr("UI_TEST_IP")
+	_ip_test_button.focus_mode = Control.FOCUS_NONE
+	_ip_test_button.custom_minimum_size = Vector2(96, 55)
+	_ip_test_button.add_theme_font_size_override("font_size", 21)
+	_ip_test_button.pressed.connect(_on_ip_test_pressed)
+	ip_row.add_child(_ip_test_button)
 
 	_port_input = LineEdit.new()
 	_port_input.placeholder_text = tr("UI_PORT")
@@ -142,15 +161,10 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	status_row.add_child(_status_label)
 
-	# --- Robot group -------------------------------------------------------
-	var robot := register_group("robot", "UI_GROUP_ROBOT", "robot-arm")
-
-	_type_option = OptionButton.new()
-	_type_option.custom_minimum_size.y = 55
-	_type_option.add_theme_font_size_override("font_size", 23)
-	for t in ROBOT_TYPES:
-		_add_option_item(_type_option, _robot_type_display(t), t, _icon_name_for_robot_type(t))
-	add_interactive(robot, _type_option)
+	# The robot *type* is intentionally not a user setting: what the XR
+	# client sends is defined entirely by the DeviceDescriptor the robot
+	# sends on handshake (input_mapping / control_schema). The discovery list
+	# above still shows each robot's self-reported device_type as a label.
 
 	# --- Display group -----------------------------------------------------
 	var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
@@ -181,7 +195,6 @@ func _on_confirm_requested() -> void:
 	settings_applied.emit(
 			str(options.get("ip", DEFAULT_IP)),
 			int(options.get("port", DEFAULT_PORT)),
-			str(options.get("robot_type", DEFAULT_TYPE)),
 			bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED)),
 			bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL)),
 			bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
@@ -247,13 +260,9 @@ func set_discovering(active: bool, text: String = "") -> void:
 
 
 func get_options() -> Dictionary:
-	var rtype := DEFAULT_TYPE
-	if _type_option.selected >= 0:
-		rtype = String(_type_option.get_item_metadata(_type_option.selected))
 	return {
 		"ip": _ip_input.text.strip_edges(),
 		"port": _port_input.text.strip_edges().to_int(),
-		"robot_type": rtype,
 		"video_face_locked": _video_face_toggle.button_pressed,
 		"show_video_panel": _show_video_panel_toggle.button_pressed,
 		"show_on_launch": _show_on_launch_toggle.button_pressed
@@ -263,11 +272,6 @@ func get_options() -> Dictionary:
 func set_options(options: Dictionary) -> void:
 	_ip_input.text = str(options.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(options.get("port", DEFAULT_PORT)))
-	var rtype := str(options.get("robot_type", DEFAULT_TYPE))
-	var type_idx := ROBOT_TYPES.find(rtype)
-	if type_idx < 0:
-		type_idx = 0
-	_type_option.select(type_idx)
 	_video_face_toggle.button_pressed = bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED))
 	_show_video_panel_toggle.button_pressed = bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL))
 	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
@@ -285,11 +289,6 @@ func _on_discovery_selected(idx: int) -> void:
 	var info: Dictionary = _discovered[rname]
 	_ip_input.text = String(info.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(info.get("pose_port", DEFAULT_PORT)))
-	var dtype: String = String(info.get("device_type", ""))
-	if dtype != "":
-		var t_idx := ROBOT_TYPES.find(dtype)
-		if t_idx >= 0:
-			_type_option.select(t_idx)
 	_apply_mode_lock()
 	set_status(tr("UI_WILL_CONNECT_TO") % _format_robot_label(rname, info))
 
@@ -298,6 +297,88 @@ func _apply_mode_lock() -> void:
 	var manual := _discovery_option.selected <= 0
 	_ip_input.editable = manual
 	_port_input.editable = manual
+	# A discovery beacon can auto-select a robot — and so flip these to
+	# read-only — while the operator is still typing in one of them. No focus
+	# change occurs, so the keyboard would stay up and silently eat keys.
+	refresh_keyboard()
+
+
+# --- IP reachability test ----------------------------------------------------
+#
+# One-shot TCP probe of the current ip:port. The command server accepts
+# multiple connections (one task per client), so probing never disturbs an
+# active teleop session. Result (✓/✗) shows for IP_TEST_RESULT_SECS, then the
+# button reverts to its label.
+
+func _process(delta: float) -> void:
+	super._process(delta)
+	_poll_ip_test()
+
+
+func _exit_tree() -> void:
+	# Scene teardown (e.g. Exit → change_scene) can land here mid-probe. The
+	# RefCounted peer would close on free anyway, but drop it explicitly so we
+	# never depend on GC timing for the socket.
+	if _ip_test_peer != null:
+		_ip_test_peer.disconnect_from_host()
+		_ip_test_peer = null
+
+
+func _on_ip_test_pressed() -> void:
+	if _ip_test_peer != null:
+		return  # probe already in flight
+	_ip_test_token += 1
+	var ip := _ip_input.text.strip_edges()
+	var port := _port_input.text.strip_edges().to_int()
+	if ip.is_empty() or port <= 0 or port > 65535:
+		_show_ip_test_result(false)
+		return
+	var peer := StreamPeerTCP.new()
+	if peer.connect_to_host(ip, port) != OK:
+		_show_ip_test_result(false)
+		return
+	_ip_test_peer = peer
+	_ip_test_deadline_msec = Time.get_ticks_msec() + IP_TEST_TIMEOUT_MSEC
+	_ip_test_button.text = "…"
+
+
+func _poll_ip_test() -> void:
+	if _ip_test_peer == null:
+		return
+	_ip_test_peer.poll()
+	var status := _ip_test_peer.get_status()
+	if status == StreamPeerTCP.STATUS_CONNECTED:
+		_finish_ip_test(true)
+	elif status == StreamPeerTCP.STATUS_ERROR \
+			or Time.get_ticks_msec() >= _ip_test_deadline_msec:
+		_finish_ip_test(false)
+
+
+func _finish_ip_test(reachable: bool) -> void:
+	if _ip_test_peer != null:
+		_ip_test_peer.disconnect_from_host()
+		_ip_test_peer = null
+	_show_ip_test_result(reachable)
+
+
+func _show_ip_test_result(reachable: bool) -> void:
+	_ip_test_token += 1
+	var token := _ip_test_token
+	var color := COL_IP_TEST_OK if reachable else COL_IP_TEST_FAIL
+	_ip_test_button.text = "✓" if reachable else "✗"
+	for theme_key in ["font_color", "font_hover_color", "font_pressed_color"]:
+		_ip_test_button.add_theme_color_override(theme_key, color)
+	get_tree().create_timer(IP_TEST_RESULT_SECS).timeout.connect(func() -> void:
+		# A newer press/result owns the button now; leave it alone.
+		if token == _ip_test_token:
+			_reset_ip_test_button()
+	)
+
+
+func _reset_ip_test_button() -> void:
+	_ip_test_button.text = tr("UI_TEST_IP")
+	for theme_key in ["font_color", "font_hover_color", "font_pressed_color"]:
+		_ip_test_button.remove_theme_color_override(theme_key)
 
 
 func _format_robot_label(rname: String, info: Dictionary) -> String:
@@ -359,7 +440,6 @@ static func _default_options() -> Dictionary:
 	return {
 		"ip": DEFAULT_IP,
 		"port": DEFAULT_PORT,
-		"robot_type": DEFAULT_TYPE,
 		"video_face_locked": DEFAULT_FACE_LOCKED,
 		"show_video_panel": DEFAULT_SHOW_VIDEO_PANEL,
 		"show_on_launch": DEFAULT_SHOW_ON_LAUNCH

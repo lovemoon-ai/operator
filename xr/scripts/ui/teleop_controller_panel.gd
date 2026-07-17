@@ -34,6 +34,7 @@ const COL_DIM := Color(0.18, 0.20, 0.23, 0.86)
 
 var _enabled_for_device := false
 var _controller_active := false
+var _suspended := false
 var _bridge_connected := false
 var _grip_pressed := false
 var _trigger_pressed := false
@@ -85,6 +86,15 @@ func set_controller_active(active: bool) -> void:
 	if _controller_active == active:
 		return
 	_controller_active = active
+	_refresh()
+
+
+## Hide the overlay while the settings panel owns the controllers; teleop
+## input is not streaming so the grip/trigger hints would be misleading.
+func set_suspended(suspended: bool) -> void:
+	if _suspended == suspended:
+		return
+	_suspended = suspended
 	_refresh()
 
 
@@ -273,7 +283,7 @@ func _label_backplate(node_name: String, position: Vector3, width: float, height
 
 
 func _refresh() -> void:
-	if not _enabled_for_device or not _controller_active:
+	if _suspended or not _enabled_for_device or not _controller_active:
 		visible = false
 		return
 	visible = true

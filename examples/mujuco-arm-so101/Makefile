@@ -53,8 +53,20 @@ check-uv:
 
 # Idempotent: `uv sync` is fast (~ms) when the venv already matches the
 # lock, so no sentinel file is needed. Creates .venv if missing.
+#
+# macOS + uv-managed CPython: `mjpython` (required for the MuJoCo viewer)
+# dlopens `@executable_path/../lib/libpython3.11.dylib`, but uv venvs don't
+# ship that dylib and `uv sync` prunes stray files from `.venv/lib/`. Re-link
+# it from the base interpreter after every sync (no-op elsewhere).
 env: check-uv
 	$(UV) sync --python $(PYTHON_VERSION)
+	@if [ "$$(uname)" = "Darwin" ]; then \
+	  base_lib="$$($(PY) -c 'import sys, pathlib; print(pathlib.Path(sys.base_prefix) / "lib")')"; \
+	  for dylib in "$$base_lib"/libpython*.dylib; do \
+	    [ -e "$$dylib" ] || continue; \
+	    ln -sf "$$dylib" "$(VENV)/lib/$$(basename "$$dylib")"; \
+	  done; \
+	fi
 
 # Fetch the 19 SO-101 mesh STL files (~17 MB) from upstream
 # mujoco_menagerie. Kept out of this repo to save space. Idempotent:
