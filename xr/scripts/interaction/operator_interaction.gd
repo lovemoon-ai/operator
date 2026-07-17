@@ -12,9 +12,30 @@ const MODE_HANDS := "hands"
 const MODE_HEAD := "head"
 const LEFT_HAND_TRACKER := &"/user/hand_tracker/left"
 const RIGHT_HAND_TRACKER := &"/user/hand_tracker/right"
+# Controller input timestamps are kept for diagnostics only. A tracked physical
+# controller stays authoritative while its controller interaction profile is
+# active; it must not expire merely because Pico also publishes UNKNOWN-source
+# optical hand joints.
+const PINCH_ARBITRATION_DISTANCE_M := 0.05
+const HAND_JOINT_THUMB_TIP := 5
+const HAND_JOINT_INDEX_FINGER_TIP := 10
+# Trackers driven by XR_EXT_hand_interaction are bare hands even though they
+# look like active XRController3D poses to Godot.
+const HAND_INTERACTION_PROFILE_HINT := "hand_interaction"
+
+# On-device interaction debug log. Release builds keep user:// in private app
+# storage; on a rooted development headset pull it from
+# /data/user/0/com.lovemoon.operator/files/interaction_debug.log.
+const DEBUG_LOG_ENABLED := true
+const DEBUG_LOG_PATH := "user://interaction_debug.log"
+const DEBUG_LOG_MAX_BYTES := 262144
+const DEBUG_LOG_SNAPSHOT_INTERVAL_S := 1.0
 
 var current_mode := MODE_CONTROLLERS
 var busy := false
+
+var _last_controller_input_msec := 0
+var _debug_log_accum_s := 0.0
 
 var _mode_override := ""
 var _router: Node
@@ -43,6 +64,11 @@ func _process(delta: float) -> void:
 	_sync_rig()
 	_update_mode()
 	_update_targets()
+	if DEBUG_LOG_ENABLED:
+		_debug_log_accum_s += delta
+		if _debug_log_accum_s >= DEBUG_LOG_SNAPSHOT_INTERVAL_S:
+			_debug_log_accum_s = 0.0
+			_write_debug_snapshot()
 	_pico_head_probe_accum_s += delta
 	if _pico_head_probe_accum_s >= 1.0:
 		_pico_head_probe_accum_s = 0.0
@@ -119,12 +145,20 @@ func _sync_rig() -> void:
 	if origin == null:
 		return
 	var camera := _find_xr_camera(origin)
-	var left_pointer := _find_controller(origin, "LeftAimPointer", &"left_hand", &"aim")
-	var right_pointer := _find_controller(origin, "RightAimPointer", &"right_hand", &"aim")
+	var left_pose := _preferred_pointer_pose(&"left_hand")
+	var right_pose := _preferred_pointer_pose(&"right_hand")
+	var left_pointer := _find_controller(origin, "LeftAimPointer", &"left_hand", left_pose)
+	var right_pointer := _find_controller(origin, "RightAimPointer", &"right_hand", right_pose)
 	if left_pointer == null:
-		left_pointer = _ensure_pose_controller(origin, "LeftAimPointer", &"left_hand", &"aim")
+		left_pointer = _ensure_pose_controller(origin, "LeftAimPointer", &"left_hand", left_pose)
 	if right_pointer == null:
-		right_pointer = _ensure_pose_controller(origin, "RightAimPointer", &"right_hand", &"aim")
+		right_pointer = _ensure_pose_controller(origin, "RightAimPointer", &"right_hand", right_pose)
+	# Preferred-name lookup intentionally survives scene changes, so keep the
+	# selected pose synchronized even when the XRController3D node is reused.
+	left_pointer.tracker = &"left_hand"
+	left_pointer.pose = left_pose
+	right_pointer.tracker = &"right_hand"
+	right_pointer.pose = right_pose
 
 	if origin == _origin \
 			and camera == _camera \
@@ -144,6 +178,24 @@ func _sync_rig() -> void:
 			_right_pointer,
 			_pointer_visual
 	)
+
+
+func _preferred_pointer_pose(tracker_name: StringName) -> StringName:
+	var tracker := XRServer.get_tracker(tracker_name)
+	if not (tracker is XRPositionalTracker):
+		return &"aim"
+	var positional := tracker as XRPositionalTracker
+	# Quest publishes both actions. Pico 4 Ultra only publishes `default` when
+	# default_pose and aim_pose are suggested for the same /input/aim/pose path.
+	# Prefer the explicit aim action when it exists, then use the equivalent
+	# default action for physical-controller profiles.
+	if positional.has_pose(&"aim"):
+		return &"aim"
+	var profile := String(positional.profile)
+	if profile.find(HAND_INTERACTION_PROFILE_HINT) == -1 \
+			and positional.has_pose(&"default"):
+		return &"default"
+	return &"aim"
 
 
 func _ensure_pointer_visual() -> void:
@@ -191,14 +243,206 @@ func _update_mode() -> void:
 	release_pointer()
 	input_mode_changed.emit(current_mode)
 	print("[Operator] Global interaction mode: %s" % current_mode)
+	if DEBUG_LOG_ENABLED:
+		_append_debug_line("%d MODE -> %s" % [Time.get_ticks_msec(), current_mode])
 
 
 func _detect_mode() -> String:
-	if _hand_tracker_active(LEFT_HAND_TRACKER) or _hand_tracker_active(RIGHT_HAND_TRACKER):
-		return MODE_HANDS
-	if _controller_active(_right_pointer) or _controller_active(_left_pointer):
+	var now := Time.get_ticks_msec()
+	var controller_input := _controller_input_detected()
+	if controller_input:
+		_last_controller_input_msec = now
+	var controller_tracking := _controller_tracking(_right_pointer) \
+			or _controller_tracking(_left_pointer)
+	var hands_unobstructed := _hand_tracker_unobstructed(LEFT_HAND_TRACKER) \
+			or _hand_tracker_unobstructed(RIGHT_HAND_TRACKER)
+	# Real controller evidence always wins over passive hand-joint data. Pico can
+	# report UNKNOWN-source optical joints while a pico4_controller pose and its
+	# actions are active; treating those joints as an exclusive hands signal is
+	# what previously disabled the controller.
+	if controller_input:
 		return MODE_CONTROLLERS
+	# XR_EXT_hand_interaction is an unambiguous bare-hand profile. It is checked
+	# before generic pose tracking because Godot exposes it through the same
+	# left_hand/right_hand XRController3D nodes.
+	if _tracker_profile_is_hand(_left_pointer) or _tracker_profile_is_hand(_right_pointer):
+		return MODE_HANDS
+	# An active physical-controller profile is authoritative even while the
+	# runtime is reacquiring its pose. PICO 4 Ultra continues to publish button
+	# actions during that window; requiring pose tracking first made it
+	# impossible for those actions to switch the router back to controllers.
+	if _tracker_profile_is_controller(_left_pointer) \
+			or _tracker_profile_is_controller(_right_pointer):
+		return MODE_CONTROLLERS
+	# A live non-hand controller pose remains in controller mode without a time
+	# limit. This prevents the pointer from disappearing after an idle timeout.
+	if controller_tracking:
+		return MODE_CONTROLLERS
+	# Only consider joint/pinch evidence after no physical controller pose is
+	# active. UNKNOWN is valid optical data on Pico, but is not by itself proof
+	# that a simultaneously tracked controller should be disabled.
+	if _hand_pinch_gesture_active():
+		return MODE_HANDS
+	if hands_unobstructed or _hands_data_present():
+		return MODE_HANDS
 	return ""
+
+
+func _controller_input_detected() -> bool:
+	return _pointer_input_detected(_left_pointer) or _pointer_input_detected(_right_pointer)
+
+
+func _pointer_input_detected(pointer: XRController3D) -> bool:
+	if pointer == null:
+		return false
+	# Pinch via XR_EXT_hand_interaction also drives these action values —
+	# only count input coming from a real controller profile.
+	if _tracker_profile_is_hand(pointer):
+		return false
+	if pointer.get_float(&"trigger") >= 0.35:
+		return true
+	for action in ["trigger_click", "primary_click", "select_button"]:
+		if pointer.is_button_pressed(action):
+			return true
+	return pointer.get_vector2(&"primary").length() >= 0.4
+
+
+func _hands_data_present() -> bool:
+	return _hand_tracker_active(LEFT_HAND_TRACKER) \
+			or _hand_tracker_active(RIGHT_HAND_TRACKER) \
+			or _tracker_profile_is_hand(_left_pointer) \
+			or _tracker_profile_is_hand(_right_pointer)
+
+
+func _hand_pinch_gesture_active() -> bool:
+	for side in [[LEFT_HAND_TRACKER, _left_pointer], [RIGHT_HAND_TRACKER, _right_pointer]]:
+		var pointer: XRController3D = side[1]
+		if pointer != null and _tracker_profile_is_hand(pointer) \
+				and pointer.get_float(&"hand_pinch") >= 0.55:
+			return true
+		var tracker := XRServer.get_tracker(side[0])
+		if tracker is XRHandTracker:
+			var hand := tracker as XRHandTracker
+			if hand.has_tracking_data \
+					and hand.hand_tracking_source != XRHandTracker.HAND_TRACKING_SOURCE_CONTROLLER:
+				var pinch_distance := _pinch_distance(hand)
+				if pinch_distance >= 0.0 and pinch_distance <= PINCH_ARBITRATION_DISTANCE_M:
+					return true
+	return false
+
+
+func _pinch_distance(hand: XRHandTracker) -> float:
+	if (hand.get_hand_joint_flags(HAND_JOINT_THUMB_TIP) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) == 0:
+		return -1.0
+	if (hand.get_hand_joint_flags(HAND_JOINT_INDEX_FINGER_TIP) & XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID) == 0:
+		return -1.0
+	var thumb := hand.get_hand_joint_transform(HAND_JOINT_THUMB_TIP).origin
+	var index := hand.get_hand_joint_transform(HAND_JOINT_INDEX_FINGER_TIP).origin
+	return thumb.distance_to(index)
+
+
+func _tracker_profile(pointer: XRController3D) -> String:
+	if pointer == null:
+		return ""
+	var tracker := XRServer.get_tracker(pointer.tracker)
+	if tracker is XRPositionalTracker:
+		return String((tracker as XRPositionalTracker).profile)
+	return ""
+
+
+func _tracker_profile_is_hand(pointer: XRController3D) -> bool:
+	return _tracker_profile(pointer).find(HAND_INTERACTION_PROFILE_HINT) != -1
+
+
+func _tracker_profile_is_controller(pointer: XRController3D) -> bool:
+	var profile := _tracker_profile(pointer)
+	return not profile.is_empty() and profile.find(HAND_INTERACTION_PROFILE_HINT) == -1
+
+
+func _write_debug_snapshot() -> void:
+	var now := Time.get_ticks_msec()
+	var scene_name := "?"
+	if get_tree() != null and get_tree().current_scene != null:
+		scene_name = String(get_tree().current_scene.name)
+	var target_count := 0
+	if get_tree() != null:
+		target_count = get_tree().get_nodes_in_group(TARGET_GROUP).size()
+	var recent_ms := -1
+	if _last_controller_input_msec > 0:
+		recent_ms = now - _last_controller_input_msec
+	_append_debug_line("%d mode=%s busy=%d scene=%s targets=%d input_ago_ms=%d | L[%s] R[%s] | handL[%s] handR[%s]" % [
+		now,
+		current_mode,
+		int(busy),
+		scene_name,
+		target_count,
+		recent_ms,
+		_pointer_debug(_left_pointer),
+		_pointer_debug(_right_pointer),
+		_hand_debug(LEFT_HAND_TRACKER),
+		_hand_debug(RIGHT_HAND_TRACKER),
+	])
+
+
+func _pointer_debug(pointer: XRController3D) -> String:
+	if pointer == null:
+		return "null"
+	var profile := _tracker_profile(pointer)
+	return "act=%d trk=%d prof=%s trig=%.2f poses=%s" % [
+		int(pointer.get_is_active()),
+		int(pointer.get_has_tracking_data()),
+		profile.get_file() if not profile.is_empty() else "-",
+		pointer.get_float(&"trigger"),
+		_tracker_pose_debug(pointer),
+	]
+
+
+func _tracker_pose_debug(pointer: XRController3D) -> String:
+	var tracker := XRServer.get_tracker(pointer.tracker)
+	if not (tracker is XRPositionalTracker):
+		return "none"
+	var positional := tracker as XRPositionalTracker
+	var states: Array[String] = []
+	for pose_name in [&"default", &"aim", &"grip"]:
+		var pose := positional.get_pose(pose_name)
+		var label := String(pose_name).left(1)
+		if pose == null:
+			states.append("%s:-" % label)
+		else:
+			states.append("%s:%d/%d" % [
+				label,
+				int(pose.get_has_tracking_data()),
+				int(pose.get_tracking_confidence()),
+			])
+	return ",".join(states)
+
+
+func _hand_debug(tracker_path: StringName) -> String:
+	var tracker := XRServer.get_tracker(tracker_path)
+	if not (tracker is XRHandTracker):
+		return "none"
+	var hand := tracker as XRHandTracker
+	if not hand.has_tracking_data:
+		return "idle"
+	return "data src=%d pinch=%.3f" % [hand.hand_tracking_source, _pinch_distance(hand)]
+
+
+func _append_debug_line(line: String) -> void:
+	var file: FileAccess = null
+	if FileAccess.file_exists(DEBUG_LOG_PATH):
+		file = FileAccess.open(DEBUG_LOG_PATH, FileAccess.READ_WRITE)
+		if file != null:
+			if file.get_length() > DEBUG_LOG_MAX_BYTES:
+				file.close()
+				file = FileAccess.open(DEBUG_LOG_PATH, FileAccess.WRITE)
+			else:
+				file.seek_end()
+	else:
+		file = FileAccess.open(DEBUG_LOG_PATH, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_line(line)
+	file.close()
 
 
 func _update_targets() -> void:
@@ -274,21 +518,26 @@ func _hand_tracker_active(tracker_path: StringName) -> bool:
 	return hand_tracker.hand_tracking_source != XRHandTracker.HAND_TRACKING_SOURCE_CONTROLLER
 
 
-func _controller_active(controller: XRController3D) -> bool:
+func _hand_tracker_unobstructed(tracker_path: StringName) -> bool:
+	var tracker := XRServer.get_tracker(tracker_path)
+	if not (tracker is XRHandTracker):
+		return false
+	var hand_tracker := tracker as XRHandTracker
+	return hand_tracker.has_tracking_data \
+			and hand_tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
+
+
+func _controller_tracking(controller: XRController3D) -> bool:
+	# Raw pose tracking gated only on the interaction profile — deliberately
+	# NOT on Haptics.should_use_controller_feedback (that heuristic made
+	# controllers permanently lose detection on Pico). A pose driven by
+	# XR_EXT_hand_interaction is a bare hand, not a controller, even though
+	# Godot reports it as an active XRController3D.
 	if controller == null:
 		return false
 	if not controller.get_is_active() or not controller.get_has_tracking_data():
 		return false
-	var haptics := _get_haptics_bus()
-	if haptics != null and haptics.has_method("should_use_controller_feedback"):
-		return bool(haptics.call("should_use_controller_feedback", controller))
-	return true
-
-
-func _get_haptics_bus() -> Node:
-	if not is_inside_tree():
-		return null
-	return get_tree().root.get_node_or_null("Haptics")
+	return not _tracker_profile_is_hand(controller)
 
 
 func _normalize_mode(mode: String) -> String:

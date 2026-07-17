@@ -88,15 +88,31 @@ func should_use_controller_feedback(controller: XRController3D) -> bool:
 	## 光学手势追踪没有实体手柄可振动，应回退到 UI 音效。
 	if controller == null:
 		return false
+	# 位姿由 XR_EXT_hand_interaction profile 驱动 == 裸手（即使 Godot 把它
+	# 当作活跃的 XRController3D）。
+	var profile := _pose_profile_for_controller(controller)
+	if profile.find("hand_interaction") != -1:
+		return false
 	var tracker := _hand_tracker_for_controller(controller)
 	if tracker != null and tracker.has_tracking_data:
-		# 只有手柄合成的手部数据（SOURCE_CONTROLLER，Quest 启用
-		# XR_EXT_hand_tracking_data_source 时出现）才说明手里握着手柄。
-		# SOURCE_UNKNOWN 也要当裸手处理：不支持该扩展的 runtime（如 Pico OS）
-		# 不上报 source，但 has_tracking_data 是真实的裸手追踪；之前
-		# "!= UNOBSTRUCTED" 的写法会让 Pico 裸手被误判成手柄模式。
-		return tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_CONTROLLER
+		if tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_CONTROLLER:
+			return true
+		if tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED:
+			return false
+		# SOURCE_UNKNOWN：不支持 XR_EXT_hand_tracking_data_source 的 runtime
+		# （如 Pico OS）不上报 source。Pico 在握着手柄时也会上报光学手部
+		# 数据，所以不能一概当裸手——改由位姿的 interaction profile 判断：
+		# 真实手柄 profile（如 pico4_controller）说明手里握着手柄；profile
+		# 为空说明位姿不是手柄驱动的，按裸手处理。
+		return not profile.is_empty()
 	return true
+
+
+func _pose_profile_for_controller(controller: XRController3D) -> String:
+	var tracker := XRServer.get_tracker(controller.tracker)
+	if tracker is XRPositionalTracker:
+		return String((tracker as XRPositionalTracker).profile)
+	return ""
 
 
 func _hand_tracker_for_controller(controller: XRController3D) -> XRHandTracker:
