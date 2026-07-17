@@ -333,7 +333,7 @@ impl ArmRuntime {
         let driver = drivers::create_driver(
             &arm_config.driver,
             arm_config.mujoco.as_ref(),
-            arm_config.so101.as_ref(),
+            arm_config.lerobot.as_ref(),
         )?;
         let safety = Safety::from_config(&arm_config.safety);
         let num_joints = arm_config.servo_ids.len();
@@ -678,6 +678,23 @@ impl ArmRuntime {
         Some(lo + value.clamp(0.0, 1.0) * (hi - lo))
     }
 
+    /// Pull the driver's latest reported state into this arm's snapshot.
+    ///
+    /// Required by the `lerobot_link` driver: it publishes targets and returns
+    /// without waiting, so the plugin's state arrives asynchronously and the
+    /// snapshot taken at write time is always a round trip stale. Reading the
+    /// driver at telemetry time instead makes telemetry reflect the plugin's
+    /// most recent report. Harmless for the MuJoCo driver, whose state is
+    /// already fresh by the time a write returns.
+    async fn refresh_from_driver(&self) {
+        let (latest_joints, latest_end_effector_pose) = {
+            let driver = self.driver.lock().await;
+            (driver.last_joint_angles(), driver.last_end_effector_pose())
+        };
+        self.update_latest(latest_joints, latest_end_effector_pose)
+            .await;
+    }
+
     async fn update_latest(
         &self,
         latest_joints: Option<crate::control::JointAngles>,
@@ -785,6 +802,11 @@ impl Device for DualSo101Device {
     }
 
     async fn get_telemetry(&self) -> Result<DeviceTelemetry> {
+        // Sample the drivers here rather than trusting the snapshot cached at
+        // write time — see ArmRuntime::refresh_from_driver.
+        self.left.refresh_from_driver().await;
+        self.right.refresh_from_driver().await;
+
         let left_angles = self.left.last_angles.lock().await.clone();
         let right_angles = self.right.last_angles.lock().await.clone();
         let mut joint_angles = left_angles.clone();
@@ -882,10 +904,12 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
 
-    use crate::config::{PoseMappingConfig, SafetyConfig, So101Config};
+    use crate::config::{LerobotConfig, PoseMappingConfig, SafetyConfig};
     use crate::device::Device;
+    use teleop_protocol::Endpoint;
 
     const IDENTITY_QUAT: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
+    const SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
     fn python_available() -> bool {
         StdCommand::new("python3")
@@ -899,17 +923,75 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")
-            .join("stub_so101_control.py")
+            .join("stub_vr_plugin.py")
     }
 
-    fn arm_config(port: &str, mirror: bool) -> ArmConfig {
-        arm_config_with_extra_args(port, mirror, Vec::new())
+    /// Unique per-test UDS path so concurrent test threads never collide.
+    fn temp_endpoint(tag: &str) -> Endpoint {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "dual-link-{tag}-{}-{nanos}.sock",
+            std::process::id()
+        ));
+        format!("uds:{}", path.display()).parse().unwrap()
     }
 
-    fn arm_config_with_extra_args(port: &str, mirror: bool, extra_args: Vec<String>) -> ArmConfig {
+    /// Kills the stub plugin on drop so a failing assertion cannot leak it.
+    struct StubGuard(std::process::Child);
+
+    impl Drop for StubGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// The adapter listens and the plugin dials in, so the *test* spawns the
+    /// stub now — the driver no longer spawns a subprocess of its own.
+    fn spawn_stub(endpoint: &Endpoint, extra: &[&str]) -> StubGuard {
+        StubGuard(
+            StdCommand::new("python3")
+                .arg(stub_script())
+                .arg("--endpoint")
+                .arg(endpoint.to_string())
+                .args(extra)
+                .spawn()
+                .expect("spawn stub plugin"),
+        )
+    }
+
+    /// Poll telemetry until `pred` holds, or panic after `SETTLE_TIMEOUT`.
+    ///
+    /// Needed because the link driver is decoupled: a write publishes a target
+    /// and returns without waiting, so plugin state lands a round trip later.
+    async fn poll_telemetry(
+        device: &DualSo101Device,
+        label: &str,
+        pred: impl Fn(&DeviceTelemetry) -> bool,
+    ) -> DeviceTelemetry {
+        let deadline = tokio::time::Instant::now() + SETTLE_TIMEOUT;
+        loop {
+            let t = device.get_telemetry().await.expect("telemetry");
+            if pred(&t) {
+                return t;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!(
+                    "timed out waiting for {label}; last telemetry: {:?}",
+                    t.values
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn arm_config(endpoint: &Endpoint, mirror: bool) -> ArmConfig {
         ArmConfig {
-            driver: "so101_real".to_string(),
-            serial_port: port.to_string(),
+            driver: "lerobot_link".to_string(),
+            serial_port: String::new(),
             baudrate: 0,
             servo_ids: vec![1, 2, 3, 4, 5, 6],
             safety: SafetyConfig {
@@ -931,11 +1013,9 @@ mod tests {
             },
             driver_write_timeout_ms: 1000,
             mujoco: None,
-            so101: Some(So101Config {
-                python: "python3".to_string(),
-                script: stub_script().to_string_lossy().to_string(),
-                port: port.to_string(),
-                extra_args,
+            lerobot: Some(LerobotConfig {
+                endpoint: endpoint.clone(),
+                hello_timeout_ms: 10_000,
             }),
         }
     }
@@ -1000,27 +1080,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dual_real_device_round_trips_against_stub_controls() {
+    async fn dual_real_device_round_trips_against_stub_plugins() {
         if !python_available() {
             eprintln!("skipping dual SO-101 device test: python3 unavailable");
             return;
         }
         assert!(stub_script().exists(), "stub script missing");
 
+        // Each arm gets its own endpoint: a dual-arm rig runs two independent
+        // `lerobot-teleoperate` processes, one per follower.
+        let left_ep = temp_endpoint("rt-left");
+        let right_ep = temp_endpoint("rt-right");
         let cfg = DualArmConfig {
-            left: arm_config("/tmp/so101-left", false),
-            right: arm_config("/tmp/so101-right", true),
+            left: arm_config(&left_ep, false),
+            right: arm_config(&right_ep, true),
         };
         let mut device = DualSo101Device::new(DualSo101Device::default_descriptor(), &cfg)
             .expect("create dual device");
+
+        let _left_stub = spawn_stub(&left_ep, &[]);
+        let _right_stub = spawn_stub(&right_ep, &[]);
 
         device.connect().await.expect("connect dual device");
 
         let mut cmd = DeviceCommand::default();
         cmd.buttons.insert(LEFT_ENABLE_BUTTON.to_string(), true);
         cmd.buttons.insert(RIGHT_ENABLE_BUTTON.to_string(), true);
+        // Both gripper axes default to 1.0 in the descriptor, and a first
+        // command *at* the default is deliberately seeded without a driver
+        // write. So use two non-default values here — otherwise the assertion
+        // below passes without any gripper write ever happening.
         cmd.axes.insert(LEFT_GRIPPER_AXIS.to_string(), 0.0);
-        cmd.axes.insert(RIGHT_GRIPPER_AXIS.to_string(), 1.0);
+        cmd.axes.insert(RIGHT_GRIPPER_AXIS.to_string(), 0.75);
         cmd.poses
             .insert(LEFT_END_EFFECTOR_POSE.to_string(), pose([0.1, 0.0, 0.0]));
         cmd.poses
@@ -1030,15 +1121,25 @@ mod tests {
 
         device.send_command(&cmd).await.expect("send dual command");
 
-        let telemetry = device.get_telemetry().await.expect("telemetry");
+        // The link driver publishes and returns; plugin state lands a round
+        // trip later, so poll rather than reading telemetry immediately.
+        let telemetry = poll_telemetry(&device, "both grippers to land", |t| {
+            let left = telemetry_array(&t.values, "left_joint_angles");
+            let right = telemetry_array(&t.values, "right_joint_angles");
+            left[5] == 0.0 && right[5] == 75.0
+        })
+        .await;
+
         let left = telemetry_array(&telemetry.values, "left_joint_angles");
         let right = telemetry_array(&telemetry.values, "right_joint_angles");
         let combined = telemetry_array(&telemetry.values, "joint_angles");
         assert_eq!(left.len(), 6);
         assert_eq!(right.len(), 6);
         assert_eq!(combined.len(), 12);
-        assert_eq!(left[5], 8.0);
-        assert_eq!(right[5], 85.0);
+        // Gripper is RANGE_0_100 on the LeRobot side, not degrees: the old
+        // 8..85 degree mapping lived in the deleted so101_real_control.py.
+        assert_eq!(left[5], 0.0, "left gripper axis 0.0 -> 0 (closed)");
+        assert_eq!(right[5], 75.0, "right gripper axis 0.75 -> 75");
 
         device.disconnect().await.expect("disconnect dual device");
     }
@@ -1051,20 +1152,18 @@ mod tests {
         }
         assert!(stub_script().exists(), "stub script missing");
 
+        let left_ep = temp_endpoint("fail-left");
+        let right_ep = temp_endpoint("fail-right");
         let cfg = DualArmConfig {
-            left: arm_config_with_extra_args(
-                "/tmp/so101-left",
-                false,
-                vec!["--mark-stop".to_string()],
-            ),
-            right: arm_config_with_extra_args(
-                "/tmp/so101-right",
-                true,
-                vec!["--fail-ee".to_string(), "--mark-stop".to_string()],
-            ),
+            left: arm_config(&left_ep, false),
+            right: arm_config(&right_ep, true),
         };
         let mut device = DualSo101Device::new(DualSo101Device::default_descriptor(), &cfg)
             .expect("create dual device");
+
+        let _left_stub = spawn_stub(&left_ep, &[]);
+        let _right_stub = spawn_stub(&right_ep, &["--fail-ee"]);
+
         device.connect().await.expect("connect dual device");
 
         let mut cmd = DeviceCommand::default();
@@ -1077,45 +1176,60 @@ mod tests {
         cmd.poses
             .insert(OPERATOR_FRAME_POSE.to_string(), pose([0.0, 0.0, 0.0]));
 
-        let err = device
-            .send_command(&cmd)
-            .await
-            .expect_err("forced left arm failure should fail the dual command");
+        // Writes are fire-and-forget, so a plugin-side failure cannot fail the
+        // command that caused it — it surfaces on a subsequent write. At the
+        // XR command rate (~72 Hz) that is one ~14 ms frame later.
+        let deadline = tokio::time::Instant::now() + SETTLE_TIMEOUT;
+        let err = loop {
+            match device.send_command(&cmd).await {
+                Err(e) => break e,
+                Ok(()) => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "forced right arm failure never surfaced as a command error"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
         assert!(
             err.to_string().contains("dual SO-101 command failed"),
             "unexpected error: {err:#}"
         );
 
-        let telemetry = device.get_telemetry().await.expect("telemetry");
-        let left = telemetry_array(&telemetry.values, "left_joint_angles");
-        assert_eq!(
-            left[0], -123.0,
-            "healthy peer arm should be emergency-stopped after the other arm fails"
-        );
+        // The safety property under test is unchanged by the decoupling: when
+        // one arm fails, the healthy peer must be safed.
+        poll_telemetry(&device, "peer arm to be emergency-stopped", |t| {
+            telemetry_array(&t.values, "left_joint_angles")[0] == -123.0
+        })
+        .await;
     }
 
+    /// Was `left_and_right_commands_are_dispatched_in_parallel`, which guarded
+    /// against the two arms' blocking writes being serialized. The link driver
+    /// makes that stronger and moves where it is enforced: writes never block
+    /// on the plugin at all, so a slow consumer cannot stall the ~72 Hz XR
+    /// command path regardless of how the arms are dispatched.
     #[tokio::test]
-    async fn left_and_right_commands_are_dispatched_in_parallel() {
+    async fn a_slow_plugin_cannot_stall_the_command_path() {
         if !python_available() {
-            eprintln!("skipping dual SO-101 parallel test: python3 unavailable");
+            eprintln!("skipping dual SO-101 slow-plugin test: python3 unavailable");
             return;
         }
         assert!(stub_script().exists(), "stub script missing");
 
+        let left_ep = temp_endpoint("slow-left");
+        let right_ep = temp_endpoint("slow-right");
         let cfg = DualArmConfig {
-            left: arm_config_with_extra_args(
-                "/tmp/so101-left",
-                false,
-                vec!["--delay-ee-ms".to_string(), "250".to_string()],
-            ),
-            right: arm_config_with_extra_args(
-                "/tmp/so101-right",
-                true,
-                vec!["--delay-ee-ms".to_string(), "250".to_string()],
-            ),
+            left: arm_config(&left_ep, false),
+            right: arm_config(&right_ep, true),
         };
         let mut device = DualSo101Device::new(DualSo101Device::default_descriptor(), &cfg)
             .expect("create dual device");
+
+        let _left_stub = spawn_stub(&left_ep, &["--delay-ee-ms", "250"]);
+        let _right_stub = spawn_stub(&right_ep, &["--delay-ee-ms", "250"]);
+
         device.connect().await.expect("connect dual device");
 
         let mut cmd = DeviceCommand::default();
@@ -1133,8 +1247,9 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(
-            elapsed < Duration::from_millis(450),
-            "dual command took {elapsed:?}; expected parallel dispatch"
+            elapsed < Duration::from_millis(100),
+            "dual command took {elapsed:?} against a 250 ms-per-frame plugin; \
+             writes must not block on the consumer"
         );
 
         device.disconnect().await.expect("disconnect dual device");

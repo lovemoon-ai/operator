@@ -70,7 +70,7 @@ impl RobotArmDevice {
         let driver = drivers::create_driver(
             &arm_config.driver,
             arm_config.mujoco.as_ref(),
-            arm_config.so101.as_ref(),
+            arm_config.lerobot.as_ref(),
         )?;
         let safety = Safety::from_config(&arm_config.safety);
         let num_joints = arm_config.servo_ids.len();
@@ -585,6 +585,27 @@ impl Device for RobotArmDevice {
     }
 
     async fn get_telemetry(&self) -> Result<DeviceTelemetry> {
+        // Sample the driver here rather than trusting the snapshot cached at
+        // write time. The `lerobot_link` driver publishes targets and returns
+        // without waiting, so the plugin's state arrives asynchronously and the
+        // write-time snapshot is always a round trip stale. Harmless for the
+        // MuJoCo driver, whose state is already fresh when a write returns.
+        {
+            let (latest_joints, latest_end_effector_pose) = {
+                let driver = self.driver.lock().await;
+                (driver.last_joint_angles(), driver.last_end_effector_pose())
+            };
+            if let Some(joints) = latest_joints {
+                let mut last_angles = self.last_angles.lock().await;
+                *last_angles = joints.angles;
+                last_angles.resize(self.num_joints, 0.0);
+            }
+            if let Some(pose) = latest_end_effector_pose {
+                let mut last_pose = self.last_end_effector_pose.lock().await;
+                *last_pose = Some(pose);
+            }
+        }
+
         let mut values = HashMap::new();
         let angles = self.last_angles.lock().await.clone();
         values.insert("joint_angles".into(), TelemetryValue::Array(angles));

@@ -81,11 +81,15 @@ Device abstraction and concrete robot drivers. It owns:
 - config loading;
 - `Device` / `RobotArm` abstractions;
 - safety wrappers and limits;
-- pose mapping;
-- MuJoCo SO-101 driver path;
-- real SO-101 driver path through a Python/LeRobot Feetech control process;
-- dual real SO-101 path with one hardware control process per arm;
+- pose mapping (the single operator→robot retarget, shared by all drivers);
+- MuJoCo SO-101 driver path (`mujoco_so101`, spawns the sim as a subprocess);
+- real SO-101 driver path (`lerobot_link`, listens for a LeRobot `vr_operator`
+  plugin that owns IK and the Feetech bus);
+- dual real SO-101 path with one endpoint and one plugin process per arm;
 - server that consumes bridge-side commands.
+
+Both drivers implement `ArmDriver` and sit *below* `PoseMapper`, so they only
+ever receive robot base-frame targets.
 
 Key paths:
 
@@ -146,21 +150,50 @@ Run the SO-101 simulator robot service:
 cargo run -p robot-service -- --config configs/mujoco_so101.yaml
 ```
 
-Run the real SO-101 robot service after installing LeRobot in the selected Python
-environment and confirming the Feetech serial port:
+The real SO-101 path runs as **two processes**: `robot-service` does not touch
+the serial bus and does not spawn Python. It listens on `arm.lerobot.endpoint`,
+and a LeRobot `vr_operator` teleoperator plugin dials in.
 
 ```bash
+# Terminal 1
 cargo run -p robot-service -- --config configs/so101_real.yaml
+
+# Terminal 2 (venv with lerobot_teleoperator_vr_operator installed)
+lerobot-teleoperate \
+  --teleop.type=vr_operator \
+  --teleop.endpoint=uds:/tmp/lerobot-vr.sock \
+  --teleop.urdf_path=/path/to/so101_new_calib.urdf \
+  --robot.type=so101_follower \
+  --robot.port=/dev/ttyACM0 \
+  --robot.max_relative_target=5
 ```
 
-The real hardware path spawns `robot/scripts/so101_real_control.py control
---port /dev/ttyACM0`. The Python control process reads the motor calibration
-already stored on the bus, applies conservative servo parameters, monitors
-current/load reflex thresholds, and bounds streamed teleop setpoint steps.
+Where the work lives:
 
-Run the dual real SO-101 robot service after setting distinct left/right
-Feetech serial ports in `dual_arm.left.so101.port` and
-`dual_arm.right.so101.port`:
+- **Rust owns the operator→robot retarget.** `PoseMapper` sits *above* the
+  `ArmDriver` boundary, so `mujoco_so101` and `lerobot_link` share it
+  byte-for-byte and the sim and real paths cannot drift apart.
+- **Python owns IK, the Feetech bus, and calibration**, via LeRobot's own
+  placo-backed `RobotKinematics` and `so101_follower`.
+
+The `lerobot_link` driver is deliberately decoupled: targets go through a
+latest-wins channel, so a write never blocks on the plugin and a slow consumer
+cannot stall the ~72 Hz XR command path. Two consequences follow. Telemetry
+lags by one round trip, so devices sample the driver in `get_telemetry()`
+rather than trusting the snapshot taken at write time. And a plugin-side error
+surfaces on a *subsequent* write rather than the one that caused it.
+
+Device connect blocks until the plugin sends `Hello`: its forward-kinematics
+snapshot is what driver-side IK mode needs to seed itself, and Rust has no FK
+of its own.
+
+> **Bootstrap caveat.** The plugin's `Hello` reports FK(`home_joints`), which
+> only matches reality if the arm is actually near home. Press reset (XR button
+> B) before the first enable, and keep `--robot.max_relative_target` set.
+
+Dual SO-101 needs **three** processes: `lerobot-teleoperate` drives exactly one
+follower, so each arm gets its own endpoint and its own plugin process (and its
+own `--robot.id`, since LeRobot keys calibration by id).
 
 ```bash
 cargo run -p robot-service -- --config configs/so101_dual_real.yaml
@@ -168,8 +201,7 @@ cargo run -p robot-service -- --config configs/so101_dual_real.yaml
 
 The dual path advertises separate XR controls for `left_end_effector`,
 `right_end_effector`, `left_gripper`, `right_gripper`, `left_enable`, and
-`right_enable`, then starts two `so101_real_control.py control --port ...`
-subprocesses inside one `robot-service` run.
+`right_enable`. See `configs/so101_dual_real.yaml` for both plugin invocations.
 
 Run top-level E2E scripts from the repo root:
 
