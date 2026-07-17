@@ -868,7 +868,7 @@ def load_camera2_projection_calibration(
         return None
 
     candidates, read_errors = camera2_metadata_candidates(input_path, operator_static, eye)
-    for characteristics, _source_label, _is_embedded in candidates:
+    for characteristics, source_label, _is_embedded in candidates:
         projection = _camera2_projection_from_characteristics(characteristics, source_label)
         if projection is None:
             continue
