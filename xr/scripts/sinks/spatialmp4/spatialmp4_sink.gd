@@ -23,20 +23,17 @@ func writer() -> Object:
 	return _writer
 
 
+## Hands, body joints and motion trackers are written directly to the muxer
+## by the hand_capture GDExtension (writeHandJointsPayload /
+## writeBodyJointsPayload / writeMotionTrackerMetadataJson), bypassing the
+## GDScript frame fanout entirely.
 func accepted_frame_types() -> Array:
 	return [
 		SensorFrameType.POSE,
 		SensorFrameType.CONTROLLER,
 		SensorFrameType.INPUT_EVENT,
-		SensorFrameType.HAND,
-		SensorFrameType.BODY,
 		SensorFrameType.DEPTH,
-		SensorFrameType.MOTION_TRACKER,
 	]
-
-
-func supports_motion_tracker_events() -> bool:
-	return _writer != null and _writer.has_method("write_motion_tracker_event")
 
 
 func start(options: Dictionary) -> bool:
@@ -111,19 +108,6 @@ func on_frame(frame: SensorFrame) -> Variant:
 				p.get("thumbstick", Vector2.ZERO) as Vector2,
 				p.get("trackpad", Vector2.ZERO) as Vector2
 			)
-		SensorFrameType.HAND:
-			return _writer.write_hand_joints(
-				str(p.get("hand", frame.source_id)),
-				frame.timestamp_ns,
-				p.get("joints", []) as Array
-			)
-		SensorFrameType.BODY:
-			return _writer.write_body_joints(
-				frame.timestamp_ns,
-				int(p.get("body_flags", 0)),
-				p.get("joints", []) as Array,
-				p.get("metadata", {}) as Dictionary
-			)
 		SensorFrameType.DEPTH:
 			return _writer.write_depth_frame(
 				frame.timestamp_ns,
@@ -133,25 +117,6 @@ func on_frame(frame: SensorFrame) -> Variant:
 				int(p.get("height", 0)),
 				p.get("metadata", {}) as Dictionary,
 				p.get("depth_u16_mm", PackedByteArray()) as PackedByteArray
-			)
-		SensorFrameType.MOTION_TRACKER:
-			if MotionTrackerFrame.is_event(frame):
-				if not _writer.has_method("write_motion_tracker_event"):
-					return false
-				return _writer.write_motion_tracker_event(
-					frame.timestamp_ns,
-					str(p.get("event_type", "")),
-					p.get("event", {}) as Dictionary
-				)
-			if not _writer.has_method("write_motion_tracker_pose"):
-				return false
-			return _writer.write_motion_tracker_pose(
-				int(p.get("tracker_index", 0)),
-				frame.source_id,
-				frame.timestamp_ns,
-				p.get("transform", Transform3D.IDENTITY) as Transform3D,
-				bool(p.get("tracking_valid", false)),
-				p.get("metadata", {}) as Dictionary
 			)
 	push_warning("SpatialMp4Sink: unsupported frame type %d" % frame.frame_type)
 	return null

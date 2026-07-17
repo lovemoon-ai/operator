@@ -50,30 +50,30 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
+build-quest: setup-vendors prepare-android-libs build-ahb build-hand-capture clean-pico-openxr-loader-stage prepare-capture-plugins
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
 # Test-harness APK (export preset "Meta Quest Test"):
 # operator_feature_test_harness=true, includes res://tests/** and
 # res://scripts/test_support/**. Consumed by tests/xr_module_harness.sh.
-build-quest-test: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
+build-quest-test: setup-vendors prepare-android-libs build-ahb build-hand-capture clean-pico-openxr-loader-stage prepare-capture-plugins
 	@mkdir -p $(dir $(apk_quest_test)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest Test,$(apk_quest_test))
 
-build-pico: setup-vendors prepare-android-libs build-ahb build-pico-openxr prepare-capture-plugins
+build-pico: setup-vendors prepare-android-libs build-ahb build-hand-capture build-pico-openxr prepare-capture-plugins
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 
-# build-androidxr: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
+# build-androidxr: setup-vendors prepare-android-libs build-ahb build-hand-capture clean-pico-openxr-loader-stage prepare-capture-plugins
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
 # 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
-build-mujoco-quest: setup-vendors prepare-android-libs build-ahb build-godot-mujoco clean-pico-openxr-loader-stage
+build-mujoco-quest: setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
-build-mujoco-pico: setup-vendors prepare-android-libs build-ahb build-godot-mujoco build-pico-openxr
+build-mujoco-pico: setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 

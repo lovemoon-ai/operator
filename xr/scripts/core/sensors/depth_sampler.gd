@@ -18,6 +18,7 @@ var _callback_us := 0
 var _convert_us := 0
 var _native_convert_plugin: Object
 var _native_convert_checked := false
+var _gdscript_convert_warned := false
 var _capture_provider: Object
 var _platform: Object
 var _extension_name := ""
@@ -268,6 +269,20 @@ func _convert_with_native_or_fallback(image: Image, metadata: Dictionary) -> Pac
 				)
 				if result is PackedByteArray and (result as PackedByteArray).size() > 0:
 					return result
+	# Guardrail: the per-pixel GDScript loop below is a frame-rate disaster
+	# (its own comment: 750-950 ms/s on Quest 3). Refuse to run it silently —
+	# drop depth for this session and say so loudly, instead of strangling
+	# rendering behind the operator's back.
+	if not _gdscript_convert_warned:
+		_gdscript_convert_warned = true
+		push_error("DepthSampler: native depth convert plugin unavailable — GDScript per-pixel fallback would cost ~0.8s of main-thread CPU per second, so depth recording is DISABLED for this session. Ship a capture plugin with convertOpenxrDepthRhToU16Mm to record depth.")
+	return PackedByteArray()
+
+
+## Debug-only escape hatch retained for offline verification of the native
+## converter's output; never called on the recording path (see guardrail
+## above).
+func _debug_convert_openxr_depth_to_u16_mm(image: Image, metadata: Dictionary) -> PackedByteArray:
 	return _convert_openxr_depth_to_u16_mm(image, metadata)
 
 

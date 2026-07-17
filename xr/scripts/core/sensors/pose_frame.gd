@@ -5,19 +5,20 @@ extends RefCounted
 ## write_jsonl: bool} (write_jsonl carries the sampler's JSONL throttle
 ## decision through to the writer shim unchanged).
 
-const COORDINATE_SPACE := "operator_xr_world"
+const DEFAULT_COORDINATE_SPACE := "openxr_play_space"
 
 
 static func build(
 	timestamp_ns: int,
 	transform: Transform3D,
 	tracking_valid: bool,
-	write_jsonl: bool = true
+	write_jsonl: bool = true,
+	coordinate_space: String = DEFAULT_COORDINATE_SPACE
 ) -> SensorFrame:
 	var frame := SensorFrame.new()
 	frame.frame_type = SensorFrameType.POSE
 	frame.timestamp_ns = timestamp_ns
-	frame.coordinate_space = COORDINATE_SPACE
+	frame.coordinate_space = coordinate_space
 	frame.source_id = "head"
 	frame.valid = tracking_valid
 	frame.payload = {

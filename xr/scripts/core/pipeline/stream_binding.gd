@@ -7,11 +7,12 @@ extends RefCounted
 ##
 ## Return-value contract (samplers bool() some results, so legacy writer
 ## semantics must survive the split): the fanout returns the boolean OR of
-## all non-null sink results, or null when no routed sink voted. Examples:
+## all non-null sink results, or null when no routed sink voted. Example:
 ## - controller input: only SpatialMp4Sink votes -> muxer bool (legacy).
-## - body joints: SpatialMp4Sink (muxer wrote) OR JsonlSidecarSink (sidecar
-##   wrote) == legacy write_body_joints `wrote` OR.
-## - motion tracker: only JsonlSidecarSink votes -> file-open bool (legacy).
+##
+## Hands, body joints and motion trackers do not flow through this fanout:
+## the hand_capture GDExtension writes them natively (see pose_sampler /
+## body_motion_sampler).
 ##
 ## Full pipeline policies (backpressure, threading) are out of scope here.
 ##
@@ -20,34 +21,35 @@ extends RefCounted
 ## a typed reference to the sinks/ base class.
 
 var _sinks: Array = []
+# Accepted-type set per sink, parallel to _sinks. Cached once at add_sink:
+# every sink's accepted_frame_types() allocates a fresh Array literal per
+# call, so querying it per frame was pure allocation churn at up to 90 Hz
+# across multiple streams and sinks.
+var _accepted_sets: Array = []
 
 
 func add_sink(sink: Object) -> void:
-	if sink != null and not _sinks.has(sink):
-		_sinks.append(sink)
+	if sink == null or _sinks.has(sink):
+		return
+	_sinks.append(sink)
+	var accepted := {}
+	for frame_type in sink.accepted_frame_types():
+		accepted[int(frame_type)] = true
+	_accepted_sets.append(accepted)
 
 
 func sinks() -> Array:
 	return _sinks
 
 
-## Legacy guard mirrored from FrameWriterShim: true when any attached sink
-## exposes the motion-tracker event surface (spool pipeline yes, live no).
-func supports_motion_tracker_events() -> bool:
-	for sink in _sinks:
-		if sink.has_method("supports_motion_tracker_events") and sink.supports_motion_tracker_events():
-			return true
-	return false
-
-
 func on_frame(frame: SensorFrame) -> Variant:
 	if frame == null:
 		return null
 	var result: Variant = null
-	for sink in _sinks:
-		if not sink.accepts(frame.frame_type):
+	for index in _sinks.size():
+		if not (_accepted_sets[index] as Dictionary).has(frame.frame_type):
 			continue
-		var sink_result: Variant = sink.on_frame(frame)
+		var sink_result: Variant = (_sinks[index] as Object).on_frame(frame)
 		if sink_result == null:
 			continue
 		result = bool(sink_result) or (result != null and bool(result))

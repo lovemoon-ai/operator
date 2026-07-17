@@ -23,13 +23,14 @@ func writer() -> Object:
 
 
 ## The live push surface has no body / motion-tracker streams (matches the
-## legacy LivePushWriter method set).
+## legacy LivePushWriter method set). Hands are pushed directly by the
+## hand_capture GDExtension (writeHandJointsJson on the live server plugin),
+## bypassing the GDScript frame fanout entirely.
 func accepted_frame_types() -> Array:
 	return [
 		SensorFrameType.POSE,
 		SensorFrameType.CONTROLLER,
 		SensorFrameType.INPUT_EVENT,
-		SensorFrameType.HAND,
 		SensorFrameType.DEPTH,
 	]
 
@@ -89,12 +90,6 @@ func on_frame(frame: SensorFrame) -> Variant:
 				float(p.get("grip_value", 0.0)),
 				p.get("thumbstick", Vector2.ZERO) as Vector2,
 				p.get("trackpad", Vector2.ZERO) as Vector2
-			)
-		SensorFrameType.HAND:
-			return _writer.write_hand_joints(
-				str(p.get("hand", frame.source_id)),
-				frame.timestamp_ns,
-				p.get("joints", []) as Array
 			)
 		SensorFrameType.DEPTH:
 			return _writer.write_depth_frame(

@@ -107,6 +107,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var rgbCodec = RgbVideoCodec.HEVC.tag
     private var rgbWidth = 0
     private var rgbHeight = 0
+    @Volatile private var exportCoordinateSpace = "openxr_stage"
     // depthStreamConfigured + lastDepthPtsUs migrated to SpatialMp4MuxerPlugin
     // alongside the writer handle (Stage 2b).
     @Volatile private var acceptingFrames = false
@@ -156,6 +157,18 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
 
     @UsedByGodot
     fun isBodyMotionCaptureSupported(): Boolean = true
+
+    @UsedByGodot
+    fun setExportCoordinateSpace(space: String): Boolean {
+        val normalized = space.trim().lowercase().replace('-', '_')
+        return when (normalized) {
+            "openxr_stage", "openxr_local", "openxr_local_floor" -> {
+                exportCoordinateSpace = normalized
+                true
+            }
+            else -> false
+        }
+    }
 
     // GDScript counterpart of PicoCapturePlugin.setBodyMotionCaptureOptions —
     // accepts the same wire shape so capture_app.gd can call it without a
@@ -1523,6 +1536,12 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return JSONObject()
             .put("schema", "spatialmp4.operator_static.session.v1")
             .put("provider", "quest")
+            .put("export_coordinate_space", exportCoordinateSpace)
+            .put("head_pose_space", exportCoordinateSpace)
+            .put("controller_pose_space", exportCoordinateSpace)
+            .put("hand_joint_space", exportCoordinateSpace)
+            .put("rgb_extrinsics_space", "head")
+            .put("rgb_camera_pose_composition", "T_export_camera=T_export_head*T_head_camera")
             .put("camera2_characteristics", cameras)
             .put("android_timebase", androidTimebase ?: JSONObject())
     }

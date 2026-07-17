@@ -2,7 +2,6 @@ extends RefCounted
 class_name SessionSpoolWriter
 
 const DEFAULT_CAPTURE_ROOT := "/sdcard/DCIM/SpatialMP4"
-const HAND_JOINTS_MAGIC := 0x544E4A48 # "HJNT" in little-endian bytes.
 const CAMERA_CHARACTERISTICS_ARTIFACTS := [
 	{
 		"kind": "left_camera_characteristics",
@@ -107,7 +106,8 @@ func start_session(options: Dictionary = {}) -> bool:
 	if _capture_enabled("record_depth"):
 		sources["depth"] = "OpenXRMetaEnvironmentDepthExtension converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
-		sources["pose"] = "Godot OpenXR nodes and XRHandTracker; PTS from OpenXRMetaEnvironmentDepthExtensionWrapper.get_predicted_display_time_ns() when available, else Time.get_ticks_usec()"
+		var export_space := str(capture_options.get("export_coordinate_space_id", "openxr_play_space"))
+		sources["pose"] = "Head, controller, and hand transforms relative to %s; RGB extrinsics remain head-relative (T_export_camera = T_export_head * T_head_camera); PTS from OpenXR runtime display time when available, else Time.get_ticks_usec()" % export_space
 	if _capture_enabled("record_body_tracking"):
 		# Placeholder — close() patches in the actual runtime info once the
 		# sampler has observed at least one frame, so the manifest stores the
@@ -503,11 +503,6 @@ func write_controller_pose(source: String, timestamp_ns: int, transform: Transfo
 		)
 
 
-func write_hand_joints(hand: String, timestamp_ns: int, joints: Array) -> void:
-	if muxer_plugin != null and not joints.is_empty():
-		muxer_plugin.call("writeHandJointsPayload", hand, timestamp_ns, _pack_hand_joints_payload(joints))
-
-
 func write_controller_input(
 	controller: String,
 	timestamp_ns: int,
@@ -593,52 +588,9 @@ func write_depth_frame(
 	_depth_sidecar_frame_count += 1
 
 
-func write_body_joints(timestamp_ns: int, body_flags: int, joints: Array, metadata: Dictionary = {}) -> bool:
-	if joints.is_empty():
-		return false
-	# The mp4 `mett:body_joints` track is the compact primary joint store:
-	# the joint dicts share the {joint, flags, radius_m, position, rotation}
-	# shape with hand joints, so the HJNT packer is reused verbatim. Frame-level
-	# body_flags and provider extras are mirrored into the JSON metadata track.
-	# The opt-in JSONL sidecar lives in JsonlSidecarSink as a debug/export mirror
-	# since WP5; StreamBinding ORs the two sinks' results to preserve the
-	# legacy `wrote` return.
-	if muxer_plugin == null:
-		return false
-	muxer_plugin.call("writeBodyJointsPayload", timestamp_ns, _pack_hand_joints_payload(joints))
-	_write_muxer_metadata_json(
-		"writeBodyFrameMetadataJson",
-		timestamp_ns,
-		_body_metadata_record(timestamp_ns, body_flags, joints, metadata)
-	)
-	return true
-
-
-func write_motion_tracker_pose(
-	tracker_index: int,
-	source: String,
-	timestamp_ns: int,
-	transform: Transform3D,
-	tracking_valid: bool,
-	metadata: Dictionary = {}
-) -> bool:
-	var record := _motion_tracker_pose_record(
-		tracker_index,
-		source,
-		timestamp_ns,
-		transform,
-		tracking_valid,
-		metadata
-	)
-	return _write_muxer_metadata_json("writeMotionTrackerMetadataJson", timestamp_ns, record)
-
-
-func write_motion_tracker_event(timestamp_ns: int, event_type: String, event: Dictionary) -> bool:
-	return _write_muxer_metadata_json(
-		"writeMotionTrackerMetadataJson",
-		timestamp_ns,
-		_motion_tracker_event_record(timestamp_ns, event_type, event)
-	)
+# Body joints and motion trackers are written by the hand_capture
+# GDExtension's NativeBodyMotionWriter (HJNT payload + metadata JSON + JSONL
+# sidecars, serialized in C++) — no GDScript write surface remains for them.
 
 
 func ticks_us_to_session_us(ticks_us: int) -> int:
@@ -695,42 +647,6 @@ func _absolute_path(path: String) -> String:
 	return ProjectSettings.globalize_path(path)
 
 
-func _pack_hand_joints_payload(joints: Array) -> PackedByteArray:
-	var payload := PackedByteArray()
-	payload.resize(8 + joints.size() * 36)
-	var offset := 0
-	payload.encode_u32(offset, HAND_JOINTS_MAGIC)
-	offset += 4
-	payload.encode_u16(offset, 1)
-	offset += 2
-	payload.encode_u16(offset, joints.size())
-	offset += 2
-	for joint_record in joints:
-		var position: Dictionary = joint_record.get("position", {})
-		var rotation: Dictionary = joint_record.get("rotation", {})
-		payload.encode_u16(offset, int(joint_record.get("joint", 0)))
-		offset += 2
-		payload.encode_u16(offset, int(joint_record.get("flags", 0)))
-		offset += 2
-		payload.encode_float(offset, float(joint_record.get("radius_m", 0.0)))
-		offset += 4
-		payload.encode_float(offset, float(position.get("x", 0.0)))
-		offset += 4
-		payload.encode_float(offset, float(position.get("y", 0.0)))
-		offset += 4
-		payload.encode_float(offset, float(position.get("z", 0.0)))
-		offset += 4
-		payload.encode_float(offset, float(rotation.get("x", 0.0)))
-		offset += 4
-		payload.encode_float(offset, float(rotation.get("y", 0.0)))
-		offset += 4
-		payload.encode_float(offset, float(rotation.get("z", 0.0)))
-		offset += 4
-		payload.encode_float(offset, float(rotation.get("w", 1.0)))
-		offset += 4
-	return payload
-
-
 func _write_muxer_metadata_json(method_name: String, timestamp_ns: int, record: Dictionary) -> bool:
 	if muxer_plugin == null or _muxer_contract_version() < 5:
 		return false
@@ -766,70 +682,6 @@ func _depth_metadata_record(
 		"height": height,
 		"metadata": _json_safe_value(metadata)
 	}
-
-
-func _body_metadata_record(timestamp_ns: int, body_flags: int, joints: Array, metadata: Dictionary) -> Dictionary:
-	var json_joints: Array = []
-	for joint in joints:
-		if typeof(joint) == TYPE_DICTIONARY:
-			json_joints.append(_json_safe_joint_record(joint))
-	var record := {
-		"timestamp_ns": timestamp_ns,
-		"body_flags": body_flags,
-		"joint_count": json_joints.size(),
-		"joints": json_joints
-	}
-	for key in metadata.keys():
-		if key == "joints" or key == "transform":
-			continue
-		record[key] = _json_safe_value(metadata[key])
-	return record
-
-
-func _motion_tracker_pose_record(
-	tracker_index: int,
-	source: String,
-	timestamp_ns: int,
-	transform: Transform3D,
-	tracking_valid: bool,
-	metadata: Dictionary = {}
-) -> Dictionary:
-	var record := _pose_record(timestamp_ns, source, transform, tracking_valid)
-	record["tracker_index"] = tracker_index
-	for key in metadata.keys():
-		if key == "transform" or key == "position" or key == "rotation" or key == "tracker_index":
-			continue
-		record[key] = _json_safe_value(metadata[key])
-	return record
-
-
-func _motion_tracker_event_record(timestamp_ns: int, event_type: String, event: Dictionary) -> Dictionary:
-	return {
-		"timestamp_ns": timestamp_ns,
-		"event_type": event_type,
-		"event": _json_safe_value(event)
-	}
-
-
-func _pose_record(timestamp_ns: int, source: String, transform: Transform3D, tracking_valid: bool) -> Dictionary:
-	var q := transform.basis.get_rotation_quaternion()
-	var p := transform.origin
-	return {
-		"timestamp_ns": timestamp_ns,
-		"source": source,
-		"tracking_valid": tracking_valid,
-		"position": {"x": p.x, "y": p.y, "z": p.z},
-		"rotation": {"x": q.x, "y": q.y, "z": q.z, "w": q.w}
-	}
-
-
-func _json_safe_joint_record(joint_record: Dictionary) -> Dictionary:
-	var out := {}
-	for key in joint_record.keys():
-		if key == "transform":
-			continue
-		out[key] = _json_safe_value(joint_record[key])
-	return out
 
 
 func _json_safe_value(value: Variant) -> Variant:

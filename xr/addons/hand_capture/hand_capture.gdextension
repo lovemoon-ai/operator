@@ -1,0 +1,19 @@
+; Godot manifest for the hand_capture GDExtension (NativeOpenXRHandCapture +
+; NativeHandSampler + NativeBodyMotionWriter). Android-only, and the hand/body/motion
+; capture path — there is no GDScript fallback. When the classes are absent
+; (desktop editor, headless runs) those streams are simply not recorded and
+; the samplers log a one-time warning.
+
+[configuration]
+entry_symbol = "hand_capture_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+; Godot's feature-tag system uses "arm64" here (NOT "arm64-v8a"); the
+; exporter internally maps arm64 -> lib/arm64-v8a/ when packaging.
+android.debug.arm64   = "res://addons/hand_capture/libhand_capture.so"
+android.release.arm64 = "res://addons/hand_capture/libhand_capture.so"
+
+[dependencies]
+; No runtime dependencies beyond Android system libraries.
