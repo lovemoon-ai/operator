@@ -9,6 +9,7 @@ signal tracking_data_ready(data: Dictionary)
 const CONTROLLER_CACHE_TTL_MSEC := 250
 const LEFT_HAND_TRACKER := &"/user/hand_tracker/left"
 const RIGHT_HAND_TRACKER := &"/user/hand_tracker/right"
+const HAND_INTERACTION_PROFILE_HINT := "hand_interaction"
 
 ## Reference to XRCamera3D in the scene tree
 var _camera: XRCamera3D
@@ -107,9 +108,16 @@ func is_controller_mode_active(hand: int) -> bool:
 		return false
 	if not controller.get_is_active() or not controller.get_has_tracking_data():
 		return false
-	var haptics := _get_haptics_bus()
-	if haptics != null and haptics.has_method("should_use_controller_feedback"):
-		return bool(haptics.call("should_use_controller_feedback", controller))
+	# Input capability must be decided from the active interaction profile, not
+	# from the haptics policy or the presence of hand joints. Pico can expose
+	# UNKNOWN-source optical joints while its physical controller is active.
+	var profile := _controller_profile(controller)
+	if profile.find(HAND_INTERACTION_PROFILE_HINT) != -1:
+		return false
+	if not profile.is_empty():
+		return true
+	# Some runtimes briefly expose the pose before publishing its profile. Keep
+	# the old conservative fallback for that short window.
 	return not is_optical_hand_tracking_active(hand)
 
 
@@ -133,11 +141,6 @@ func get_controller_pose(hand: int) -> Dictionary:
 	if not controller:
 		return _get_cached_controller_pose(hand)
 
-	if is_optical_hand_tracking_active(hand):
-		_last_controller_poses[hand] = {}
-		_last_controller_pose_msec[hand] = 0
-		return {"is_active": false}
-
 	if not is_controller_mode_active(hand):
 		return _get_cached_controller_pose(hand)
 
@@ -158,11 +161,6 @@ func get_controller_input(hand: int) -> Dictionary:
 	var controller: XRController3D = _left_controller if hand == 0 else _right_controller
 	if not controller:
 		return _get_cached_controller_input(hand)
-
-	if is_optical_hand_tracking_active(hand):
-		_last_controller_inputs[hand] = {}
-		_last_controller_input_msec[hand] = 0
-		return {}
 
 	if not is_controller_mode_active(hand):
 		return _get_cached_controller_input(hand)
@@ -257,10 +255,13 @@ func _hand_tracker_name(hand: int) -> StringName:
 	return LEFT_HAND_TRACKER if hand == 0 else RIGHT_HAND_TRACKER
 
 
-func _get_haptics_bus() -> Node:
-	if not is_inside_tree():
-		return null
-	return get_tree().root.get_node_or_null("Haptics")
+func _controller_profile(controller: XRController3D) -> String:
+	if controller == null:
+		return ""
+	var tracker := XRServer.get_tracker(controller.tracker)
+	if tracker is XRPositionalTracker:
+		return String((tracker as XRPositionalTracker).profile)
+	return ""
 
 
 ## Collect all tracking data into a single dictionary.
