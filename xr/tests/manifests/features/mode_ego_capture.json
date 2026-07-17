@@ -36,6 +36,12 @@
       "script": "res://tests/unit/capture/pico_rgb_resolution_options_test.gd"
     },
     {
+      "id": "launcher.navigation_policy",
+      "level": "unit",
+      "suite": "modes.navigation",
+      "script": "res://tests/unit/contracts/launcher_navigation_test.gd"
+    },
+    {
       "id": "capture.start_stop_with_fake_sources",
       "level": "integration",
       "suite": "capture.pipeline",
