@@ -1,27 +1,32 @@
 """Command-space joint rate limiter for the `vr_operator` plugin (Phase-2).
 
-Bounds the *commanded* joint velocity and acceleration against the plugin's own
-previous command, so it needs no `Present_Position` read. This lets us drop
-LeRobot's `--robot.max_relative_target` (which clamped against a fresh serial
-read every loop) without letting the arm slew or jerk unboundedly.
+Shapes the *commanded* joint trajectory: bounds velocity, acceleration, and
+(via stopping-distance planning) prevents overshoot, so a jumpy IK target
+becomes a smooth, jerk-bounded command.
+
+It works in command space (against the plugin's own last command) because the
+teleoperator cannot see the follower's encoders -- `get_action()` takes no
+observation. That makes it cheap, but it also means it canNOT bound motion
+relative to the arm's *actual* position: if the internal command state and the
+physical arm disagree (e.g. at startup when the arm is not at the assumed home),
+this limiter alone provides no measured-space guarantee. It therefore
+COMPLEMENTS, and does not replace, LeRobot's `--robot.max_relative_target`, which
+clamps each goal against a fresh `Present_Position` read (measured 1.3ms; keep it
+on for safety). Use both: `max_relative_target` = measured-space floor, this =
+command-space smoothness + fps-independent velocity/accel caps.
 
 Design notes
 ------------
-* Works in command space (last commanded joints), not measured space -- the
-  teleoperator cannot see the follower's encoders (`get_action()` takes no
-  observation). This is the same reason it is cheaper than `max_relative_target`,
-  which paid a serial round-trip to read the present position.
 * `dt` is measured wall-clock between calls and clamped to `max_dt_s` so a loop
   stall (GC, serial retry) cannot turn into one giant jump when the loop resumes.
-* The velocity default is set at/above the effective envelope
-  `max_relative_target=5` gave at 30Hz (~150 deg/s), so enabling this is a safety
-  *replacement*, not a tracking regression.
-* Also bounds the startup/reset home slew (target jumps to home; the limiter
-  slews the command there at bounded speed) -- the role `max_relative_target`
-  used to play for the README's "arm slews to home on start" behaviour.
+* Deceleration planning: the target velocity is capped at sqrt(2*a*distance) so
+  the joint can always stop within the remaining distance under the accel limit
+  -- a trapezoidal profile with no overshoot/oscillation on fast approaches.
 """
 
 from __future__ import annotations
+
+import math
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -80,14 +85,38 @@ class JointRateLimiter:
         dv_max = self.max_acc * dt
         v_max = self.max_vel
         for i in range(self._n):
-            desired_v = (target_q[i] - self._q[i]) / dt
+            dist = target_q[i] - self._q[i]
+            # Deceleration planning: never go faster than we can still stop from
+            # within the remaining distance (v_stop = sqrt(2*a*|dist|)). Without
+            # this the accel clamp can't brake in time and the joint overshoots
+            # and oscillates around the target on fast approaches.
+            v_stop = math.sqrt(2.0 * self.max_acc * abs(dist))
+            desired_v = _clamp(dist / dt, -v_max, v_max)
+            desired_v = _clamp(desired_v, -v_stop, v_stop)
             # Acceleration clamp: change in velocity is bounded per step...
             dv = _clamp(desired_v - self._v[i], -dv_max, dv_max)
             v = _clamp(self._v[i] + dv, -v_max, v_max)  # ...then the velocity itself.
-            self._q[i] += v * dt
+            q_next = self._q[i] + v * dt
+            # Discrete integration can still nudge a fraction past the target even
+            # with decel planning; clamp to the target (and stop) if this step
+            # would cross it, so there is provably zero overshoot.
+            if (dist > 0.0 and q_next > target_q[i]) or (dist < 0.0 and q_next < target_q[i]):
+                q_next = target_q[i]
+                v = 0.0
+            self._q[i] = q_next
             self._v[i] = v
 
         dg_max = self.grip_rate * dt
         self._g += _clamp(target_gripper - self._g, -dg_max, dg_max)
 
+        return list(self._q), self._g
+
+    def current(self) -> tuple[list[float], float] | None:
+        """The limiter's current commanded (joints, gripper), or None if unseeded.
+
+        This is what the arm is actually being driven toward -- report it (not the
+        raw IK target) in State/Hello so the adapter's snapshot matches reality.
+        """
+        if self._q is None or self._g is None:
+            return None
         return list(self._q), self._g

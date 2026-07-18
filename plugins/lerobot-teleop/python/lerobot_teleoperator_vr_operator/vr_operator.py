@@ -330,12 +330,19 @@ class VROperator(Teleoperator):
 
         # Phase-1: record the consume-path segments for this fresh command.
         # age_uds spans adapter publish -> here (same host wall clock); None if
-        # the adapter did not stamp ts_ns.
-        fresh = target.seq != self._last_consumed_seq
+        # the adapter did not stamp ts_ns. (Named is_new_seq, not `fresh`, to
+        # avoid colliding with the TTL-freshness check above.)
+        is_new_seq = target.seq != self._last_consumed_seq
         self._last_consumed_seq = target.seq
         age_uds_ms = (time.time_ns() - target.ts_ns) / 1e6 if target.ts_ns else None
+        # Only feed IK timing for real EE-pose solves; direct-position and
+        # gripper-only frames run no IK and would bias the ik percentiles to ~0.
+        did_ik = target.positions is None and target.ee_position is not None
         self._metrics.record_solve(
-            age_uds_ms=age_uds_ms, ik_ms=ik_ms, ik_iters=self._last_ik_iters, fresh=fresh
+            age_uds_ms=age_uds_ms,
+            ik_ms=ik_ms if did_ik else None,
+            ik_iters=self._last_ik_iters if did_ik else None,
+            fresh=is_new_seq,
         )
 
         # Re-arm the error edge: if this fault recurs later it is news again.
@@ -465,11 +472,17 @@ class VROperator(Teleoperator):
         RANGE_0_100 -- matching what the adapter's own stub plugin reports.
         """
         assert self._kin is not None
-        ee = matrix_to_pose(self._kin.forward_kinematics(np.asarray(self._last_q, dtype=float)))
+        # Report the COMMANDED (rate-limited) joints, not the raw IK target: the
+        # limiter can lag _last_q during a slew, and the adapter seeds its
+        # retarget baseline from this snapshot on (re)connect -- reporting the
+        # target would place the baseline where the arm is not yet.
+        cmd = self._limiter.current() if self._limiter is not None else None
+        q_report, gripper_report = cmd if cmd is not None else (self._last_q, self._last_gripper)
+        ee = matrix_to_pose(self._kin.forward_kinematics(np.asarray(q_report, dtype=float)))
         payload: dict = {
             "type": kind,
             "joint_names": list(JOINT_NAMES),
-            "positions": [*(float(q) for q in self._last_q), float(self._last_gripper)],
+            "positions": [*(float(q) for q in q_report), float(gripper_report)],
             "ee": ee,
         }
         if kind == "State":

@@ -96,17 +96,18 @@ class VROperatorConfig(TeleoperatorConfig):
 
     # --- Command-space joint rate limiting (Phase-2) --------------------------
     #
-    # Replaces LeRobot's `--robot.max_relative_target`, which clamped each step
-    # against a fresh `Present_Position` sync_read -- a serial round-trip on the
-    # teleop hot path every loop. This limiter instead bounds the *commanded*
-    # joint velocity/acceleration against our own last command, needing no read,
-    # so `--robot.max_relative_target` can be dropped (kills that read) while the
-    # arm still cannot slew or jerk unboundedly. It also bounds the startup/reset
-    # home slew that `max_relative_target` used to bound.
-    #
-    # Velocity default is set at/above the envelope `max_relative_target=5` gave
-    # at 30Hz (~150 deg/s) so this is a safety *replacement*, not a tracking
-    # regression. Set `limit_enabled=False` to A/B against the raw IK output.
+    # COMPLEMENTS (does NOT replace) LeRobot's `--robot.max_relative_target`.
+    # This limiter shapes the *commanded* trajectory -- velocity, acceleration,
+    # and overshoot-free deceleration -- against our own last command. It needs
+    # no serial read, but for exactly that reason it cannot bound motion relative
+    # to the arm's *actual* position (the teleoperator never reads the encoders):
+    # at startup, if the arm is not at the assumed home, the limiter's internal
+    # state disagrees with reality and provides no measured-space guarantee.
+    # Keep `--robot.max_relative_target` ON as the measured-space safety floor
+    # (its Present_Position read is ~1.3ms and the loop is fps/sleep-bound, so it
+    # is effectively free); this limiter adds smoothness and an fps-independent
+    # velocity/accel cap on top. Set `limit_enabled=False` to A/B the raw IK
+    # output.
     limit_enabled: bool = True
     max_velocity_deg_s: float = 180.0
     max_acceleration_deg_s2: float = 1200.0

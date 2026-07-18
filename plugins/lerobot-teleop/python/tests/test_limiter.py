@@ -65,6 +65,30 @@ def test_stall_dt_is_clamped():
     assert g <= 400.0 * 0.05 + 1e-6
 
 
+def test_no_overshoot_on_fast_approach():
+    # Deceleration planning must stop the joint AT the target without overshoot,
+    # even when it approaches at high velocity. Drive from rest to a fixed target
+    # and assert the command never exceeds it (within fp epsilon).
+    lim = _limiter(max_velocity_deg_s=180.0, max_acceleration_deg_s2=1200.0)
+    lim.reset([0.0] * 5, 0.0, now=0.0)
+    target = 30.0
+    peak = 0.0
+    q = None
+    for k in range(1, 400):
+        q, _ = lim.step([target, 0, 0, 0, 0], 0.0, now=k / 90.0)
+        peak = max(peak, q[0])
+    assert peak <= target + 1e-6, f"overshot to {peak} > {target}"
+    assert abs(q[0] - target) < 1e-3, f"did not converge: {q[0]}"
+
+
+def test_current_returns_commanded_state():
+    lim = _limiter()
+    assert lim.current() is None  # unseeded
+    lim.reset([1.0, 2.0, 3.0, 4.0, 5.0], 50.0, now=0.0)
+    q, g = lim.current()
+    assert q == [1.0, 2.0, 3.0, 4.0, 5.0] and g == 50.0
+
+
 def test_gripper_rate_is_bounded():
     lim = _limiter(gripper_max_rate_per_s=400.0)
     lim.reset([0.0] * 5, 0.0, now=0.0)

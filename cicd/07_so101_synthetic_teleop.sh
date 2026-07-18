@@ -54,9 +54,14 @@ SO101_URDF="${SO101_URDF:-}"
 ENDPOINT="${ENDPOINT:-uds:/tmp/lerobot-vr.sock}"
 ROBOT_ID="${ROBOT_ID:-so101_follower}"
 CONFIG="${CONFIG:-configs/so101_real.yaml}"
-# Use `-` not `:-` so an explicit empty value (MAX_RELATIVE_TARGET=) is honored:
-# empty => omit the flag entirely, which skips lerobot's per-loop Present_Position
-# sync_read (the plugin's own JointRateLimiter bounds slew instead). Unset => 5.
+# Default 5 (unset => 5). This is the MEASURED-space safety floor: lerobot's
+# send_action clamps each goal to +/-N of a fresh Present_Position read, so the
+# arm cannot step far from where it ACTUALLY is -- the plugin's JointRateLimiter
+# works in command space and cannot do this (it never reads the encoders). The
+# read is ~1.3ms and the loop is fps/sleep-bound, so keeping it is effectively
+# free. Setting MAX_RELATIVE_TARGET= (empty) omits it: EXPERIMENT ONLY -- it
+# drops the measured-space guard, so a startup where the arm is not near home can
+# slam. (`-` not `:-` so an explicit empty value is honored.)
 MAX_RELATIVE_TARGET="${MAX_RELATIVE_TARGET-5}"
 FPS="${FPS:-30}"
 PYTHON="${PYTHON:-python3}"
