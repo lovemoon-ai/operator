@@ -82,7 +82,7 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
             udp_stats,
         ),
         telemetry_server::run(config.telemetry_port, telemetry_rx),
-        forward::run(descriptor, device_cmd_rx, client),
+        forward::run(descriptor, device_cmd_rx, client, latency.clone()),
         latency::run_aggregator(latency.clone()),
         video::run(video_feeds),
     )?;

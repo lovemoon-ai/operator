@@ -19,6 +19,7 @@ from .config_vr_operator import (
     JOINT_NAMES,
     VROperatorConfig,
 )
+from .latency_metrics import LatencyMetrics
 from .link import TargetSample, VRLink
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,12 @@ class VROperator(Teleoperator):
         self._last_state_sent = 0.0
         # Last Error message sent, so a sustained fault is reported once.
         self._last_error: str | None = None
+
+        # Phase-1 latency instrumentation (pure logging; no control effect).
+        self._metrics = LatencyMetrics()
+        self._last_ik_iters = 0
+        # seq of the last target we actually consumed, to count fresh vs repeat.
+        self._last_consumed_seq = -1
 
     # -- features ----------------------------------------------------------
 
@@ -206,6 +213,20 @@ class VROperator(Teleoperator):
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:
+        """Timing wrapper around `_get_action_impl` (Phase-1 instrumentation).
+
+        Measures whole-call time and flushes the 1Hz latency summary. The
+        `finally` guarantees the sample is recorded on every return path,
+        including the many `_hold()` early-outs, without touching control logic.
+        """
+        t0 = time.perf_counter()
+        try:
+            return self._get_action_impl()
+        finally:
+            self._metrics.record_call((time.perf_counter() - t0) * 1000.0)
+            self._metrics.maybe_flush()
+
+    def _get_action_impl(self) -> RobotAction:
         """Latest joint targets, or the last commanded ones to hold. Never blocks.
 
         Every path returns a full six-key action -- **never** `{}`. An empty
@@ -281,9 +302,21 @@ class VROperator(Teleoperator):
             self._report_state()
             return self._hold()
 
+        ik_t0 = time.perf_counter()
         joints = self._solve(target)
+        ik_ms = (time.perf_counter() - ik_t0) * 1000.0
         if joints is None:  # IK non-convergent; _solve() already sent an Error
             return self._hold()
+
+        # Phase-1: record the consume-path segments for this fresh command.
+        # age_uds spans adapter publish -> here (same host wall clock); None if
+        # the adapter did not stamp ts_ns.
+        fresh = target.seq != self._last_consumed_seq
+        self._last_consumed_seq = target.seq
+        age_uds_ms = (time.time_ns() - target.ts_ns) / 1e6 if target.ts_ns else None
+        self._metrics.record_solve(
+            age_uds_ms=age_uds_ms, ik_ms=ik_ms, ik_iters=self._last_ik_iters, fresh=fresh
+        )
 
         # Re-arm the error edge: if this fault recurs later it is news again.
         self._last_error = None
@@ -302,10 +335,12 @@ class VROperator(Teleoperator):
                 self._fail(f"positions must contain {len(ARM_JOINT_NAMES)} floats")
                 return None
             self._last_ik_error = None
+            self._last_ik_iters = 0
             return [float(v) for v in target.positions]
 
         if target.ee_position is None:
             # Gripper-only update: hold the joints we last commanded.
+            self._last_ik_iters = 0
             return list(self._last_q)
 
         assert self._kin is not None
@@ -323,7 +358,9 @@ class VROperator(Teleoperator):
         # Reachable targets settle in 2-4 iterations.
         solution = np.asarray(self._last_q, dtype=float)
         error = float("inf")
+        iters = 0
         for _ in range(self.config.ik_max_iterations):
+            iters += 1
             solution = self._kin.inverse_kinematics(
                 solution,
                 desired,
@@ -341,6 +378,7 @@ class VROperator(Teleoperator):
             if error <= self.config.ik_position_tolerance:
                 break
 
+        self._last_ik_iters = iters
         self._last_ik_error = error
         if error > self.config.ik_position_tolerance:
             self._fail(
@@ -381,6 +419,7 @@ class VROperator(Teleoperator):
         pose available. `--robot.max_relative_target` bounds each step of the
         resulting slew; the README calls this out.
         """
+        self._metrics.record_hold()
         return self._action(self._last_q, self._last_gripper)
 
     def _action(self, joints: list[float], gripper: float) -> RobotAction:

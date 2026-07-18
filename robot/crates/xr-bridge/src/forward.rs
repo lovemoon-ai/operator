@@ -33,6 +33,7 @@ use tokio::time::{Duration, Instant, MissedTickBehavior};
 use teleop_protocol::DeviceDescriptor;
 
 use crate::adapter_client::AdapterClient;
+use crate::latency::{self, LatencyFrame, LatencyRecorder};
 use crate::safety::{DeviceSafety, SafetyResult};
 use crate::wire_runtime::TimedCommand;
 
@@ -52,6 +53,7 @@ pub async fn run(
     descriptor: Arc<DeviceDescriptor>,
     mut cmd_rx: watch::Receiver<Option<TimedCommand>>,
     mut client: AdapterClient,
+    latency: Arc<LatencyRecorder>,
 ) -> Result<()> {
     let mut safety = DeviceSafety::new(&descriptor);
 
@@ -86,6 +88,9 @@ pub async fn run(
                     // Channel signalled change but value is None — ignore.
                     continue;
                 };
+                // Stamp the moment this command crossed the watch boundary into
+                // the forward loop, so `rx -> dispatch` measures watch latency.
+                let t_dispatch_ns = latency::wall_clock_ns();
 
                 last_cmd_at = Some(Instant::now());
                 if timed_out {
@@ -93,14 +98,29 @@ pub async fn run(
                     timed_out = false;
                 }
 
-                let TimedCommand { cmd, seq, .. } = timed;
+                let TimedCommand { cmd, seq, t_rx_ns } = timed;
+                let t_xr_send_ns = cmd.timestamp_ns;
                 match safety.validate(&cmd) {
                     SafetyResult::Rejected(reason) => {
                         tracing::warn!("Command rejected (seq={seq}): {reason}");
                     }
                     SafetyResult::Ok(sanitized) | SafetyResult::Clamped(sanitized) => {
+                        // Bracket only the adapter write so `drv` measures the
+                        // bridge->adapter handoff (the span the driver publish
+                        // returns through), then complete the frame. This is the
+                        // point wire_runtime::TimedCommand's doc-comment refers to.
+                        let t_drv_start_ns = latency::wall_clock_ns();
                         if let Err(e) = client.send_command(&sanitized).await {
                             tracing::error!("Forwarding command to adapter failed (seq={seq}): {e}");
+                        } else {
+                            latency.record_complete(LatencyFrame {
+                                seq,
+                                t_xr_send_ns,
+                                t_rx_ns,
+                                t_dispatch_ns,
+                                t_drv_start_ns,
+                                t_drv_done_ns: latency::wall_clock_ns(),
+                            });
                         }
                     }
                 }
@@ -227,7 +247,12 @@ mod tests {
         client.handshake().await.unwrap();
 
         let (cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
-        let forward = tokio::spawn(run(Arc::new(desc), cmd_rx, client));
+        let forward = tokio::spawn(run(
+            Arc::new(desc),
+            cmd_rx,
+            client,
+            LatencyRecorder::new(),
+        ));
 
         // Out-of-range throttle (5.0) → must arrive clamped to 1.0.
         let mut cmd = DeviceCommand::default();
@@ -267,7 +292,12 @@ mod tests {
         client.handshake().await.unwrap();
 
         let (cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
-        let forward = tokio::spawn(run(Arc::new(desc), cmd_rx, client));
+        let forward = tokio::spawn(run(
+            Arc::new(desc),
+            cmd_rx,
+            client,
+            LatencyRecorder::new(),
+        ));
 
         let mut cmd = DeviceCommand::default();
         cmd.axes.insert("nonexistent".into(), 0.5);
@@ -298,7 +328,12 @@ mod tests {
         client.handshake().await.unwrap();
 
         let (cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
-        let forward = tokio::spawn(run(Arc::new(desc), cmd_rx, client));
+        let forward = tokio::spawn(run(
+            Arc::new(desc),
+            cmd_rx,
+            client,
+            LatencyRecorder::new(),
+        ));
 
         // Send one command to start the idle timer.
         let mut cmd = DeviceCommand::default();
