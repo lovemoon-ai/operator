@@ -125,6 +125,12 @@ class SteppingKinematics:
 
 
 def make_operator(tmp_path, link: FakeLink, kin: FakeKinematics | None = None, **overrides):
+    # These tests assert the exact target/IK output of get_action (decision logic,
+    # units, hold behaviour). The Phase-2 JointRateLimiter is an output stage that
+    # slews toward that target, so it is disabled here to keep assertions on the
+    # unslewed value; the limiter has its own tests in test_limiter.py. Pass
+    # limit_enabled=True explicitly to exercise the integrated slew.
+    overrides.setdefault("limit_enabled", False)
     config = VROperatorConfig(calibration_dir=tmp_path, **overrides)
     operator = VROperator(config)
     # Bypass connect(): it would need a real adapter socket and a real URDF.
