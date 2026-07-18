@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# RELEASE STATUS: DEFERRED for v0.1.3 QA automation.
+#   The full Quest 3 -> real SO-101 teleop stack was verified MANUALLY on local
+#   hardware by the maintainer for the v0.1.3 release; this automated bring-up
+#   was NOT run as part of the v0.1.3 QA gate (no arm / lerobot in the QA env).
+# TODO(release): fold cicd/06 + cicd/07 into the standard CICD release QA flow
+#   so real SO-101 teleop is covered automatically in future releases.
+#
 # Bring up the full Quest 3 -> real SO-101 teleop stack and hold it open.
 #
 # This is the one test no script can finish for you: it needs a human wearing
