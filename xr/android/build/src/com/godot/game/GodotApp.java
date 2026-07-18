@@ -66,6 +66,12 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_OPERATOR_AUTO_START_LEGACY = "operator_auto_start";
 	private static final String EXTRA_MUJOCO_DURATION = "mujoco.duration";
 	private static final String EXTRA_MUJOCO_MIN_FRAMES = "mujoco.min.frames";
+	// Headless synthetic teleop (cicd/07_so101_synthetic_teleop.sh): drives the
+	// real teleop command path from a scripted operator, no headset/human.
+	private static final String EXTRA_TELEOP_SYNTHETIC = "operator.teleop.synthetic";
+	private static final String EXTRA_TELEOP_HOST = "operator.teleop.host";
+	private static final String EXTRA_TELEOP_PORT = "operator.teleop.port";
+	private static final String EXTRA_TELEOP_DURATION = "operator.teleop.duration";
 
 	static {
 		// .NET libraries.
@@ -134,6 +140,10 @@ public class GodotApp extends GodotActivity {
 		}
 		appendIntentExtraArg(args, EXTRA_MUJOCO_DURATION, "--mujoco-duration");
 		appendIntentExtraArg(args, EXTRA_MUJOCO_MIN_FRAMES, "--mujoco-min-frames");
+		appendIntentExtraArg(args, EXTRA_TELEOP_SYNTHETIC, "--operator-teleop-synthetic");
+		appendIntentExtraArg(args, EXTRA_TELEOP_HOST, "--operator-teleop-host");
+		appendIntentExtraArg(args, EXTRA_TELEOP_PORT, "--operator-teleop-port");
+		appendIntentExtraArg(args, EXTRA_TELEOP_DURATION, "--operator-teleop-duration");
 		// WP7 module test harness (tests/xr_module_harness.sh): only honored
 		// by APKs exported with operator_feature_test_harness=true.
 		appendIntentExtraArg(args, "operator_test_suite", "--operator-test-suite");
