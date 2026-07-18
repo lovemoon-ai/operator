@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Bring up the full Quest 3 -> real SO-101 teleop stack and hold it open.
 #
-# This is the one test no script can finish for you: it needs a human wearing
-# the headset. So it starts everything, proves the headset can see the host, and
-# then tails the logs while you drive. Ctrl-C tears it all down and de-energises
-# the arm.
+# EXAMPLE / MANUAL BRING-UP — not a CI test. It needs a human wearing the headset
+# to drive the arm, so it cannot run unattended. It is the teaching demo for
+# "put on the headset and teleoperate a real SO-101". For the automated,
+# human-free version of this same vertical slice, see
+# cicd/07_so101_synthetic_teleop.sh (a synthetic operator drives the arm and the
+# client self-asserts).
+#
+# It starts everything, proves the headset can see the host, and then tails the
+# logs while you drive. Ctrl-C tears it all down and de-energises the arm.
 #
 #   Quest 3 (Godot client)
 #     --UDP 63900 discovery--> host
@@ -26,13 +31,20 @@
 #   stop this script first.
 #
 # Usage:
-#   bash cicd/07_so101_quest_teleop.sh
-#   SO101_PORT=/dev/tty.usbmodem... QUEST_IP=10.79.153.133 bash cicd/07_so101_quest_teleop.sh
+#   bash examples/quest_so101_teleop_manual.sh
+#   SO101_PORT=/dev/tty.usbmodem... QUEST_IP=10.79.153.133 bash examples/quest_so101_teleop_manual.sh
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROBOT_DIR="$ROOT/robot"
+
+# Make the environment READY before anything else: create/refresh the uv-managed
+# lerobot venv, auto-detect the serial port, and locate the URDF. This EXPORTS
+# SO101_PORT / SO101_URDF / PYTHON and puts the venv on PATH, so the defaults
+# below become fallbacks and this test needs no env vars set by hand.
+# (Set SKIP_LEROBOT_PREPARE=1 to bypass when the env is provisioned elsewhere.)
+source "$ROOT/cicd/prepare_lerobot_so101.sh"
 
 SO101_PORT="${SO101_PORT:-/dev/tty.usbmodem58FA1019921}"
 SO101_URDF="${SO101_URDF:-$HOME/.cache/huggingface/lerobot/robot-urdfs/so101/so101_new_calib.urdf}"

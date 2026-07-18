@@ -66,10 +66,48 @@ var _xr_started: bool = false
 var _launch_window_active: bool = false
 var _launch_window_token: int = 0
 
+# --- Synthetic (headless CI) teleop -------------------------------------------
+# When launched with `operator.teleop.synthetic=true`, the OpenXR-backed
+# TrackingProvider is swapped for a SyntheticTeleopSource that plays a canned
+# right-controller trajectory, the client auto-connects (directly if a host is
+# given, else via discovery), drives the REAL command path for a bounded window,
+# self-asserts the arm moved via real telemetry, and quits with an exit code —
+# no headset, no operator. A normal launch never sets the flag, so this is inert.
+const SyntheticTeleopSourceScript = preload("res://scripts/xr/synthetic_teleop_source.gd")
+# GodotApp.java surfaces these intent extras as `--kebab value` user args (the
+# same convention as --operator-mode / --mujoco-duration), not `key=value`.
+const SYNTH_KEY_ENABLE := "--operator-teleop-synthetic"
+const SYNTH_KEY_DURATION := "--operator-teleop-duration"
+const SYNTH_KEY_HOST := "--operator-teleop-host"
+const SYNTH_KEY_PORT := "--operator-teleop-port"
+const SYNTH_DEFAULT_DURATION := 25.0
+const SYNTH_DEFAULT_PORT := 63901
+## Minimum peak joint excursion (deg) that counts as "the arm tracked".
+const SYNTH_MIN_JOINT_DELTA_DEG := 1.0
+## Fail if the descriptor handshake (→ engage) has not happened this long after
+## the autopilot starts driving the connection.
+const SYNTH_CONNECT_TIMEOUT_SEC := 45.0
+
+var _synthetic := false
+var _synth_source: Node = null
+var _synth_duration := SYNTH_DEFAULT_DURATION
+var _synth_host := ""
+var _synth_port := SYNTH_DEFAULT_PORT
+var _synth_engaged := false
+var _synth_finished := false
+var _synth_telemetry_count := 0
+var _synth_first_joints: Array = []
+var _synth_last_joints: Array = []
+var _synth_max_delta := 0.0
+
 
 func _ready() -> void:
 	if Engine.is_editor_hint():
 		return
+
+	# Must run before the command sender is wired (below) so it captures the
+	# synthetic provider rather than the OpenXR one.
+	_maybe_setup_synthetic()
 
 	_configure_passthrough()
 	_create_v2_nodes()
@@ -142,8 +180,15 @@ func _ready() -> void:
 
 	print("[Operator] Main scene initialized (UI hidden — awaiting XR)")
 
+	# Networking + command emission run in _physics_process regardless of the XR
+	# session, so the autopilot does not wait on a headset/OpenXR to come up.
+	if _synthetic:
+		call_deferred("_start_synthetic_autopilot")
+
 
 func _process(_delta: float) -> void:
+	if _synthetic:
+		_tick_synthetic()
 	if _camera:
 		if _settings_panel:
 			_settings_panel.transform = _camera.transform * SETTINGS_PANEL_OFFSET
@@ -319,7 +364,10 @@ func _on_xr_started() -> void:
 		if typeof(runtime_any) == TYPE_STRING and not String(runtime_any).is_empty():
 			print("[Operator] OpenXR runtime: %s" % String(runtime_any))
 
-	_begin_launch_window()
+	# Synthetic runs own their own connection lifecycle and must never pop the
+	# discovery/settings panel (which would suspend teleop and block sending).
+	if not _synthetic:
+		_begin_launch_window()
 
 
 func _on_xr_failed() -> void:
@@ -694,6 +742,12 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	# re-enables sending when it closes.
 	if not _teleop_suspended:
 		_robot_control_sink.set_sending(true)
+	# Synthetic: the descriptor has landed and sending is on — start the canned
+	# operator trajectory now so the robot seeds its retarget reference cleanly.
+	if _synthetic and _synth_source and not _synth_engaged:
+		_synth_engaged = true
+		_synth_source.call("engage", _synth_duration)
+		print("[TeleopSynthetic] descriptor device=%s — engaging synthetic operator" % device_type)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_update_teleop_controller_panel()
@@ -718,7 +772,8 @@ func _on_telemetry_received(_data: Dictionary) -> void:
 	# work: surface telemetry as an optional overlay or a Phase-2 panel
 	# section. For now we just drop the data so the signal stays connected
 	# (Session still parses telemetry frames so consumer can subscribe).
-	pass
+	if _synthetic:
+		_synth_capture_telemetry(_data)
 
 
 func _configure_robot_video_stream(descriptor: Dictionary) -> void:
@@ -869,3 +924,140 @@ func _robot_type_display(robot_type: String) -> String:
 			return tr("UI_DEVICE_TYPE_RC_CAR")
 		_:
 			return robot_type
+
+
+# --- Synthetic (headless CI) autopilot ----------------------------------------
+
+## Read an intent-extra / cmdline value. Android `--es KEY VAL` surfaces as the
+## token `KEY=VAL`; the `KEY VAL` pair form is also accepted. Mirrors the
+## convention used by mode_select and the mujoco device test.
+func _synthetic_arg(key: String, fallback: String) -> String:
+	var args: Array = []
+	args.append_array(OS.get_cmdline_user_args())
+	args.append_array(OS.get_cmdline_args())
+	for i in range(args.size()):
+		var arg := String(args[i]).strip_edges()
+		if arg == key and i + 1 < args.size():
+			return String(args[i + 1]).strip_edges()
+		if arg.begins_with(key + "="):
+			return arg.substr(key.length() + 1).strip_edges()
+	return fallback
+
+
+func _synthetic_flag_set() -> bool:
+	var raw := _synthetic_arg(SYNTH_KEY_ENABLE, "").to_lower()
+	return raw == "1" or raw == "true" or raw == "yes" or raw == "on"
+
+
+## Swap the OpenXR TrackingProvider for the scripted source. Runs before the
+## command sender is wired so it captures the synthetic provider.
+func _maybe_setup_synthetic() -> void:
+	if not _synthetic_flag_set():
+		return
+	_synthetic = true
+	_synth_duration = float(_synthetic_arg(SYNTH_KEY_DURATION, str(SYNTH_DEFAULT_DURATION)))
+	_synth_host = _synthetic_arg(SYNTH_KEY_HOST, "")
+	_synth_port = int(_synthetic_arg(SYNTH_KEY_PORT, str(SYNTH_DEFAULT_PORT)))
+
+	var src: Node = SyntheticTeleopSourceScript.new()
+	src.name = "SyntheticTeleopSource"
+	add_child(src)
+	# Retire the real XR-backed provider so it does no OpenXR work.
+	if is_instance_valid(_tracking_provider):
+		_tracking_provider.queue_free()
+	_tracking_provider = src
+	_synth_source = src
+	print("[TeleopSynthetic] started duration=%.1fs host=%s port=%d" % [
+		_synth_duration, ("<discovery>" if _synth_host.is_empty() else _synth_host), _synth_port,
+	])
+
+
+func _start_synthetic_autopilot() -> void:
+	if not _synthetic:
+		return
+	if not _synth_host.is_empty():
+		print("[TeleopSynthetic] direct-connecting to %s:%d" % [_synth_host, _synth_port])
+		_connect_to_robot(_synth_host, _synth_port)
+	else:
+		print("[TeleopSynthetic] no host set — relying on discovery + auto-connect")
+	# Watchdog: if the descriptor handshake never engages the source, fail loud
+	# instead of hanging until the outer CI timeout.
+	get_tree().create_timer(SYNTH_CONNECT_TIMEOUT_SEC).timeout.connect(_synth_connect_watchdog)
+
+
+func _synth_connect_watchdog() -> void:
+	if _synth_finished or _synth_engaged:
+		return
+	_finish_synthetic("never engaged (no descriptor handshake within %ds)" % int(SYNTH_CONNECT_TIMEOUT_SEC))
+
+
+func _tick_synthetic() -> void:
+	if _synth_finished or not _synth_engaged or _synth_source == null:
+		return
+	var elapsed := float(_synth_source.call("elapsed"))
+	if elapsed >= _synth_duration:
+		_finish_synthetic("")
+
+
+func _synth_capture_telemetry(data: Dictionary) -> void:
+	var values: Dictionary = data.get("values", {})
+	var joints_any: Variant = values.get("joint_angles", [])
+	if not (joints_any is Array) or (joints_any as Array).is_empty():
+		return
+	var joints: Array = joints_any
+	_synth_telemetry_count += 1
+	_synth_last_joints = joints.duplicate()
+	# Baseline = first joints seen AFTER the deadman engaged (so the home slew
+	# does not count as "tracking").
+	if _synth_first_joints.is_empty():
+		if not _synth_engaged:
+			return
+		_synth_first_joints = joints.duplicate()
+		print("[TeleopSynthetic] telemetry baseline joints=%s" % JSON.stringify(joints))
+		return
+	_synth_max_delta = maxf(_synth_max_delta, _synth_joint_delta(_synth_first_joints, joints))
+
+
+func _synth_joint_delta(a: Array, b: Array) -> float:
+	var n := mini(a.size(), b.size())
+	var worst := 0.0
+	for i in range(n):
+		worst = maxf(worst, absf(float(a[i]) - float(b[i])))
+	return worst
+
+
+func _finish_synthetic(reason: String) -> void:
+	if _synth_finished:
+		return
+	_synth_finished = true
+	if _robot_control_sink:
+		_robot_control_sink.set_sending(false)
+	var connected: bool = _tcp_handler != null and _tcp_handler.is_connected_to_robot()
+	var moved := _synth_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG
+	print("[TeleopSynthetic] summary connected=%s engaged=%s telemetry_frames=%d max_joint_delta_deg=%.3f first=%s last=%s" % [
+		str(connected), str(_synth_engaged), _synth_telemetry_count, _synth_max_delta,
+		JSON.stringify(_synth_first_joints), JSON.stringify(_synth_last_joints),
+	])
+	if reason.is_empty() and connected and _synth_engaged and moved:
+		print("[TeleopSynthetic] PASS arm tracked synthetic operator (max_joint_delta=%.2f deg over %d frames)" % [
+			_synth_max_delta, _synth_telemetry_count,
+		])
+		_synth_quit(0)
+	else:
+		var why := reason
+		if why.is_empty():
+			why = "connected=%s engaged=%s moved=%s (max_delta=%.2f < %.2f deg)" % [
+				str(connected), str(_synth_engaged), str(moved),
+				_synth_max_delta, SYNTH_MIN_JOINT_DELTA_DEG,
+			]
+		push_error("[TeleopSynthetic] FAIL %s" % why)
+		_synth_quit(2)
+
+
+func _synth_quit(code: int) -> void:
+	# Drop the deadman and the connection before quitting so the robot-side
+	# watchdog safes the arm; the host script's trap de-energises regardless.
+	if _tcp_handler and _tcp_handler.is_connected_to_robot():
+		_tcp_handler.disconnect_from_robot()
+	print("[TeleopSynthetic] exiting code=%d" % code)
+	get_tree().quit(code)

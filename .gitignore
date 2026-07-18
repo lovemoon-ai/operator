@@ -123,7 +123,13 @@ xr/dist/
 cicd/results/
 cicd/logs
 
+# uv-managed lerobot teleop env built by cicd/prepare_lerobot_so101.sh
+cicd/.lerobot-venv/
+
 # qa
 claw/qa-artifacts
 xr/artifacts/
 tests/logs
+
+# editable install metadata from prepare_lerobot_so101.sh
+plugins/lerobot-teleop/python/*.egg-info/

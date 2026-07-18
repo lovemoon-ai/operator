@@ -31,6 +31,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROBOT_DIR="$ROOT/robot"
 
+# Make the environment READY before anything else: create/refresh the uv-managed
+# lerobot venv, auto-detect the serial port, and locate the URDF. This EXPORTS
+# SO101_PORT / SO101_URDF / PYTHON and puts the venv on PATH, so the defaults
+# below become fallbacks and this test needs no env vars set by hand.
+# (Set SKIP_LEROBOT_PREPARE=1 to bypass when the env is provisioned elsewhere.)
+source "$ROOT/cicd/prepare_lerobot_so101.sh"
+
 SO101_PORT="${SO101_PORT:-/dev/ttyACM0}"
 SO101_URDF="${SO101_URDF:-}"
 # MUST match `adapter.arm.lerobot.endpoint` in $CONFIG. The endpoint is
