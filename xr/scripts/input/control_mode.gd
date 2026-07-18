@@ -28,7 +28,12 @@ func configure(descriptor: Dictionary) -> void:
 
 
 func collect_command(tracking: TrackingProvider) -> Dictionary:
-	var cmd = {"axes": {}, "buttons": {}, "poses": {}, "timestamp_ns": Time.get_ticks_usec() * 1000}
+	# Stamp with the SAME unix-epoch clock RobotClockSync.now_ns() uses for its
+	# ClockPing t_xr_send. The bridge's clock offset is derived from ClockPing, so
+	# the command timestamp must share that clock or the offset cannot cancel and
+	# the xr->rx / e2e latency segments come out as raw clock skew (garbage).
+	# (Was Time.get_ticks_usec()*1000 — a monotonic, boot-relative clock.)
+	var cmd = {"axes": {}, "buttons": {}, "poses": {}, "timestamp_ns": RobotClockSync.now_ns()}
 	for mapping in _mappings:
 		var source: String = mapping["source"]
 		var target: String = mapping["target"]
