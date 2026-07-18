@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# RELEASE STATUS: DEFERRED for v0.1.3 QA automation.
+#   The real SO-101 path was verified MANUALLY on local hardware by the
+#   maintainer for the v0.1.3 release; this automated device smoke was NOT run
+#   as part of the v0.1.3 QA gate (no arm / lerobot in the QA environment).
+# TODO(release): fold cicd/06 + cicd/07 into the standard CICD release QA flow
+#   so real SO-101 teleop is covered automatically in future releases.
+#
 # Device smoke test for the real SO-101 path via the LeRobot `vr_operator` plugin.
 #
 # Replaces the deleted `robot/crates/robot-adapter/tests/so101_real_hardware.rs`,
