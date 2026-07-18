@@ -20,6 +20,7 @@ from .config_vr_operator import (
     VROperatorConfig,
 )
 from .latency_metrics import LatencyMetrics
+from .limiter import JointRateLimiter
 from .link import TargetSample, VRLink
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,21 @@ class VROperator(Teleoperator):
         # seq of the last target we actually consumed, to count fresh vs repeat.
         self._last_consumed_seq = -1
 
+        # Phase-2 command-space rate limiter (replaces --robot.max_relative_target
+        # so its per-loop Present_Position read can be dropped). Output stage only:
+        # it never feeds back into `_last_q`, so IK keeps warm-starting from the
+        # converged target rather than the lagging command.
+        self._limiter = (
+            JointRateLimiter(
+                n_arm=len(ARM_JOINT_NAMES),
+                max_velocity_deg_s=config.max_velocity_deg_s,
+                max_acceleration_deg_s2=config.max_acceleration_deg_s2,
+                gripper_max_rate_per_s=config.gripper_max_rate_per_s,
+            )
+            if config.limit_enabled
+            else None
+        )
+
     # -- features ----------------------------------------------------------
 
     @property
@@ -142,6 +158,10 @@ class VROperator(Teleoperator):
         # arm is at `home_joints`, which is only true if it actually is.
         self._last_q = list(self.config.home_joints)
         self._last_gripper = float(self.config.home_gripper)
+        # Seed the limiter at home (where the bootstrap assumes the arm is), so
+        # the first commands slew gently instead of snapping from a stale state.
+        if self._limiter is not None:
+            self._limiter.reset(self._last_q, self._last_gripper)
 
         link = VRLink(self.config.endpoint, self.config.connect_timeout_ms / 1000.0)
         link.set_hello(self._snapshot_payload("Hello"))
@@ -423,7 +443,13 @@ class VROperator(Teleoperator):
         return self._action(self._last_q, self._last_gripper)
 
     def _action(self, joints: list[float], gripper: float) -> RobotAction:
-        """Build the action dict. Arm joints in DEGREES, gripper in RANGE_0_100."""
+        """Build the action dict. Arm joints in DEGREES, gripper in RANGE_0_100.
+
+        Single choke point for every commanded pose (active track, hold, home
+        slew), so the rate limiter here bounds all motion uniformly.
+        """
+        if self._limiter is not None:
+            joints, gripper = self._limiter.step(joints, gripper, time.monotonic())
         action: RobotAction = {
             f"{name}.pos": float(q) for name, q in zip(ARM_JOINT_NAMES, joints, strict=True)
         }

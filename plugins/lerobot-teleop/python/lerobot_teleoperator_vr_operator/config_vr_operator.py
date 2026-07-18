@@ -94,6 +94,26 @@ class VROperatorConfig(TeleoperatorConfig):
     # (an unreachable target) so `get_action()` stays cheap.
     ik_max_iterations: int = 10
 
+    # --- Command-space joint rate limiting (Phase-2) --------------------------
+    #
+    # Replaces LeRobot's `--robot.max_relative_target`, which clamped each step
+    # against a fresh `Present_Position` sync_read -- a serial round-trip on the
+    # teleop hot path every loop. This limiter instead bounds the *commanded*
+    # joint velocity/acceleration against our own last command, needing no read,
+    # so `--robot.max_relative_target` can be dropped (kills that read) while the
+    # arm still cannot slew or jerk unboundedly. It also bounds the startup/reset
+    # home slew that `max_relative_target` used to bound.
+    #
+    # Velocity default is set at/above the envelope `max_relative_target=5` gave
+    # at 30Hz (~150 deg/s) so this is a safety *replacement*, not a tracking
+    # regression. Set `limit_enabled=False` to A/B against the raw IK output.
+    limit_enabled: bool = True
+    max_velocity_deg_s: float = 180.0
+    max_acceleration_deg_s2: float = 1200.0
+    # Gripper is RANGE_0_100, not degrees; limit its slew separately. 400/s =
+    # full open->close in 0.25s.
+    gripper_max_rate_per_s: float = 400.0
+
     def __post_init__(self) -> None:
         # draccus cannot decode `Literal`, and validating here keeps bad CLI
         # input from surfacing as an obscure failure much later.
@@ -116,3 +136,9 @@ class VROperatorConfig(TeleoperatorConfig):
             raise ValueError(f"ik_position_tolerance must be > 0 (meters), got {self.ik_position_tolerance}")
         if self.ik_max_iterations < 1:
             raise ValueError(f"ik_max_iterations must be >= 1, got {self.ik_max_iterations}")
+        if self.max_velocity_deg_s <= 0.0:
+            raise ValueError(f"max_velocity_deg_s must be > 0, got {self.max_velocity_deg_s}")
+        if self.max_acceleration_deg_s2 <= 0.0:
+            raise ValueError(f"max_acceleration_deg_s2 must be > 0, got {self.max_acceleration_deg_s2}")
+        if self.gripper_max_rate_per_s <= 0.0:
+            raise ValueError(f"gripper_max_rate_per_s must be > 0, got {self.gripper_max_rate_per_s}")
