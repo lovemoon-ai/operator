@@ -79,16 +79,27 @@ class LatencyMetrics:
         """This call held the last setpoint (disabled/stale/e-stop/no target)."""
         self._holds += 1
 
-    def record_solve(self, *, age_uds_ms: float | None, ik_ms: float, ik_iters: int, fresh: bool) -> None:
-        """This call consumed a target and ran IK.
+    def record_solve(
+        self,
+        *,
+        age_uds_ms: float | None,
+        ik_ms: float | None,
+        ik_iters: int | None,
+        fresh: bool,
+    ) -> None:
+        """This call consumed a target.
 
         ``age_uds_ms`` is None when the adapter did not stamp ``ts_ns`` (older
-        adapter) so the segment is simply not sampled rather than logged as zero.
+        adapter); ``ik_ms``/``ik_iters`` are None for non-IK frames (direct
+        position / gripper-only). In each case the segment is simply not sampled
+        rather than logged as a misleading zero.
         """
         if age_uds_ms is not None and age_uds_ms >= 0.0:
             self._age_uds_ms.append(age_uds_ms)
-        self._ik_ms.append(ik_ms)
-        self._ik_iters.append(ik_iters)
+        if ik_ms is not None:
+            self._ik_ms.append(ik_ms)
+        if ik_iters is not None:
+            self._ik_iters.append(ik_iters)
         if fresh:
             self._fresh += 1
 
