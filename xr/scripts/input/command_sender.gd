@@ -21,7 +21,13 @@ func configure_for_device(descriptor: Dictionary) -> void:
 	print("[CommandSender] Configured for device: %s" % descriptor.get("device", {}).get("name", "unknown"))
 
 
-func _physics_process(delta: float) -> void:
+# Sample + send in _process (render rate, ~72/90Hz on Quest) rather than
+# _physics_process (fixed 60Hz). The XR controller transform is freshest at
+# render time (predicted to the display photon instant), and sending above the
+# robot's 60Hz consume loop means every consume gets a fresh frame instead of a
+# repeat, lifting delivered fresh-target rate toward the loop cap. The 1/72 gate
+# still bounds the wire rate so a 90/120Hz headset doesn't oversend.
+func _process(delta: float) -> void:
 	if not _sending or not control_mode: return
 	if not tcp_handler or not tcp_handler.is_connected_to_robot(): return
 	if not tracking_provider: return

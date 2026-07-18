@@ -78,7 +78,11 @@ func elapsed() -> float:
 	return _t if _engaged else 0.0
 
 
-func _physics_process(delta: float) -> void:
+# Advance in _process (render rate) to match CommandSender, which now samples at
+# render rate: this keeps the synthetic pose fresh on every send instead of only
+# every 60Hz physics tick, so the synthetic path exercises the same higher-rate
+# delivery the real controller does.
+func _process(delta: float) -> void:
 	if not _engaged:
 		return
 	_t += delta
