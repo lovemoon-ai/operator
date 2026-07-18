@@ -103,6 +103,9 @@ pub async fn spawn_stack(
         telemetry_tx,
     )));
 
+    // Clone the recorder for the forward loop before pose_server moves its own.
+    let forward_latency = latency.clone();
+
     // pose_server on the pre-bound listener.
     {
         let descriptor = descriptor.clone();
@@ -118,7 +121,7 @@ pub async fn spawn_stack(
 
     // The forward loop owns the client.
     tasks.push(tokio::spawn(async move {
-        if let Err(e) = forward::run(descriptor, cmd_rx, client).await {
+        if let Err(e) = forward::run(descriptor, cmd_rx, client, forward_latency).await {
             tracing::warn!("forward loop exited: {e}");
         }
     }));
