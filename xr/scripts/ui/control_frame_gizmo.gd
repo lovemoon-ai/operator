@@ -4,8 +4,8 @@ extends Node3D
 ##
 ## The origin follows the driving controller, but the ORIENTATION is the robot's
 ## control frame -- the yaw-only operator frame the adapter captured when the
-## deadman was squeezed. Push the controller along the 前 arrow and the arm goes
-## forward, regardless of how the controller itself is rotated.
+## deadman was squeezed. Push the controller along the FORWARD arrow and the arm
+## goes forward, regardless of how the controller itself is rotated.
 ##
 ## The frame and the lateral convention are taken from TELEMETRY, not re-derived
 ## here: the retarget's `mirror`/`scale` live in robot-side config, and a client
@@ -19,18 +19,24 @@ const AXIS_RADIUS := 0.005
 const LABEL_GAP := 0.025
 const LABEL_SIZE := 0.035
 
-const COLOR_FORWARD := Color(1.0, 0.32, 0.32)   # 前
-const COLOR_LATERAL := Color(0.36, 0.95, 0.45)  # 右
-const COLOR_UP := Color(0.40, 0.60, 1.0)        # 上
+const COLOR_FORWARD := Color(1.0, 0.32, 0.32)
+const COLOR_LATERAL := Color(0.36, 0.95, 0.45)
+const COLOR_UP := Color(0.40, 0.60, 1.0)
 
 var _axes: Array[MeshInstance3D] = []
 var _labels: Array[Label3D] = []
 
 
 func _ready() -> void:
-	for spec in [[COLOR_FORWARD, "前"], [COLOR_LATERAL, "右"], [COLOR_UP, "上"]]:
+	# Labels go through tr() like the rest of the UI (see scripts/i18n/localization.gd);
+	# the gizmo is operator-facing text, not a debug readout.
+	for spec in [
+		[COLOR_FORWARD, "UI_TELEOP_AXIS_FORWARD"],
+		[COLOR_LATERAL, "UI_TELEOP_AXIS_RIGHT"],
+		[COLOR_UP, "UI_TELEOP_AXIS_UP"],
+	]:
 		_axes.append(_make_axis(spec[0]))
-		_labels.append(_make_label(spec[1], spec[0]))
+		_labels.append(_make_label(tr(spec[1]), spec[0]))
 	visible = false
 
 
@@ -102,7 +108,7 @@ func apply(origin: Vector3, frame: Quaternion, mirror: bool) -> void:
 	var forward := -basis.z
 	# robot lateral = lateral_sign * operator X, with lateral_sign = -1 when
 	# mirrored. mirror=true (the shipped config) is the "same side" convention:
-	# move the hand right and the arm goes right, so the 右 arrow is +X. With
+	# move the hand right and the arm goes right, so the RIGHT arrow is +X. With
 	# mirror=false the arm goes the other way and the arrow must flip.
 	var lateral := basis.x if mirror else -basis.x
 	var up := basis.y
