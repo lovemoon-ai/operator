@@ -70,6 +70,9 @@ class VROperator(Teleoperator):
     config_class = VROperatorConfig
     name = "vr_operator"
 
+    # How often the best-effort workspace-edge notice may be logged.
+    _EDGE_NOTE_PERIOD_S = 1.0
+
     def __init__(self, config: VROperatorConfig):
         # The connection-state attribute must exist before anything that can
         # raise: the base class `__del__` reads `self.is_connected`, which would
@@ -96,6 +99,8 @@ class VROperator(Teleoperator):
         self._last_state_sent = 0.0
         # Last Error message sent, so a sustained fault is reported once.
         self._last_error: str | None = None
+        # Time-based rate limit for the best-effort "workspace edge" notice.
+        self._last_edge_note = 0.0
 
         # Phase-1 latency instrumentation (pure logging; no control effect).
         self._metrics = LatencyMetrics()
@@ -407,15 +412,43 @@ class VROperator(Teleoperator):
 
         self._last_ik_iters = iters
         self._last_ik_error = error
-        if error > self.config.ik_position_tolerance:
+
+        # Genuinely unreachable: hold. This is the only case that freezes.
+        if error > self.config.ik_reject_tolerance:
+            self._metrics.record_ik_reject()
             self._fail(
-                f"IK did not converge after {self.config.ik_max_iterations} iterations: "
-                f"{error * 1000:.1f}mm from the requested target (tolerance "
-                f"{self.config.ik_position_tolerance * 1000:.1f}mm); target likely out of reach"
+                f"IK target unreachable: {error * 1000:.0f}mm from the requested target "
+                f"(reject bound {self.config.ik_reject_tolerance * 1000:.0f}mm); holding. "
+                f"Move your hand back toward the arm's workspace."
             )
             return None
 
+        # Workspace edge: track the CLOSEST reachable pose rather than freezing.
+        # A binary reject here used to stall the arm completely over a residual a
+        # few tenths of a millimetre past tolerance.
+        if error > self.config.ik_position_tolerance:
+            self._metrics.record_ik_degraded()
+            self._note_workspace_edge(error)
+
         return [float(v) for v in solution[: len(ARM_JOINT_NAMES)]]
+
+    def _note_workspace_edge(self, error: float) -> None:
+        """Rate-limited notice that we are tracking best-effort at the edge.
+
+        Time-limited, NOT edge-triggered on the message like `_fail`: the text
+        embeds a residual that changes every frame, so message-equality dedup
+        never fires and it floods the link (~2000 frames in one session).
+        """
+        now = time.monotonic()
+        if now - self._last_edge_note < self._EDGE_NOTE_PERIOD_S:
+            return
+        self._last_edge_note = now
+        logger.info(
+            "IK at workspace edge: tracking closest reachable pose, %.0fmm from target "
+            "(clean tolerance %.0fmm)",
+            error * 1000,
+            self.config.ik_position_tolerance * 1000,
+        )
 
     def _fail(self, msg: str) -> None:
         """Log and surface a plugin-side failure to the adapter.

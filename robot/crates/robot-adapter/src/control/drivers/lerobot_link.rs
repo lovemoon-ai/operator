@@ -353,6 +353,22 @@ impl LerobotLinkDriver {
             return Ok(());
         }
 
+        // Self-heal the stop latch. `emergency_stop()` latches `stopped=true`,
+        // and it is reached by the bridge's liveness watchdog (headset quiet for
+        // command_timeout_ms) as well as by real safety rejections. Nothing on
+        // the normal command path used to clear it, so a single 300ms wifi/
+        // hand-tracking hiccup left the plugin holding FOREVER -- the arm went
+        // dead until the operator happened to press reset (B) or restarted.
+        // Reaching here means a fresh, safety-validated target is being written,
+        // i.e. the operator is actively driving again, so the stop is stale.
+        if self.control_tx.borrow().stopped {
+            self.set_control(|c| {
+                c.stopped = false;
+                c.enabled = true;
+            })?;
+            tracing::info!("LeRobot link: command flow resumed; clearing stop latch");
+        }
+
         // Merge onto the pending (possibly already-consumed) setpoint.
         let msg = {
             let prev = self.target_tx.borrow();
