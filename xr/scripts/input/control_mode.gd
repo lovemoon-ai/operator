@@ -9,9 +9,16 @@ var _mappings: Array = []
 var _dead_zones: Dictionary = {}  # axis_name -> dead_zone
 var _button_targets: Dictionary = {}  # button_name -> button definition
 var _toggle_states: Dictionary = {}  # button_name -> bool (for toggle buttons)
-var _enable_hold_until_msec: Dictionary = {}
+var _enable_latched: Dictionary = {}  # enable target -> bool (hysteresis state)
 
-const ENABLE_RELEASE_GRACE_MSEC := 100
+# Deadman hysteresis. A single 0.5 threshold chatters when the grip value sits
+# near it, which is why this used to hold `enable=true` for 100ms after release.
+# That grace made RELEASE LAG BY 100ms -- and during those 100ms the client keeps
+# streaming the operator's still-moving hand pose, so the arm visibly kept going
+# after they let go. Two thresholds give the same chatter immunity with ZERO
+# release delay: engage above PRESS, drop below RELEASE, hold state in between.
+const ENABLE_PRESS_THRESHOLD := 0.6
+const ENABLE_RELEASE_THRESHOLD := 0.4
 
 
 func configure(descriptor: Dictionary) -> void:
@@ -46,12 +53,16 @@ func collect_command(tracking: TrackingProvider) -> Dictionary:
 			continue
 
 		if _is_enable_target(target):
-			var enable_pressed := _source_value_to_button(value, scale, invert, offset)
-			var now_msec := Time.get_ticks_msec()
-			if enable_pressed:
-				_enable_hold_until_msec[target] = now_msec + ENABLE_RELEASE_GRACE_MSEC
-			else:
-				enable_pressed = now_msec <= int(_enable_hold_until_msec.get(target, 0))
+			# Hysteresis, not a release grace: crossing PRESS engages, crossing
+			# RELEASE disengages immediately, in between holds. Release therefore
+			# reaches the robot on the very next send (~14ms) instead of 100ms late.
+			var enable_scalar := _source_value_to_scalar(value, scale, invert, offset)
+			var enable_pressed := bool(_enable_latched.get(target, false))
+			if enable_scalar >= ENABLE_PRESS_THRESHOLD:
+				enable_pressed = true
+			elif enable_scalar < ENABLE_RELEASE_THRESHOLD:
+				enable_pressed = false
+			_enable_latched[target] = enable_pressed
 			cmd["buttons"][target] = bool(cmd["buttons"].get(target, false)) or enable_pressed
 			continue
 
@@ -97,6 +108,26 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"right_hand_joints": return tracking.get_hand_joints(1)
 		"left_hand_joints": return tracking.get_hand_joints(0)
 	return null
+
+
+## Scaled numeric form of a VR source, so a caller can apply its own thresholds
+## (the deadman needs two, for hysteresis). Mirrors `_source_value_to_button`'s
+## scale/invert/offset handling exactly; that function is this plus `>= 0.5`.
+func _source_value_to_scalar(value: Variant, scale: float, invert: bool, offset: float) -> float:
+	if typeof(value) == TYPE_BOOL:
+		return 1.0 if bool(value) else 0.0
+	if typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
+		var numeric_value := float(value)
+		if invert:
+			numeric_value = -numeric_value
+		return numeric_value * scale + offset
+	if value is Vector2:
+		var vector_value: Vector2 = value
+		var vector_magnitude := vector_value.length()
+		if invert:
+			vector_magnitude = -vector_magnitude
+		return vector_magnitude * scale + offset
+	return 0.0
 
 
 func _source_value_to_button(value: Variant, scale: float, invert: bool, offset: float) -> bool:
