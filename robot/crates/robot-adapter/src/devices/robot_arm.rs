@@ -58,6 +58,9 @@ pub struct RobotArmDevice {
     gripper_default: Option<f64>,
     last_gripper: Option<f64>,
     last_reset_button: bool,
+    /// Last deadman state pushed to the driver, so the edge is published once
+    /// rather than on every command frame.
+    last_operator_driving: bool,
     /// Maximum time a single driver write is allowed to block.
     driver_write_timeout: std::time::Duration,
     /// Counter of frames that exceeded `driver_write_timeout`.
@@ -106,11 +109,25 @@ impl RobotArmDevice {
             gripper_default,
             last_gripper: None,
             last_reset_button: false,
+            last_operator_driving: false,
             driver_write_timeout: std::time::Duration::from_millis(
                 arm_config.driver_write_timeout_ms,
             ),
             driver_write_timeout_count: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Push a deadman edge to the driver. Best-effort and edge-triggered: this
+    /// sits on the per-command path, and failing to announce "not driving" must
+    /// never abort the command itself.
+    async fn publish_operator_driving(&mut self, driving: bool) {
+        if self.last_operator_driving == driving {
+            return;
+        }
+        self.last_operator_driving = driving;
+        if let Err(e) = self.driver.lock().await.set_operator_driving(driving).await {
+            tracing::warn!("RobotArmDevice: could not report operator_driving={driving}: {e}");
+        }
     }
 
     /// The built-in 6-DOF SO-101 arm descriptor: one robot `gripper` axis
@@ -481,17 +498,26 @@ impl Device for RobotArmDevice {
                     return Ok(());
                 };
 
-                let target = {
+                // Resolve while holding the mapper lock, then DROP it before the
+                // deadman edge is published: publishing takes `&mut self`.
+                let mapped = {
                     let mut mapper = self.mapper.lock().await;
-                    match self.teleop.map_end_effector_command(
+                    self.teleop.map_end_effector_command(
                         cmd,
                         &mut mapper,
                         &current_end_effector_pose,
-                    ) {
-                        TeleopEndEffectorResult::Active(target) => target,
-                        TeleopEndEffectorResult::Disabled => return Ok(()),
-                        TeleopEndEffectorResult::WaitingForPose => return Ok(()),
+                    )
+                };
+                let target = match mapped {
+                    TeleopEndEffectorResult::Active(target) => {
+                        self.publish_operator_driving(true).await;
+                        target
                     }
+                    TeleopEndEffectorResult::Disabled => {
+                        self.publish_operator_driving(false).await;
+                        return Ok(());
+                    }
+                    TeleopEndEffectorResult::WaitingForPose => return Ok(()),
                 };
 
                 let gripper_cmd = self.prepare_gripper_command(gripper);
@@ -527,16 +553,23 @@ impl Device for RobotArmDevice {
             }
 
             let current_joint_target = self.last_angles.lock().await.clone();
-            let joints = {
+            // Same as the end-effector path: drop the mapper guard before the
+            // deadman edge, which needs `&mut self`.
+            let mapped = {
                 let mut mapper = self.mapper.lock().await;
-                match self
-                    .teleop
+                self.teleop
                     .map_command(cmd, &mut mapper, &current_joint_target)
-                {
-                    TeleopPoseResult::Active(joints) => joints,
-                    TeleopPoseResult::Disabled => return Ok(()),
-                    TeleopPoseResult::WaitingForPose => return Ok(()),
+            };
+            let joints = match mapped {
+                TeleopPoseResult::Active(joints) => {
+                    self.publish_operator_driving(true).await;
+                    joints
                 }
+                TeleopPoseResult::Disabled => {
+                    self.publish_operator_driving(false).await;
+                    return Ok(());
+                }
+                TeleopPoseResult::WaitingForPose => return Ok(()),
             };
 
             let safety_result = self.safety.lock().await.validate(&joints);
