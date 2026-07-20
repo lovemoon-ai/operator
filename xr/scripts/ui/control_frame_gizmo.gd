@@ -27,17 +27,33 @@ var _axes: Array[MeshInstance3D] = []
 var _labels: Array[Label3D] = []
 
 
+## Label keys in axis order (forward, lateral, up). Kept as a constant so
+## `_refresh_labels` can re-translate in place on a locale change.
+const LABEL_KEYS := ["UI_TELEOP_AXIS_FORWARD", "UI_TELEOP_AXIS_RIGHT", "UI_TELEOP_AXIS_UP"]
+const LABEL_COLORS := [COLOR_FORWARD, COLOR_LATERAL, COLOR_UP]
+
+
 func _ready() -> void:
 	# Labels go through tr() like the rest of the UI (see scripts/i18n/localization.gd);
 	# the gizmo is operator-facing text, not a debug readout.
-	for spec in [
-		[COLOR_FORWARD, "UI_TELEOP_AXIS_FORWARD"],
-		[COLOR_LATERAL, "UI_TELEOP_AXIS_RIGHT"],
-		[COLOR_UP, "UI_TELEOP_AXIS_UP"],
-	]:
-		_axes.append(_make_axis(spec[0]))
-		_labels.append(_make_label(tr(spec[1]), spec[0]))
+	for i in range(LABEL_KEYS.size()):
+		_axes.append(_make_axis(LABEL_COLORS[i]))
+		_labels.append(_make_label(tr(LABEL_KEYS[i]), LABEL_COLORS[i]))
 	visible = false
+
+
+func _notification(what: int) -> void:
+	# Godot re-emits this when the locale changes at runtime. Without it the
+	# labels keep whatever tr() returned at construction -- including the raw
+	# UI_TELEOP_AXIS_* keys if the scene was built before translations were
+	# registered.
+	if what == NOTIFICATION_TRANSLATION_CHANGED:
+		_refresh_labels()
+
+
+func _refresh_labels() -> void:
+	for i in range(_labels.size()):
+		_labels[i].text = tr(LABEL_KEYS[i])
 
 
 func _make_axis(color: Color) -> MeshInstance3D:

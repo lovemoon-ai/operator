@@ -41,6 +41,17 @@ func get_driving_hand() -> int:
 	return _driving_hand
 
 
+## Whether the deadman is currently engaged, using the SAME hysteresis state the
+## command stream reports. Callers (e.g. the gizmo's visibility test) must not
+## re-threshold the raw grip themselves: a second copy of the thresholds silently
+## desyncs from the real enable the moment either is tuned.
+func is_deadman_engaged() -> bool:
+	for target in _enable_latched:
+		if bool(_enable_latched[target]):
+			return true
+	return false
+
+
 # Per-frame cache of get_controller_input(hand). Resolving the driving hand
 # needs both hands' grips, and the mapping loop then re-reads the driving hand's
 # inputs, so without this a single command rebuilt the same input Dictionaries

@@ -37,6 +37,54 @@ Rust implementation:
 The v2 session starts with Hello and device descriptor negotiation. Old peers
 can still fall back to the legacy path through `Session`.
 
+### Input sources are hand-agnostic
+
+`input_mapping` sources use the `active_*` family rather than naming a hand:
+
+```text
+active_controller_pose  active_grip  active_trigger
+active_joystick_x  active_joystick_y  active_joystick_click  active_button_b
+```
+
+`active_*` resolves client-side (`xr/scripts/input/control_mode.gd`) to the
+DRIVING hand: the last controller to squeeze its grip, latched until that grip
+releases, defaulting to whichever controller is active (preferring right) before
+the first squeeze. One controller drives one arm, so a single-arm rig works with
+either controller. Explicit `left_*` / `right_*` sources still exist for
+mappings that must name a side.
+
+`nudge_x` / `nudge_y` (axes) and `nudge_vertical` (button) are the thumbstick
+fine-adjust: the adapter integrates them into a persistent robot-frame
+end-effector offset at 30 mm/s, horizontal by default and vertical while the
+stick click is held. They apply whether or not the deadman is held. This is a
+Cartesian offset, so it is only honoured in `pose_mapping.mode: ik`.
+
+### Telemetry values
+
+Beyond `joint_angles` / `num_joints` / `connected`, the arm publishes the data
+the headset needs to draw its control-frame overlay:
+
+| key | type | meaning |
+| --- | --- | --- |
+| `operator_frame` | array[4] | Captured yaw-only control frame (xyzw). **Absent while the deadman is released** — that absence is the client's cue to hide the gizmo. |
+| `pose_scale` | float | Hand-delta scale factor. |
+| `pose_mirror` | bool | Lateral convention; `true` means hand-right → arm-right. |
+| `nudge_offset` | array[3] | Current stick fine-adjust offset, metres, robot frame. |
+
+The client renders the overlay from these rather than re-deriving the retarget
+rule, so a change to `scale`/`mirror` in robot-side config cannot leave the
+overlay silently lying about which way the arm will move.
+
+### Adapter → plugin control state
+
+`AdapterToLerobot::Control` carries two gates with strictly separate owners
+(they previously contended over one field and cancelled each other out):
+
+- `stopped` — e-stop latch. Set by `emergency_stop`/watchdog, cleared when fresh
+  targets resume or on reset. Checked first, so it overrides everything.
+- `enabled` — "the operator intends motion", i.e. deadman held **or** stick
+  nudging. Owned solely by `ArmDriver::set_motion_allowed`.
+
 ## Discovery
 
 Default port: `63900`.

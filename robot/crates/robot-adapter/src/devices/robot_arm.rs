@@ -62,9 +62,11 @@ pub struct RobotArmDevice {
     gripper_default: Option<f64>,
     last_gripper: Option<f64>,
     last_reset_button: bool,
-    /// Last deadman state pushed to the driver, so the edge is published once
-    /// rather than on every command frame.
+    /// Last motion-intent state pushed to the driver, so the edge is published
+    /// once rather than on every command frame.
     last_operator_driving: bool,
+    /// One-shot latch for the "nudge does nothing in joint mode" warning.
+    warned_joint_mode_nudge: bool,
     /// Maximum time a single driver write is allowed to block.
     driver_write_timeout: std::time::Duration,
     /// Counter of frames that exceeded `driver_write_timeout`.
@@ -114,6 +116,7 @@ impl RobotArmDevice {
             last_gripper: None,
             last_reset_button: false,
             last_operator_driving: false,
+            warned_joint_mode_nudge: false,
             driver_write_timeout: std::time::Duration::from_millis(
                 arm_config.driver_write_timeout_ms,
             ),
@@ -121,16 +124,21 @@ impl RobotArmDevice {
         })
     }
 
-    /// Push a deadman edge to the driver. Best-effort and edge-triggered: this
-    /// sits on the per-command path, and failing to announce "not driving" must
+    /// Push a motion-intent edge to the driver. Best-effort and edge-triggered:
+    /// this sits on the per-command path, and failing to announce intent must
     /// never abort the command itself.
-    async fn publish_operator_driving(&mut self, driving: bool) {
-        if self.last_operator_driving == driving {
+    ///
+    /// Intent is `deadman held OR stick nudging`. Gating it on the deadman alone
+    /// made released-grip nudging a silent no-op: the driver told the plugin
+    /// `enabled=false`, and the plugin then discarded the nudge target we had
+    /// just gone to the trouble of computing.
+    async fn publish_motion_allowed(&mut self, allowed: bool) {
+        if self.last_operator_driving == allowed {
             return;
         }
-        self.last_operator_driving = driving;
-        if let Err(e) = self.driver.lock().await.set_operator_driving(driving).await {
-            tracing::warn!("RobotArmDevice: could not report operator_driving={driving}: {e}");
+        self.last_operator_driving = allowed;
+        if let Err(e) = self.driver.lock().await.set_motion_allowed(allowed).await {
+            tracing::warn!("RobotArmDevice: could not report motion_allowed={allowed}: {e}");
         }
     }
 
@@ -148,17 +156,40 @@ impl RobotArmDevice {
                 model_url: String::new(),
             },
             control_schema: ControlSchema {
-                axes: vec![AxisDef {
-                    name: "gripper".to_string(),
-                    display: "Gripper".to_string(),
-                    range: (0.0, 1.0),
-                    default: 1.0,
-                    dead_zone: 0.02,
-                }],
+                axes: vec![
+                    AxisDef {
+                        name: "gripper".to_string(),
+                        display: "Gripper".to_string(),
+                        range: (0.0, 1.0),
+                        default: 1.0,
+                        dead_zone: 0.02,
+                    },
+                    AxisDef {
+                        name: NUDGE_X_AXIS.to_string(),
+                        display: "Nudge Lateral".to_string(),
+                        range: (-1.0, 1.0),
+                        default: 0.0,
+                        dead_zone: 0.15,
+                    },
+                    AxisDef {
+                        name: NUDGE_Y_AXIS.to_string(),
+                        display: "Nudge Forward".to_string(),
+                        range: (-1.0, 1.0),
+                        default: 0.0,
+                        dead_zone: 0.15,
+                    },
+                ],
                 buttons: vec![
                     ButtonDef {
                         name: ENABLE_BUTTON.to_string(),
                         display: "Enable".to_string(),
+                        toggle: false,
+                        group: None,
+                        confirm: false,
+                    },
+                    ButtonDef {
+                        name: NUDGE_VERTICAL_BUTTON.to_string(),
+                        display: "Nudge Vertical Mode".to_string(),
                         toggle: false,
                         group: None,
                         confirm: false,
@@ -188,7 +219,7 @@ impl RobotArmDevice {
             },
             input_mapping: vec![
                 InputMapping {
-                    source: "right_controller_pose".to_string(),
+                    source: "active_controller_pose".to_string(),
                     target: END_EFFECTOR_POSE.to_string(),
                     scale: 1.0,
                     invert: false,
@@ -204,7 +235,7 @@ impl RobotArmDevice {
                     mode: "absolute".to_string(),
                 },
                 InputMapping {
-                    source: "right_trigger".to_string(),
+                    source: "active_trigger".to_string(),
                     target: "gripper".to_string(),
                     scale: 1.0,
                     invert: true,
@@ -212,7 +243,7 @@ impl RobotArmDevice {
                     mode: "absolute".to_string(),
                 },
                 InputMapping {
-                    source: "right_grip".to_string(),
+                    source: "active_grip".to_string(),
                     target: ENABLE_BUTTON.to_string(),
                     scale: 1.0,
                     invert: false,
@@ -220,8 +251,32 @@ impl RobotArmDevice {
                     mode: "momentary".to_string(),
                 },
                 InputMapping {
-                    source: "button_b".to_string(),
+                    source: "active_button_b".to_string(),
                     target: RESET_BUTTON.to_string(),
+                    scale: 1.0,
+                    invert: false,
+                    offset: 0.0,
+                    mode: "momentary".to_string(),
+                },
+                InputMapping {
+                    source: "active_joystick_x".to_string(),
+                    target: NUDGE_X_AXIS.to_string(),
+                    scale: 1.0,
+                    invert: false,
+                    offset: 0.0,
+                    mode: "absolute".to_string(),
+                },
+                InputMapping {
+                    source: "active_joystick_y".to_string(),
+                    target: NUDGE_Y_AXIS.to_string(),
+                    scale: 1.0,
+                    invert: false,
+                    offset: 0.0,
+                    mode: "absolute".to_string(),
+                },
+                InputMapping {
+                    source: "active_joystick_click".to_string(),
+                    target: NUDGE_VERTICAL_BUTTON.to_string(),
                     scale: 1.0,
                     invert: false,
                     offset: 0.0,
@@ -256,6 +311,45 @@ impl RobotArmDevice {
                         warn_below: None,
                         value_type: Some("bool".to_string()),
                         length: None,
+                    },
+                    // Control-frame overlay data; must stay in step with what
+                    // `telemetry()` inserts or the advertised schema understates
+                    // the payload.
+                    TelemetryValueDef {
+                        name: "operator_frame".to_string(),
+                        display: "Operator Alignment Frame".to_string(),
+                        unit: String::new(),
+                        range: None,
+                        warn_below: None,
+                        value_type: Some("array".to_string()),
+                        length: Some(4),
+                    },
+                    TelemetryValueDef {
+                        name: "pose_scale".to_string(),
+                        display: "Pose Scale".to_string(),
+                        unit: String::new(),
+                        range: None,
+                        warn_below: None,
+                        value_type: Some("float".to_string()),
+                        length: None,
+                    },
+                    TelemetryValueDef {
+                        name: "pose_mirror".to_string(),
+                        display: "Lateral Mirrored".to_string(),
+                        unit: String::new(),
+                        range: None,
+                        warn_below: None,
+                        value_type: Some("bool".to_string()),
+                        length: None,
+                    },
+                    TelemetryValueDef {
+                        name: "nudge_offset".to_string(),
+                        display: "Stick Fine-Adjust Offset".to_string(),
+                        unit: "m".to_string(),
+                        range: None,
+                        warn_below: None,
+                        value_type: Some("array".to_string()),
+                        length: Some(3),
                     },
                 ],
             },
@@ -502,53 +596,59 @@ impl Device for RobotArmDevice {
                     return Ok(());
                 };
 
-                // Integrate the thumbstick fine-adjust BEFORE the enable gate:
-                // by product decision the stick trims the pose whether or not
-                // the deadman is held, so it must not sit behind the `Disabled`
-                // early return. When enabled the offset is folded into the
-                // target by the mapper; when released it moves the last target.
-                let nudge_delta = {
+                // One mapper guard for the whole resolve. The stick is integrated
+                // BEFORE the enable gate -- by product decision it trims the pose
+                // whether or not the deadman is held, so it must not sit behind
+                // the `Disabled` early return. When enabled the offset is folded
+                // into the target by the mapper; when released it moves the last
+                // target directly. The guard is dropped before publishing the
+                // intent edge, which needs `&mut self`.
+                let (nudge_delta, resolved) = {
                     let mut mapper = self.mapper.lock().await;
-                    mapper.integrate_nudge(
+                    let nudge_delta = mapper.integrate_nudge(
                         cmd.axes.get(NUDGE_X_AXIS).copied().unwrap_or(0.0) as f64,
                         cmd.axes.get(NUDGE_Y_AXIS).copied().unwrap_or(0.0) as f64,
                         cmd.buttons
                             .get(NUDGE_VERTICAL_BUTTON)
                             .copied()
                             .unwrap_or(false),
-                    )
-                };
-
-                // Resolve while holding the mapper lock, then DROP it before the
-                // deadman edge is published: publishing takes `&mut self`.
-                let mapped = {
-                    let mut mapper = self.mapper.lock().await;
-                    self.teleop.map_end_effector_command(
+                    );
+                    let mapped = self.teleop.map_end_effector_command(
                         cmd,
                         &mut mapper,
                         &current_end_effector_pose,
-                    )
-                };
-                let target = match mapped {
-                    TeleopEndEffectorResult::Active(target) => {
-                        self.publish_operator_driving(true).await;
-                        target
-                    }
-                    TeleopEndEffectorResult::Disabled => {
-                        self.publish_operator_driving(false).await;
-                        // Hand contributes nothing, but the stick may still be
-                        // trimming. Only emit a frame when it actually moved.
-                        if nudge_delta == [0.0; 3] {
-                            return Ok(());
+                    );
+                    let resolved = match mapped {
+                        TeleopEndEffectorResult::Active(target) => Some(target),
+                        TeleopEndEffectorResult::Disabled => {
+                            // Hand contributes nothing, but the stick may still
+                            // be trimming: move the last target by that delta.
+                            if nudge_delta == [0.0; 3] {
+                                None
+                            } else {
+                                mapper.nudge_last_target(nudge_delta)
+                            }
                         }
-                        let mut mapper = self.mapper.lock().await;
-                        match mapper.nudge_last_target(nudge_delta) {
-                            Some(target) => target,
-                            None => return Ok(()),
-                        }
-                    }
-                    TeleopEndEffectorResult::WaitingForPose => return Ok(()),
+                        TeleopEndEffectorResult::WaitingForPose => None,
+                    };
+                    (nudge_delta, resolved)
                 };
+
+                // Motion intent = deadman held OR the stick is nudging. The
+                // plugin refuses to act on targets when this is false, so it
+                // must cover the nudge-only case or released-grip nudging is
+                // published and then silently discarded.
+                let nudging = nudge_delta != [0.0; 3];
+                let Some(target) = resolved else {
+                    // Nothing to command this frame. Still drop intent when the
+                    // operator is neither driving nor nudging, so the plugin
+                    // freezes instead of coasting toward a stale target.
+                    if !nudging {
+                        self.publish_motion_allowed(false).await;
+                    }
+                    return Ok(());
+                };
+                self.publish_motion_allowed(true).await;
 
                 let gripper_cmd = self.prepare_gripper_command(gripper);
                 if let Some(value) = gripper_cmd {
@@ -590,13 +690,27 @@ impl Device for RobotArmDevice {
                 self.teleop
                     .map_command(cmd, &mut mapper, &current_joint_target)
             };
+            // The stick nudge is a CARTESIAN end-effector offset and has no
+            // meaning in joint space without IK, so it is not applied here. Warn
+            // once rather than leaving an advertised control silently inert.
+            if !self.warned_joint_mode_nudge
+                && (cmd.axes.get(NUDGE_X_AXIS).is_some_and(|v| *v != 0.0)
+                    || cmd.axes.get(NUDGE_Y_AXIS).is_some_and(|v| *v != 0.0))
+            {
+                self.warned_joint_mode_nudge = true;
+                tracing::warn!(
+                    "RobotArmDevice: thumbstick nudge ignored in joint-space mapping mode \
+                     (it is a Cartesian end-effector offset); use pose_mapping.mode=ik to enable it"
+                );
+            }
+
             let joints = match mapped {
                 TeleopPoseResult::Active(joints) => {
-                    self.publish_operator_driving(true).await;
+                    self.publish_motion_allowed(true).await;
                     joints
                 }
                 TeleopPoseResult::Disabled => {
-                    self.publish_operator_driving(false).await;
+                    self.publish_motion_allowed(false).await;
                     return Ok(());
                 }
                 TeleopPoseResult::WaitingForPose => return Ok(()),
@@ -749,30 +863,47 @@ mod tests {
         assert_eq!(d.control_schema.poses[0].frame, "right_hand");
         assert_eq!(d.control_schema.poses[1].name, "operator_frame");
         assert_eq!(d.control_schema.poses[1].frame, "head");
-        assert_eq!(d.control_schema.axes.len(), 1);
+        assert_eq!(d.control_schema.axes.len(), 3);
         assert_eq!(d.control_schema.axes[0].name, "gripper");
         assert_eq!(d.control_schema.axes[0].range, (0.0, 1.0));
         assert_eq!(d.control_schema.axes[0].default, 1.0);
-        assert_eq!(d.control_schema.buttons.len(), 2);
+        assert_eq!(d.control_schema.axes[1].name, NUDGE_X_AXIS);
+        assert_eq!(d.control_schema.axes[2].name, NUDGE_Y_AXIS);
+        assert_eq!(d.control_schema.buttons.len(), 3);
         assert_eq!(d.control_schema.buttons[0].name, "enable");
-        assert_eq!(d.control_schema.buttons[1].name, "reset");
+        assert_eq!(d.control_schema.buttons[1].name, NUDGE_VERTICAL_BUTTON);
+        assert_eq!(d.control_schema.buttons[2].name, "reset");
+        // Sources are hand-agnostic: `active_*` resolves client-side to whichever
+        // controller is driving, so a rig with only the LEFT controller works.
         assert!(d
             .input_mapping
             .iter()
-            .any(|m| m.source == "right_grip" && m.target == "enable"));
+            .any(|m| m.source == "active_grip" && m.target == "enable"));
         assert!(d
             .input_mapping
             .iter()
-            .any(|m| m.source == "button_b" && m.target == RESET_BUTTON));
+            .any(|m| m.source == "active_button_b" && m.target == RESET_BUTTON));
         assert!(d
             .input_mapping
             .iter()
             .any(|m| m.source == "head_pose" && m.target == "operator_frame"));
+        assert!(d
+            .input_mapping
+            .iter()
+            .any(|m| m.source == "active_joystick_x" && m.target == NUDGE_X_AXIS));
+        assert!(d
+            .input_mapping
+            .iter()
+            .any(|m| m.source == "active_joystick_click" && m.target == NUDGE_VERTICAL_BUTTON));
+        assert!(
+            !d.input_mapping.iter().any(|m| m.source.starts_with("right_")),
+            "built-in descriptor must not hardcode the right hand"
+        );
         let trigger = d
             .input_mapping
             .iter()
-            .find(|m| m.source == "right_trigger" && m.target == "gripper")
-            .expect("right trigger gripper mapping");
+            .find(|m| m.source == "active_trigger" && m.target == "gripper")
+            .expect("active trigger gripper mapping");
         assert!(trigger.invert);
         assert_eq!(trigger.offset, 1.0);
         // Telemetry advertises joint_angles (array), num_joints, connected.

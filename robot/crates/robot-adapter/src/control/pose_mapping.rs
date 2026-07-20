@@ -18,6 +18,8 @@ const DEFAULT_NUDGE_RATE_M_S: f64 = 0.030;
 const DEFAULT_NUDGE_LIMIT_M: f64 = 0.15;
 /// Largest integration step, so a stalled command stream cannot jump the offset.
 const MAX_NUDGE_DT_S: f64 = 0.1;
+/// Minimum gap between nudge-saturation warnings.
+const NUDGE_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Maps controller pose data to joint angles or end-effector pose targets.
 pub struct PoseMapper {
@@ -58,6 +60,8 @@ pub struct PoseMapper {
     /// Runaway guard: total offset since the last baseline, per axis.
     nudge_limit_m: f64,
     last_nudge_at: Option<std::time::Instant>,
+    /// Rate limit for the saturation warning.
+    last_nudge_warn_at: Option<std::time::Instant>,
     /// Last end-effector target produced, so a nudge with the deadman released
     /// has something to move relative to.
     last_target_ee: Option<Pose6D>,
@@ -92,6 +96,7 @@ impl PoseMapper {
             nudge_rate_m_s: DEFAULT_NUDGE_RATE_M_S,
             nudge_limit_m: DEFAULT_NUDGE_LIMIT_M,
             last_nudge_at: None,
+            last_nudge_warn_at: None,
             last_target_ee: None,
         }
     }
@@ -161,11 +166,28 @@ impl PoseMapper {
         };
 
         let mut applied = [0.0; 3];
+        let mut saturated = false;
         for i in 0..3 {
             let before = self.nudge_offset[i];
             let after = (before + requested[i]).clamp(-self.nudge_limit_m, self.nudge_limit_m);
             self.nudge_offset[i] = after;
             applied[i] = after - before;
+            // Requested motion that the clamp swallowed entirely.
+            if requested[i] != 0.0 && applied[i] == 0.0 {
+                saturated = true;
+            }
+        }
+        // Otherwise the stick just stops working with no explanation: the offset
+        // only resets when a new baseline is captured (a grip squeeze), so with
+        // the deadman released an operator can sit at the cap indefinitely.
+        if saturated && self.last_nudge_warn_at.is_none_or(|t| now.duration_since(t) > NUDGE_WARN_EVERY)
+        {
+            self.last_nudge_warn_at = Some(now);
+            tracing::warn!(
+                "Nudge offset saturated at the +/-{:.2}m guard; squeeze the deadman to recapture \
+                 a baseline (which clears the offset) before trimming further",
+                self.nudge_limit_m
+            );
         }
         applied
     }
