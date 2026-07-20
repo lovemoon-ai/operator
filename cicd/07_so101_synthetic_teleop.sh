@@ -54,7 +54,15 @@ SO101_URDF="${SO101_URDF:-}"
 ENDPOINT="${ENDPOINT:-uds:/tmp/lerobot-vr.sock}"
 ROBOT_ID="${ROBOT_ID:-so101_follower}"
 CONFIG="${CONFIG:-configs/so101_real.yaml}"
-MAX_RELATIVE_TARGET="${MAX_RELATIVE_TARGET:-5}"
+# Default 5 (unset => 5). This is the MEASURED-space safety floor: lerobot's
+# send_action clamps each goal to +/-N of a fresh Present_Position read, so the
+# arm cannot step far from where it ACTUALLY is -- the plugin's JointRateLimiter
+# works in command space and cannot do this (it never reads the encoders). The
+# read is ~1.3ms and the loop is fps/sleep-bound, so keeping it is effectively
+# free. Setting MAX_RELATIVE_TARGET= (empty) omits it: EXPERIMENT ONLY -- it
+# drops the measured-space guard, so a startup where the arm is not near home can
+# slam. (`-` not `:-` so an explicit empty value is honored.)
+MAX_RELATIVE_TARGET="${MAX_RELATIVE_TARGET-5}"
 FPS="${FPS:-30}"
 PYTHON="${PYTHON:-python3}"
 
@@ -222,8 +230,15 @@ SERVICE_PID=$!
 for _ in $(seq 1 50); do grep -q "LeRobot link: listening" "$SERVICE_LOG" && break; sleep 0.2; done
 grep -q "LeRobot link: listening" "$SERVICE_LOG" || fail "robot-service never bound; see $SERVICE_LOG"
 
-log "starting lerobot-teleoperate (arm will slew to home)"
+mrt_flag=""
+if [ -n "$MAX_RELATIVE_TARGET" ]; then
+  mrt_flag="--robot.max_relative_target=$MAX_RELATIVE_TARGET"
+  log "starting lerobot-teleoperate (arm will slew to home; max_relative_target=$MAX_RELATIVE_TARGET)"
+else
+  log "starting lerobot-teleoperate (arm will slew to home; max_relative_target OMITTED — plugin JointRateLimiter bounds slew, no Present read)"
+fi
 set -m
+# shellcheck disable=SC2086  # mrt_flag is intentionally word-split (empty => omitted)
 lerobot-teleoperate \
   --teleop.type=vr_operator \
   --teleop.endpoint="$ENDPOINT" \
@@ -231,7 +246,7 @@ lerobot-teleoperate \
   --robot.type=so101_follower \
   --robot.id="$ROBOT_ID" \
   --robot.port="$SO101_PORT" \
-  --robot.max_relative_target="$MAX_RELATIVE_TARGET" \
+  $mrt_flag \
   --fps="$FPS" >"$TELEOP_LOG" 2>&1 &
 TELEOP_PID=$!
 set +m

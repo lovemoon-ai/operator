@@ -219,6 +219,18 @@ impl Decoder for LinkCodec {
 // Shared state
 // ---------------------------------------------------------------------------
 
+/// Control state pushed to the plugin.
+///
+/// The two gates have STRICTLY separate owners; they used to contend over
+/// `enabled` and silently cancel each other out:
+///
+/// * `stopped` -- the e-stop latch. Owned by `emergency_stop` / the watchdog and
+///   cleared by `publish` (fresh targets = the fault is stale) or a reset. The
+///   plugin checks it FIRST, so it overrides everything.
+/// * `enabled` -- "the operator intends motion". Owned solely by
+///   `set_motion_allowed`, driven by the deadman OR an active thumbstick nudge.
+///   Nothing else may write it: when `emergency_stop` also cleared it and
+///   `publish` re-set it, a released-deadman nudge became nondeterministic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct ControlState {
     enabled: bool,
@@ -353,6 +365,23 @@ impl LerobotLinkDriver {
             return Ok(());
         }
 
+        // Self-heal the stop latch. `emergency_stop()` latches `stopped=true`,
+        // and it is reached by the bridge's liveness watchdog (headset quiet for
+        // command_timeout_ms) as well as by real safety rejections. Nothing on
+        // the normal command path used to clear it, so a single 300ms wifi/
+        // hand-tracking hiccup left the plugin holding FOREVER -- the arm went
+        // dead until the operator happened to press reset (B) or restarted.
+        // Reaching here means a fresh, safety-validated target is being written,
+        // i.e. the operator is actively driving again, so the stop is stale.
+        if self.control_tx.borrow().stopped {
+            // Clear ONLY the e-stop latch. `enabled` belongs to
+            // `set_motion_allowed`; forcing it true here used to override a
+            // deliberate deadman-release and made released-grip nudging work
+            // only when the link happened to be stopped.
+            self.set_control(|c| c.stopped = false)?;
+            tracing::info!("LeRobot link: command flow resumed; clearing stop latch");
+        }
+
         // Merge onto the pending (possibly already-consumed) setpoint.
         let msg = {
             let prev = self.target_tx.borrow();
@@ -470,11 +499,31 @@ impl ArmDriver for LerobotLinkDriver {
     }
 
     async fn emergency_stop(&mut self) -> Result<()> {
-        self.set_control(|c| {
-            c.stopped = true;
-            c.enabled = false;
-        })?;
+        // Only the stop latch: the plugin checks `stopped` before `enabled`, so
+        // this already blocks all motion without stomping on motion intent.
+        self.set_control(|c| c.stopped = true)?;
         tracing::warn!("LeRobot link: emergency stop requested");
+        Ok(())
+    }
+
+    /// Forward MOTION INTENT to the plugin as `Control.enabled`.
+    ///
+    /// Intent is `deadman held OR stick nudging`, not the deadman alone: the
+    /// plugin refuses to act on targets while this is false, so gating it purely
+    /// on the deadman made released-grip nudging a no-op.
+    ///
+    /// Without the edge at all, the plugin only learns the operator let go when
+    /// the last target ages past `command_timeout_ms` (500ms), and until then it
+    /// keeps re-solving that stale target while its rate limiter slews toward it
+    /// — the arm carries on moving for up to half a second after release.
+    async fn set_motion_allowed(&mut self, driving: bool) -> Result<()> {
+        // Edge-only: this is called per command frame, and a watch send per
+        // frame would wake the serve task ~90x/s for no reason.
+        if self.control_tx.borrow().enabled == driving {
+            return Ok(());
+        }
+        self.set_control(|c| c.enabled = driving)?;
+        tracing::debug!("LeRobot link: motion allowed = {driving}");
         Ok(())
     }
 
@@ -515,11 +564,13 @@ impl ArmDriver for LerobotLinkDriver {
         }
 
         self.take_plugin_error()?;
+        // Link is live but the operator has not asked for motion yet; `enabled`
+        // is raised by the first deadman squeeze or stick nudge.
         self.set_control(|c| {
-            c.enabled = true;
+            c.enabled = false;
             c.stopped = false;
         })?;
-        tracing::info!("LeRobot link: enabled");
+        tracing::info!("LeRobot link: ready (awaiting operator motion intent)");
         Ok(())
     }
 }

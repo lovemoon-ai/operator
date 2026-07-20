@@ -11,6 +11,16 @@ use crate::config::PoseMappingConfig;
 use crate::control::JointAngles;
 use teleop_protocol::Pose6D;
 
+/// Thumbstick fine-adjust speed at full deflection (metres/second).
+const DEFAULT_NUDGE_RATE_M_S: f64 = 0.030;
+/// Per-axis cap on the accumulated nudge since the last baseline. A stuck stick
+/// therefore drifts a bounded distance instead of walking the arm away.
+const DEFAULT_NUDGE_LIMIT_M: f64 = 0.15;
+/// Largest integration step, so a stalled command stream cannot jump the offset.
+const MAX_NUDGE_DT_S: f64 = 0.1;
+/// Minimum gap between nudge-saturation warnings.
+const NUDGE_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Maps controller pose data to joint angles or end-effector pose targets.
 pub struct PoseMapper {
     /// Mapping mode.
@@ -33,6 +43,28 @@ pub struct PoseMapper {
     /// deltas are first interpreted in this local frame, then mapped to the
     /// robot base frame so the operator's forward direction becomes robot +X.
     reference_frame_rotation: Option<UnitQuaternion<f64>>,
+
+    // --- Thumbstick fine-adjust ("nudge") ---------------------------------
+    //
+    // A persistent end-effector offset in the ROBOT base frame, integrated from
+    // the stick at `nudge_rate_m_s`. It is deliberately additive to the hand
+    // mapping so the operator can trim a pose without moving their arm.
+    //
+    // It is zeroed whenever a new baseline is captured (see
+    // `set_base_end_effector_pose`): the baseline is taken at the arm's CURRENT
+    // pose, which already embodies every earlier nudge, so carrying the offset
+    // across a re-squeeze would apply it twice. The nudge still "persists" in
+    // the only sense that matters -- the arm stays where it was trimmed to.
+    nudge_offset: [f64; 3],
+    nudge_rate_m_s: f64,
+    /// Runaway guard: total offset since the last baseline, per axis.
+    nudge_limit_m: f64,
+    last_nudge_at: Option<std::time::Instant>,
+    /// Rate limit for the saturation warning.
+    last_nudge_warn_at: Option<std::time::Instant>,
+    /// Last end-effector target produced, so a nudge with the deadman released
+    /// has something to move relative to.
+    last_target_ee: Option<Pose6D>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +92,12 @@ impl PoseMapper {
             base_angles: vec![0.0; num_joints],
             base_end_effector_pose: None,
             reference_frame_rotation: None,
+            nudge_offset: [0.0; 3],
+            nudge_rate_m_s: DEFAULT_NUDGE_RATE_M_S,
+            nudge_limit_m: DEFAULT_NUDGE_LIMIT_M,
+            last_nudge_at: None,
+            last_nudge_warn_at: None,
+            last_target_ee: None,
         }
     }
 
@@ -89,6 +127,113 @@ impl PoseMapper {
     /// Set the end-effector pose baseline for driver-side IK.
     pub fn set_base_end_effector_pose(&mut self, pose: &Pose6D) {
         self.base_end_effector_pose = Some(pose.clone());
+        // The new baseline already includes every nudge applied so far; keeping
+        // the offset would double-count it on the next target.
+        self.nudge_offset = [0.0; 3];
+    }
+
+    /// Integrate one tick of thumbstick fine-adjust into the persistent offset.
+    ///
+    /// `stick_x` is lateral and `stick_y` is forward/back, both -1..1 and
+    /// already dead-zoned by the client. With `vertical` held, `stick_y` drives
+    /// HEIGHT instead of forward/back (and lateral is ignored), which is the
+    /// documented click-to-change-axis behaviour.
+    ///
+    /// Returns the delta actually applied this tick, so a caller can move the
+    /// last target directly when the deadman is released and there is no
+    /// baseline to rebuild from.
+    pub fn integrate_nudge(&mut self, stick_x: f64, stick_y: f64, vertical: bool) -> [f64; 3] {
+        let now = std::time::Instant::now();
+        let dt = match self.last_nudge_at {
+            // Clamp so a stalled/resumed command stream cannot integrate one
+            // giant step, same reasoning as the plugin's rate limiter.
+            Some(prev) => now.duration_since(prev).as_secs_f64().min(MAX_NUDGE_DT_S),
+            None => 0.0,
+        };
+        self.last_nudge_at = Some(now);
+        if dt <= 0.0 {
+            return [0.0; 3];
+        }
+
+        let step = self.nudge_rate_m_s * dt;
+        // Robot base frame: +X forward, +Y left, +Z up. Lateral uses the same
+        // sign convention as the hand mapping so the stick and the hand agree.
+        let lateral_sign = if self.mirror { -1.0 } else { 1.0 };
+        let requested = if vertical {
+            [0.0, 0.0, stick_y * step]
+        } else {
+            [stick_y * step, lateral_sign * stick_x * step, 0.0]
+        };
+
+        let mut applied = [0.0; 3];
+        let mut saturated = false;
+        for i in 0..3 {
+            let before = self.nudge_offset[i];
+            let after = (before + requested[i]).clamp(-self.nudge_limit_m, self.nudge_limit_m);
+            self.nudge_offset[i] = after;
+            applied[i] = after - before;
+            // Requested motion that the clamp swallowed entirely.
+            if requested[i] != 0.0 && applied[i] == 0.0 {
+                saturated = true;
+            }
+        }
+        // Otherwise the stick just stops working with no explanation: the offset
+        // only resets when a new baseline is captured (a grip squeeze), so with
+        // the deadman released an operator can sit at the cap indefinitely.
+        if saturated && self.last_nudge_warn_at.is_none_or(|t| now.duration_since(t) > NUDGE_WARN_EVERY)
+        {
+            self.last_nudge_warn_at = Some(now);
+            tracing::warn!(
+                "Nudge offset saturated at the +/-{:.2}m guard; squeeze the deadman to recapture \
+                 a baseline (which clears the offset) before trimming further",
+                self.nudge_limit_m
+            );
+        }
+        applied
+    }
+
+    /// Current persistent nudge offset (robot base frame, metres).
+    pub fn nudge_offset(&self) -> [f64; 3] {
+        self.nudge_offset
+    }
+
+    /// The captured yaw-only operator frame as an xyzw quaternion, if teleop is
+    /// engaged. Published as telemetry so the headset can draw an axis gizmo
+    /// showing the TRUE control directions instead of re-deriving the rule
+    /// client-side (where a config change to `mirror`/`scale` would silently
+    /// make the overlay lie).
+    pub fn reference_frame_quat_xyzw(&self) -> Option<[f64; 4]> {
+        self.reference_frame_rotation.as_ref().map(|f| {
+            let q = f.quaternion();
+            [q.i, q.j, q.k, q.w]
+        })
+    }
+
+    /// Position scale applied to hand deltas.
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// Whether the lateral axis is mirrored.
+    pub fn mirror(&self) -> bool {
+        self.mirror
+    }
+
+    /// Last end-effector target produced by the mapper, if any.
+    pub fn last_target_ee(&self) -> Option<&Pose6D> {
+        self.last_target_ee.as_ref()
+    }
+
+    /// Move the last target by `delta` (robot frame). Used when the deadman is
+    /// released: there is no baseline or hand delta, but the stick may still be
+    /// trimming the pose.
+    pub fn nudge_last_target(&mut self, delta: [f64; 3]) -> Option<Pose6D> {
+        let mut target = self.last_target_ee.clone()?;
+        target.position[0] += delta[0];
+        target.position[1] += delta[1];
+        target.position[2] += delta[2];
+        self.last_target_ee = Some(target.clone());
+        Some(target)
     }
 
     /// Capture the operator-local reference frame for relative teleop.
@@ -126,17 +271,23 @@ impl PoseMapper {
     ///
     /// Rotation is relative too, but it is interpreted in the same captured
     /// operator frame before being applied in robot base coordinates.
-    pub fn map_end_effector_target(&self, pose: &Pose6D) -> Pose6D {
-        let base = self.base_end_effector_pose.as_ref().unwrap_or(pose);
+    pub fn map_end_effector_target(&mut self, pose: &Pose6D) -> Pose6D {
+        let base = self
+            .base_end_effector_pose
+            .clone()
+            .unwrap_or_else(|| pose.clone());
         let delta = self.controller_delta_robot(pose);
-        Pose6D {
+        let nudge = self.nudge_offset;
+        let target = Pose6D {
             position: [
-                base.position[0] + delta[0],
-                base.position[1] + delta[1],
-                base.position[2] + delta[2],
+                base.position[0] + delta[0] + nudge[0],
+                base.position[1] + delta[1] + nudge[1],
+                base.position[2] + delta[2] + nudge[2],
             ],
-            rotation: self.relative_target_rotation(pose, base),
-        }
+            rotation: self.relative_target_rotation(pose, &base),
+        };
+        self.last_target_ee = Some(target.clone());
+        target
     }
 
     /// Direct mapping: controller position deltas mapped to joint angle deltas.
@@ -312,6 +463,108 @@ mod tests {
 
     fn pose(position: [f64; 3], rotation: [f64; 4]) -> Pose6D {
         Pose6D { position, rotation }
+    }
+
+    /// Drive the nudge integrator for a real elapsed interval. `integrate_nudge`
+    /// derives dt from wall time, and the first call only primes the clock.
+    fn nudge_for(m: &mut PoseMapper, x: f64, y: f64, vertical: bool, ms: u64) -> [f64; 3] {
+        m.integrate_nudge(x, y, vertical);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        m.integrate_nudge(x, y, vertical)
+    }
+
+    #[test]
+    fn nudge_horizontal_maps_stick_to_robot_forward_and_lateral() {
+        let mut m = ik_mapper(true, 0.5);
+        // Stick forward only -> robot +X (forward), no lateral, no height.
+        let d = nudge_for(&mut m, 0.0, 1.0, false, 50);
+        assert!(d[0] > 0.0, "stick forward must move robot +X, got {d:?}");
+        assert_eq!(d[1], 0.0);
+        assert_eq!(d[2], 0.0, "horizontal nudge must never change height");
+    }
+
+    #[test]
+    fn nudge_lateral_follows_the_hand_mirror_convention() {
+        // mirror=true is the shipped config and means "same side": hand/stick
+        // right moves the arm right, i.e. robot -Y.
+        let mut m = ik_mapper(true, 0.5);
+        let d = nudge_for(&mut m, 1.0, 0.0, false, 50);
+        assert!(d[1] < 0.0, "stick right must move robot -Y with mirror, got {d:?}");
+
+        let mut m2 = ik_mapper(false, 0.5);
+        let d2 = nudge_for(&mut m2, 1.0, 0.0, false, 50);
+        assert!(d2[1] > 0.0, "mirror=false flips lateral, got {d2:?}");
+    }
+
+    #[test]
+    fn nudge_click_switches_stick_to_height_only() {
+        let mut m = ik_mapper(true, 0.5);
+        let d = nudge_for(&mut m, 1.0, 1.0, true, 50);
+        assert_eq!(d[0], 0.0, "vertical mode must not move forward");
+        assert_eq!(d[1], 0.0, "vertical mode must not move laterally");
+        assert!(d[2] > 0.0, "vertical mode maps stick Y to height, got {d:?}");
+    }
+
+    #[test]
+    fn nudge_rate_is_about_30mm_per_second() {
+        let mut m = ik_mapper(true, 0.5);
+        let d = nudge_for(&mut m, 0.0, 1.0, false, 100);
+        // 30mm/s for ~0.1s, with generous slack for scheduler jitter.
+        assert!(
+            d[0] > 0.001 && d[0] < 0.006,
+            "expected ~3mm in 100ms at 30mm/s, got {}m",
+            d[0]
+        );
+    }
+
+    #[test]
+    fn new_baseline_zeroes_the_nudge_so_it_is_not_applied_twice() {
+        // The baseline is captured at the arm's CURRENT pose, which already
+        // includes every nudge so far. Carrying the offset across a re-squeeze
+        // would double-count it and make the arm jump on every re-grip.
+        let mut m = ik_mapper(true, 0.5);
+        nudge_for(&mut m, 0.0, 1.0, false, 50);
+        assert!(m.nudge_offset()[0] > 0.0, "precondition: offset accumulated");
+
+        m.set_base_end_effector_pose(&pose([0.25, 0.0, 0.14], [0.0, 0.0, 0.0, 1.0]));
+        assert_eq!(
+            m.nudge_offset(),
+            [0.0; 3],
+            "capturing a baseline must clear the offset it already contains"
+        );
+    }
+
+    #[test]
+    fn nudge_offset_is_clamped_so_a_stuck_stick_cannot_run_away() {
+        let mut m = ik_mapper(true, 0.5);
+        m.integrate_nudge(0.0, 1.0, false);
+        // Far more travel than the limit allows.
+        for _ in 0..400 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            m.integrate_nudge(0.0, 1.0, false);
+        }
+        assert!(
+            m.nudge_offset()[0] <= DEFAULT_NUDGE_LIMIT_M + 1e-9,
+            "offset {} exceeded the {}m guard",
+            m.nudge_offset()[0],
+            DEFAULT_NUDGE_LIMIT_M
+        );
+    }
+
+    #[test]
+    fn nudge_last_target_moves_the_pose_when_the_deadman_is_released() {
+        let mut m = ik_mapper(true, 0.5);
+        // No baseline/hand input: seed a target the way a prior enabled frame would.
+        m.set_base_end_effector_pose(&pose([0.25, 0.0, 0.14], [0.0, 0.0, 0.0, 1.0]));
+        let seeded = m.map_end_effector_target(&pose([0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]));
+
+        let moved = m
+            .nudge_last_target([0.01, 0.0, 0.0])
+            .expect("a target exists to nudge");
+        assert!((moved.position[0] - (seeded.position[0] + 0.01)).abs() < 1e-9);
+        // And it is now the tracked target, so successive nudges accumulate.
+        let moved2 = m.nudge_last_target([0.01, 0.0, 0.0]).unwrap();
+        assert!((moved2.position[0] - (seeded.position[0] + 0.02)).abs() < 1e-9);
     }
 
     fn quat_xyzw(q: UnitQuaternion<f64>) -> [f64; 4] {

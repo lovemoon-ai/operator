@@ -11,6 +11,20 @@ control_schema:
       range: [0.0, 1.0]
       default: 1.0
       dead_zone: 0.02
+    # Thumbstick fine-adjust. These are RATES (-1..1 of nudge_rate_m_s), not
+    # positions: the adapter integrates them into a persistent end-effector
+    # offset, so the stick nudges the arm and it stays where you left it.
+    # Horizontal by default; holding the stick click switches to vertical.
+    - name: "nudge_x"
+      display: "Nudge Lateral"
+      range: [-1.0, 1.0]
+      default: 0.0
+      dead_zone: 0.15
+    - name: "nudge_y"
+      display: "Nudge Forward"
+      range: [-1.0, 1.0]
+      default: 0.0
+      dead_zone: 0.15
   buttons:
     - name: "enable"
       display: "Enable"
@@ -20,6 +34,11 @@ control_schema:
       display: "Reset"
       toggle: false
       confirm: true
+    # Held: nudge_y drives HEIGHT instead of forward/back.
+    - name: "nudge_vertical"
+      display: "Nudge Vertical Mode"
+      toggle: false
+      confirm: false
   poses:
     - name: "end_effector"
       display: "End Effector Target"
@@ -31,7 +50,7 @@ control_schema:
       frame: "head"
 
 input_mapping:
-  - source: "right_controller_pose"
+  - source: "active_controller_pose"
     target: "end_effector"
     scale: 1.0
     invert: false
@@ -43,20 +62,41 @@ input_mapping:
     invert: false
     offset: 0.0
     mode: "absolute"
-  - source: "right_trigger"
+  - source: "active_trigger"
     target: "gripper"
     scale: 1.0
     invert: true
     offset: 1.0
     mode: "absolute"
-  - source: "right_grip"
+  - source: "active_grip"
     target: "enable"
     scale: 1.0
     invert: false
     offset: 0.0
     mode: "momentary"
-  - source: "button_b"
+  - source: "active_button_b"
     target: "reset"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "momentary"
+  # Thumbstick fine-adjust, on the same controller that carries the pose. All
+  # `active_*` sources resolve to the DRIVING hand (last one to squeeze grip,
+  # latched while held), so a single-arm rig works with either controller.
+  - source: "active_joystick_x"
+    target: "nudge_x"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "absolute"
+  - source: "active_joystick_y"
+    target: "nudge_y"
+    scale: 1.0
+    invert: false
+    offset: 0.0
+    mode: "absolute"
+  - source: "active_joystick_click"
+    target: "nudge_vertical"
     scale: 1.0
     invert: false
     offset: 0.0
@@ -75,6 +115,26 @@ telemetry_schema:
     - name: "connected"
       display: "Connected"
       type: "bool"
+    # Control-frame overlay: lets the headset draw an axis gizmo at the
+    # controller showing the TRUE directions the arm will move. Published by the
+    # adapter so a change to scale/mirror cannot make the overlay lie.
+    # `operator_frame` is only present while the deadman is held (there is no
+    # captured frame otherwise), which is also the client's cue to hide it.
+    - name: "operator_frame"
+      display: "Operator Alignment Frame"
+      type: "array"
+      length: 4
+    - name: "pose_scale"
+      display: "Pose Scale"
+      type: "float"
+    - name: "pose_mirror"
+      display: "Lateral Mirrored"
+      type: "bool"
+    - name: "nudge_offset"
+      display: "Stick Fine-Adjust Offset"
+      unit: "m"
+      type: "array"
+      length: 3
 
 video_feeds: []
 

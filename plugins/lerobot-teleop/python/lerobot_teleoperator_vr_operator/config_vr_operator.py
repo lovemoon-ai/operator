@@ -83,16 +83,51 @@ class VROperatorConfig(TeleoperatorConfig):
     ik_position_weight: float = 1.0
     ik_orientation_weight: float = 0.01
 
-    # Max acceptable IK position residual, in METERS: if the solved joints put
-    # the end effector further than this from the requested target, the solve is
-    # treated as non-convergent (the arm holds, an `Error` frame is sent).
+    # IK residual (METERS) below which the solve is considered CLEAN. This is no
+    # longer a freeze threshold: exceeding it degrades to best-effort tracking
+    # (see `ik_reject_tolerance`), it does not stop the arm.
     ik_position_tolerance: float = 0.02
+
+    # Hard outer bound (METERS). Residual above this means the target is
+    # genuinely unreachable (operator's hand far outside the workspace) and the
+    # arm HOLDS. Between `ik_position_tolerance` and this, the arm tracks the
+    # closest reachable pose -- graceful degradation at the workspace edge.
+    #
+    # Why this exists: with a binary reject at 20mm the solver would stall at a
+    # ~20.0-20.5mm residual and every single target got rejected by a few tenths
+    # of a millimetre, freezing the arm completely while the operator saw no
+    # reason why. Freezing is the wrong failure mode for teleop; tracking to the
+    # edge is right.
+    ik_reject_tolerance: float = 0.10
 
     # `RobotKinematics.inverse_kinematics` performs ONE differential-IK step per
     # call, so the plugin iterates it until the residual is inside tolerance.
-    # Reachable targets converge in 2-4 steps; the cap bounds the worst case
-    # (an unreachable target) so `get_action()` stays cheap.
-    ik_max_iterations: int = 10
+    # Reachable targets converge in 2-4 steps; the cap bounds the worst case.
+    # Raised from 10 because 10 left the residual sitting right on the old 20mm
+    # reject line for edge-of-workspace targets. IK is ~0.5ms/solve, so the extra
+    # headroom is affordable inside an 11ms (90Hz) loop budget.
+    ik_max_iterations: int = 20
+
+    # --- Command-space joint rate limiting (Phase-2) --------------------------
+    #
+    # COMPLEMENTS (does NOT replace) LeRobot's `--robot.max_relative_target`.
+    # This limiter shapes the *commanded* trajectory -- velocity, acceleration,
+    # and overshoot-free deceleration -- against our own last command. It needs
+    # no serial read, but for exactly that reason it cannot bound motion relative
+    # to the arm's *actual* position (the teleoperator never reads the encoders):
+    # at startup, if the arm is not at the assumed home, the limiter's internal
+    # state disagrees with reality and provides no measured-space guarantee.
+    # Keep `--robot.max_relative_target` ON as the measured-space safety floor
+    # (its Present_Position read is ~1.3ms and the loop is fps/sleep-bound, so it
+    # is effectively free); this limiter adds smoothness and an fps-independent
+    # velocity/accel cap on top. Set `limit_enabled=False` to A/B the raw IK
+    # output.
+    limit_enabled: bool = True
+    max_velocity_deg_s: float = 180.0
+    max_acceleration_deg_s2: float = 1200.0
+    # Gripper is RANGE_0_100, not degrees; limit its slew separately. 400/s =
+    # full open->close in 0.25s.
+    gripper_max_rate_per_s: float = 400.0
 
     def __post_init__(self) -> None:
         # draccus cannot decode `Literal`, and validating here keeps bad CLI
@@ -116,3 +151,15 @@ class VROperatorConfig(TeleoperatorConfig):
             raise ValueError(f"ik_position_tolerance must be > 0 (meters), got {self.ik_position_tolerance}")
         if self.ik_max_iterations < 1:
             raise ValueError(f"ik_max_iterations must be >= 1, got {self.ik_max_iterations}")
+        if self.ik_reject_tolerance < self.ik_position_tolerance:
+            raise ValueError(
+                f"ik_reject_tolerance ({self.ik_reject_tolerance}) must be >= "
+                f"ik_position_tolerance ({self.ik_position_tolerance}); the reject bound is the "
+                f"outer limit past which the arm holds, the position tolerance is the clean-solve bar"
+            )
+        if self.max_velocity_deg_s <= 0.0:
+            raise ValueError(f"max_velocity_deg_s must be > 0, got {self.max_velocity_deg_s}")
+        if self.max_acceleration_deg_s2 <= 0.0:
+            raise ValueError(f"max_acceleration_deg_s2 must be > 0, got {self.max_acceleration_deg_s2}")
+        if self.gripper_max_rate_per_s <= 0.0:
+            raise ValueError(f"gripper_max_rate_per_s must be > 0, got {self.gripper_max_rate_per_s}")
