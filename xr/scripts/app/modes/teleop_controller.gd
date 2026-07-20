@@ -833,32 +833,31 @@ func _update_control_frame_gizmo() -> void:
 	)
 
 
-## The controller currently commanding the arm, per ControlMode's driving-hand
-## latch, so the gizmo is always attached to the hand actually in control.
+## ControlMode owns both the driving-hand latch and the deadman hysteresis, so
+## the gizmo asks it rather than re-deriving either. Re-thresholding the raw grip
+## here duplicated the constants AND cost an extra controller-input read every
+## rendered frame -- the same per-frame cost that had to be stripped out of this
+## file after it measurably cut the delivered command rate.
+func _active_control_mode():
+	if _command_sender == null:
+		return null
+	return _command_sender.control_mode
+
+
+## The controller currently commanding the arm.
 func _driving_controller() -> XRController3D:
+	var mode = _active_control_mode()
 	var hand := 1
-	if _command_sender and _command_sender.control_mode \
-			and _command_sender.control_mode.has_method("get_driving_hand"):
-		hand = int(_command_sender.control_mode.get_driving_hand())
+	if mode and mode.has_method("get_driving_hand"):
+		hand = int(mode.get_driving_hand())
 	return _right_controller if hand == 1 else _left_controller
 
 
 func _is_deadman_held() -> bool:
-	if _tracking_provider == null or not _tracking_provider.has_method("get_controller_input"):
+	var mode = _active_control_mode()
+	if mode == null or not mode.has_method("is_deadman_engaged"):
 		return false
-	var hand := 1
-	if _command_sender and _command_sender.control_mode \
-			and _command_sender.control_mode.has_method("get_driving_hand"):
-		hand = int(_command_sender.control_mode.get_driving_hand())
-	var input_any: Variant = _tracking_provider.call("get_controller_input", hand)
-	if not (input_any is Dictionary):
-		return false
-	var input: Dictionary = input_any
-	var grip := maxf(
-		float(input.get("grip", 0.0)),
-		maxf(float(input.get("grip_click", 0.0)), float(input.get("grip_force", 0.0)))
-	)
-	return grip >= 0.4  # ControlMode.ENABLE_RELEASE_THRESHOLD
+	return bool(mode.is_deadman_engaged())
 
 
 func _configure_robot_video_stream(descriptor: Dictionary) -> void:
