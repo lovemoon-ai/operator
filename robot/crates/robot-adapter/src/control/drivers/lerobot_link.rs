@@ -494,6 +494,24 @@ impl ArmDriver for LerobotLinkDriver {
         Ok(())
     }
 
+    /// Forward the deadman state to the plugin as `Control.enabled`.
+    ///
+    /// Without this the plugin only learns the operator let go when the last
+    /// target ages past `command_timeout_ms` (500ms), and until then it keeps
+    /// re-solving that stale target while its rate limiter slews toward it — the
+    /// arm carries on moving for up to half a second after release. Pushing the
+    /// edge makes release land in one Control frame.
+    async fn set_operator_driving(&mut self, driving: bool) -> Result<()> {
+        // Edge-only: this is called per command frame, and a watch send per
+        // frame would wake the serve task ~90x/s for no reason.
+        if self.control_tx.borrow().enabled == driving {
+            return Ok(());
+        }
+        self.set_control(|c| c.enabled = driving)?;
+        tracing::debug!("LeRobot link: operator driving = {driving}");
+        Ok(())
+    }
+
     async fn enable_torque(&mut self) -> Result<()> {
         // Surface a bind failure exactly once, at connect time.
         if let Some(bind_rx) = self.bind_rx.take() {
