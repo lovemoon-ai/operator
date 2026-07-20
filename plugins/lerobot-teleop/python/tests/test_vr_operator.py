@@ -372,9 +372,37 @@ def test_unreachable_ee_pose_holds_and_reports_an_error(tmp_path):
     operator._last_q = [11.0, 22.0, 33.0, 44.0, 55.0]
 
     # Hold, not `{}`: an out-of-reach hand must leave the arm parked where it
-    # is, and `{}` would crash the loop rather than stop it.
+    # is, and `{}` would crash the loop rather than stop it. 1m residual is far
+    # past ik_reject_tolerance, so this is the genuine-unreachable path.
     assert operator.get_action()["shoulder_pan.pos"] == 11.0
-    assert "IK did not converge" in link.errors()[0]["msg"]
+    assert "unreachable" in link.errors()[0]["msg"]
+
+
+def test_marginal_ik_miss_tracks_best_effort_instead_of_freezing(tmp_path):
+    """A residual just past the clean tolerance must NOT freeze the arm.
+
+    Regression test for the field failure where the solver settled at a
+    ~20.0-20.5mm residual against a 20mm binary reject, so every single target
+    was rejected by a fraction of a millimetre and the arm never moved at all
+    (~2100 rejects in one session) while the operator saw no reason why.
+    """
+    # FK reports the origin, so a 0.05m target leaves a 50mm residual: past the
+    # 20mm clean tolerance but well inside the 100mm reject bound.
+    link = FakeLink(
+        control=ControlState(enabled=True),
+        target=fresh_target(ee_position=[0.05, 0.0, 0.0], ee_rotation=[0.0, 0.0, 0.0, 1.0]),
+    )
+    operator = make_operator(
+        tmp_path, link, ik_position_tolerance=0.02, ik_reject_tolerance=0.10
+    )
+    operator._last_q = [11.0, 22.0, 33.0, 44.0, 55.0]
+
+    action = operator.get_action()
+    # Tracks the closest reachable solution ([1,2,3,4,5] from FakeKinematics),
+    # NOT the held _last_q (11.0).
+    assert action["shoulder_pan.pos"] == 1.0, "marginal IK miss must track, not hold"
+    # And it must not spam the link with Error frames for a normal edge case.
+    assert link.errors() == []
 
 
 def test_a_sustained_ik_failure_reports_one_error_not_one_per_tick(tmp_path):

@@ -69,6 +69,8 @@ class LatencyMetrics:
     _calls: int = 0
     _fresh: int = 0
     _holds: int = 0
+    _ik_degraded: int = 0
+    _ik_reject: int = 0
 
     def record_call(self, get_action_ms: float) -> None:
         """One `get_action()` returned, whatever path it took."""
@@ -78,6 +80,20 @@ class LatencyMetrics:
     def record_hold(self) -> None:
         """This call held the last setpoint (disabled/stale/e-stop/no target)."""
         self._holds += 1
+
+    def record_ik_degraded(self) -> None:
+        """IK missed the clean tolerance; tracking the closest reachable pose."""
+        self._ik_degraded += 1
+
+    def record_ik_reject(self) -> None:
+        """IK target past the reject bound; the arm held.
+
+        Counted explicitly because a rejected solve returns before `record_solve`,
+        so without this the 1Hz line reads `fresh/s=0` and looks identical to
+        "no targets arriving" -- which is exactly what masked a session where
+        every target was arriving and being rejected by a fraction of a mm.
+        """
+        self._ik_reject += 1
 
     def record_solve(
         self,
@@ -120,13 +136,15 @@ class LatencyMetrics:
         iters_max = max(self._ik_iters) if self._ik_iters else 0
 
         logger.info(
-            "teleop-latency: calls/s=%.1f fresh/s=%.1f holds=%d "
+            "teleop-latency: calls/s=%.1f fresh/s=%.1f holds=%d ik_edge=%d ik_reject=%d "
             "age_uds(p50/p95/p99/max)=%.1f/%.1f/%.1f/%.1f ms "
             "ik(p50/p95/max)=%.2f/%.2f/%.2f ms ik_iters_max=%d "
             "get_action(p50/p95/max)=%.2f/%.2f/%.2f ms",
             call_hz,
             fresh_hz,
             self._holds,
+            self._ik_degraded,
+            self._ik_reject,
             a50,
             a95,
             a99,
@@ -150,3 +168,5 @@ class LatencyMetrics:
         self._calls = 0
         self._fresh = 0
         self._holds = 0
+        self._ik_degraded = 0
+        self._ik_reject = 0
