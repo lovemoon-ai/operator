@@ -32,6 +32,10 @@ use crate::control::teleop::{
 use crate::device::Device;
 
 const GRIPPER_AXIS: &str = "gripper";
+/// Thumbstick fine-adjust axes/button (see so101_real_descriptor.yaml).
+const NUDGE_X_AXIS: &str = "nudge_x";
+const NUDGE_Y_AXIS: &str = "nudge_y";
+const NUDGE_VERTICAL_BUTTON: &str = "nudge_vertical";
 const GRIPPER_COMMAND_EPSILON: f64 = 0.01;
 
 /// A robotic arm device backed by an [`ArmDriver`] (SO-101 sim or hardware).
@@ -498,6 +502,23 @@ impl Device for RobotArmDevice {
                     return Ok(());
                 };
 
+                // Integrate the thumbstick fine-adjust BEFORE the enable gate:
+                // by product decision the stick trims the pose whether or not
+                // the deadman is held, so it must not sit behind the `Disabled`
+                // early return. When enabled the offset is folded into the
+                // target by the mapper; when released it moves the last target.
+                let nudge_delta = {
+                    let mut mapper = self.mapper.lock().await;
+                    mapper.integrate_nudge(
+                        cmd.axes.get(NUDGE_X_AXIS).copied().unwrap_or(0.0) as f64,
+                        cmd.axes.get(NUDGE_Y_AXIS).copied().unwrap_or(0.0) as f64,
+                        cmd.buttons
+                            .get(NUDGE_VERTICAL_BUTTON)
+                            .copied()
+                            .unwrap_or(false),
+                    )
+                };
+
                 // Resolve while holding the mapper lock, then DROP it before the
                 // deadman edge is published: publishing takes `&mut self`.
                 let mapped = {
@@ -515,7 +536,16 @@ impl Device for RobotArmDevice {
                     }
                     TeleopEndEffectorResult::Disabled => {
                         self.publish_operator_driving(false).await;
-                        return Ok(());
+                        // Hand contributes nothing, but the stick may still be
+                        // trimming. Only emit a frame when it actually moved.
+                        if nudge_delta == [0.0; 3] {
+                            return Ok(());
+                        }
+                        let mut mapper = self.mapper.lock().await;
+                        match mapper.nudge_last_target(nudge_delta) {
+                            Some(target) => target,
+                            None => return Ok(()),
+                        }
                     }
                     TeleopEndEffectorResult::WaitingForPose => return Ok(()),
                 };
@@ -648,6 +678,28 @@ impl Device for RobotArmDevice {
         );
         let connected = self.connected.load(std::sync::atomic::Ordering::SeqCst);
         values.insert("connected".into(), TelemetryValue::Bool(connected));
+
+        // Control-frame overlay data. The headset draws an axis gizmo at the
+        // controller showing which way the arm will actually move; publishing
+        // the ADAPTER's live values (rather than re-deriving them client-side)
+        // means a change to scale/mirror can never make the overlay lie.
+        // `operator_frame` is absent while the deadman is released -- there is
+        // no captured frame then, and the client hides the gizmo.
+        {
+            let mapper = self.mapper.lock().await;
+            if let Some(q) = mapper.reference_frame_quat_xyzw() {
+                values.insert(
+                    "operator_frame".into(),
+                    TelemetryValue::Array(q.to_vec()),
+                );
+            }
+            values.insert("pose_scale".into(), TelemetryValue::Float(mapper.scale()));
+            values.insert("pose_mirror".into(), TelemetryValue::Bool(mapper.mirror()));
+            values.insert(
+                "nudge_offset".into(),
+                TelemetryValue::Array(mapper.nudge_offset().to_vec()),
+            );
+        }
 
         Ok(DeviceTelemetry {
             values,
