@@ -74,6 +74,22 @@ pub trait ArmDriver: Send {
 
     /// Enable torque on all servos (recover from e-stop).
     async fn enable_torque(&mut self) -> Result<()>;
+
+    /// Report whether the operator currently intends motion.
+    ///
+    /// This is `deadman held OR thumbstick nudging`, NOT the deadman alone: a
+    /// far-side consumer that refuses to act on targets while this is false
+    /// would otherwise silently drop nudge-only motion.
+    ///
+    /// Default: no-op — in-process drivers already see a disable as "no more
+    /// setpoints". Drivers that forward control to a SEPARATE process must
+    /// override this: otherwise the far side cannot distinguish "operator let
+    /// go" from "link went quiet" and has to infer it from a staleness timeout,
+    /// during which it keeps slewing toward the last target and the arm visibly
+    /// keeps moving after release.
+    async fn set_motion_allowed(&mut self, _allowed: bool) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Create a driver instance based on configuration.

@@ -46,6 +46,17 @@ var _engaged := false
 var _t := 0.0
 var _release_at := INF  # seconds after engage() at which the grip releases
 
+## Thumbstick fine-adjust exercise window, as offsets from RELEASE.
+## The nudge path (stick deflection, and the released-deadman branch) was
+## previously never executed by CI at all -- the stick sat at zero for the whole
+## run -- which is exactly how a bug that made released-grip nudging a silent
+## no-op shipped with a green harness. The sweep below drives the stick while
+## ENGAGED and again after RELEASE so both branches are covered.
+const STICK_ENGAGED_SEC := 1.5
+const STICK_RELEASED_SEC := 1.5
+
+var _stick: Vector2 = Vector2.ZERO
+var _stick_click := false
 var _grip := 0.0
 var _trigger := 0.0
 var _button_b := 0.0
@@ -78,7 +89,11 @@ func elapsed() -> float:
 	return _t if _engaged else 0.0
 
 
-func _physics_process(delta: float) -> void:
+# Advance in _process (render rate) to match CommandSender, which now samples at
+# render rate: this keeps the synthetic pose fresh on every send instead of only
+# every 60Hz physics tick, so the synthetic path exercises the same higher-rate
+# delivery the real controller does.
+func _process(delta: float) -> void:
 	if not _engaged:
 		return
 	_t += delta
@@ -97,6 +112,18 @@ func _recompute(t: float) -> void:
 
 	# Deadman engaged (unless we've entered the release tail).
 	_grip = 0.0 if t >= _release_at else 1.0
+
+	# Stick sweep: a horizontal push just before release, then a vertical push
+	# (click held) after release, so CI exercises the nudge in BOTH the enabled
+	# and released-deadman branches.
+	_stick = Vector2.ZERO
+	_stick_click = false
+	var engaged_from := _release_at - STICK_ENGAGED_SEC
+	if t >= engaged_from and t < _release_at:
+		_stick = Vector2(0.0, 1.0)          # push forward while driving
+	elif t >= _release_at and t < _release_at + STICK_RELEASED_SEC:
+		_stick = Vector2(0.0, 1.0)          # push again with the deadman RELEASED
+		_stick_click = true                 # ...and in vertical (height) mode
 
 	# Sweep phase progress (0 during the squeeze-and-settle ramp).
 	var sweep_t := maxf(0.0, t - (SETTLE_SEC + RAMP_SEC))
@@ -134,11 +161,11 @@ func get_controller_input(hand: int) -> Dictionary:
 		"grip_click": _grip,
 		"grip_force": _grip,
 		"select_button": 0.0,
-		"primary": Vector2.ZERO,
-		"joystick": Vector2.ZERO,
-		"primary_x": 0.0,
-		"primary_y": 0.0,
-		"primary_click": 0.0,
+		"primary": _stick,
+		"joystick": _stick,
+		"primary_x": _stick.x,
+		"primary_y": _stick.y,
+		"primary_click": _stick_click,
 		"ax_button": 0.0,
 		"by_button": _button_b,
 		"menu_button": 0.0,

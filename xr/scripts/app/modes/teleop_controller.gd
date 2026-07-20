@@ -28,6 +28,13 @@ const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 @onready var _camera: XRCamera3D = $XROrigin3D/XRCamera3D
 @onready var _left_controller: XRController3D = $XROrigin3D/LeftController
 @onready var _right_controller: XRController3D = $XROrigin3D/RightController
+
+# Axis overlay showing the arm's true control directions at the driving hand.
+const ControlFrameGizmoScript = preload("res://scripts/ui/control_frame_gizmo.gd")
+var _control_frame_gizmo: Node3D
+var _control_frame: Quaternion = Quaternion.IDENTITY
+var _control_frame_valid := false
+var _control_frame_mirror := true
 @onready var _tracking_provider: Node = $TrackingProvider
 @onready var _tcp_handler: Node = $TcpHandler
 @onready var _discovery: Node = $Discovery
@@ -196,6 +203,9 @@ func _process(_delta: float) -> void:
 			_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
+	# Position refreshes every frame so the gizmo tracks the controller smoothly;
+	# its orientation only changes when telemetry reports a new captured frame.
+	_update_control_frame_gizmo()
 
 
 # Push the detected input source down to the teleop settings panel so the
@@ -301,6 +311,14 @@ func _create_settings_ui_nodes() -> void:
 	# from the right controller so it stays aligned with the physical controller.
 	_origin.add_child(_teleop_controller_panel)
 	_update_teleop_controller_panel_transform()
+
+	# Axis gizmo, in origin space like the panel: its global transform is driven
+	# each frame from the DRIVING controller, so it follows whichever hand has
+	# command rather than being parented to one of them.
+	_control_frame_gizmo = ControlFrameGizmoScript.new()
+	_control_frame_gizmo.name = "ControlFrameGizmo"
+	_origin.add_child(_control_frame_gizmo)
+
 	_bind_operator_interaction()
 
 
@@ -772,8 +790,74 @@ func _on_telemetry_received(_data: Dictionary) -> void:
 	# work: surface telemetry as an optional overlay or a Phase-2 panel
 	# section. For now we just drop the data so the signal stays connected
 	# (Session still parses telemetry frames so consumer can subscribe).
+	_capture_control_frame(_data)
 	if _synthetic:
 		_synth_capture_telemetry(_data)
+
+
+## Latch the robot's control frame for the axis gizmo.
+##
+## `operator_frame` is only present while the deadman is held -- the adapter
+## clears it on release -- so its absence is the authoritative "not driving"
+## signal. Orientation only changes when the operator re-squeezes, so latching it
+## here at telemetry rate (~10Hz) is plenty; the gizmo's POSITION is refreshed
+## every frame in `_update_control_frame_gizmo`.
+func _capture_control_frame(data: Dictionary) -> void:
+	var values: Dictionary = data.get("values", {})
+	var frame_any: Variant = values.get("operator_frame", null)
+	if frame_any is Array and (frame_any as Array).size() == 4:
+		var f: Array = frame_any
+		_control_frame = Quaternion(float(f[0]), float(f[1]), float(f[2]), float(f[3])).normalized()
+		_control_frame_valid = true
+	else:
+		_control_frame_valid = false
+	_control_frame_mirror = bool(values.get("pose_mirror", true))
+
+
+func _update_control_frame_gizmo() -> void:
+	if _control_frame_gizmo == null:
+		return
+	# Hide the moment the operator lets go. We use the LOCAL deadman state rather
+	# than waiting for the next telemetry frame to drop `operator_frame`, so the
+	# gizmo disappears with the release instead of up to a telemetry period later.
+	if not _control_frame_valid or not _is_deadman_held():
+		_control_frame_gizmo.visible = false
+		return
+	var controller := _driving_controller()
+	if controller == null:
+		_control_frame_gizmo.visible = false
+		return
+	_control_frame_gizmo.visible = true
+	_control_frame_gizmo.apply(
+		controller.global_transform.origin, _control_frame, _control_frame_mirror
+	)
+
+
+## ControlMode owns both the driving-hand latch and the deadman hysteresis, so
+## the gizmo asks it rather than re-deriving either. Re-thresholding the raw grip
+## here duplicated the constants AND cost an extra controller-input read every
+## rendered frame -- the same per-frame cost that had to be stripped out of this
+## file after it measurably cut the delivered command rate.
+func _active_control_mode():
+	if _command_sender == null:
+		return null
+	return _command_sender.control_mode
+
+
+## The controller currently commanding the arm.
+func _driving_controller() -> XRController3D:
+	var mode = _active_control_mode()
+	var hand := 1
+	if mode and mode.has_method("get_driving_hand"):
+		hand = int(mode.get_driving_hand())
+	return _right_controller if hand == 1 else _left_controller
+
+
+func _is_deadman_held() -> bool:
+	var mode = _active_control_mode()
+	if mode == null or not mode.has_method("is_deadman_engaged"):
+		return false
+	return bool(mode.is_deadman_engaged())
 
 
 func _configure_robot_video_stream(descriptor: Dictionary) -> void:

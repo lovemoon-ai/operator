@@ -19,6 +19,8 @@ from .config_vr_operator import (
     JOINT_NAMES,
     VROperatorConfig,
 )
+from .latency_metrics import LatencyMetrics
+from .limiter import JointRateLimiter
 from .link import TargetSample, VRLink
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,9 @@ class VROperator(Teleoperator):
     config_class = VROperatorConfig
     name = "vr_operator"
 
+    # How often the best-effort workspace-edge notice may be logged.
+    _EDGE_NOTE_PERIOD_S = 1.0
+
     def __init__(self, config: VROperatorConfig):
         # The connection-state attribute must exist before anything that can
         # raise: the base class `__del__` reads `self.is_connected`, which would
@@ -94,6 +99,29 @@ class VROperator(Teleoperator):
         self._last_state_sent = 0.0
         # Last Error message sent, so a sustained fault is reported once.
         self._last_error: str | None = None
+        # Time-based rate limit for the best-effort "workspace edge" notice.
+        self._last_edge_note = 0.0
+
+        # Phase-1 latency instrumentation (pure logging; no control effect).
+        self._metrics = LatencyMetrics()
+        self._last_ik_iters = 0
+        # seq of the last target we actually consumed, to count fresh vs repeat.
+        self._last_consumed_seq = -1
+
+        # Phase-2 command-space rate limiter (replaces --robot.max_relative_target
+        # so its per-loop Present_Position read can be dropped). Output stage only:
+        # it never feeds back into `_last_q`, so IK keeps warm-starting from the
+        # converged target rather than the lagging command.
+        self._limiter = (
+            JointRateLimiter(
+                n_arm=len(ARM_JOINT_NAMES),
+                max_velocity_deg_s=config.max_velocity_deg_s,
+                max_acceleration_deg_s2=config.max_acceleration_deg_s2,
+                gripper_max_rate_per_s=config.gripper_max_rate_per_s,
+            )
+            if config.limit_enabled
+            else None
+        )
 
     # -- features ----------------------------------------------------------
 
@@ -135,6 +163,10 @@ class VROperator(Teleoperator):
         # arm is at `home_joints`, which is only true if it actually is.
         self._last_q = list(self.config.home_joints)
         self._last_gripper = float(self.config.home_gripper)
+        # Seed the limiter at home (where the bootstrap assumes the arm is), so
+        # the first commands slew gently instead of snapping from a stale state.
+        if self._limiter is not None:
+            self._limiter.reset(self._last_q, self._last_gripper)
 
         link = VRLink(self.config.endpoint, self.config.connect_timeout_ms / 1000.0)
         link.set_hello(self._snapshot_payload("Hello"))
@@ -206,6 +238,20 @@ class VROperator(Teleoperator):
 
     @check_if_not_connected
     def get_action(self) -> RobotAction:
+        """Timing wrapper around `_get_action_impl` (Phase-1 instrumentation).
+
+        Measures whole-call time and flushes the 1Hz latency summary. The
+        `finally` guarantees the sample is recorded on every return path,
+        including the many `_hold()` early-outs, without touching control logic.
+        """
+        t0 = time.perf_counter()
+        try:
+            return self._get_action_impl()
+        finally:
+            self._metrics.record_call((time.perf_counter() - t0) * 1000.0)
+            self._metrics.maybe_flush()
+
+    def _get_action_impl(self) -> RobotAction:
         """Latest joint targets, or the last commanded ones to hold. Never blocks.
 
         Every path returns a full six-key action -- **never** `{}`. An empty
@@ -268,8 +314,10 @@ class VROperator(Teleoperator):
                 # Honoured even while disabled: reset is an explicit operator
                 # action, and the bootstrap (README) depends on being able to
                 # send the arm home *before* the first enable.
+                # freeze=False: a reset MUST keep slewing toward home; freezing
+                # in place is the opposite of what was asked for.
                 self._report_state()
-                return self._hold()
+                return self._hold(freeze=False)
 
         if not control.enabled:  # deadman released
             self._report_state()
@@ -281,9 +329,28 @@ class VROperator(Teleoperator):
             self._report_state()
             return self._hold()
 
+        ik_t0 = time.perf_counter()
         joints = self._solve(target)
+        ik_ms = (time.perf_counter() - ik_t0) * 1000.0
         if joints is None:  # IK non-convergent; _solve() already sent an Error
             return self._hold()
+
+        # Phase-1: record the consume-path segments for this fresh command.
+        # age_uds spans adapter publish -> here (same host wall clock); None if
+        # the adapter did not stamp ts_ns. (Named is_new_seq, not `fresh`, to
+        # avoid colliding with the TTL-freshness check above.)
+        is_new_seq = target.seq != self._last_consumed_seq
+        self._last_consumed_seq = target.seq
+        age_uds_ms = (time.time_ns() - target.ts_ns) / 1e6 if target.ts_ns else None
+        # Only feed IK timing for real EE-pose solves; direct-position and
+        # gripper-only frames run no IK and would bias the ik percentiles to ~0.
+        did_ik = target.positions is None and target.ee_position is not None
+        self._metrics.record_solve(
+            age_uds_ms=age_uds_ms,
+            ik_ms=ik_ms if did_ik else None,
+            ik_iters=self._last_ik_iters if did_ik else None,
+            fresh=is_new_seq,
+        )
 
         # Re-arm the error edge: if this fault recurs later it is news again.
         self._last_error = None
@@ -302,10 +369,12 @@ class VROperator(Teleoperator):
                 self._fail(f"positions must contain {len(ARM_JOINT_NAMES)} floats")
                 return None
             self._last_ik_error = None
+            self._last_ik_iters = 0
             return [float(v) for v in target.positions]
 
         if target.ee_position is None:
             # Gripper-only update: hold the joints we last commanded.
+            self._last_ik_iters = 0
             return list(self._last_q)
 
         assert self._kin is not None
@@ -323,7 +392,9 @@ class VROperator(Teleoperator):
         # Reachable targets settle in 2-4 iterations.
         solution = np.asarray(self._last_q, dtype=float)
         error = float("inf")
+        iters = 0
         for _ in range(self.config.ik_max_iterations):
+            iters += 1
             solution = self._kin.inverse_kinematics(
                 solution,
                 desired,
@@ -341,16 +412,45 @@ class VROperator(Teleoperator):
             if error <= self.config.ik_position_tolerance:
                 break
 
+        self._last_ik_iters = iters
         self._last_ik_error = error
-        if error > self.config.ik_position_tolerance:
+
+        # Genuinely unreachable: hold. This is the only case that freezes.
+        if error > self.config.ik_reject_tolerance:
+            self._metrics.record_ik_reject()
             self._fail(
-                f"IK did not converge after {self.config.ik_max_iterations} iterations: "
-                f"{error * 1000:.1f}mm from the requested target (tolerance "
-                f"{self.config.ik_position_tolerance * 1000:.1f}mm); target likely out of reach"
+                f"IK target unreachable: {error * 1000:.0f}mm from the requested target "
+                f"(reject bound {self.config.ik_reject_tolerance * 1000:.0f}mm); holding. "
+                f"Move your hand back toward the arm's workspace."
             )
             return None
 
+        # Workspace edge: track the CLOSEST reachable pose rather than freezing.
+        # A binary reject here used to stall the arm completely over a residual a
+        # few tenths of a millimetre past tolerance.
+        if error > self.config.ik_position_tolerance:
+            self._metrics.record_ik_degraded()
+            self._note_workspace_edge(error)
+
         return [float(v) for v in solution[: len(ARM_JOINT_NAMES)]]
+
+    def _note_workspace_edge(self, error: float) -> None:
+        """Rate-limited notice that we are tracking best-effort at the edge.
+
+        Time-limited, NOT edge-triggered on the message like `_fail`: the text
+        embeds a residual that changes every frame, so message-equality dedup
+        never fires and it floods the link (~2000 frames in one session).
+        """
+        now = time.monotonic()
+        if now - self._last_edge_note < self._EDGE_NOTE_PERIOD_S:
+            return
+        self._last_edge_note = now
+        logger.info(
+            "IK at workspace edge: tracking closest reachable pose, %.0fmm from target "
+            "(clean tolerance %.0fmm)",
+            error * 1000,
+            self.config.ik_position_tolerance * 1000,
+        )
 
     def _fail(self, msg: str) -> None:
         """Log and surface a plugin-side failure to the adapter.
@@ -365,8 +465,13 @@ class VROperator(Teleoperator):
             self._link.send({"type": "Error", "msg": msg})
         self._last_error = msg
 
-    def _hold(self) -> RobotAction:
+    def _hold(self, freeze: bool = True) -> RobotAction:
         """Re-command the last setpoint, which is how "no change" is expressed.
+
+        `freeze=True` (the default, used for deadman-release / stale / e-stop)
+        stops the commanded pose exactly where it is. `freeze=False` is for the
+        reset-to-home path, which deliberately wants the limiter to keep slewing
+        toward home rather than parking in place.
 
         Used for every idle path: deadman released, e-stop, stale link, no
         target yet, IK non-convergent. See `get_action`'s docstring for why this
@@ -381,10 +486,27 @@ class VROperator(Teleoperator):
         pose available. `--robot.max_relative_target` bounds each step of the
         resulting slew; the README calls this out.
         """
+        self._metrics.record_hold()
+        if freeze and self._limiter is not None:
+            frozen = self._limiter.freeze()
+            if frozen is not None:
+                q, gripper = frozen
+                # Snap the setpoint to what is actually commanded, so the hold
+                # target IS the current pose (no residual to slew) and the next
+                # IK warm-start begins from reality rather than a stale target.
+                self._last_q = list(q)
+                self._last_gripper = gripper
+                return self._action(q, gripper)
         return self._action(self._last_q, self._last_gripper)
 
     def _action(self, joints: list[float], gripper: float) -> RobotAction:
-        """Build the action dict. Arm joints in DEGREES, gripper in RANGE_0_100."""
+        """Build the action dict. Arm joints in DEGREES, gripper in RANGE_0_100.
+
+        Single choke point for every commanded pose (active track, hold, home
+        slew), so the rate limiter here bounds all motion uniformly.
+        """
+        if self._limiter is not None:
+            joints, gripper = self._limiter.step(joints, gripper, time.monotonic())
         action: RobotAction = {
             f"{name}.pos": float(q) for name, q in zip(ARM_JOINT_NAMES, joints, strict=True)
         }
@@ -400,11 +522,17 @@ class VROperator(Teleoperator):
         RANGE_0_100 -- matching what the adapter's own stub plugin reports.
         """
         assert self._kin is not None
-        ee = matrix_to_pose(self._kin.forward_kinematics(np.asarray(self._last_q, dtype=float)))
+        # Report the COMMANDED (rate-limited) joints, not the raw IK target: the
+        # limiter can lag _last_q during a slew, and the adapter seeds its
+        # retarget baseline from this snapshot on (re)connect -- reporting the
+        # target would place the baseline where the arm is not yet.
+        cmd = self._limiter.current() if self._limiter is not None else None
+        q_report, gripper_report = cmd if cmd is not None else (self._last_q, self._last_gripper)
+        ee = matrix_to_pose(self._kin.forward_kinematics(np.asarray(q_report, dtype=float)))
         payload: dict = {
             "type": kind,
             "joint_names": list(JOINT_NAMES),
-            "positions": [*(float(q) for q in self._last_q), float(self._last_gripper)],
+            "positions": [*(float(q) for q in q_report), float(gripper_report)],
             "ee": ee,
         }
         if kind == "State":

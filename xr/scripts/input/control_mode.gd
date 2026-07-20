@@ -9,9 +9,87 @@ var _mappings: Array = []
 var _dead_zones: Dictionary = {}  # axis_name -> dead_zone
 var _button_targets: Dictionary = {}  # button_name -> button definition
 var _toggle_states: Dictionary = {}  # button_name -> bool (for toggle buttons)
-var _enable_hold_until_msec: Dictionary = {}
+var _enable_latched: Dictionary = {}  # enable target -> bool (hysteresis state)
 
-const ENABLE_RELEASE_GRACE_MSEC := 100
+# Deadman hysteresis. A single 0.5 threshold chatters when the grip value sits
+# near it, which is why this used to hold `enable=true` for 100ms after release.
+# That grace made RELEASE LAG BY 100ms -- and during those 100ms the client keeps
+# streaming the operator's still-moving hand pose, so the arm visibly kept going
+# after they let go. Two thresholds give the same chatter immunity with ZERO
+# release delay: engage above PRESS, drop below RELEASE, hold state in between.
+const ENABLE_PRESS_THRESHOLD := 0.6
+const ENABLE_RELEASE_THRESHOLD := 0.4
+
+# --- Driving hand -------------------------------------------------------------
+# One controller drives one arm. Rather than hard-coding "right" (which breaks
+# outright if only the left controller is powered on), the `active_*` sources
+# resolve to whichever hand is DRIVING: the last hand to squeeze its grip, held
+# latched until that grip is released. Before any squeeze it falls back to
+# whichever controller is actually active, preferring right.
+#
+# Switching hands is safe: taking over re-triggers enable, so the robot captures
+# a fresh baseline at the new hand's pose instead of jumping.
+const HAND_LEFT := 0
+const HAND_RIGHT := 1
+var _driving_hand: int = HAND_RIGHT
+var _driving_latched: bool = false
+
+
+## Which hand currently drives the arm. The overlay gizmo follows this so it is
+## always attached to the controller actually in command.
+func get_driving_hand() -> int:
+	return _driving_hand
+
+
+## Whether the deadman is currently engaged, using the SAME hysteresis state the
+## command stream reports. Callers (e.g. the gizmo's visibility test) must not
+## re-threshold the raw grip themselves: a second copy of the thresholds silently
+## desyncs from the real enable the moment either is tuned.
+func is_deadman_engaged() -> bool:
+	for target in _enable_latched:
+		if bool(_enable_latched[target]):
+			return true
+	return false
+
+
+# Per-frame cache of get_controller_input(hand). Resolving the driving hand
+# needs both hands' grips, and the mapping loop then re-reads the driving hand's
+# inputs, so without this a single command rebuilt the same input Dictionaries
+# several times per frame. That cost lands in _process, which is also where
+# commands are sent, so it shows up directly as a lower delivered command rate.
+var _input_cache: Dictionary = {}
+
+
+func _cached_input(tracking: TrackingProvider, hand: int) -> Dictionary:
+	if _input_cache.has(hand):
+		return _input_cache[hand]
+	var input: Dictionary = tracking.get_controller_input(hand)
+	_input_cache[hand] = input
+	return input
+
+
+func _update_driving_hand(tracking: TrackingProvider) -> void:
+	var grip := [_get_grip_value(tracking, HAND_LEFT), _get_grip_value(tracking, HAND_RIGHT)]
+
+	if _driving_latched:
+		# Stay with this hand until its grip is released, so a stray squeeze from
+		# the other hand cannot steal control mid-motion.
+		if grip[_driving_hand] < ENABLE_RELEASE_THRESHOLD:
+			_driving_latched = false
+		return
+
+	# Free: the first hand to cross the press threshold takes command.
+	for hand in [HAND_RIGHT, HAND_LEFT]:
+		if grip[hand] >= ENABLE_PRESS_THRESHOLD and tracking.is_controller_mode_active(hand):
+			_driving_hand = hand
+			_driving_latched = true
+			return
+
+	# Idle: track whichever controller is actually usable, preferring right.
+	if tracking.is_controller_mode_active(HAND_RIGHT):
+		_driving_hand = HAND_RIGHT
+	elif tracking.is_controller_mode_active(HAND_LEFT):
+		_driving_hand = HAND_LEFT
 
 
 func configure(descriptor: Dictionary) -> void:
@@ -28,7 +106,17 @@ func configure(descriptor: Dictionary) -> void:
 
 
 func collect_command(tracking: TrackingProvider) -> Dictionary:
-	var cmd = {"axes": {}, "buttons": {}, "poses": {}, "timestamp_ns": Time.get_ticks_usec() * 1000}
+	# Fresh inputs each command; the cache only dedupes within this one frame.
+	_input_cache.clear()
+	# Resolve the driving hand BEFORE reading any source, so every `active_*`
+	# lookup in this frame refers to the same controller.
+	_update_driving_hand(tracking)
+	# Stamp with the SAME unix-epoch clock RobotClockSync.now_ns() uses for its
+	# ClockPing t_xr_send. The bridge's clock offset is derived from ClockPing, so
+	# the command timestamp must share that clock or the offset cannot cancel and
+	# the xr->rx / e2e latency segments come out as raw clock skew (garbage).
+	# (Was Time.get_ticks_usec()*1000 — a monotonic, boot-relative clock.)
+	var cmd = {"axes": {}, "buttons": {}, "poses": {}, "timestamp_ns": RobotClockSync.now_ns()}
 	for mapping in _mappings:
 		var source: String = mapping["source"]
 		var target: String = mapping["target"]
@@ -41,12 +129,16 @@ func collect_command(tracking: TrackingProvider) -> Dictionary:
 			continue
 
 		if _is_enable_target(target):
-			var enable_pressed := _source_value_to_button(value, scale, invert, offset)
-			var now_msec := Time.get_ticks_msec()
-			if enable_pressed:
-				_enable_hold_until_msec[target] = now_msec + ENABLE_RELEASE_GRACE_MSEC
-			else:
-				enable_pressed = now_msec <= int(_enable_hold_until_msec.get(target, 0))
+			# Hysteresis, not a release grace: crossing PRESS engages, crossing
+			# RELEASE disengages immediately, in between holds. Release therefore
+			# reaches the robot on the very next send (~14ms) instead of 100ms late.
+			var enable_scalar := _source_value_to_scalar(value, scale, invert, offset)
+			var enable_pressed := bool(_enable_latched.get(target, false))
+			if enable_scalar >= ENABLE_PRESS_THRESHOLD:
+				enable_pressed = true
+			elif enable_scalar < ENABLE_RELEASE_THRESHOLD:
+				enable_pressed = false
+			_enable_latched[target] = enable_pressed
 			cmd["buttons"][target] = bool(cmd["buttons"].get(target, false)) or enable_pressed
 			continue
 
@@ -64,6 +156,13 @@ func collect_command(tracking: TrackingProvider) -> Dictionary:
 		elif typeof(value) == TYPE_BOOL:
 			cmd["buttons"][target] = value
 		elif value is Dictionary and value.has("position"):
+			# Never forward a pose from an untracked source. get_controller_pose()
+			# reports is_active=false (and may hand back a cached value) when the
+			# controller is off or lost, and publishing that ships a stale pose to
+			# the robot. This was previously only masked by the deadman reading 0
+			# from the same dead controller -- safety by coincidence, not design.
+			if not bool(value.get("is_active", true)):
+				continue
 			cmd["poses"][target] = {
 				"position": [value["position"].x, value["position"].y, value["position"].z],
 				"rotation": [value["rotation"].x, value["rotation"].y, value["rotation"].z, value["rotation"].w]
@@ -91,7 +190,40 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"head_pose": return tracking.get_head_pose()
 		"right_hand_joints": return tracking.get_hand_joints(1)
 		"left_hand_joints": return tracking.get_hand_joints(0)
+		"left_joystick_click": return _get_input_bool(tracking, 0, "primary_click")
+		"right_joystick_click": return _get_input_bool(tracking, 1, "primary_click")
+		# Hand-agnostic sources: resolve to whichever controller is driving, so a
+		# single-arm setup works with EITHER controller instead of only the right.
+		"active_controller_pose": return tracking.get_controller_pose(_driving_hand)
+		"active_grip": return _get_grip_value(tracking, _driving_hand)
+		"active_trigger": return _get_input_float(tracking, _driving_hand, "trigger")
+		"active_joystick_x": return _get_input(tracking, _driving_hand, "joystick").x
+		"active_joystick_y": return _get_input(tracking, _driving_hand, "joystick").y
+		"active_joystick_click": return _get_input_bool(tracking, _driving_hand, "primary_click")
+		"active_button_a": return _get_input_bool(tracking, _driving_hand, "ax_button")
+		"active_button_b": return _get_input_bool(tracking, _driving_hand, "by_button")
+		"active_hand_joints": return tracking.get_hand_joints(_driving_hand)
 	return null
+
+
+## Scaled numeric form of a VR source, so a caller can apply its own thresholds
+## (the deadman needs two, for hysteresis). Mirrors `_source_value_to_button`'s
+## scale/invert/offset handling exactly; that function is this plus `>= 0.5`.
+func _source_value_to_scalar(value: Variant, scale: float, invert: bool, offset: float) -> float:
+	if typeof(value) == TYPE_BOOL:
+		return 1.0 if bool(value) else 0.0
+	if typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
+		var numeric_value := float(value)
+		if invert:
+			numeric_value = -numeric_value
+		return numeric_value * scale + offset
+	if value is Vector2:
+		var vector_value: Vector2 = value
+		var vector_magnitude := vector_value.length()
+		if invert:
+			vector_magnitude = -vector_magnitude
+		return vector_magnitude * scale + offset
+	return 0.0
 
 
 func _source_value_to_button(value: Variant, scale: float, invert: bool, offset: float) -> bool:
@@ -119,7 +251,7 @@ func _is_enable_target(target: String) -> bool:
 
 # Helper methods to safely extract input values
 func _get_input(tracking: TrackingProvider, hand: int, key: String) -> Vector2:
-	var input = tracking.get_controller_input(hand)
+	var input := _cached_input(tracking, hand)
 	if input.is_empty(): return Vector2.ZERO
 	var val = input.get(key, Vector2.ZERO)
 	if val is Vector2: return val
@@ -127,13 +259,13 @@ func _get_input(tracking: TrackingProvider, hand: int, key: String) -> Vector2:
 
 
 func _get_input_float(tracking: TrackingProvider, hand: int, key: String) -> float:
-	var input = tracking.get_controller_input(hand)
+	var input := _cached_input(tracking, hand)
 	if input.is_empty(): return 0.0
 	return float(input.get(key, 0.0))
 
 
 func _get_grip_value(tracking: TrackingProvider, hand: int) -> float:
-	var input = tracking.get_controller_input(hand)
+	var input := _cached_input(tracking, hand)
 	if input.is_empty(): return 0.0
 	return maxf(
 		float(input.get("grip", 0.0)),
@@ -142,6 +274,6 @@ func _get_grip_value(tracking: TrackingProvider, hand: int) -> float:
 
 
 func _get_input_bool(tracking: TrackingProvider, hand: int, key: String) -> bool:
-	var input = tracking.get_controller_input(hand)
+	var input := _cached_input(tracking, hand)
 	if input.is_empty(): return false
 	return float(input.get(key, 0.0)) > 0.5

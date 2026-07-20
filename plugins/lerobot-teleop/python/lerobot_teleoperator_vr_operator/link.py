@@ -147,6 +147,11 @@ class TargetSample:
     # Local monotonic receipt time. Staleness is judged against this rather than
     # the wire `ts_ns`, which comes from another process's wall clock.
     recv_monotonic: float = field(default_factory=time.monotonic)
+    # Adapter-side wall clock (ns, UNIX epoch) when this Target was published to
+    # the UDS, stamped by `lerobot_link.rs::now_ns`. Same host + same clock base
+    # as `time.time_ns()`, so `time.time_ns() - ts_ns` is the true
+    # publish->consume latency. 0 means the adapter did not stamp it.
+    ts_ns: int = 0
 
 
 class VRLink:
@@ -435,6 +440,7 @@ class VRLink:
                 gripper=float(gripper) if gripper is not None else None,
                 seq=int(msg.get("seq", 0)),
                 recv_monotonic=time.monotonic(),
+                ts_ns=int(msg.get("ts_ns", 0)),
             )
             with self._lock:
                 self._target = sample

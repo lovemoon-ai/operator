@@ -169,6 +169,11 @@ const MESSAGES := {
 		"UI_TELEOP_WAITING": "Waiting for Grip",
 		"UI_TELEOP_MODE": "Teleop",
 		"UI_TELEOP_MODE_SUB": "Pilot your mechanical avatar",
+		# Control-frame gizmo axis labels. Short by design: they are rendered as
+		# 3D labels on the controller overlay and must stay readable at ~3cm.
+		"UI_TELEOP_AXIS_FORWARD": "FWD",
+		"UI_TELEOP_AXIS_RIGHT": "RIGHT",
+		"UI_TELEOP_AXIS_UP": "UP",
 		"UI_TRACKING_FULL": "Full tracking",
 		"UI_TRACKING_LABEL": "Tracking: %s",
 		"UI_TRACKING_LOST": "Tracking lost",
@@ -396,6 +401,9 @@ const MESSAGES := {
 		"UI_TELEOP_WAITING": "等待生效",
 		"UI_TELEOP_MODE": "远程操控",
 		"UI_TELEOP_MODE_SUB": "操控你的机械分身",
+		"UI_TELEOP_AXIS_FORWARD": "前",
+		"UI_TELEOP_AXIS_RIGHT": "右",
+		"UI_TELEOP_AXIS_UP": "上",
 		"UI_TRACKING_FULL": "全追踪",
 		"UI_TRACKING_LABEL": "追踪：%s",
 		"UI_TRACKING_LOST": "追踪丢失",
