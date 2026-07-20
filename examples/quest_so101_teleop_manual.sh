@@ -58,8 +58,16 @@ SO101_URDF="${SO101_URDF:-$HOME/.cache/huggingface/lerobot/robot-urdfs/so101/so1
 ENDPOINT="${ENDPOINT:-uds:/tmp/lerobot-vr.sock}"
 ROBOT_ID="${ROBOT_ID:-so101_follower}"
 CONFIG="${CONFIG:-configs/so101_real.yaml}"
+# Measured-space safety floor: send_action clamps each goal to +/-N of a fresh
+# Present_Position read. Keep it on -- the read is ~1.3ms and the loop is
+# fps/sleep-bound, so it is effectively free, and it is the ONLY thing bounding
+# motion relative to where the arm ACTUALLY is (the plugin never reads encoders).
 MAX_RELATIVE_TARGET="${MAX_RELATIVE_TARGET:-5}"
-FPS="${FPS:-30}"
+# 90Hz: the teleop loop's real work is ~3-4ms, so it holds 90Hz with zero jitter
+# (measured p95=11.11ms). This is the command->motor cadence and it is THE
+# dominant latency knob: 30 -> 90 took it from 35.3ms to 11.1ms. Do not drop this
+# back to 30 for a latency test -- that reverts the main optimization.
+FPS="${FPS:-90}"
 PKG="${PKG:-com.lovemoon.operator}"
 ACT="${ACT:-com.godot.game.GodotApp}"
 ADB="${ADB:-adb}"
@@ -158,7 +166,18 @@ command -v lerobot-teleoperate >/dev/null 2>&1 || fail "lerobot-teleoperate not 
 "$PYTHON" -c "import lerobot_teleoperator_vr_operator" 2>/dev/null \
   || fail "vr_operator plugin not installed: pip install -e plugins/lerobot-teleop/python"
 
-$ADB get-state >/dev/null 2>&1 || fail "no adb device; connect the Quest over USB"
+# adb natively honours ANDROID_SERIAL; QUEST_SERIAL accepted as an alias. Needed
+# whenever more than one device is attached (e.g. a Quest and a phone/Pico).
+if [ -z "${ANDROID_SERIAL:-}" ] && [ -n "${QUEST_SERIAL:-}" ]; then
+  export ANDROID_SERIAL="$QUEST_SERIAL"
+fi
+_ndev="$($ADB devices 2>/dev/null | awk '/\tdevice$/{n++} END{print n+0}')"
+if [ -z "${ANDROID_SERIAL:-}" ] && [ "$_ndev" -gt 1 ]; then
+  printf '[quest-teleop] attached devices:\n' >&2
+  $ADB devices -l 2>/dev/null | sed -n '2,$p' >&2
+  fail "more than one adb device; set ANDROID_SERIAL=<serial> (or QUEST_SERIAL=<serial>) to pick the headset"
+fi
+$ADB get-state >/dev/null 2>&1 || fail "no adb device; connect the Quest over USB (or set ANDROID_SERIAL)"
 QUEST_IP="${QUEST_IP:-$($ADB shell ip -o -4 addr show wlan0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr -d '\r')}"
 [ -n "$QUEST_IP" ] || fail "could not read the Quest's wifi IP; is wifi on?"
 log "Quest wifi IP: $QUEST_IP"
