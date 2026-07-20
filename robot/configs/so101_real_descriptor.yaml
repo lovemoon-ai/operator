@@ -50,7 +50,7 @@ control_schema:
       frame: "head"
 
 input_mapping:
-  - source: "right_controller_pose"
+  - source: "active_controller_pose"
     target: "end_effector"
     scale: 1.0
     invert: false
@@ -62,38 +62,40 @@ input_mapping:
     invert: false
     offset: 0.0
     mode: "absolute"
-  - source: "right_trigger"
+  - source: "active_trigger"
     target: "gripper"
     scale: 1.0
     invert: true
     offset: 1.0
     mode: "absolute"
-  - source: "right_grip"
+  - source: "active_grip"
     target: "enable"
     scale: 1.0
     invert: false
     offset: 0.0
     mode: "momentary"
-  - source: "button_b"
+  - source: "active_button_b"
     target: "reset"
     scale: 1.0
     invert: false
     offset: 0.0
     mode: "momentary"
-  # Thumbstick fine-adjust on the same (right) controller that carries the pose.
-  - source: "right_joystick_x"
+  # Thumbstick fine-adjust, on the same controller that carries the pose. All
+  # `active_*` sources resolve to the DRIVING hand (last one to squeeze grip,
+  # latched while held), so a single-arm rig works with either controller.
+  - source: "active_joystick_x"
     target: "nudge_x"
     scale: 1.0
     invert: false
     offset: 0.0
     mode: "absolute"
-  - source: "right_joystick_y"
+  - source: "active_joystick_y"
     target: "nudge_y"
     scale: 1.0
     invert: false
     offset: 0.0
     mode: "absolute"
-  - source: "right_joystick_click"
+  - source: "active_joystick_click"
     target: "nudge_vertical"
     scale: 1.0
     invert: false
