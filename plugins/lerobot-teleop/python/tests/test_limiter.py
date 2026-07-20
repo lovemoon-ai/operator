@@ -81,6 +81,28 @@ def test_no_overshoot_on_fast_approach():
     assert abs(q[0] - target) < 1e-3, f"did not converge: {q[0]}"
 
 
+def test_freeze_stops_the_command_dead():
+    # Build up velocity chasing a far target, then freeze: the command must not
+    # advance any further, even though the old target is still far away. This is
+    # the "arm keeps moving after I let go of the grip" regression.
+    lim = _limiter()
+    lim.reset([0.0] * 5, 0.0, now=0.0)
+    for k in range(1, 20):
+        lim.step([1000, 0, 0, 0, 0], 100.0, now=k / 90.0)
+    q_at_release, g_at_release = lim.current()
+    assert q_at_release[0] > 0.0, "precondition: it was moving"
+
+    frozen_q, frozen_g = lim.freeze()
+    assert frozen_q == q_at_release and frozen_g == g_at_release
+
+    # Holding at the frozen pose must produce zero further motion, even for many
+    # ticks -- the residual velocity is gone and the target is the current pose.
+    for k in range(20, 60):
+        q, g = lim.step(frozen_q, frozen_g, now=k / 90.0)
+        assert q == q_at_release, f"command moved after freeze: {q} != {q_at_release}"
+        assert g == g_at_release
+
+
 def test_current_returns_commanded_state():
     lim = _limiter()
     assert lim.current() is None  # unseeded

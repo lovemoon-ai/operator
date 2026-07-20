@@ -314,8 +314,10 @@ class VROperator(Teleoperator):
                 # Honoured even while disabled: reset is an explicit operator
                 # action, and the bootstrap (README) depends on being able to
                 # send the arm home *before* the first enable.
+                # freeze=False: a reset MUST keep slewing toward home; freezing
+                # in place is the opposite of what was asked for.
                 self._report_state()
-                return self._hold()
+                return self._hold(freeze=False)
 
         if not control.enabled:  # deadman released
             self._report_state()
@@ -463,8 +465,13 @@ class VROperator(Teleoperator):
             self._link.send({"type": "Error", "msg": msg})
         self._last_error = msg
 
-    def _hold(self) -> RobotAction:
+    def _hold(self, freeze: bool = True) -> RobotAction:
         """Re-command the last setpoint, which is how "no change" is expressed.
+
+        `freeze=True` (the default, used for deadman-release / stale / e-stop)
+        stops the commanded pose exactly where it is. `freeze=False` is for the
+        reset-to-home path, which deliberately wants the limiter to keep slewing
+        toward home rather than parking in place.
 
         Used for every idle path: deadman released, e-stop, stale link, no
         target yet, IK non-convergent. See `get_action`'s docstring for why this
@@ -480,6 +487,16 @@ class VROperator(Teleoperator):
         resulting slew; the README calls this out.
         """
         self._metrics.record_hold()
+        if freeze and self._limiter is not None:
+            frozen = self._limiter.freeze()
+            if frozen is not None:
+                q, gripper = frozen
+                # Snap the setpoint to what is actually commanded, so the hold
+                # target IS the current pose (no residual to slew) and the next
+                # IK warm-start begins from reality rather than a stale target.
+                self._last_q = list(q)
+                self._last_gripper = gripper
+                return self._action(q, gripper)
         return self._action(self._last_q, self._last_gripper)
 
     def _action(self, joints: list[float], gripper: float) -> RobotAction:

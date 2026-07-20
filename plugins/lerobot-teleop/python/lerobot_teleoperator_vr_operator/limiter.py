@@ -111,6 +111,21 @@ class JointRateLimiter:
 
         return list(self._q), self._g
 
+    def freeze(self) -> tuple[list[float], float] | None:
+        """Stop here: zero the velocity and return the current command.
+
+        Used when the deadman is released (or the link goes stale/e-stopped).
+        Without this the limiter keeps slewing toward the last IK target it had
+        not caught up to yet, and carries its accumulated velocity, so the arm
+        visibly keeps moving after the operator lets go. Freezing makes "release"
+        mean "the commanded pose stops changing NOW"; the only motion left is the
+        servo finishing its approach to the pose already commanded.
+        """
+        if self._q is None or self._g is None:
+            return None
+        self._v = [0.0] * self._n
+        return list(self._q), self._g
+
     def current(self) -> tuple[list[float], float] | None:
         """The limiter's current commanded (joints, gripper), or None if unseeded.
 
