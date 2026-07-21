@@ -58,7 +58,7 @@ adapter:
       pose_mapping:
         mode: "ik"
         scale: 0.5
-        mirror: false
+        mirror: true
 
       driver_write_timeout_ms: 20
 
