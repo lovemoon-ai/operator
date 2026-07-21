@@ -428,7 +428,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	@Suppress("FunctionName")
 	@UsedByGodot
 	fun probe_hardware_buffer_support(): String {
-		// API 28+ for Image.getHardwareBuffer(); swan is well above.
+		// API 28+ for Image.getHardwareBuffer(); supported XR targets are above it.
 		// We return a human-readable status string instead of a bool
 		// so logs are self-explanatory.
 		val codecLocal = codec
@@ -462,7 +462,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		// [issue 005 / D-6] Synchronous polling is the final design.
 		// History: [opt 8] tried async MediaCodec.Callback (HandlerThread
 		// + setCallback) but onOutputBufferAvailable never fired on
-		// swan — input slots were consumed but output stayed silent —
+		// one affected Android XR runtime consumed input slots while output stayed silent —
 		// freezing the pipeline. Sync polling adds ~20 ms scheduling
 		// latency at worst, comfortably inside our motion-to-photons
 		// budget. The OES SurfaceTexture path was the previous
@@ -1295,7 +1295,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		//   G = ( 298*(Y-16) - 100*(U-128) - 208*(V-128) + 128 ) >> 8
 		//   B = ( 298*(Y-16) + 516*(U-128) + 128 ) >> 8
 		// Pure integer math with one shift/clamp per channel — at least
-		// 3-5x faster than the previous Float coercion path on swan's CPU.
+		// 3-5x faster than the previous Float coercion path on the target XR CPU.
 		var dst = 0
 		for (row in 0 until height) {
 			var srcY = row * yRowStride

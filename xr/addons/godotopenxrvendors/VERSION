@@ -2,5 +2,5 @@ upstream_repo=https://github.com/GodotVR/godot_openxr_vendors.git
 upstream_tag=4.3.1-stable
 upstream_commit=22156fcab0fadd480b1bf64de57d900f750fa9a3
 godot_version=4.5.1
-patch_set=operator-meta-depth-readback-v2
-patches=patches/0001-meta-depth-callback-metadata.patch,patches/0002-meta-vulkan-depth-readback.patch,patches/0003-fb-body-tracking-vformat-fix.patch
+patch_set=operator-meta-depth-readback-v3
+patches=patches/0001-meta-depth-callback-metadata.patch,patches/0002-meta-vulkan-depth-readback.patch,patches/0003-fb-body-tracking-vformat-fix.patch,patches/0004-meta-depth-start-result.patch

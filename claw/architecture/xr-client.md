@@ -107,6 +107,16 @@ mode intent extras, and routes to mode scenes.
   instead of a texture/AHardwareBuffer, so one native client-memory-to-GPU
   upload remains unavoidable.
 
+PICO RGB configuration is runtime capability-driven. After the OpenXR session
+starts, the bridge enumerates camera ids, per-eye resolutions, formats,
+transfer types, and frame rates through `XR_PICO_camera_image`. The settings UI
+shows the common stereo resolution set (or the left-camera set for mono) and an
+`Auto` choice. `Auto` passes no preferred dimensions, allowing the runtime to
+select a supported configuration; an explicit choice must be negotiated
+exactly or capture is rejected. No product model, codename, or device serial is
+used to select a camera profile, so the same `Pico` export is shared by PICO
+headsets with different camera shapes.
+
 ## Teleop Runtime
 
 `teleop_controller.gd` creates the v2 teleop stack at runtime:
@@ -196,6 +206,13 @@ timed-metadata tracks for structured metadata:
 | `depth_frame_meta` | OpenXR depth metadata such as timestamp source, runtime display time, projection/inverse-projection columns, near/far range, FOV tangents, and `local_from_depth_eye`. | Per depth frame. |
 | `body_frame_meta` | Frame-level `body_flags` and provider-specific body extras that do not fit the compact body-joints payload. | Per body frame. |
 | `motion_trackers` | PICO motion tracker pose samples, velocities, accelerations, battery state, and power-key events. | Per tracker sample/event. |
+
+Environment-depth replay uses each frame's `local_from_depth_eye` and
+inverse-projection metadata for every OpenXR provider. Metric depth points are
+unprojected in RDF image coordinates (X right, Y down, Z forward), then mapped
+into the OpenXR/Godot eye basis (X right, Y up, Z back) with an explicit Y/Z
+axis flip before RGB reprojection. This is selected by the embedded depth
+metadata contract, never by headset model, codename, or serial number.
 
 Readers should use embedded MP4 metadata tracks for geometry and timing, while
 `manifest.json` remains artifact inventory and integrity metadata. Default

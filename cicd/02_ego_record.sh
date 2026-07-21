@@ -306,7 +306,7 @@ adb_device_matches_kind() {
   text="$(printf '%s %s\n' "$device_line" "$props" | tr '[:upper:]' '[:lower:]')"
   case "$DEVICE_KIND" in
     pico)
-      grep -Eq 'pico|picovr|sparrow|a9210|a8210|a8110|a8150|pico 4' <<< "$text"
+      grep -Eq 'pico|picovr' <<< "$text"
       ;;
     quest)
       grep -Eq 'quest|oculus|meta|eureka|panther|seacliff|hollywood' <<< "$text"
@@ -632,8 +632,10 @@ grant_permissions() {
     horizonos.permission.AVATAR_CAMERA \
     com.oculus.permission.USE_SCENE \
     horizonos.permission.USE_SCENE \
-    com.picovr.permission.CAMERA \
-    com.picovr.permission.HEAD_TRACKER \
+	com.picovr.permission.CAMERA \
+	com.picovr.permission.HAND_TRACKING \
+	com.picovr.permission.HEAD_TRACKER \
+    com.picovr.permission.SPATIAL_DATA \
     com.pico.permission.CAMERA_DATA \
     android.permission.READ_EXTERNAL_STORAGE \
     android.permission.WRITE_EXTERNAL_STORAGE
@@ -1511,7 +1513,8 @@ def check_device_block(manifest: dict[str, Any]) -> dict[str, Any]:
 
     if expected_device_prefix:
         # Quest family: classifier returns quest3 / quest3s / questpro / quest2.
-        # Pico family: pico4_ultra / pico4_pro / pico4_enterprise / pico4 / ...
+        # All PICO models use the generic vendor identity; runtime capabilities
+        # distinguish camera and interaction features.
         device_type = str(device.get("device_type", "")).lower()
         if device_type.startswith(expected_device_prefix):
             passed(

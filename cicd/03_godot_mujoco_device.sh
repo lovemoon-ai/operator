@@ -130,7 +130,7 @@ detect_device_kind() {
   local manufacturer model
   manufacturer="$(run_adb shell getprop ro.product.manufacturer 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
   model="$(run_adb shell getprop ro.product.model 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]')"
-  if printf '%s\n%s\n' "$manufacturer" "$model" | grep -Eq 'pico|a9210|sparrow'; then
+  if printf '%s\n' "$manufacturer" | grep -Eq 'pico|picovr'; then
     DEVICE_KIND="pico"
   elif printf '%s\n%s\n' "$manufacturer" "$model" | grep -Eq 'meta|oculus|quest'; then
     DEVICE_KIND="quest"
@@ -154,7 +154,7 @@ device_matches_kind() {
   haystack="${manufacturer}
 ${model}"
   case "$kind" in
-    pico) printf '%s\n' "$haystack" | grep -Eq 'pico|a9210|sparrow' ;;
+    pico) printf '%s\n' "$manufacturer" | grep -Eq 'pico|picovr' ;;
     quest) printf '%s\n' "$haystack" | grep -Eq 'meta|oculus|quest' ;;
     *) return 1 ;;
   esac

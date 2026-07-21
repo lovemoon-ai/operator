@@ -59,8 +59,10 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_CAPTURE_AUTO_START = "operator.capture.auto_start";
 	private static final String EXTRA_CAPTURE_AUTO_STOP_SECONDS = "operator.capture.auto_stop_seconds";
 	private static final String EXTRA_CAPTURE_RGB_RESOLUTION = "operator.capture.rgb_resolution";
+	private static final String EXTRA_CAPTURE_EXPORT_COORDINATE_SPACE = "operator.capture.export_coordinate_space";
 	private static final String EXTRA_CAPTURE_SAVE_ROOT = "operator.capture.save_root";
 	private static final String EXTRA_CAPTURE_RGB_ONLY = "operator.capture.rgb_only";
+	private static final String EXTRA_CAPTURE_CAPABILITY_PROBE = "operator.capture.capability_probe";
 	private static final String EXTRA_BODY_POSE_DEBUG = "operator.body_pose_debug";
 	private static final String EXTRA_OPERATOR_AUTO_START = "operator.auto_start";
 	private static final String EXTRA_OPERATOR_AUTO_START_LEGACY = "operator_auto_start";
@@ -130,8 +132,10 @@ public class GodotApp extends GodotActivity {
 		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_START, "--operator-capture-auto-start");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_AUTO_STOP_SECONDS, "--operator-capture-auto-stop-seconds");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_RGB_RESOLUTION, "--operator-capture-rgb-resolution");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_EXPORT_COORDINATE_SPACE, "--operator-capture-export-coordinate-space");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_SAVE_ROOT, "--operator-capture-save-root");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_RGB_ONLY, "--operator-capture-rgb-only");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_CAPABILITY_PROBE, "--operator-capture-capability-probe");
 		appendIntentExtraArg(args, EXTRA_BODY_POSE_DEBUG, "--operator-body-pose-debug");
 		if (readBooleanExtra(EXTRA_OPERATOR_AUTO_START) || readBooleanExtra(EXTRA_OPERATOR_AUTO_START_LEGACY)) {
 			ensureUserArgsDelimiter(args);

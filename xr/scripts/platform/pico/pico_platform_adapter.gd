@@ -85,7 +85,7 @@ func capabilities() -> Array:
 	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.MOTION_TRACKERS, PROVIDER_ID, body_state))
 	var mux_state := CapabilityStateScript.AVAILABLE if muxer_plugin() != null else CapabilityStateScript.UNAVAILABLE
 	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.SPATIAL_MP4_MUX, PROVIDER_ID, mux_state))
-	caps.append(CapabilityInfoScript.create(
-		SensorCapabilityScript.DEPTH_MAP, PROVIDER_ID,
-		CapabilityStateScript.UNAVAILABLE, "no depth camera stream"))
+	# Environment depth is contributed by GenericOpenXRPlatformAdapter after a
+	# live extension probe; it must not be inferred from the PICO camera plugin
+	# or from a headset identity.
 	return caps

@@ -9,6 +9,7 @@ Apply order:
 1. `0001-meta-depth-callback-metadata.patch`
 2. `0002-meta-vulkan-depth-readback.patch`
 3. `0003-fb-body-tracking-vformat-fix.patch`
+4. `0004-meta-depth-start-result.patch`
 
 The first patch exposes Meta environment-depth timing, FOV, near/far, and
 depth-eye pose metadata through `get_environment_depth_map_async()` and adds
@@ -28,6 +29,13 @@ missing the `%s` placeholder for its second argument. Every time
 formatting") instead of the intended log message, spamming the per-frame
 process callback on Quest 3 during OpenXR session start-up and any
 transient body-tracking outage.
+
+The fourth patch reports the real render-thread result of
+`xrStartEnvironmentDepthProviderMETA` to Godot. The public started state and
+started signal now change only after OpenXR succeeds; failures emit
+`openxr_meta_environment_depth_start_failed` with the `XrResult` value.
+Both Meta and PICO vendor AARs must embed the rebuilt shared library because
+Android packaging can select the AAR copy over the standalone GDExtension.
 
 Build patched binaries with:
 

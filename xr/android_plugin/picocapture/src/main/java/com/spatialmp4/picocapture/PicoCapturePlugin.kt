@@ -32,6 +32,7 @@ import com.spatialmp4.capturecommon.CapturedYuvFrame
 import com.spatialmp4.capturecommon.ChromaLayout
 import com.spatialmp4.capturecommon.DeviceIdentity
 import com.spatialmp4.capturecommon.GpuSurfaceStereoEncoder
+import com.spatialmp4.capturecommon.OpenXrDepthConverter
 import com.spatialmp4.capturecommon.StereoHevcEncoder
 import com.spatialmp4.capturecommon.YuvPlaneCapture
 import com.spatialmp4.contract.SessionConfig
@@ -81,6 +82,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var configureElapsedRealtimeNs = 0L
     private var configureClockMonotonicNs = 0L
     private var configureUnixTimeMs = 0L
+    private var recordDepth = false
     private var recordHeadPose = true
     private var recordControllerPose = true
     private var recordHandData = true
@@ -165,9 +167,6 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         rgbBitrate: Int,
         rgbFps: Int
     ): Boolean {
-        if (recordDepth) {
-            Log.i(TAG, "Pico 4 Ultra depth capture requested; ignoring because the platform has no depth camera stream")
-        }
         return configureSessionInternal(
             sessionPath,
             sessionStartUnixUs,
@@ -175,6 +174,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             configureGodotTicksUs,
             finalPath,
             partialPath,
+            recordDepth,
             recordHeadPose,
             recordControllerPose,
             recordHandData,
@@ -244,7 +244,15 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     }
 
     @UsedByGodot
-    fun isDepthCaptureSupported(): Boolean = false
+    fun isDepthCaptureSupported(): Boolean = true
+
+    @UsedByGodot
+    fun convertOpenxrDepthRhToU16Mm(
+        raw: ByteArray,
+        width: Int,
+        height: Int,
+        invProjViewRow3: DoubleArray,
+    ): ByteArray = OpenXrDepthConverter.rhToU16Mm(raw, width, height, invProjViewRow3)
 
     @UsedByGodot
     fun isBodyMotionCaptureSupported(): Boolean = true
@@ -256,6 +264,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         configureGodotTicksUs: Long,
         finalPath: String,
         partialPath: String,
+        recordDepth: Boolean,
         recordHeadPose: Boolean,
         recordControllerPose: Boolean,
         recordHandData: Boolean,
@@ -286,6 +295,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         this.sessionStartUnixUs = sessionStartUnixUs
         this.sessionStartGodotTicksUs = sessionStartGodotTicksUs
         this.configureGodotTicksUs = configureGodotTicksUs
+        this.recordDepth = recordDepth
         this.recordHeadPose = recordHeadPose
         this.recordControllerPose = recordControllerPose
         this.recordHandData = recordHandData
@@ -864,7 +874,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             rgbHeight = leftConfig.size.height,
             rgbFps = rgbFps,
             rgbCameraCount = rgbCameraCount,
-            depthExpected = false,
+            depthExpected = recordDepth,
             headPoseExpected = recordHeadPose,
             controllerPoseExpected = recordControllerPose,
             handJointsExpected = recordHandData,
@@ -1378,7 +1388,13 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return sum
     }
 
-    private fun requiredRuntimePermissions(): List<String> = listOf(Manifest.permission.CAMERA)
+    private fun requiredRuntimePermissions(): List<String> = buildList {
+        add(Manifest.permission.CAMERA)
+        // The same PICO provider APK runs on runtimes with and without
+        // environment depth. Request spatial-data access only when the live
+        // OpenXR capability gate left depth enabled for this session.
+        if (recordDepth) add(PERMISSION_SPATIAL_DATA)
+    }
 
     private fun ensureDirectory(path: File): Boolean = path.isDirectory || path.mkdirs()
 
@@ -1417,6 +1433,7 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     companion object {
         private const val REQUEST_CAMERA_PERMISSIONS = 5001
         private const val REQUEST_STORAGE_PERMISSION = 5002
+        private const val PERMISSION_SPATIAL_DATA = "com.picovr.permission.SPATIAL_DATA"
         private const val IMAGE_READER_MAX_IMAGES = 3
         private const val TAG = "PicoCapturePlugin"
         private const val DEFAULT_RGB_BITRATE = 24_000_000

@@ -1,7 +1,10 @@
 extends Node
 class_name DepthSampler
 
+signal start_failed(reason: String)
+
 @export var request_interval_sec := 0.2
+@export var start_timeout_sec := 5.0
 
 var writer: Object
 # WP4: canonical-frame sink (default: FrameWriterShim over `writer`).
@@ -9,6 +12,8 @@ var _frame_sink: Object
 var _extension: Object
 var _timer := 0.0
 var _started := false
+var _start_pending := false
+var _start_wait_sec := 0.0
 var _request_pending := false
 var _xr_time_offset_ns := 0
 var _xr_time_offset_resolved := false
@@ -60,7 +65,23 @@ func configure(p_writer: Object, p_capture_provider: Object = null, p_platform: 
 	if not info.is_empty():
 		_extension = info.get("extension")
 		_extension_name = str(info.get("name", ""))
+		_connect_extension_start_signal("openxr_meta_environment_depth_started")
+		_connect_extension_start_signal("openxr_android_environment_depth_started")
+		if _extension.has_signal("openxr_meta_environment_depth_start_failed"):
+			var failure_callback := Callable(self, "_on_extension_depth_start_failed")
+			if not _extension.is_connected(
+					"openxr_meta_environment_depth_start_failed", failure_callback):
+				_extension.connect(
+					"openxr_meta_environment_depth_start_failed", failure_callback)
 		print("DepthSampler bound %s" % _extension_name)
+
+
+func _connect_extension_start_signal(signal_name: StringName) -> void:
+	if not _extension.has_signal(signal_name):
+		return
+	var callback := Callable(self, "_on_extension_depth_started")
+	if not _extension.is_connected(signal_name, callback):
+		_extension.connect(signal_name, callback)
 
 
 func set_frame_sink(sink: Object) -> void:
@@ -94,29 +115,54 @@ func _resolve_xr_time_offset_ns() -> int:
 
 
 func start() -> void:
-	if _extension == null or _started:
+	if _started or _start_pending:
+		return
+	if _extension == null:
+		_fail_start("extension_unavailable")
 		return
 
 	var supported := bool(_extension.call("is_environment_depth_supported"))
 	if supported:
 		_timer = 0.0
-		_extension.call("start_environment_depth")
-		_started = true
-		print("DepthSampler started %s" % _extension_name)
+		_start_wait_sec = 0.0
+		_start_pending = true
+		var result: Variant = _extension.call("start_environment_depth")
+		# XR_ANDROID_environment_depth reports the synchronous XrResult as a
+		# bool. The patched XR_META wrapper reports the render-thread result via
+		# its started/failed signals and exposes the pending state as a contract
+		# marker. Refuse the legacy Meta wrapper: its is_started flag is set
+		# optimistically before xrStartEnvironmentDepthProviderMETA executes.
+		if result is bool:
+			if bool(result):
+				_on_extension_depth_started()
+			else:
+				_fail_start("runtime_rejected")
+		elif not _extension.has_method("is_environment_depth_start_pending"):
+			if bool(_extension.call("is_environment_depth_started")):
+				_extension.call("stop_environment_depth")
+			_fail_start("start_result_unavailable")
 	else:
-		_mark_drop("unsupported", {"extension": _extension_name})
+		_fail_start("unsupported")
 
 
 func stop() -> void:
-	if _extension == null or not _started:
+	if _extension == null or (not _started and not _start_pending):
 		return
 
-	if _extension.call("is_environment_depth_started"):
+	if _start_pending or _extension.call("is_environment_depth_started"):
 		_extension.call("stop_environment_depth")
 	_started = false
+	_start_pending = false
+	_start_wait_sec = 0.0
 
 
 func pump(delta: float) -> void:
+	if _start_pending:
+		_start_wait_sec += delta
+		if _start_wait_sec >= start_timeout_sec:
+			stop()
+			_fail_start("start_timeout")
+		return
 	if _frame_sink == null or _extension == null or not _started or _request_pending:
 		return
 
@@ -131,6 +177,28 @@ func pump(delta: float) -> void:
 	_timer = 0.0
 	_request_pending = true
 	_extension.call("get_environment_depth_map_async", Callable(self, "_on_depth_map"))
+
+
+func _on_extension_depth_started() -> void:
+	if not _start_pending:
+		return
+	_start_pending = false
+	_start_wait_sec = 0.0
+	_started = true
+	print("DepthSampler started %s" % _extension_name)
+
+
+func _on_extension_depth_start_failed(result: int) -> void:
+	if _start_pending:
+		_fail_start("xr_result_%d" % result)
+
+
+func _fail_start(reason: String) -> void:
+	_start_pending = false
+	_start_wait_sec = 0.0
+	_started = false
+	_mark_drop("start_failed", {"extension": _extension_name, "reason": reason})
+	start_failed.emit(reason)
 
 
 func _on_depth_map(data: Array) -> void:
@@ -169,8 +237,8 @@ func _on_depth_map(data: Array) -> void:
 			continue
 
 		# Prefer the OpenXR runtime display time when the patched Vendors
-		# wrapper exposes it. Quest's XR runtime returns XrTime in
-		# CLOCK_MONOTONIC nanoseconds, which is the same clock as
+		# wrapper exposes it. Android OpenXR XrTime is mapped against
+		# CLOCK_MONOTONIC nanoseconds, the same clock family as
 		# Time.get_ticks_usec(), so we can place it directly into the Godot
 		# ticks domain used by RGB and pose. Fall back to the callback time
 		# otherwise so the stream is still usable on unpatched builds.

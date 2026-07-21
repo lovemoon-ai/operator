@@ -54,13 +54,6 @@ const LOCAL_FILE_MODE_UPLOAD := "upload"
 const LOCAL_FILE_MODE_DELETE := "delete"
 const RGB_PROVIDER_DEFAULT := "quest"
 const RGB_RESOLUTIONS := {
-	"pico": [
-		Vector2i(2048, 1536),
-		Vector2i(1920, 1440),
-		Vector2i(1280, 960),
-		Vector2i(1024, 768),
-		Vector2i(640, 480),
-	],
 	"quest": [
 		Vector2i(640, 480),
 		Vector2i(800, 600),
@@ -68,11 +61,9 @@ const RGB_RESOLUTIONS := {
 	],
 }
 const RGB_DEFAULT_RESOLUTION := {
-	"pico": Vector2i(640, 480),
 	"quest": Vector2i(1280, 960),
 }
 const RGB_FPS_VALUES := {
-	"pico": [30, 60],
 	"quest": [15, 30, 60],
 }
 const DEFAULT_RGB_FPS := 30
@@ -149,6 +140,13 @@ var _requested_rgb_resolution := ""
 var _requested_rgb_fps := DEFAULT_RGB_FPS
 var _requested_rgb_codec := DEFAULT_RGB_CODEC
 var _refreshing_rgb_selects := false
+# PICO camera choices are populated from XR_PICO_camera_image at runtime.
+# They intentionally carry no product/model key: any current or future PICO
+# runtime that reports the same capabilities gets the same UI and behavior.
+var _runtime_rgb_mono_resolutions: Array[Vector2i] = []
+var _runtime_rgb_stereo_resolutions: Array[Vector2i] = []
+var _runtime_rgb_fps: Array[int] = []
+var _runtime_rgb_stereo_available := false
 # Mirror of the live-server connection state reported by capture_app via
 # set_live_server_connectivity_status(). Used by _on_confirm_requested to
 # gate the Save button in live-feed mode.
@@ -251,7 +249,7 @@ func get_options() -> Dictionary:
 	var rgb_resolution := _selected_rgb_resolution()
 	options["rgb_width"] = rgb_resolution.x
 	options["rgb_height"] = rgb_resolution.y
-	options["rgb_resolution"] = _resolution_text(rgb_resolution)
+	options["rgb_resolution"] = "" if rgb_resolution == Vector2i.ZERO else _resolution_text(rgb_resolution)
 	options["rgb_fps"] = _selected_rgb_fps()
 	options["rgb_codec"] = _selected_rgb_codec()
 	if _live_server_mode:
@@ -371,12 +369,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	# --- Streams group -----------------------------------------------------
 	var streams := register_group("streams", "UI_CAPTURED_STREAMS", "camera")
-	_add_stream_toggle(streams, "stereo_rgb", tr("UI_STEREO_RGB"))
+	var stereo_toggle := _add_stream_toggle(streams, "stereo_rgb", tr("UI_STEREO_RGB"))
+	stereo_toggle.toggled.connect(_on_stereo_rgb_toggled)
 	_add_stream_toggle(streams, "record_depth", tr("UI_DEPTH"))
-	# Depth capture is Quest-only today (XR_META_environment_depth). Like the
-	# motion-tracker row below, hide the slot until capture_app confirms the
-	# provider supports it so a Pico operator never flips a switch that
-	# silently records nothing.
+	# Hide depth until capture_app confirms the active OpenXR runtime and Android
+	# provider can both produce it, so unsupported devices never expose a switch
+	# that silently records nothing.
 	_depth_toggle = _stream_toggles.get("record_depth")
 	_set_depth_row_visible(_depth_supported)
 	_add_stream_toggle(streams, "record_head_pose", tr("UI_HEAD_POSE"))
@@ -753,10 +751,9 @@ func _set_motion_tracker_row_visible(visible_for_capture: bool) -> void:
 		(slot as Control).visible = visible_for_capture
 
 
-## Declares whether the bound capture provider can produce environment-depth
-## data (Quest only, today). When false the UI row is hidden and the saved
-## option is forced off so the recording manifest never advertises a depth
-## stream the device cannot read.
+## Declares whether the active OpenXR runtime and bound capture provider can
+## produce environment-depth data. When false the UI row is hidden and the
+## option is forced off so the manifest never advertises an unreadable stream.
 func set_depth_supported(supported: bool) -> void:
 	_depth_supported = supported
 	_set_depth_row_visible(supported)
@@ -779,11 +776,80 @@ func set_capture_provider_name(provider: String) -> void:
 	if _capture_provider_name == normalized:
 		return
 	_capture_provider_name = normalized
+	var stereo_toggle := _stream_toggles.get("stereo_rgb") as CheckButton
+	if stereo_toggle != null and normalized != "pico":
+		stereo_toggle.disabled = false
 	_refresh_rgb_selects()
+
+
+## Installs the runtime camera capability snapshot returned by the active
+## OpenXR bridge. No device model, codename, serial, or product-name mapping is
+## involved: the picker is a direct projection of the camera runtime's lists.
+func set_rgb_capabilities(capabilities: Dictionary) -> void:
+	_runtime_rgb_mono_resolutions = _resolution_array_from_capabilities(
+		capabilities.get("mono_resolutions", capabilities.get("resolutions", [])))
+	_runtime_rgb_stereo_resolutions = _resolution_array_from_capabilities(
+		capabilities.get("stereo_resolutions", []))
+	_runtime_rgb_fps.clear()
+	var fps_value: Variant = capabilities.get("fps", [])
+	if fps_value is PackedInt32Array or fps_value is Array:
+		for raw_fps in fps_value:
+			var fps := int(raw_fps)
+			if fps > 0 and not _runtime_rgb_fps.has(fps):
+				_runtime_rgb_fps.append(fps)
+	_runtime_rgb_fps.sort()
+	_runtime_rgb_stereo_available = bool(capabilities.get(
+		"stereo_available", not _runtime_rgb_stereo_resolutions.is_empty()))
+	var stereo_toggle := _stream_toggles.get("stereo_rgb") as CheckButton
+	if stereo_toggle != null:
+		stereo_toggle.disabled = not _runtime_rgb_stereo_available
+		if not _runtime_rgb_stereo_available:
+			stereo_toggle.button_pressed = false
+	if _capture_provider_name == "pico":
+		_refresh_rgb_selects()
+
+
+func _resolution_array_from_capabilities(raw_value: Variant) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	if not (raw_value is Array):
+		return out
+	for entry_v in raw_value as Array:
+		var resolution := Vector2i.ZERO
+		if entry_v is Vector2i:
+			resolution = entry_v as Vector2i
+		elif entry_v is Dictionary:
+			var entry := entry_v as Dictionary
+			resolution = Vector2i(int(entry.get("width", 0)), int(entry.get("height", 0)))
+		if resolution.x > 0 and resolution.y > 0 and not out.has(resolution):
+			out.append(resolution)
+	out.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		var area_a := a.x * a.y
+		var area_b := b.x * b.y
+		return a.x > b.x if area_a == area_b else area_a > area_b)
+	return out
 
 
 func _rgb_provider_key() -> String:
 	return "pico" if _capture_provider_name == "pico" else "quest"
+
+
+func _rgb_resolution_choices() -> Array:
+	if _rgb_provider_key() != "pico":
+		return RGB_RESOLUTIONS.get(_rgb_provider_key(), RGB_RESOLUTIONS[RGB_PROVIDER_DEFAULT])
+	if _toggle_enabled("stereo_rgb"):
+		return _runtime_rgb_stereo_resolutions
+	return _runtime_rgb_mono_resolutions
+
+
+func _rgb_fps_choices() -> Array:
+	if _rgb_provider_key() == "pico" and not _runtime_rgb_fps.is_empty():
+		return _runtime_rgb_fps
+	return RGB_FPS_VALUES.get(_rgb_provider_key(), [DEFAULT_RGB_FPS])
+
+
+func _on_stereo_rgb_toggled(_enabled: bool) -> void:
+	if _capture_provider_name == "pico":
+		_refresh_rgb_selects()
 
 
 func _refresh_rgb_selects() -> void:
@@ -849,13 +915,18 @@ func _rebuild_rgb_resolution_select() -> void:
 		return
 	var provider := _rgb_provider_key()
 	var selected_text := _requested_rgb_resolution
+	var pico_runtime_choices := provider == "pico"
 	var fallback: Vector2i = RGB_DEFAULT_RESOLUTION.get(provider, RGB_DEFAULT_RESOLUTION[RGB_PROVIDER_DEFAULT])
-	var fallback_text := _resolution_text(fallback)
-	if selected_text.is_empty():
-		selected_text = fallback_text
 	_clear_rgb_menu(_rgb_resolution_menu)
-	var choices: Array = RGB_RESOLUTIONS.get(provider, RGB_RESOLUTIONS[RGB_PROVIDER_DEFAULT])
+	var choices: Array = _rgb_resolution_choices()
+	var fallback_text := _resolution_text(choices[0]) if pico_runtime_choices and not choices.is_empty() else _resolution_text(fallback)
 	var selected_found := false
+	# PICO capabilities arrive after the OpenXR session starts. Preserve an
+	# explicit automation/saved value during that short pending window; the next
+	# rebuild validates it against the real runtime list and falls back to its
+	# first advertised resolution if the runtime does not advertise it.
+	if pico_runtime_choices and choices.is_empty() and not selected_text.is_empty():
+		selected_found = true
 	for i in range(choices.size()):
 		var resolution := choices[i] as Vector2i
 		var text := _resolution_text(resolution)
@@ -867,9 +938,9 @@ func _rebuild_rgb_resolution_select() -> void:
 			_on_rgb_resolution_option_pressed.bind(text)
 		)
 	if not selected_found:
-		selected_text = fallback_text
+		selected_text = fallback_text if not pico_runtime_choices or not choices.is_empty() else ""
 	_requested_rgb_resolution = selected_text
-	_rgb_resolution_button.text = selected_text
+	_rgb_resolution_button.text = selected_text if not selected_text.is_empty() else "--"
 	if _rgb_resolution_menu != null:
 		_rgb_resolution_menu.visible = false
 
@@ -880,7 +951,7 @@ func _rebuild_rgb_fps_select() -> void:
 	var provider := _rgb_provider_key()
 	var requested_fps := _requested_rgb_fps if _requested_rgb_fps > 0 else DEFAULT_RGB_FPS
 	_clear_rgb_menu(_rgb_fps_menu)
-	var fps_values: Array = RGB_FPS_VALUES.get(provider, RGB_FPS_VALUES[RGB_PROVIDER_DEFAULT])
+	var fps_values: Array = _rgb_fps_choices()
 	var selected_found := false
 	for i in range(fps_values.size()):
 		var fps := int(fps_values[i])
@@ -1024,7 +1095,7 @@ func _on_rgb_resolution_option_pressed(text: String) -> void:
 		return
 	_requested_rgb_resolution = text
 	if _rgb_resolution_button != null:
-		_rgb_resolution_button.text = text
+		_rgb_resolution_button.text = text if not text.is_empty() else "--"
 	if _rgb_resolution_menu != null:
 		_rgb_resolution_menu.visible = false
 
@@ -1057,6 +1128,11 @@ func _selected_rgb_resolution_text() -> String:
 	if not _requested_rgb_resolution.is_empty():
 		return _requested_rgb_resolution
 	var provider := _rgb_provider_key()
+	if provider == "pico":
+		var choices := _rgb_resolution_choices()
+		if not choices.is_empty():
+			return _resolution_text(choices[0])
+		return ""
 	return _resolution_text(RGB_DEFAULT_RESOLUTION.get(provider, RGB_DEFAULT_RESOLUTION[RGB_PROVIDER_DEFAULT]))
 
 
@@ -1105,6 +1181,11 @@ func _parse_resolution_text(text: String) -> Vector2i:
 	var parts := normalized.split("x", false, 2)
 	if parts.size() != 2:
 		var provider := _rgb_provider_key()
+		if provider == "pico":
+			var choices := _rgb_resolution_choices()
+			if not choices.is_empty():
+				return choices[0]
+			return Vector2i.ZERO
 		return RGB_DEFAULT_RESOLUTION.get(provider, RGB_DEFAULT_RESOLUTION[RGB_PROVIDER_DEFAULT])
 	return Vector2i(maxi(1, int(parts[0])), maxi(1, int(parts[1])))
 

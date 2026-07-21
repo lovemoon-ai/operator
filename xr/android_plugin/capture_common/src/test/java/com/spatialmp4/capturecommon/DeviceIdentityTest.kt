@@ -40,4 +40,10 @@ class DeviceIdentityTest {
         assertEquals("quest3s", classify("Oculus", "Quest", "unknown", "panther"))
         assertEquals("quest_unknown", classify("Oculus", "Quest", "unknown"))
     }
+
+    @Test
+    fun classifiesEveryPicoModelAsGenericVendorType() {
+        assertEquals("pico", classify("Pico", "example-one", "device-one"))
+        assertEquals("pico", classify("PICO", "example-two", "device-two"))
+    }
 }

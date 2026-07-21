@@ -12,6 +12,8 @@
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 
+#include <vector>
+
 using namespace godot;
 
 class PicoOpenXRExtension : public OpenXRExtensionWrapperExtension {
@@ -31,6 +33,7 @@ public:
 
 	Dictionary get_status() const;
 	Dictionary get_external_camera_info();
+	Dictionary get_camera_image_capabilities();
 	Dictionary start_camera_image_capture(bool stereo = true, int width = 640, int height = 480, int fps = 30);
 	Array poll_camera_image_frames();
 	// Kotlin-direct camera pump: binds the capture plugin (JNISingleton) so
@@ -104,6 +107,14 @@ private:
 		XrCameraImageFpsPICO fps = XR_CAMERA_IMAGE_FPS_30_PICO;
 	};
 
+	struct CameraImageCapabilitySet {
+		std::vector<XrExtent2Di> resolutions;
+		std::vector<XrCameraImageFormatPICO> formats;
+		std::vector<XrCameraDataTransferTypePICO> transfer_types;
+		std::vector<XrCameraModelPICO> models;
+		std::vector<XrCameraImageFpsPICO> fps_values;
+	};
+
 	// One normalized camera frame pulled from the PICO runtime (shared by
 	// the legacy Dictionary poll and the Kotlin-direct pump).
 	struct AcquiredCameraFrame {
@@ -123,6 +134,8 @@ private:
 	bool resolve_functions();
 	bool wait_future_until_ready(XrFutureEXT future, XrResult &poll_result, int timeout_ms = 3000);
 	bool refresh_camera_image_camera_ids();
+	bool query_camera_image_capabilities(XrCameraIdPICO camera_id, CameraImageCapabilitySet &capabilities);
+	Dictionary camera_image_capability_record(XrCameraIdPICO camera_id, const CameraImageCapabilitySet &capabilities) const;
 	bool select_camera_image_config(XrCameraIdPICO camera_id, int preferred_width, int preferred_height, int preferred_fps, CameraImageCaptureConfig &config);
 	bool start_camera_image_eye(CameraImageEyeState &eye_state, const CameraImageCaptureConfig &config);
 	void stop_camera_image_eye(CameraImageEyeState &eye_state);

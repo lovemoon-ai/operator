@@ -56,7 +56,7 @@ func start() -> void:
 	_timer.start()
 	# Don't fire the first ClockPing immediately — back-to-back sends
 	# right after STATUS_CONNECTED were racing Godot's StreamPeerTCP
-	# state on swan and dropping the command socket. The Timer fires
+	# state on affected Android XR runtimes and dropping the command socket. The Timer fires
 	# its first event PING_INTERVAL_SEC after start(); we let that be
 	# the first ping. Initial offset just shows up one second late.
 

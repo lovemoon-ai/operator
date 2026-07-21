@@ -30,7 +30,8 @@ Differences from the reference (deliberate):
     ``operator_static`` metadata.
     Operator-specific JSON ``mett`` tracks such as ``motion_trackers`` are
     read directly from the MP4 with ffprobe until the SDK exposes typed APIs.
-    Depth uses MP4-embedded ``depth_frame_meta`` when the recording has it.
+    Depth uses MP4-embedded ``depth_frame_meta`` when the recording has it,
+    regardless of which OpenXR provider produced the environment-depth frame.
     When Quest Camera2 metadata is missing, we use ``T_W_Srgb = T_W_H @
     T_I_Srgb`` straight out of the mp4's RGB extrinsics and accept the
     live-writer's documented ~10° X-axis bias.
@@ -113,6 +114,12 @@ from spatialmp4_metadata import (
     RERUN_FRAME_METADATA_KINDS,
     camera2_metadata_candidates,
     resolve_android_timebase_metadata,
+)
+from environment_depth_geometry import (
+    OPENXR_DEPTH_EYE_GODOT_FROM_RDF,
+    openxr_depth_camera_pose,
+    project_rdf_points_to_image,
+    unproject_environment_depth_via_inverse_projection,
 )
 
 
@@ -480,15 +487,7 @@ class ResolvedIntrinsics:
 UNITY_FROM_GODOT_3 = np.diag([1.0, 1.0, -1.0])
 UNITY_FROM_GODOT_4 = np.diag([1.0, 1.0, -1.0, 1.0])
 PICO_UNITY_CAMERA_AXIS_ADJUSTMENT = np.diag([1.0, -1.0, -1.0, 1.0])
-QUEST_DEPTH_META_MATCH_MAX_DT = 0.060
-
-# Quest Environment Depth per-frame metadata reports local_from_depth_eye as a
-# Godot/OpenXR transform. The metric depth unprojection below intentionally
-# stays OpenCV/RDF (X-right, Y-down, Z-forward). Right-multiplying the metadata
-# pose by this basis map makes the per-frame extrinsic consume those RDF points
-# without changing the depth sample decoding path.
-QUEST_DEPTH_EYE_GODOT_FROM_RDF = np.diag([1.0, -1.0, -1.0])
-
+ENVIRONMENT_DEPTH_META_MATCH_MAX_DT = 0.060
 
 _PICO_PERM = np.array(
     [
@@ -1804,7 +1803,7 @@ def load_json_metadata_frames_from_mp4(input_path: Path, kind: str) -> Dict[str,
 
 
 @dataclass(frozen=True)
-class _QuestDepthMetaPose:
+class _EnvironmentDepthMetaPose:
     timestamp: float
     track_id: str
     T_W_depth_camera: np.ndarray
@@ -1813,7 +1812,7 @@ class _QuestDepthMetaPose:
     far_z: Optional[float]
 
 
-def _quest_json_xyz(value: Any) -> Optional[np.ndarray]:
+def _json_xyz(value: Any) -> Optional[np.ndarray]:
     if isinstance(value, dict):
         try:
             return np.array(
@@ -1833,7 +1832,7 @@ def _quest_json_xyz(value: Any) -> Optional[np.ndarray]:
     return None
 
 
-def _quest_json_quat_xyzw(value: Any) -> Optional[np.ndarray]:
+def _json_quat_xyzw(value: Any) -> Optional[np.ndarray]:
     if isinstance(value, dict):
         try:
             quat = np.array(
@@ -1869,11 +1868,11 @@ def _quest_json_quat_xyzw(value: Any) -> Optional[np.ndarray]:
     return quat / norm
 
 
-def _quest_json_pose_to_matrix(value: Any) -> Optional[np.ndarray]:
+def _json_pose_to_matrix(value: Any) -> Optional[np.ndarray]:
     if not isinstance(value, dict):
         return None
-    pos = _quest_json_xyz(value.get("position") or value.get("translation"))
-    quat = _quest_json_quat_xyzw(value.get("rotation") or value.get("orientation"))
+    pos = _json_xyz(value.get("position") or value.get("translation"))
+    quat = _json_quat_xyzw(value.get("rotation") or value.get("orientation"))
     if pos is None or quat is None:
         return None
     mat = np.eye(4, dtype=np.float64)
@@ -1882,7 +1881,9 @@ def _quest_json_pose_to_matrix(value: Any) -> Optional[np.ndarray]:
     return mat
 
 
-def _quest_depth_camera_pose_from_frame(frame: _TimedJsonFrame) -> Optional[np.ndarray]:
+def _environment_depth_camera_pose_from_frame(
+    frame: _TimedJsonFrame,
+) -> Optional[np.ndarray]:
     payload = frame.payload
     metadata = payload.get("metadata")
     local_from_depth_eye = None
@@ -1891,18 +1892,16 @@ def _quest_depth_camera_pose_from_frame(frame: _TimedJsonFrame) -> Optional[np.n
     if local_from_depth_eye is None:
         local_from_depth_eye = payload.get("local_from_depth_eye")
 
-    T_W_depth_eye = _quest_json_pose_to_matrix(local_from_depth_eye)
+    T_W_depth_eye = _json_pose_to_matrix(local_from_depth_eye)
     if T_W_depth_eye is None:
         return None
 
-    T_W_depth_camera = np.array(T_W_depth_eye, dtype=np.float64, copy=True)
-    T_W_depth_camera[:3, :3] = (
-        T_W_depth_camera[:3, :3] @ QUEST_DEPTH_EYE_GODOT_FROM_RDF
-    )
-    return T_W_depth_camera
+    return openxr_depth_camera_pose(T_W_depth_eye)
 
 
-def _quest_depth_inverse_projection_view_from_frame(frame: _TimedJsonFrame) -> Optional[np.ndarray]:
+def _environment_depth_inverse_projection_view_from_frame(
+    frame: _TimedJsonFrame,
+) -> Optional[np.ndarray]:
     metadata = frame.payload.get("metadata")
     if not isinstance(metadata, dict):
         return None
@@ -1918,7 +1917,7 @@ def _quest_depth_inverse_projection_view_from_frame(frame: _TimedJsonFrame) -> O
     return matrix
 
 
-def _quest_depth_near_far_from_frame(
+def _environment_depth_near_far_from_frame(
     frame: _TimedJsonFrame,
 ) -> Tuple[Optional[float], Optional[float]]:
     metadata = frame.payload.get("metadata")
@@ -1936,14 +1935,14 @@ def _quest_depth_near_far_from_frame(
     return near_z, far_z
 
 
-def _quest_unproject_depth_via_ipv(
+def _unproject_environment_depth_via_ipv(
     depth_native_m: np.ndarray,
-    meta: _QuestDepthMetaPose,
+    meta: _EnvironmentDepthMetaPose,
     depth_min_m: float,
     depth_max_m: float,
     stride: int,
 ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Quest-only OpenXR Environment Depth world unprojection.
+    """OpenXR Environment Depth world unprojection.
 
     This deliberately consumes the already-decoded SDK metric depth buffer.
     It only replaces the projection math: OpenXR's per-frame
@@ -1953,81 +1952,36 @@ def _quest_unproject_depth_via_ipv(
     """
     if meta.inverse_projection_view is None or meta.near_z is None:
         return None
-    near_z = float(meta.near_z)
-    far_z = meta.far_z
-    if not np.isfinite(near_z) or near_z <= 0.0:
-        return None
-    if far_z is None or not np.isfinite(far_z) or far_z < near_z:
-        x_param = -2.0 * near_z
-        y_param = -1.0
-    elif far_z == near_z:
-        return None
-    else:
-        x_param = -2.0 * far_z * near_z / (far_z - near_z)
-        y_param = -(far_z + near_z) / (far_z - near_z)
-
-    full_h, full_w = depth_native_m.shape
-    sample_stride = max(int(stride), 1)
-    row_idx = np.arange(0, full_h, sample_stride, dtype=np.float64)
-    col_idx = np.arange(0, full_w, sample_stride, dtype=np.float64)
-    rows, cols = np.meshgrid(row_idx, col_idx, indexing="ij")
-    depth = depth_native_m[::sample_stride, ::sample_stride].astype(np.float64, copy=False)
-
-    valid_depth = (
-        (depth > depth_min_m)
-        & (depth < depth_max_m)
-        & np.isfinite(depth)
+    return unproject_environment_depth_via_inverse_projection(
+        depth_native_m,
+        meta.inverse_projection_view,
+        float(meta.near_z),
+        meta.far_z,
+        depth_min_m,
+        depth_max_m,
+        stride,
     )
-    if not valid_depth.any():
-        return np.zeros((0, 3), dtype=np.float64), np.zeros((0,), dtype=np.float64)
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        window_depth = (x_param / depth - y_param + 1.0) / 2.0
-    window_depth_finite = np.isfinite(window_depth)
-    safe_window_depth = np.where(window_depth_finite, window_depth, 0.0)
-
-    clip = np.stack(
-        [
-            2.0 * ((cols + 0.5) / full_w) - 1.0,
-            2.0 * ((rows + 0.5) / full_h) - 1.0,
-            2.0 * safe_window_depth - 1.0,
-            np.ones_like(depth, dtype=np.float64),
-        ],
-        axis=-1,
-    ).reshape(-1, 4)
-    homogeneous = (meta.inverse_projection_view @ clip.T).T
-    w = homogeneous[:, 3]
-    valid_w = np.isfinite(w) & (np.abs(w) > 1e-12)
-    points = np.full((homogeneous.shape[0], 3), np.nan, dtype=np.float64)
-    points[valid_w] = homogeneous[valid_w, :3] / w[valid_w, None]
-
-    valid = (
-        valid_w
-        & valid_depth.reshape(-1)
-        & window_depth_finite.reshape(-1)
-        & np.all(np.isfinite(points), axis=1)
-    )
-    depth_values = depth.reshape(-1)[valid]
-    return points[valid], depth_values
 
 
-class _QuestDepthMetaLookup:
-    """Quest-only depth pose/timestamp lookup from depth_frame_meta packets."""
+class _EnvironmentDepthMetaLookup:
+    """OpenXR depth pose/timestamp lookup from depth_frame_meta packets."""
 
     def __init__(self, frames_by_track: Dict[str, List[_TimedJsonFrame]]) -> None:
-        frames: List[_QuestDepthMetaPose] = []
+        frames: List[_EnvironmentDepthMetaPose] = []
         for track_id, track_frames in frames_by_track.items():
             for frame in track_frames:
-                T_W_depth_camera = _quest_depth_camera_pose_from_frame(frame)
+                T_W_depth_camera = _environment_depth_camera_pose_from_frame(frame)
                 if T_W_depth_camera is None:
                     continue
-                near_z, far_z = _quest_depth_near_far_from_frame(frame)
+                near_z, far_z = _environment_depth_near_far_from_frame(frame)
                 frames.append(
-                    _QuestDepthMetaPose(
+                    _EnvironmentDepthMetaPose(
                         timestamp=float(frame.timestamp),
                         track_id=track_id,
                         T_W_depth_camera=T_W_depth_camera,
-                        inverse_projection_view=_quest_depth_inverse_projection_view_from_frame(frame),
+                        inverse_projection_view=(
+                            _environment_depth_inverse_projection_view_from_frame(frame)
+                        ),
                         near_z=near_z,
                         far_z=far_z,
                     )
@@ -2045,8 +1999,8 @@ class _QuestDepthMetaLookup:
     def nearest_within(
         self,
         t: float,
-        max_dt: float = QUEST_DEPTH_META_MATCH_MAX_DT,
-    ) -> Optional[Tuple[_QuestDepthMetaPose, float]]:
+        max_dt: float = ENVIRONMENT_DEPTH_META_MATCH_MAX_DT,
+    ) -> Optional[Tuple[_EnvironmentDepthMetaPose, float]]:
         if not self._frames:
             return None
         idx = bisect.bisect_left(self._ts, t)
@@ -2867,22 +2821,19 @@ def project_world_points_to_image(
             info(f"unsupported camera_xyz={coord} for 2D projection; skipping joints")
             return nan, np.zeros((n,), dtype=bool)
 
-    z = p_rdf[:, 2]
-    valid_z = z > z_near
     fx, fy = float(K.fx), float(K.fy)
     cx, cy = float(K.cx), float(K.cy)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        u = p_rdf[:, 0] * fx / z + cx
-        v = p_rdf[:, 1] * fy / z + cy
-    if flip_projected_y:
-        v = (height - 1) - v
-    inside = (u >= 0) & (u < width) & (v >= 0) & (v < height)
-    mask = valid_z & inside & np.isfinite(u) & np.isfinite(v)
-
-    uv = nan.copy()
-    uv[mask, 0] = u[mask]
-    uv[mask, 1] = v[mask]
-    return uv, mask
+    return project_rdf_points_to_image(
+        p_rdf,
+        fx,
+        fy,
+        cx,
+        cy,
+        width,
+        height,
+        z_near=z_near,
+        flip_projected_y=flip_projected_y,
+    )
 
 
 def project_world_points_to_camera2_image(
@@ -3514,21 +3465,21 @@ def run(args: argparse.Namespace) -> int:
     depth_h = reader.get_depth_height() if has_depth else 0
     K_d_raw = reader.get_depth_intrinsics() if has_depth else None
     T_I_Sd = reader.get_depth_extrinsics().as_se3() if has_depth else None
-    quest_depth_meta_lookup: Optional[_QuestDepthMetaLookup] = None
-    if has_depth and profile.name == "quest":
-        quest_depth_meta_lookup = _QuestDepthMetaLookup(
+    environment_depth_meta_lookup: Optional[_EnvironmentDepthMetaLookup] = None
+    if has_depth:
+        environment_depth_meta_lookup = _EnvironmentDepthMetaLookup(
             json_metadata_tracks.get("depth_frame_meta", {})
         )
-        if not quest_depth_meta_lookup.empty():
+        if not environment_depth_meta_lookup.empty():
             info(
-                "Quest depth: using "
-                f"{len(quest_depth_meta_lookup)} depth_frame_meta pose sample(s) "
-                "for per-frame timestamp/extrinsics"
+                f"{profile.name.upper()} environment depth: using "
+                f"{len(environment_depth_meta_lookup)} depth_frame_meta sample(s) "
+                "for per-frame timestamp, pose, and projection"
             )
 
-    # Quest's Environment Depth ships row 0 at the bottom of the image
-    # (OpenGL convention). For 2D viewing in Rerun we flip rows AND
-    # mirror cy. The reference does the same.
+    # OpenXR Environment Depth ships row 0 at the bottom of the image (OpenGL
+    # convention). For 2D viewing and the pinhole fallback we flip rows and
+    # mirror cy. The per-frame inverse-projection path consumes native rows.
     flip_depth_y = True
     K_d = None
     if has_depth:
@@ -3538,15 +3489,17 @@ def run(args: argparse.Namespace) -> int:
         K_d.cx = K_d_raw.cx
         K_d.cy = (depth_h - 1) - K_d_raw.cy if flip_depth_y else K_d_raw.cy
 
-    # Quest legacy fallback only. Quest and Pico depth providers do not share
-    # the same depth metadata contract, so never apply this identity-extrinsic
-    # compensation outside the Quest path. New Quest captures should use the
-    # per-frame depth_frame_meta/local_from_depth_eye lookup above instead.
+    # Quest legacy fallback only. Older Quest captures used the RGB rotation
+    # as their best available depth-eye estimate. Current captures should use
+    # the per-frame depth_frame_meta/local_from_depth_eye lookup above.
     if (
         has_depth
         and has_rgb
         and profile.name == "quest"
-        and (quest_depth_meta_lookup is None or quest_depth_meta_lookup.empty())
+        and (
+            environment_depth_meta_lookup is None
+            or environment_depth_meta_lookup.empty()
+        )
         and np.allclose(T_I_Sd[:3, :3], np.eye(3))
         and np.allclose(T_I_Sd[:3, 3], 0.0)
     ):
@@ -3556,6 +3509,26 @@ def run(args: argparse.Namespace) -> int:
             "Quest legacy capture has identity depth_extrinsics and no usable "
             "depth_frame_meta pose; using rgb-rotation with zero translation "
             "(depth eye at IMU origin)"
+        )
+
+    # Generic legacy fallback. Metric depth points are always unfolded as RDF,
+    # so an identity static extrinsic cannot be multiplied directly into an
+    # OpenXR/Godot head pose: Y and Z would point the opposite way. Recordings
+    # with per-frame metadata never reach this branch.
+    if (
+        has_depth
+        and (
+            environment_depth_meta_lookup is None
+            or environment_depth_meta_lookup.empty()
+        )
+        and np.allclose(T_I_Sd[:3, :3], np.eye(3))
+        and np.allclose(T_I_Sd[:3, 3], 0.0)
+    ):
+        T_I_Sd = np.eye(4, dtype=np.float64)
+        T_I_Sd[:3, :3] = OPENXR_DEPTH_EYE_GODOT_FROM_RDF
+        info(
+            "Environment depth has identity static extrinsics and no usable "
+            "depth_frame_meta pose; applying RDF-to-OpenXR Y/Z axis mapping"
         )
 
     info(
@@ -3667,33 +3640,38 @@ def run(args: argparse.Namespace) -> int:
         reader.reset()
         processed = 0
         depth_ts_cache: List[float] = []
-        quest_depth_meta_misses = 0
-        quest_depth_ipv_frames = 0
-        quest_depth_pinhole_meta_frames = 0
+        environment_depth_meta_misses = 0
+        environment_depth_ipv_frames = 0
+        environment_depth_pinhole_meta_frames = 0
+        depth_overlay_visible_total = 0
         while reader.has_next():
             df = reader.load_depth()
             ts = df.timestamp
             depth_raw = df.depth.copy()
 
-            quest_depth_meta: Optional[_QuestDepthMetaPose] = None
-            if quest_depth_meta_lookup is not None and not quest_depth_meta_lookup.empty():
-                matched = quest_depth_meta_lookup.nearest_within(ts)
+            environment_depth_meta: Optional[_EnvironmentDepthMetaPose] = None
+            if (
+                environment_depth_meta_lookup is not None
+                and not environment_depth_meta_lookup.empty()
+            ):
+                matched = environment_depth_meta_lookup.nearest_within(ts)
                 if matched is not None:
-                    quest_depth_meta, _meta_dt = matched
-                    ts = quest_depth_meta.timestamp
+                    environment_depth_meta, _meta_dt = matched
+                    ts = environment_depth_meta.timestamp
                 else:
-                    quest_depth_meta_misses += 1
+                    environment_depth_meta_misses += 1
 
             head_pose = head_lookup.nearest(ts)
             if head_pose is None:
                 continue
-            if quest_depth_meta is not None:
-                # Quest Environment Depth records the actual depth-eye pose per
-                # frame. Keep this isolated from Pico: Pico depth continues to
-                # use compose_world_sensor_pose(head, static_depth_extrinsic).
+            if environment_depth_meta is not None:
+                # The extension records the actual OpenXR depth-eye pose per
+                # frame. Its local axes are converted from RDF to Godot/OpenXR
+                # by _environment_depth_camera_pose_from_frame(). This fixes
+                # providers whose MP4 static depth extrinsic is only identity.
                 T_W_root = head_pose_matrix(head_pose, profile)
-                T_W_Sd_sensor = quest_depth_meta.T_W_depth_camera
-                T_W_Sd_camera = quest_depth_meta.T_W_depth_camera
+                T_W_Sd_sensor = environment_depth_meta.T_W_depth_camera
+                T_W_Sd_camera = environment_depth_meta.T_W_depth_camera
             else:
                 # Compose T_W_I, T_W_S, and the logical camera-frame pose
                 # through the same explicit chain used for RGB hand projection.
@@ -3729,31 +3707,31 @@ def run(args: argparse.Namespace) -> int:
             except TypeError:
                 rr.log("depth2d/depth", rr.DepthImage(depth_for_2d, meter=1.0))
 
-            # 3D point cloud. Quest Environment Depth carries a per-frame
-            # OpenXR inverse_projection_view matrix in depth_frame_meta; use it
+            # 3D point cloud. OpenXR Environment Depth carries a per-frame
+            # inverse_projection_view matrix in depth_frame_meta; use it
             # when present because it encodes the real depth view pose, row
             # convention, and asymmetric frustum in Godot world coordinates.
-            # The SDK depth buffer itself is still consumed exactly once via
-            # df.depth above; this branch only changes Quest projection math.
-            quest_ipv_points = (
-                _quest_unproject_depth_via_ipv(
+            # The SDK depth buffer is still consumed exactly once via df.depth;
+            # this branch only changes projection math.
+            environment_ipv_points = (
+                _unproject_environment_depth_via_ipv(
                     depth_raw,
-                    quest_depth_meta,
+                    environment_depth_meta,
                     args.depth_min,
                     args.depth_max,
                     args.depth_pc_stride,
                 )
-                if quest_depth_meta is not None
+                if environment_depth_meta is not None
                 else None
             )
-            if quest_ipv_points is not None:
-                pts_world, z_local = quest_ipv_points
-                quest_depth_ipv_frames += 1
+            if environment_ipv_points is not None:
+                pts_world, z_local = environment_ipv_points
+                environment_depth_ipv_frames += 1
             else:
-                if quest_depth_meta is not None:
-                    quest_depth_pinhole_meta_frames += 1
-                # Fallback path for Pico, non-Quest captures, and old Quest
-                # metadata that lacks inverse_projection_view. Pair
+                if environment_depth_meta is not None:
+                    environment_depth_pinhole_meta_frames += 1
+                # Fallback path for captures whose metadata lacks
+                # inverse_projection_view. Pair
                 # {depth_for_2d, K_d_raw}: depth_for_2d is row-flipped into
                 # OpenCV row order, and K_d_raw.cy is measured from the top.
                 pts_cam = project_depth_to_points(
@@ -3836,6 +3814,7 @@ def run(args: argparse.Namespace) -> int:
                         T_Srgb_W = np.linalg.inv(T_W_Srgb_camera_at_depth_ts)
                         z_rgb = (T_Srgb_W[:3, :3] @ pts_world_ov.T).T[:, 2] + T_Srgb_W[2, 3]
                     visible_rgb = int(mask_rgb.sum())
+                    depth_overlay_visible_total += visible_rgb
                     if visible_rgb > 0:
                         # Colour by distance along the RGB camera axis so
                         # blue-near / red-far reads relative to the view.
@@ -3866,23 +3845,28 @@ def run(args: argparse.Namespace) -> int:
                 break
 
         info(f"logged {processed} depth frames")
-        if quest_depth_ipv_frames:
+        if has_rgb and args.depth_overlay_stride > 0:
             info(
-                "Quest depth: unprojected "
-                f"{quest_depth_ipv_frames} frame(s) via "
+                f"  + {depth_overlay_visible_total} depth samples projected "
+                "inside the left RGB image across all depth frames"
+            )
+        if environment_depth_ipv_frames:
+            info(
+                f"{profile.name.upper()} environment depth: unprojected "
+                f"{environment_depth_ipv_frames} frame(s) via "
                 "depth_frame_meta.depth_inverse_projection_view"
             )
-        if quest_depth_pinhole_meta_frames:
+        if environment_depth_pinhole_meta_frames:
             info(
-                "Quest depth: "
-                f"{quest_depth_pinhole_meta_frames} metadata-matched frame(s) "
+                f"{profile.name.upper()} environment depth: "
+                f"{environment_depth_pinhole_meta_frames} metadata-matched frame(s) "
                 "lacked a valid inverse_projection_view; used pinhole fallback"
             )
-        if quest_depth_meta_misses:
+        if environment_depth_meta_misses:
             info(
-                "Quest depth: "
-                f"{quest_depth_meta_misses} frame(s) had no depth_frame_meta "
-                f"within {QUEST_DEPTH_META_MATCH_MAX_DT * 1000:.0f}ms; "
+                f"{profile.name.upper()} environment depth: "
+                f"{environment_depth_meta_misses} frame(s) had no depth_frame_meta "
+                f"within {ENVIRONMENT_DEPTH_META_MATCH_MAX_DT * 1000:.0f}ms; "
                 "used static depth extrinsics fallback for those frames"
             )
 
