@@ -22,9 +22,9 @@
 # to its home pose. Clear the workspace before running.
 #
 # Usage:
-#   bash cicd/06_so101_lerobot_device.sh
-#   SO101_PORT=/dev/ttyACM0 bash cicd/06_so101_lerobot_device.sh
-#   SO101_URDF=/path/to/so101_new_calib.urdf bash cicd/06_so101_lerobot_device.sh
+#   bash cicd/06_single_so101_lerobot_device.sh
+#   SO101_PORT=/dev/ttyACM0 bash cicd/06_single_so101_lerobot_device.sh
+#   SO101_URDF=/path/to/so101_new_calib.urdf bash cicd/06_single_so101_lerobot_device.sh
 
 set -euo pipefail
 
