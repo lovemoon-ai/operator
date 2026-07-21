@@ -60,16 +60,16 @@ Run device tests only on target devices. Do not create local fixtures to
 replace device coverage.
 
 ```bash
-bash tests/01_rtsp_test.sh
-bash tests/02_ego_record.sh
-bash tests/03_godot_mujoco_device.sh
-bash tests/04_live_feed_e2e.sh
+bash cicd/01_rtsp_test.sh
+bash cicd/02_ego_record.sh
+bash cicd/03_godot_mujoco_device.sh
+bash cicd/04_live_feed_e2e.sh
 ```
 
 Static checks that do not run the XR runtime:
 
 ```bash
-python3 tests/validate_xr_features.py
-python3 tests/validate_xr_test_manifests.py
-bash tests/03_godot_mujoco_static.sh
+python3 cicd/validate_xr_features.py
+python3 cicd/validate_xr_test_manifests.py
+bash cicd/03_godot_mujoco_static.sh
 ```

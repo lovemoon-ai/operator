@@ -13,6 +13,26 @@ var _hand_joints_left: Array[Dictionary] = []
 var _hand_joints_right: Array[Dictionary] = []
 
 
+## Both controllers report as usable by default. The inherited implementation
+## derives this from real XRController3D nodes, which a free-standing fake never
+## has, so it would answer false for both hands -- and ControlMode's driving-hand
+## latch requires an ACTIVE controller, meaning no test could ever hand control
+## to the left hand. Tests that care about a dead/powered-off controller call
+## `set_controller_mode_active(hand, false)`.
+var _mode_active: Array = [true, true]
+
+
+func set_controller_mode_active(hand: int, active: bool) -> void:
+	if hand >= 0 and hand < 2:
+		_mode_active[hand] = active
+
+
+func is_controller_mode_active(hand: int) -> bool:
+	if hand >= 0 and hand < 2:
+		return bool(_mode_active[hand])
+	return false
+
+
 func set_controller_input(hand: int, input: Dictionary) -> void:
 	if hand >= 0 and hand < 2:
 		_inputs[hand] = input

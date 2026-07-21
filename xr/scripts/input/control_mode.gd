@@ -52,6 +52,23 @@ func is_deadman_engaged() -> bool:
 	return false
 
 
+## Whether the deadman for ONE hand is engaged.
+##
+## A dual-arm descriptor gives each side its own `left_enable`/`right_enable`
+## target, so the any-target [method is_deadman_engaged] above cannot answer
+## per-hand: it reports true for BOTH hands as soon as either grip is squeezed,
+## which would leave the idle hand's overlay drawn as if that arm were live.
+## Single-arm descriptors use an unprefixed `enable`, which belongs to whichever
+## hand is currently driving.
+func is_deadman_engaged_for_hand(hand: int) -> bool:
+	var side_target := "left_enable" if hand == HAND_LEFT else "right_enable"
+	if _enable_latched.has(side_target):
+		return bool(_enable_latched[side_target])
+	if hand == _driving_hand:
+		return bool(_enable_latched.get("enable", false))
+	return false
+
+
 # Per-frame cache of get_controller_input(hand). Resolving the driving hand
 # needs both hands' grips, and the mapping loop then re-reads the driving hand's
 # inputs, so without this a single command rebuilt the same input Dictionaries
