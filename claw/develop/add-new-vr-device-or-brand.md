@@ -111,11 +111,11 @@ packaging differences, not every runtime capability variation.
 - `xr/scripts/platform/registry/platform_registry.gd` - app/core entry point
   for capability queries and provider lookup.
 - `xr/scripts/platform/quest/quest_platform_adapter.gd` - Meta Quest singleton
-  names, Quest provider probing, depth/boundary/timebase capability reporting.
+  names plus Quest provider and boundary probing.
 - `xr/scripts/platform/pico/pico_platform_adapter.gd` - Pico singleton names,
   Pico build/runtime heuristics, Pico OpenXR bridge access.
 - `xr/scripts/platform/openxr/generic_openxr_adapter.gd` - generic pose,
-  controller, and hand-tracking fallback.
+  controller, hand-tracking, and environment-depth capability probes.
 - `xr/scripts/contracts/platform/sensor_capability.gd` - stable capability ids.
 - `xr/scripts/contracts/platform/capability_state.gd` - availability states.
 - `xr/scripts/contracts/platform/capability_info.gd` - capability payload.
@@ -166,14 +166,17 @@ under the Pico family.
    ```
 
    In Godot, `OS.get_model_name()` is acceptable for snapshots. Avoid using it
-   as a feature gate outside a platform adapter.
+   as a feature gate outside a platform adapter. A serial may select a device
+   for a host-side test command, but it must never be compiled into the APK or
+   used as a runtime feature gate.
 
 3. Update the brand adapter only when runtime probing is wrong.
 
    Examples:
 
-   - Quest depth extension reports present on one model and absent on another:
-     fix `QuestPlatformAdapter.depth_extension_info()` or its capability state.
+   - Environment depth reports present on one runtime and absent on another:
+     fix `GenericOpenXRPlatformAdapter.environment_depth_capability()`; do not
+     add a model-name branch.
    - Pico motion trackers expose a new runtime name pattern:
      update `PicoPlatformAdapter.looks_like_motion_tracker_name()` or
      `is_pico_openxr_runtime_name()`.
@@ -184,6 +187,10 @@ under the Pico family.
    add a new `SensorCapability`; add runtime tuning or profile data. If the
    difference is "can provide depth map" or "can provide motion trackers", use
    a capability.
+
+   For PICO RGB capture, use `PicoOpenXRExtension.get_camera_image_capabilities()`
+   and project the runtime's resolution/FPS lists into the UI. Do not introduce
+   a model-to-resolution table.
 
 5. Add device coverage.
 
@@ -268,8 +275,10 @@ under the Pico family.
 
 8. Update shell device selection.
 
-   If a top-level E2E script needs to detect the brand, update its
-   manufacturer/model matching. Current examples are in:
+   If a top-level E2E script needs to detect the brand, update its manufacturer
+   or brand matching. Model matching is reserved for a documented vendor bug
+   workaround and must not be the normal PICO feature-selection path. Current
+   examples are in:
 
    - `cicd/02_ego_record.sh`;
    - `cicd/03_godot_mujoco_device.sh`;
@@ -315,6 +324,13 @@ bash cicd/04_live_feed_e2e.sh --device quest
 For Pico, replace the device flag and APK build/install path accordingly.
 For a new brand, add explicit script support before relying on `auto`.
 
+PICO camera resolution coverage can be discovered directly from the installed
+runtime and exercised without a checked-in device table:
+
+```bash
+bash cicd/05_pico_ego_resolution_matrix.sh --serial <serial> --skip-build
+```
+
 Pull and compare capability snapshots from the module harness results. The
 minimum acceptance criteria:
 
@@ -332,6 +348,7 @@ minimum acceptance criteria:
 - Build differences are represented in export presets and Makefile targets.
 - Same-brand model differences do not create new presets without a packaging
   reason.
+- PICO camera behavior contains no model, codename, or serial gates.
 - Device smoke tests run on at least one old and one new model in the family.
 - Docs list known unsupported or degraded capabilities.
 

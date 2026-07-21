@@ -6,7 +6,7 @@ import android.os.Build
  * Headset identity captured at session start, so every produced spatial mp4
  * and manifest.json records which device the data came from.
  *
- * `type` is a normalised short id ("pico4_ultra", "quest3", "quest3s",
+ * `type` is a normalised short id ("pico", "quest3", "quest3s",
  * "questpro", "vivexr_elite", ...). Unknown devices fall back to a slugified
  * version of Build.MODEL so we never lose information. `model` and
  * `manufacturer` are the raw Build.* strings -- downstream tooling can pick
@@ -88,35 +88,12 @@ data class DeviceIdentity(
                 return "meta_unknown"
             }
 
-            // ---- Pico family. Build.MANUFACTURER is "Pico" / "PICO". We
-            // classify by MODEL only -- Pico's Build.DEVICE / Build.PRODUCT
-            // codenames vary across firmware revisions and aren't publicly
-            // documented, so MODEL is the only field we trust.
+            // ---- Pico family. Capture behavior is capability-driven, so
+            // every PICO model intentionally shares one stable vendor type.
+            // Raw Build fields remain in DeviceIdentity for diagnostics and
+            // manifests, but no model number/codename gates functionality.
             if (mfg.contains("pico")) {
-                // Pico's MODEL is sometimes the marketing name ("Pico 4 Ultra")
-                // and sometimes the internal model number (e.g. "A9210" for
-                // Pico 4 Ultra, "A8110"/"A8150" for Pico 4). Both forms are
-                // checked here so either lands in the right classifier branch.
-                if (mdl.contains("4 ultra") || mdl.contains("4u") ||
-                    mdl.contains("a9210") || mdl.contains("a8210")) {
-                    return "pico4_ultra"
-                }
-                if (mdl.contains("4 pro")) {
-                    return "pico4_pro"
-                }
-                if (mdl.contains("4 enterprise") || mdl.contains("4e")) {
-                    return "pico4_enterprise"
-                }
-                if (mdl.contains("pico 4") || mdl.contains("a8110") || mdl.contains("a8150")) {
-                    return "pico4"
-                }
-                if (mdl.contains("g3") || mdl.contains("pico g3")) {
-                    return "pico_g3"
-                }
-                if (mdl.contains("neo 3")) {
-                    return "pico_neo3"
-                }
-                return slug(model.ifEmpty { "pico_unknown" })
+                return "pico"
             }
 
             // ---- HTC Vive XR

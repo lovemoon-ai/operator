@@ -78,11 +78,15 @@ func _initialize() -> void:
 
 
 func has_capability(id: int) -> bool:
-	var info: Object = _capabilities.get(id)
+	var info: Object = capability_info(id)
 	return info != null and info.available()
 
 
 func capability_info(id: int) -> Object:
+	if id == SensorCapabilityScript.DEPTH_MAP and _generic_adapter != null:
+		var live_environment_depth: Object = _generic_adapter.environment_depth_capability()
+		_capabilities[id] = live_environment_depth
+		_providers[id] = _generic_adapter
 	var info: Object = _capabilities.get(id)
 	if info != null:
 		return info
@@ -99,6 +103,8 @@ func provider_for(id: int) -> Object:
 
 
 func capabilities() -> Array:
+	# Environment depth is an active-runtime property, not a headset-model property.
+	capability_info(SensorCapabilityScript.DEPTH_MAP)
 	var out: Array = []
 	for id in _capabilities.keys():
 		out.append(_capabilities[id])
@@ -151,17 +157,18 @@ func boundary_extension() -> Object:
 
 
 func depth_extension_info() -> Dictionary:
-	return _quest_adapter.depth_extension_info()
+	return _generic_adapter.environment_depth_info()
 
 
 func depth_time_extension() -> Object:
-	return _quest_adapter.depth_time_extension()
+	return _generic_adapter.environment_depth_time_extension()
 
 
-## Legacy fallback used by samplers when no capture provider was injected:
-## historically they fell back to QuestCapturePlugin only.
+## Fallback used by samplers when no capture provider was injected. Select the
+## active Android provider by runtime score so depth conversion and timestamps
+## work in the same APK across supported OpenXR devices.
 func fallback_capture_provider() -> Object:
-	return _quest_adapter.camera_plugin()
+	return bind_camera_provider()
 
 
 static func _call_or_null(plugin: Object, method: String) -> Variant:

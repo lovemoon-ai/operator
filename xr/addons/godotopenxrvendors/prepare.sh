@@ -43,6 +43,7 @@ PATCH_FILES=(
   patches/0001-meta-depth-callback-metadata.patch
   patches/0002-meta-vulkan-depth-readback.patch
   patches/0003-fb-body-tracking-vformat-fix.patch
+  patches/0004-meta-depth-start-result.patch
 )
 
 # Files we keep locally, relative to .bin/.
@@ -68,7 +69,9 @@ FILES=(
 # from the official release if the local platform build does not emit them.
 PATCHED_REQUIRED_FILES=(
   android/debug/godotopenxr-meta-debug.aar
+  android/debug/godotopenxr-pico-debug.aar
   android/release/godotopenxr-meta-release.aar
+  android/release/godotopenxr-pico-release.aar
   android/template_debug/arm64/libgodotopenxrvendors.so
   android/template_release/arm64/libgodotopenxrvendors.so
 )
@@ -80,12 +83,15 @@ PATCHED_SO_FILES=(
 
 PATCHED_AAR_FILES=(
   android/debug/godotopenxr-meta-debug.aar
+  android/debug/godotopenxr-pico-debug.aar
   android/release/godotopenxr-meta-release.aar
+  android/release/godotopenxr-pico-release.aar
 )
 
 PATCH_MARKERS=(
   "runtime_display_time_ns"
   "Failed to copy environment depth image for CPU readback: "
+  "openxr_meta_environment_depth_start_failed"
 )
 
 TEMP_DIRS=()

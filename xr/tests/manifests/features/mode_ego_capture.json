@@ -42,6 +42,13 @@
       "script": "res://tests/unit/contracts/launcher_navigation_test.gd"
     },
     {
+      "id": "contracts.pico_interaction_parity",
+      "level": "contract",
+      "suite": "contracts.interaction",
+      "module": "interaction",
+      "script": "res://tests/unit/contracts/pico_interaction_parity_test.gd"
+    },
+    {
       "id": "capture.start_stop_with_fake_sources",
       "level": "integration",
       "suite": "capture.pipeline",

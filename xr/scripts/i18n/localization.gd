@@ -6,6 +6,7 @@ const SUPPORTED_LOCALES: Array[String] = ["en", "zh"]
 # 游戏化文案 — 操作员/链路/机体 世界观
 const MESSAGES := {
 	"en": {
+		"UI_AUTO": "Auto",
 		"UI_ADDRESS_LABEL": "Address: %s",
 		"UI_APPLYING": "Applying...",
 		"UI_BACK_TO_HARDWARE_SELECT": "Back to Selection",
@@ -238,6 +239,7 @@ const MESSAGES := {
 			"UI_XR_FAILED_START": "XR Failed to Start",
 	},
 	"zh": {
+		"UI_AUTO": "自动",
 		"UI_ADDRESS_LABEL": "地址：%s",
 		"UI_APPLYING": "应用配置中…",
 		"UI_BACK_TO_HARDWARE_SELECT": "返回设备选择",

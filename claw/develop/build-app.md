@@ -49,10 +49,13 @@ downloads the *official, unpatched* GodotVR OpenXR Vendors release binaries.
 
 ## Ego depth capture requires the patched vendor plugin
 
-Environment depth (`XR_META_environment_depth`) on Quest is read back from the
-GPU depth swapchain to the CPU, converted to `u16` millimetres, and muxed into
-the SpatialMP4. That readback only works with two local patches to the OpenXR
-Vendors plugin, tracked in `xr/addons/godotopenxrvendors/patches/`:
+Environment depth (`XR_META_environment_depth`) on any runtime that advertises
+the extension is read back from the GPU depth swapchain to the CPU, converted
+to `u16` millimetres, and muxed into the SpatialMP4. This includes supported
+Meta and PICO runtimes while keeping one APK per vendor build. The device model
+is never used as the support signal. That readback only works with two local
+patches to the OpenXR Vendors plugin, tracked in
+`xr/addons/godotopenxrvendors/patches/`:
 
 - `0001-meta-depth-callback-metadata.patch` — adds `near_z`, `far_z`, FOV,
   `runtime_display_time_ns`, and `local_from_depth_eye` to each depth callback.
@@ -76,8 +79,10 @@ cd xr
 ./addons/godotopenxrvendors/prepare.sh --check-patched
 
 # 3. Build and install the APK as usual. setup-vendors is a no-op now that
-#    .bin/ already holds the patched binaries.
+#    .bin/ already holds the patched binaries. Both builds use the same patched
+#    runtime capability probe and depth-frame contract.
 make build-install-quest
+make build-pico
 make ship-quest
 ```
 

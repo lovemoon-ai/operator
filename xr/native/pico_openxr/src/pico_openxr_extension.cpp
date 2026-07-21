@@ -87,6 +87,7 @@ PicoOpenXRExtension::~PicoOpenXRExtension() {
 void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_status"), &PicoOpenXRExtension::get_status);
 	ClassDB::bind_method(D_METHOD("get_external_camera_info"), &PicoOpenXRExtension::get_external_camera_info);
+	ClassDB::bind_method(D_METHOD("get_camera_image_capabilities"), &PicoOpenXRExtension::get_camera_image_capabilities);
 	ClassDB::bind_method(D_METHOD("start_camera_image_capture", "stereo", "width", "height", "fps"), &PicoOpenXRExtension::start_camera_image_capture, DEFVAL(true), DEFVAL(640), DEFVAL(480), DEFVAL(30));
 	ClassDB::bind_method(D_METHOD("poll_camera_image_frames"), &PicoOpenXRExtension::poll_camera_image_frames);
 	ClassDB::bind_method(D_METHOD("bind_camera_frame_sink", "sink"), &PicoOpenXRExtension::bind_camera_frame_sink);
@@ -266,6 +267,106 @@ Dictionary PicoOpenXRExtension::get_external_camera_info() {
 		refresh_external_camera_info();
 	}
 	return cached_external_camera_info.duplicate(true);
+}
+
+Dictionary PicoOpenXRExtension::get_camera_image_capabilities() {
+	Dictionary result;
+	result["extension"] = XR_PICO_CAMERA_IMAGE_EXTENSION_NAME;
+	result["supported"] = camera_image_ext;
+	result["available"] = false;
+	result["stereo_available"] = false;
+	result["resolutions"] = Array();
+	result["fps"] = PackedInt32Array();
+
+	if (!resolve_functions() || !instance || !has_camera_image_functions()) {
+		last_camera_image_result = XR_ERROR_HANDLE_INVALID;
+		result["result"] = last_camera_image_result;
+		return result;
+	}
+
+	// Camera ids and capability lists come from the runtime. The fallback ids
+	// retained by refresh_camera_image_camera_ids() are vendor API defaults,
+	// not product/model mappings, so this remains usable on future PICO models.
+	refresh_camera_image_camera_ids();
+	CameraImageCapabilitySet left_capabilities;
+	CameraImageCapabilitySet right_capabilities;
+	const bool left_ok = query_camera_image_capabilities(camera_left.camera_id, left_capabilities);
+	const bool right_ok = query_camera_image_capabilities(camera_right.camera_id, right_capabilities);
+	if (left_ok) {
+		result["left"] = camera_image_capability_record(camera_left.camera_id, left_capabilities);
+	}
+	if (right_ok) {
+		result["right"] = camera_image_capability_record(camera_right.camera_id, right_capabilities);
+	}
+
+	auto supports_capture_format = [](const CameraImageCapabilitySet &capabilities) {
+		const bool rgba_ok = capabilities.formats.empty() ||
+				contains_value(capabilities.formats, XR_CAMERA_IMAGE_FORMAT_RGBA_8888_PICO);
+		const bool raw_ok = capabilities.transfer_types.empty() ||
+				contains_value(capabilities.transfer_types, XR_CAMERA_DATA_TRANSFER_TYPE_RAW_BUFFER_PICO);
+		return rgba_ok && raw_ok && !capabilities.resolutions.empty();
+	};
+	const bool left_usable = left_ok && supports_capture_format(left_capabilities);
+	const bool right_usable = right_ok && supports_capture_format(right_capabilities);
+
+	Array mono_resolutions;
+	if (left_usable) {
+		std::vector<XrExtent2Di> sorted = left_capabilities.resolutions;
+		std::sort(sorted.begin(), sorted.end(), [](const XrExtent2Di &a, const XrExtent2Di &b) {
+			const int64_t area_a = static_cast<int64_t>(a.width) * a.height;
+			const int64_t area_b = static_cast<int64_t>(b.width) * b.height;
+			return area_a == area_b ? a.width > b.width : area_a > area_b;
+		});
+		for (const XrExtent2Di &resolution : sorted) {
+			if (resolution.width <= 0 || resolution.height <= 0) {
+				continue;
+			}
+			Dictionary entry;
+			entry["width"] = resolution.width;
+			entry["height"] = resolution.height;
+			mono_resolutions.push_back(entry);
+		}
+	}
+
+	Array stereo_resolutions;
+	if (left_usable && right_usable) {
+		for (int i = 0; i < mono_resolutions.size(); ++i) {
+			const Dictionary entry = mono_resolutions[i];
+			const int width = int(entry["width"]);
+			const int height = int(entry["height"]);
+			const bool right_has_match = std::any_of(
+					right_capabilities.resolutions.begin(), right_capabilities.resolutions.end(),
+					[width, height](const XrExtent2Di &candidate) {
+						return candidate.width == width && candidate.height == height;
+					});
+			if (right_has_match) {
+				stereo_resolutions.push_back(entry);
+			}
+		}
+	}
+
+	PackedInt32Array common_fps;
+	if (left_usable) {
+		for (XrCameraImageFpsPICO fps : left_capabilities.fps_values) {
+			if (right_usable && !contains_value(right_capabilities.fps_values, fps)) {
+				continue;
+			}
+			const int value = camera_fps_to_int(fps);
+			if (!common_fps.has(value)) {
+				common_fps.push_back(value);
+			}
+		}
+	}
+	common_fps.sort();
+
+	result["available"] = left_usable;
+	result["stereo_available"] = left_usable && right_usable && !stereo_resolutions.is_empty();
+	result["mono_resolutions"] = mono_resolutions;
+	result["stereo_resolutions"] = stereo_resolutions;
+	result["resolutions"] = !stereo_resolutions.is_empty() ? stereo_resolutions : mono_resolutions;
+	result["fps"] = common_fps;
+	result["result"] = last_camera_image_result;
+	return result;
 }
 
 Dictionary PicoOpenXRExtension::start_camera_image_capture(bool stereo, int width, int height, int fps) {
@@ -1204,7 +1305,10 @@ bool PicoOpenXRExtension::refresh_camera_image_camera_ids() {
 	return true;
 }
 
-bool PicoOpenXRExtension::select_camera_image_config(XrCameraIdPICO camera_id, int preferred_width, int preferred_height, int preferred_fps, CameraImageCaptureConfig &config) {
+bool PicoOpenXRExtension::query_camera_image_capabilities(
+		XrCameraIdPICO camera_id,
+		CameraImageCapabilitySet &capabilities) {
+	capabilities = CameraImageCapabilitySet{};
 	if (!instance || !xrEnumerateCameraCapabilityTypesPICO_ptr || !xrGetCameraSupportedCapabilitiesPICO_ptr) {
 		last_camera_image_result = XR_ERROR_HANDLE_INVALID;
 		return false;
@@ -1301,45 +1405,102 @@ bool PicoOpenXRExtension::select_camera_image_config(XrCameraIdPICO camera_id, i
 		return false;
 	}
 
-	std::vector<XrExtent2Di> resolutions(resolution.resolutionCountOutput);
-	std::vector<XrCameraImageFormatPICO> formats(format.formatCountOutput);
-	std::vector<XrCameraDataTransferTypePICO> transfer_types(transfer_type.typeCountOutput);
-	std::vector<XrCameraModelPICO> models(model.modelCountOutput);
-	std::vector<XrCameraImageFpsPICO> fps_values(fps.fpsCountOutput);
-	resolution.resolutionCapacityInput = static_cast<uint32_t>(resolutions.size());
-	resolution.resolutions = resolutions.empty() ? nullptr : resolutions.data();
-	format.formatCapacityInput = static_cast<uint32_t>(formats.size());
-	format.formats = formats.empty() ? nullptr : formats.data();
-	transfer_type.typeCapacityInput = static_cast<uint32_t>(transfer_types.size());
-	transfer_type.types = transfer_types.empty() ? nullptr : transfer_types.data();
-	model.modelCapacityInput = static_cast<uint32_t>(models.size());
-	model.models = models.empty() ? nullptr : models.data();
-	fps.fpsCapacityInput = static_cast<uint32_t>(fps_values.size());
-	fps.fps = fps_values.empty() ? nullptr : fps_values.data();
+	capabilities.resolutions.resize(resolution.resolutionCountOutput);
+	capabilities.formats.resize(format.formatCountOutput);
+	capabilities.transfer_types.resize(transfer_type.typeCountOutput);
+	capabilities.models.resize(model.modelCountOutput);
+	capabilities.fps_values.resize(fps.fpsCountOutput);
+	resolution.resolutionCapacityInput = static_cast<uint32_t>(capabilities.resolutions.size());
+	resolution.resolutions = capabilities.resolutions.empty() ? nullptr : capabilities.resolutions.data();
+	format.formatCapacityInput = static_cast<uint32_t>(capabilities.formats.size());
+	format.formats = capabilities.formats.empty() ? nullptr : capabilities.formats.data();
+	transfer_type.typeCapacityInput = static_cast<uint32_t>(capabilities.transfer_types.size());
+	transfer_type.types = capabilities.transfer_types.empty() ? nullptr : capabilities.transfer_types.data();
+	model.modelCapacityInput = static_cast<uint32_t>(capabilities.models.size());
+	model.models = capabilities.models.empty() ? nullptr : capabilities.models.data();
+	fps.fpsCapacityInput = static_cast<uint32_t>(capabilities.fps_values.size());
+	fps.fps = capabilities.fps_values.empty() ? nullptr : capabilities.fps_values.data();
 
 	last_camera_image_result = xrGetCameraSupportedCapabilitiesPICO_ptr(instance, &get_info, &supported);
 	if (XR_FAILED(last_camera_image_result)) {
 		return false;
 	}
+	capabilities.resolutions.resize(resolution.resolutionCountOutput);
+	capabilities.formats.resize(format.formatCountOutput);
+	capabilities.transfer_types.resize(transfer_type.typeCountOutput);
+	capabilities.models.resize(model.modelCountOutput);
+	capabilities.fps_values.resize(fps.fpsCountOutput);
+	last_camera_image_result = XR_SUCCESS;
+	return true;
+}
+
+Dictionary PicoOpenXRExtension::camera_image_capability_record(
+		XrCameraIdPICO camera_id,
+		const CameraImageCapabilitySet &capabilities) const {
+	Dictionary record;
+	record["camera_id"] = static_cast<int64_t>(camera_id);
+	Array resolutions;
+	for (const XrExtent2Di &resolution : capabilities.resolutions) {
+		if (resolution.width <= 0 || resolution.height <= 0) {
+			continue;
+		}
+		Dictionary entry;
+		entry["width"] = resolution.width;
+		entry["height"] = resolution.height;
+		resolutions.push_back(entry);
+	}
+	PackedInt32Array fps_values;
+	for (XrCameraImageFpsPICO fps : capabilities.fps_values) {
+		const int value = camera_fps_to_int(fps);
+		if (!fps_values.has(value)) {
+			fps_values.push_back(value);
+		}
+	}
+	fps_values.sort();
+	record["resolutions"] = resolutions;
+	record["fps"] = fps_values;
+	record["rgba8888"] = capabilities.formats.empty() ||
+			contains_value(capabilities.formats, XR_CAMERA_IMAGE_FORMAT_RGBA_8888_PICO);
+	record["raw_buffer"] = capabilities.transfer_types.empty() ||
+			contains_value(capabilities.transfer_types, XR_CAMERA_DATA_TRANSFER_TYPE_RAW_BUFFER_PICO);
+	return record;
+}
+
+bool PicoOpenXRExtension::select_camera_image_config(XrCameraIdPICO camera_id, int preferred_width, int preferred_height, int preferred_fps, CameraImageCaptureConfig &config) {
+	CameraImageCapabilitySet capabilities;
+	if (!query_camera_image_capabilities(camera_id, capabilities)) {
+		return false;
+	}
+	const std::vector<XrExtent2Di> &resolutions = capabilities.resolutions;
+	const std::vector<XrCameraImageFormatPICO> &formats = capabilities.formats;
+	const std::vector<XrCameraDataTransferTypePICO> &transfer_types = capabilities.transfer_types;
+	const std::vector<XrCameraModelPICO> &models = capabilities.models;
+	const std::vector<XrCameraImageFpsPICO> &fps_values = capabilities.fps_values;
 
 	bool have_resolution = false;
 	uint64_t best_score = std::numeric_limits<uint64_t>::max();
-	const uint64_t preferred_area = preferred_width > 0 && preferred_height > 0 ?
+	const bool has_preferred_resolution = preferred_width > 0 && preferred_height > 0;
+	const uint64_t preferred_area = has_preferred_resolution ?
 			static_cast<uint64_t>(preferred_width) * static_cast<uint64_t>(preferred_height) : 0;
 	for (const XrExtent2Di &candidate : resolutions) {
 		if (candidate.width <= 0 || candidate.height <= 0) {
 			continue;
 		}
-		uint64_t score = static_cast<uint64_t>(candidate.width) * static_cast<uint64_t>(candidate.height);
-		if (preferred_width > 0 && preferred_height > 0) {
-			const int64_t width_delta = static_cast<int64_t>(candidate.width) - preferred_width;
-			const int64_t height_delta = static_cast<int64_t>(candidate.height) - preferred_height;
-			const uint64_t abs_width = width_delta < 0 ? static_cast<uint64_t>(-width_delta) : static_cast<uint64_t>(width_delta);
-			const uint64_t abs_height = height_delta < 0 ? static_cast<uint64_t>(-height_delta) : static_cast<uint64_t>(height_delta);
-			const uint64_t area = static_cast<uint64_t>(candidate.width) * static_cast<uint64_t>(candidate.height);
-			const uint64_t area_delta = area > preferred_area ? area - preferred_area : preferred_area - area;
-			score = abs_width * 1000000ULL + abs_height * 1000ULL + area_delta;
+		// A missing preference is a legacy/pending-state fallback. Select the
+		// runtime's first advertised group instead of scoring toward the
+		// smallest resolution (the old implicit "Auto" behavior).
+		if (!has_preferred_resolution) {
+			config.resolution = candidate;
+			have_resolution = true;
+			break;
 		}
+		const int64_t width_delta = static_cast<int64_t>(candidate.width) - preferred_width;
+		const int64_t height_delta = static_cast<int64_t>(candidate.height) - preferred_height;
+		const uint64_t abs_width = width_delta < 0 ? static_cast<uint64_t>(-width_delta) : static_cast<uint64_t>(width_delta);
+		const uint64_t abs_height = height_delta < 0 ? static_cast<uint64_t>(-height_delta) : static_cast<uint64_t>(height_delta);
+		const uint64_t area = static_cast<uint64_t>(candidate.width) * static_cast<uint64_t>(candidate.height);
+		const uint64_t area_delta = area > preferred_area ? area - preferred_area : preferred_area - area;
+		const uint64_t score = abs_width * 1000000ULL + abs_height * 1000ULL + area_delta;
 		if (!have_resolution || score < best_score) {
 			config.resolution = candidate;
 			best_score = score;

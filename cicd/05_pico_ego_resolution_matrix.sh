@@ -9,7 +9,7 @@
 #
 # Usage:
 #   bash cicd/05_pico_ego_resolution_matrix.sh --serial <pico-serial>
-#   bash cicd/05_pico_ego_resolution_matrix.sh --resolutions 2048x1536,1920x1440
+#   bash cicd/05_pico_ego_resolution_matrix.sh --resolutions 1920x1920,1280x1280
 #   bash cicd/05_pico_ego_resolution_matrix.sh --skip-build --skip-install
 
 set -euo pipefail
@@ -25,7 +25,7 @@ FFPROBE="${FFPROBE:-ffprobe}"
 MAKE="${MAKE:-make}"
 SERIAL="${PICO_SERIAL:-${ADB_SERIAL:-}}"
 CAPTURE_SECONDS="${CAPTURE_SECONDS:-8}"
-RESOLUTION_CSV="${RESOLUTIONS:-2048x1536,1920x1440,1280x960,1024x768,640x480}"
+RESOLUTION_CSV="${RESOLUTIONS:-}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/cicd/results/pico-ego-resolution-$RUN_ID}"
 REMOTE_RUN_ROOT="${DEVICE_ROOT:-/sdcard/DCIM/OperatorResolutionTests/$RUN_ID}"
@@ -71,25 +71,47 @@ run_adb() {
   "$ADB" -s "$SERIAL" "$@"
 }
 
+stop_app_and_wait() {
+  local deadline=$(( $(date +%s) + 10 ))
+  # Some PICO runtimes retain the immersive task after the Linux process has
+  # exited and return START_TASK_TO_FRONT for the next intent, dropping its
+  # new automation extras. Move Home first so the spatial container detaches.
+  run_adb shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
+  sleep 0.5
+  run_adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ -z "$(run_adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')" ]; then
+      sleep 0.5
+      return 0
+    fi
+    sleep 0.25
+  done
+  fail "timed out waiting for $PKG to stop"
+}
+
 require_tool() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"
 }
 
 is_supported_resolution() {
-  case "$1" in
-    2048x1536|1920x1440|1280x960|1024x768|640x480) return 0 ;;
-    *) return 1 ;;
-  esac
+  [[ "$1" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]]
 }
 
 device_looks_like_pico() {
   local serial="$1"
-  local identity
-  identity="$("$ADB" -s "$serial" shell 'getprop ro.product.manufacturer; getprop ro.product.model; getprop ro.product.device' 2>/dev/null | tr '\r\n' ' ')"
-  case "$(printf '%s' "$identity" | tr '[:upper:]' '[:lower:]')" in
-    *pico*|*a9210*|*sparrow*) return 0 ;;
-    *) return 1 ;;
-  esac
+  local identity=""
+  local attempt
+  # ADB can transiently return an empty property response while two USB XR
+  # devices are active. Retry the generic manufacturer/brand probe; never
+  # fall back to a model, product codename, or serial allowlist.
+  for attempt in 1 2 3; do
+    identity="$("$ADB" -s "$serial" shell 'getprop ro.product.manufacturer; getprop ro.product.brand' 2>/dev/null | tr '\r\n' ' ')"
+    case "$(printf '%s' "$identity" | tr '[:upper:]' '[:lower:]')" in
+      *pico*|*picovr*) return 0 ;;
+    esac
+    sleep 0.25
+  done
+  return 1
 }
 
 pick_pico_device() {
@@ -174,6 +196,58 @@ wait_for_log_marker() {
   return 1
 }
 
+wait_for_app_exit() {
+  local timeout="$1"
+  local deadline=$(( $(date +%s) + timeout ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ -z "$(run_adb shell pidof "$PKG" 2>/dev/null | tr -d '\r')" ]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
+probe_runtime_resolutions() {
+  local log_path="$OUTPUT_DIR/runtime-capabilities.log"
+  local json_path="$OUTPUT_DIR/runtime-capabilities.json"
+  local marker="PICO RGB runtime capabilities: "
+  local line
+
+  log "probing XR_PICO_camera_image runtime capabilities" >&2
+  stop_app_and_wait
+  run_adb logcat -c >/dev/null 2>&1 || true
+  run_adb shell am start -S --activity-clear-task --activity-multiple-task -n "$PKG/$ACT" \
+    --es operator.mode ego_capture \
+    --es operator.capture.interaction_mode head \
+    --es operator.capture.capability_probe true >/dev/null
+  if ! wait_for_log_marker "$marker" 45 "$log_path"; then
+    fail "runtime camera capability probe did not complete; see $log_path"
+  fi
+  line="$(grep -F "$marker" "$log_path" | tail -n1)"
+  printf '%s\n' "${line#*"$marker"}" > "$json_path"
+  wait_for_log_marker "PICO RGB capability probe complete; quitting" 5 "$log_path" || true
+  if ! wait_for_app_exit 10; then
+    stop_app_and_wait
+  fi
+  python3 - "$json_path" <<'PY'
+import json
+import sys
+
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+entries = doc.get("stereo_resolutions") or []
+values = []
+for entry in entries:
+    width = int(entry.get("width", 0))
+    height = int(entry.get("height", 0))
+    if width > 0 and height > 0:
+        values.append(f"{width}x{height}")
+if not values:
+    raise SystemExit("runtime reported no stereo RGB resolutions")
+print(",".join(values))
+PY
+}
+
 record_and_validate() {
   local resolution="$1"
   local width="${resolution%x*}"
@@ -188,12 +262,13 @@ record_and_validate() {
   local crash_log="$OUTPUT_DIR/$resolution-crash.log"
 
   log "recording $resolution per eye; expecting $expected_video side-by-side"
-  run_adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
+  stop_app_and_wait
   run_adb shell mkdir -p "$remote_root"
   run_adb logcat -c >/dev/null 2>&1 || true
-  run_adb shell am start -n "$PKG/$ACT" \
+  run_adb shell am start -S --activity-clear-task --activity-multiple-task -n "$PKG/$ACT" \
     --es operator.mode ego_capture \
     --es operator.capture.interaction_mode head \
+    --es operator.capture.export_coordinate_space LOCAL \
     --es operator.capture.auto_start true \
     --es operator.capture.auto_stop_seconds "$CAPTURE_SECONDS" \
     --es operator.capture.rgb_resolution "$resolution" \
@@ -209,7 +284,7 @@ record_and_validate() {
   fi
   # Finalization is complete at the stop marker. Stop the process before the
   # automation timer's delayed app quit so the next resolution starts cleanly.
-  run_adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
+  stop_app_and_wait
   run_adb logcat -d -v threadtime > "$log_path" 2>&1 || true
   run_adb logcat -b crash -d > "$crash_log" 2>&1 || true
   if grep -Fq "Cmdline: $PKG" "$crash_log"; then
@@ -239,12 +314,6 @@ case "$CAPTURE_SECONDS" in
 esac
 [ "$CAPTURE_SECONDS" -gt 0 ] || fail "--capture-seconds must be greater than zero"
 
-IFS=',' read -r -a RESOLUTION_LIST <<< "$RESOLUTION_CSV"
-[ "${#RESOLUTION_LIST[@]}" -gt 0 ] || fail "no resolutions requested"
-for resolution in "${RESOLUTION_LIST[@]}"; do
-  is_supported_resolution "$resolution" || fail "unsupported Pico test resolution: $resolution"
-done
-
 pick_pico_device
 mkdir -p "$OUTPUT_DIR"
 printf 'per_eye\tencoded_video\tlocal_mp4\n' > "$OUTPUT_DIR/results.tsv"
@@ -267,6 +336,15 @@ run_adb shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
 run_adb shell wm dismiss-keyguard >/dev/null 2>&1 || true
 run_adb shell pm grant "$PKG" android.permission.CAMERA >/dev/null 2>&1 || true
 run_adb shell appops set "$PKG" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 || true
+if [ -z "$RESOLUTION_CSV" ]; then
+  RESOLUTION_CSV="$(probe_runtime_resolutions)"
+fi
+IFS=',' read -r -a RESOLUTION_LIST <<< "$RESOLUTION_CSV"
+[ "${#RESOLUTION_LIST[@]}" -gt 0 ] || fail "runtime reported no resolutions"
+for resolution in "${RESOLUTION_LIST[@]}"; do
+  is_supported_resolution "$resolution" || fail "invalid resolution: $resolution"
+done
+log "runtime resolution matrix: $RESOLUTION_CSV"
 if run_adb shell ls -d "$REMOTE_RUN_ROOT" >/dev/null 2>&1; then
   fail "refusing to reuse existing device output root: $REMOTE_RUN_ROOT"
 fi

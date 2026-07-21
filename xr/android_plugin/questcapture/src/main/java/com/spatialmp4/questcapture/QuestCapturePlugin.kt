@@ -32,6 +32,7 @@ import com.spatialmp4.capturecommon.AudioCapture
 import com.spatialmp4.capturecommon.CapturedYuvFrame
 import com.spatialmp4.capturecommon.ChromaLayout
 import com.spatialmp4.capturecommon.DeviceIdentity
+import com.spatialmp4.capturecommon.OpenXrDepthConverter
 import com.spatialmp4.capturecommon.StereoHevcEncoder
 import com.spatialmp4.capturecommon.YuvPlaneCapture
 import com.spatialmp4.muxer.SpatialMp4MuxerPlugin
@@ -799,49 +800,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         // made the panels feel laggy. Same arithmetic, executed in JVM
         // primitives, drops the cost to < 1 ms per frame.
         //
-        // Only the inverse projection-view matrix's row 3 is needed: it
-        // encodes the perspective-divide w that gives 1/Z in eye space.
-        if (width <= 0 || height <= 0) return ByteArray(0)
-        val expected = width * height * 2
-        if (raw.size < expected) return ByteArray(0)
-        if (invProjViewRow3.size < 4) return ByteArray(0)
-        val out = ByteArray(expected)
-        val r0 = invProjViewRow3[0]
-        val r1 = invProjViewRow3[1]
-        val r2 = invProjViewRow3[2]
-        val r3 = invProjViewRow3[3]
-        val invW = 1.0 / width.toDouble()
-        val invH = 1.0 / height.toDouble()
-        val invMax = 1.0 / 65535.0
-        var index = 0
-        for (y in 0 until height) {
-            val clipY = 2.0 * (y.toDouble() + 0.5) * invH - 1.0
-            val r1y = r1 * clipY
-            for (x in 0 until width) {
-                val srcOffset = index shl 1
-                val raw0 = raw[srcOffset].toInt() and 0xff
-                val raw1 = raw[srcOffset + 1].toInt() and 0xff
-                val u16 = raw0 or (raw1 shl 8)
-                val normalized = u16 * invMax
-                var mm = 0
-                if (normalized in 0.0..1.0) {
-                    val clipX = 2.0 * (x.toDouble() + 0.5) * invW - 1.0
-                    val clipZ = 2.0 * normalized - 1.0
-                    val homogW = r0 * clipX + r1y + r2 * clipZ + r3
-                    if (homogW > 0.0) {
-                        val meters = 1.0 / homogW
-                        if (meters.isFinite() && meters > 0.0) {
-                            val mmRaw = (meters * 1000.0 + 0.5).toInt()
-                            mm = if (mmRaw < 0) 0 else if (mmRaw > 65535) 65535 else mmRaw
-                        }
-                    }
-                }
-                out[srcOffset] = (mm and 0xff).toByte()
-                out[srcOffset + 1] = ((mm shr 8) and 0xff).toByte()
-                index += 1
-            }
-        }
-        return out
+        return OpenXrDepthConverter.rhToU16Mm(raw, width, height, invProjViewRow3)
     }
 
     @UsedByGodot

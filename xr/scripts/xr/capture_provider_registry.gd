@@ -24,10 +24,13 @@ static func provider_name(plugin: Object) -> String:
 static func supports_depth(plugin: Object) -> bool:
 	if plugin == null:
 		return false
+	# The Android provider declaration only says it can convert and mux depth.
+	# Actual sensor support is a live OpenXR extension capability and may differ
+	# between devices using the same provider and APK.
 	var raw: Variant = _call_or_null(plugin, "isDepthCaptureSupported")
-	if raw != null:
-		return bool(raw)
-	return provider_name(plugin) == "quest"
+	if raw != null and not bool(raw):
+		return false
+	return PlatformRegistry.shared().has_capability(SensorCapability.DEPTH_MAP)
 
 
 static func supports_body_motion(plugin: Object) -> bool:

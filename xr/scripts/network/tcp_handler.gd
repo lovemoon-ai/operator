@@ -5,7 +5,7 @@ extends Node
 ##
 ## [issue 005 / D-4] Inline drain-loop is the final design. Worker
 ## threads were attempted (see [opt 6 reverted] history below) but
-## Godot 4's StreamPeerTCP isn't reliably thread-safe on swan: the
+## Godot 4's StreamPeerTCP isn't reliably thread-safe on some Android XR runtimes: the
 ## very first put_data after the worker started polling returned
 ## err=1 (FAILED) ~half the time, killing the connection before any
 ## frames flowed. We accept the ~3–5 ms worst-case scheduling latency

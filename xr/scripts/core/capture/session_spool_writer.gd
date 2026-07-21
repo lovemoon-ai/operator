@@ -90,7 +90,7 @@ func start_session(options: Dictionary = {}) -> bool:
 		str(capture_options.get("rgb_codec", "hevc"))
 	)
 	if _capture_enabled("record_depth"):
-		sources["depth"] = "OpenXRMetaEnvironmentDepthExtension converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
+		sources["depth"] = "XR_META_environment_depth converted to uint16 millimeters, FFV1 lossless (intra) in the mp4 depth track; PTS from OpenXR runtime_display_time_ns when available"
 	if _capture_enabled("record_head_pose") or _capture_enabled("record_controller_pose") or _capture_enabled("record_hand_data"):
 		var export_space := str(capture_options.get("export_coordinate_space_id", "openxr_play_space"))
 		sources["pose"] = "Head, controller, and hand transforms relative to %s; RGB extrinsics remain head-relative (T_export_camera = T_export_head * T_head_camera); PTS from OpenXR runtime display time when available, else Time.get_ticks_usec()" % export_space
@@ -749,7 +749,7 @@ func _capture_enabled(option: String) -> bool:
 
 # Mirror of the headset identity that the muxer writes into the mp4 moov/udta
 # metadata, so the session manifest carries the same device_type
-# (pico4_ultra / quest3 / quest3s / ...) without having to demux the mp4.
+# (pico / quest3 / quest3s / ...) without having to demux the mp4.
 #
 # When the Android plugin isn't wired up (desktop editor / unit tests / old
 # plugin AAR without `getDeviceIdentityJson`), we leave the device fields

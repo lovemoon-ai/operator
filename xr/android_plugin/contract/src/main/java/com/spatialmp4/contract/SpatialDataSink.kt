@@ -155,7 +155,7 @@ data class SessionConfig(
     val rgbDstr: ByteArray,
     // Device identity, captured at session start so every produced mp4 carries
     // the headset model in its moov/udta metadata. `deviceType` is the
-    // normalised short id ("pico4_ultra" / "quest3" / "quest3s" / ...), while
+    // normalised short id ("pico" / "quest3" / "quest3s" / ...), while
     // the raw Build.MODEL / Build.MANUFACTURER strings are forwarded verbatim
     // for tooling that prefers them. Empty strings are tolerated; the muxer
     // simply skips writing the corresponding metadata key.

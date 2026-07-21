@@ -1,0 +1,152 @@
+diff --git a/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp b/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
+index 4d738fa..d0da9ac 100644
+--- a/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
++++ b/plugin/src/main/cpp/extensions/openxr_meta_environment_depth_extension_wrapper.cpp
+@@ -184,6 +184,7 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_bind_methods() {
+ 	ClassDB::bind_method(D_METHOD("start_environment_depth"), &OpenXRMetaEnvironmentDepthExtensionWrapper::start_environment_depth);
+ 	ClassDB::bind_method(D_METHOD("stop_environment_depth"), &OpenXRMetaEnvironmentDepthExtensionWrapper::stop_environment_depth);
+ 	ClassDB::bind_method(D_METHOD("is_environment_depth_started"), &OpenXRMetaEnvironmentDepthExtensionWrapper::is_environment_depth_started);
++	ClassDB::bind_method(D_METHOD("is_environment_depth_start_pending"), &OpenXRMetaEnvironmentDepthExtensionWrapper::is_environment_depth_start_pending);
+ 
+ 	ClassDB::bind_method(D_METHOD("set_hand_removal_enabled", "enable"), &OpenXRMetaEnvironmentDepthExtensionWrapper::set_hand_removal_enabled);
+ 	ClassDB::bind_method(D_METHOD("get_hand_removal_enabled"), &OpenXRMetaEnvironmentDepthExtensionWrapper::get_hand_removal_enabled);
+@@ -193,6 +194,7 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_bind_methods() {
+ 	ClassDB::bind_method(D_METHOD("get_predicted_display_time_ns"), &OpenXRMetaEnvironmentDepthExtensionWrapper::get_predicted_display_time_ns);
+ 
+ 	ADD_SIGNAL(MethodInfo("openxr_meta_environment_depth_started"));
++	ADD_SIGNAL(MethodInfo("openxr_meta_environment_depth_start_failed", PropertyInfo(Variant::INT, "result")));
+ 	ADD_SIGNAL(MethodInfo("openxr_meta_environment_depth_stopped"));
+ }
+ 
+@@ -413,22 +415,21 @@ uint64_t OpenXRMetaEnvironmentDepthExtensionWrapper::_set_system_properties_and_
+ void OpenXRMetaEnvironmentDepthExtensionWrapper::start_environment_depth() {
+ 	RenderingServer *rs = RenderingServer::get_singleton();
+ 	ERR_FAIL_NULL(rs);
+-	ERR_FAIL_COND(depth_provider_started);
++	ERR_FAIL_COND(depth_provider_started || depth_provider_start_pending);
+ 
+-	depth_provider_started = true;
++	depth_provider_start_pending = true;
+ 	setup_global_uniforms();
+ 
+ 	rs->call_on_render_thread(callable_mp(this, &OpenXRMetaEnvironmentDepthExtensionWrapper::_start_environment_depth_rt));
+-
+-	emit_signal("openxr_meta_environment_depth_started");
+ }
+ 
+ void OpenXRMetaEnvironmentDepthExtensionWrapper::stop_environment_depth() {
+ 	RenderingServer *rs = RenderingServer::get_singleton();
+ 	ERR_FAIL_NULL(rs);
+-	ERR_FAIL_COND(!depth_provider_started);
++	ERR_FAIL_COND(!depth_provider_started && !depth_provider_start_pending);
+ 
+ 	depth_provider_started = false;
++	depth_provider_start_pending = false;
+ 
+ 	rs->call_on_render_thread(callable_mp(this, &OpenXRMetaEnvironmentDepthExtensionWrapper::_stop_environment_depth_rt));
+ 
+@@ -439,6 +440,10 @@ bool OpenXRMetaEnvironmentDepthExtensionWrapper::is_environment_depth_started()
+ 	return depth_provider_started;
+ }
+ 
++bool OpenXRMetaEnvironmentDepthExtensionWrapper::is_environment_depth_start_pending() {
++	return depth_provider_start_pending;
++}
++
+ void OpenXRMetaEnvironmentDepthExtensionWrapper::set_hand_removal_enabled(bool p_enable) {
+ 	RenderingServer *rs = RenderingServer::get_singleton();
+ 	ERR_FAIL_NULL(rs);
+@@ -868,6 +873,9 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_start_environment_depth_rt() {
+ 
+ 	if (render_state.depth_provider == XR_NULL_HANDLE) {
+ 		if (!_create_depth_provider_rt()) {
++			callable_mp(this, &OpenXRMetaEnvironmentDepthExtensionWrapper::_complete_environment_depth_start)
++					.bind(static_cast<int64_t>(XR_ERROR_RUNTIME_FAILURE))
++					.call_deferred();
+ 			return;
+ 		}
+ 	}
+@@ -875,15 +883,22 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_start_environment_depth_rt() {
+ 	XrResult result = xrStartEnvironmentDepthProviderMETA(render_state.depth_provider);
+ 	if (XR_FAILED(result)) {
+ 		UtilityFunctions::printerr("Failed to start environment depth provider: ", get_openxr_api()->get_error_string(result));
++		callable_mp(this, &OpenXRMetaEnvironmentDepthExtensionWrapper::_complete_environment_depth_start)
++				.bind(static_cast<int64_t>(result))
++				.call_deferred();
+ 		return;
+ 	}
+ 
+ 	render_state.depth_provider_started = true;
++	callable_mp(this, &OpenXRMetaEnvironmentDepthExtensionWrapper::_complete_environment_depth_start)
++			.bind(static_cast<int64_t>(XR_SUCCESS))
++			.call_deferred();
+ }
+ 
+ void OpenXRMetaEnvironmentDepthExtensionWrapper::_stop_environment_depth_rt() {
+-	ERR_FAIL_COND(!render_state.depth_provider_started);
+-	ERR_FAIL_NULL(render_state.depth_provider);
++	if (!render_state.depth_provider_started || render_state.depth_provider == XR_NULL_HANDLE) {
++		return;
++	}
+ 
+ 	XrResult result = xrStopEnvironmentDepthProviderMETA(render_state.depth_provider);
+ 	if (XR_FAILED(result)) {
+@@ -894,6 +909,23 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_stop_environment_depth_rt() {
+ 	render_state.depth_provider_started = false;
+ }
+ 
++void OpenXRMetaEnvironmentDepthExtensionWrapper::_complete_environment_depth_start(int64_t p_result) {
++	// A stop request can overtake this deferred main-thread callback. In that
++	// case the render-thread stop is already queued and this completion is stale.
++	if (!depth_provider_start_pending) {
++		return;
++	}
++	depth_provider_start_pending = false;
++	XrResult result = static_cast<XrResult>(p_result);
++	if (XR_FAILED(result)) {
++		depth_provider_started = false;
++		emit_signal("openxr_meta_environment_depth_start_failed", p_result);
++		return;
++	}
++	depth_provider_started = true;
++	emit_signal("openxr_meta_environment_depth_started");
++}
++
+ void OpenXRMetaEnvironmentDepthExtensionWrapper::_set_hand_removal_enabled_rt(bool p_enable) {
+ 	if (render_state.depth_provider == XR_NULL_HANDLE) {
+ 		if (!_create_depth_provider_rt()) {
+@@ -948,5 +980,6 @@ void OpenXRMetaEnvironmentDepthExtensionWrapper::_destroy_depth_provider_rt() {
+ 
+ void OpenXRMetaEnvironmentDepthExtensionWrapper::reset_state() {
+ 	depth_provider_started = false;
++	depth_provider_start_pending = false;
+ 	hand_removal_enabled = false;
+ }
+diff --git a/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h b/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
+index bd00553..c42084f 100644
+--- a/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
++++ b/plugin/src/main/cpp/include/extensions/openxr_meta_environment_depth_extension_wrapper.h
+@@ -68,6 +68,7 @@ public:
+ 	void start_environment_depth();
+ 	void stop_environment_depth();
+ 	bool is_environment_depth_started();
++	bool is_environment_depth_start_pending();
+ 
+ 	void set_hand_removal_enabled(bool p_enable);
+ 	bool get_hand_removal_enabled() const;
+@@ -177,6 +178,7 @@ private:
+ 	} render_state;
+ 
+ 	bool depth_provider_started = false;
++	bool depth_provider_start_pending = false;
+ 	bool hand_removal_enabled = false;
+ 
+ 	Ref<Shader> reprojection_shader;
+@@ -194,6 +196,7 @@ private:
+ 
+ 	void _start_environment_depth_rt();
+ 	void _stop_environment_depth_rt();
++	void _complete_environment_depth_start(int64_t p_result);
+ 	void _set_hand_removal_enabled_rt(bool p_enable);
+ 	void _add_depth_map_callback_rt(const Callable &p_callback);
+ 

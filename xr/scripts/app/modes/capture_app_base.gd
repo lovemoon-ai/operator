@@ -26,7 +26,6 @@ const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
 const DEFAULT_RGB_FPS := 30
 const DEFAULT_RGB_CODEC := "hevc"
-const PICO_DEFAULT_RGB_RESOLUTION := Vector2i(640, 480)
 const OPENXR_HAND_CAPTURE_SINGLETON := &"NativeOpenXRHandCapture"
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
@@ -267,6 +266,9 @@ var _motion_tracker_provider_known := false
 var _depth_supported_pushed := false
 var _depth_provider_known := false
 var _rgb_recording_provider_pushed := ""
+var _rgb_camera_capabilities_pushed := false
+var _rgb_camera_capability_next_probe_us := 0
+var _quit_after_rgb_capability_probe := false
 # Tracks whether we've already fired an up-front requestAudioPermission()
 # prompt for this app session. Audio defaults to ON now, so we surface the
 # system prompt as soon as the capture provider binds -- otherwise the
@@ -339,6 +341,7 @@ func _ready() -> void:
 	add_child(pose_sampler)
 	add_child(depth_sampler)
 	add_child(body_motion_sampler)
+	depth_sampler.start_failed.connect(_on_depth_sampler_start_failed)
 	pose_sampler.configure(writer, hmd_camera, left_controller, right_controller, camera_plugin)
 	depth_sampler.configure(writer, camera_plugin)
 	body_motion_sampler.configure(writer, pose_sampler, pico_openxr_bridge)
@@ -550,6 +553,8 @@ func _capture_automation_options_from_args() -> Dictionary:
 
 func _apply_capture_automation_options(automation: Dictionary) -> void:
 	var changed := false
+	_quit_after_rgb_capability_probe = bool(automation.get("capability_probe", false))
+	changed = changed or _quit_after_rgb_capability_probe
 	if automation.has("interaction_mode"):
 		var interaction_mode := str(automation["interaction_mode"])
 		capture_options["interaction_mode"] = interaction_mode
@@ -587,6 +592,11 @@ func _apply_capture_automation_options(automation: Dictionary) -> void:
 			capture_options["rgb_resolution"] = _rgb_resolution_text(resolution)
 			changed = true
 
+	if automation.has("export_coordinate_space"):
+		capture_options["export_coordinate_space"] = OpenXRExportSpace.normalize(
+			automation["export_coordinate_space"])
+		changed = true
+
 	if automation.has("save_root"):
 		var save_root := str(automation["save_root"]).strip_edges()
 		if not save_root.is_empty():
@@ -612,10 +622,11 @@ func _apply_capture_automation_options(automation: Dictionary) -> void:
 		if settings_panel.has_method("get_options"):
 			_merge_capture_options(settings_panel.get_options())
 	print(
-		"Capture automation applied: interaction_mode=%s rgb_resolution=%s save_root=%s rgb_only=%s"
+		"Capture automation applied: interaction_mode=%s rgb_resolution=%s export_space=%s save_root=%s rgb_only=%s"
 		% [
 			str(capture_options.get("interaction_mode", "")),
 			str(capture_options.get("rgb_resolution", "")),
+			str(capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT)),
 			str(capture_options.get("save_root", "")),
 			str(bool(automation.get("rgb_only", false))),
 		]
@@ -645,6 +656,10 @@ func _collect_capture_automation_args(options: Dictionary, args: PackedStringArr
 				if i + 1 < args.size():
 					options["rgb_resolution"] = String(args[i + 1]).strip_edges()
 					i += 1
+			"--operator-capture-export-coordinate-space", "--capture-export-coordinate-space":
+				if i + 1 < args.size():
+					options["export_coordinate_space"] = String(args[i + 1]).strip_edges()
+					i += 1
 			"--operator-capture-save-root", "--capture-save-root":
 				if i + 1 < args.size():
 					options["save_root"] = String(args[i + 1]).strip_edges()
@@ -655,6 +670,12 @@ func _collect_capture_automation_args(options: Dictionary, args: PackedStringArr
 					i += 1
 				else:
 					options["rgb_only"] = true
+			"--operator-capture-capability-probe", "--capture-capability-probe":
+				if i + 1 < args.size() and not String(args[i + 1]).begins_with("--"):
+					options["capability_probe"] = _parse_capture_bool(String(args[i + 1]))
+					i += 1
+				else:
+					options["capability_probe"] = true
 			_:
 				if arg.begins_with("--operator-capture-interaction-mode="):
 					options["interaction_mode"] = _normalize_capture_interaction_mode(arg.substr("--operator-capture-interaction-mode=".length()))
@@ -680,6 +701,12 @@ func _collect_capture_automation_args(options: Dictionary, args: PackedStringArr
 					options["rgb_resolution"] = arg.substr("--capture-rgb-resolution=".length()).strip_edges()
 				elif arg.begins_with("operator.capture.rgb_resolution="):
 					options["rgb_resolution"] = arg.substr("operator.capture.rgb_resolution=".length()).strip_edges()
+				elif arg.begins_with("--operator-capture-export-coordinate-space="):
+					options["export_coordinate_space"] = arg.substr("--operator-capture-export-coordinate-space=".length()).strip_edges()
+				elif arg.begins_with("--capture-export-coordinate-space="):
+					options["export_coordinate_space"] = arg.substr("--capture-export-coordinate-space=".length()).strip_edges()
+				elif arg.begins_with("operator.capture.export_coordinate_space="):
+					options["export_coordinate_space"] = arg.substr("operator.capture.export_coordinate_space=".length()).strip_edges()
 				elif arg.begins_with("--operator-capture-save-root="):
 					options["save_root"] = arg.substr("--operator-capture-save-root=".length()).strip_edges()
 				elif arg.begins_with("--capture-save-root="):
@@ -692,6 +719,12 @@ func _collect_capture_automation_args(options: Dictionary, args: PackedStringArr
 					options["rgb_only"] = _parse_capture_bool(arg.substr("--capture-rgb-only=".length()))
 				elif arg.begins_with("operator.capture.rgb_only="):
 					options["rgb_only"] = _parse_capture_bool(arg.substr("operator.capture.rgb_only=".length()))
+				elif arg.begins_with("--operator-capture-capability-probe="):
+					options["capability_probe"] = _parse_capture_bool(arg.substr("--operator-capture-capability-probe=".length()))
+				elif arg.begins_with("--capture-capability-probe="):
+					options["capability_probe"] = _parse_capture_bool(arg.substr("--capture-capability-probe=".length()))
+				elif arg.begins_with("operator.capture.capability_probe="):
+					options["capability_probe"] = _parse_capture_bool(arg.substr("operator.capture.capability_probe=".length()))
 		i += 1
 
 
@@ -1156,8 +1189,6 @@ func _on_capture_session_started(_session_dir: String) -> void:
 	# claw/issues/010-ego-data-upload.md "Trip-wires".
 	if ego_uploader and not _is_live_feed_mode():
 		ego_uploader.pause()
-	if _xr_session_begun and _stream_enabled("record_depth"):
-		depth_sampler.start()
 	_start_camera_plugin()
 	if not _recording:
 		return
@@ -1961,6 +1992,14 @@ func _try_start_camera_plugin() -> void:
 			if not _audio_permission_degraded_logged:
 				_audio_permission_degraded_logged = true
 				print("%s audio permission missing; starting without audio" % _provider_label())
+	# Environment depth may have its own Android runtime permission. Start the
+	# OpenXR provider only after the capture provider confirms all permissions
+	# required by this session, otherwise the runtime can reject the provider
+	# and foreground its permission/setup UI while recording is already active.
+	if _xr_session_begun and _stream_enabled("record_depth"):
+		depth_sampler.start()
+		if not _recording:
+			return
 	_camera_start_attempted = true
 	var started := false
 	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
@@ -2025,6 +2064,8 @@ func _on_openxr_session_begun() -> void:
 	if _xr_session_begun:
 		return
 	_xr_session_begun = true
+	_rgb_camera_capabilities_pushed = false
+	_rgb_camera_capability_next_probe_us = 0
 	var viewport := get_viewport()
 	if viewport != null:
 		viewport.use_xr = true
@@ -2432,7 +2473,7 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 		return false
 	var stereo := bool(_capture_option("stereo_rgb", true))
 	var fps := int(_capture_option("rgb_fps", DEFAULT_RGB_FPS))
-	var resolution := _rgb_resolution_from_capture_options(PICO_DEFAULT_RGB_RESOLUTION)
+	var resolution := _rgb_resolution_from_capture_options(Vector2i.ZERO)
 	var info: Variant = pico_openxr_bridge.call(
 		"start_camera_image_capture",
 		stereo,
@@ -2447,6 +2488,14 @@ func _start_pico_openxr_camera_image_capture() -> bool:
 	print("XR_PICO_camera_image start info: %s" % JSON.stringify(info_dict))
 	if not bool(info_dict.get("active", false)):
 		push_error("XR_PICO_camera_image did not become active: %s" % JSON.stringify(info_dict))
+		return false
+	var negotiated_resolution := Vector2i(
+		int(info_dict.get("width", 0)), int(info_dict.get("height", 0)))
+	if resolution != Vector2i.ZERO and negotiated_resolution != resolution:
+		pico_openxr_bridge.call("stop_camera_image_capture")
+		push_error(
+			"XR_PICO_camera_image negotiated %s instead of explicitly requested %s"
+			% [_rgb_resolution_text(negotiated_resolution), _rgb_resolution_text(resolution)])
 		return false
 	# Poll at 2x the negotiated camera fps (see _pico_camera_poll_interval_s).
 	_pico_camera_poll_interval_s = 0.5 / max(float(info_dict.get("fps", DEFAULT_RGB_FPS)), 1.0)
@@ -2627,6 +2676,11 @@ func _abort_capture_start(message: String) -> void:
 	push_error(message)
 	if _recording:
 		stop_capture()
+
+
+func _on_depth_sampler_start_failed(reason: String) -> void:
+	if _recording and _stream_enabled("record_depth"):
+		_abort_capture_start("Environment depth start failed: %s" % reason)
 
 
 func _merge_capture_options(options: Dictionary) -> void:
@@ -2844,13 +2898,9 @@ func _update_motion_tracker_support_flag() -> void:
 		capture_options["record_motion_trackers"] = false
 
 
-## Same gating as _update_motion_tracker_support_flag(), but for the depth
-## stream: only Quest wires XR_META_environment_depth today (see
-## CaptureProviderRegistry.supports_depth), so on other providers we hide the
-## toggle and force the saved option off. _effective_capture_options() already
-## keeps depth out of the recording pipeline at session start; this pushes the
-## same truth into the UI so the operator never sees a switch that records
-## nothing.
+## Same gating as _update_motion_tracker_support_flag(), but for the standard
+## OpenXR environment-depth stream. The active runtime capability determines
+## visibility; provider name and physical device identity are not consulted.
 func _update_depth_support_flag() -> void:
 	if settings_panel == null or not settings_panel.has_method("set_depth_supported"):
 		return
@@ -2885,12 +2935,55 @@ func _update_rgb_recording_provider() -> void:
 	if camera_plugin == null:
 		return
 	var provider := CaptureProviderRegistryScript.provider_name(camera_plugin)
-	if provider.is_empty() or provider == _rgb_recording_provider_pushed:
+	if provider.is_empty():
 		return
-	_rgb_recording_provider_pushed = provider
-	settings_panel.call("set_capture_provider_name", provider)
+	if provider != _rgb_recording_provider_pushed:
+		_rgb_recording_provider_pushed = provider
+		_rgb_camera_capabilities_pushed = false
+		_rgb_camera_capability_next_probe_us = 0
+		settings_panel.call("set_capture_provider_name", provider)
+		if settings_panel.has_method("get_options"):
+			_merge_capture_options(settings_panel.get_options())
+	if provider != "pico" or _rgb_camera_capabilities_pushed:
+		return
+	var now_us := Time.get_ticks_usec()
+	if now_us < _rgb_camera_capability_next_probe_us:
+		return
+	_rgb_camera_capability_next_probe_us = now_us + 1_000_000
+	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("get_camera_image_capabilities"):
+		return
+	var raw_capabilities: Variant = pico_openxr_bridge.call("get_camera_image_capabilities")
+	if not (raw_capabilities is Dictionary):
+		return
+	var capabilities := raw_capabilities as Dictionary
+	if not bool(capabilities.get("available", false)):
+		return
+	if settings_panel.has_method("set_rgb_capabilities"):
+		settings_panel.call("set_rgb_capabilities", capabilities)
+	_rgb_camera_capabilities_pushed = true
+	# Keep the log payload below Android's per-line logcat limit. Some runtimes
+	# advertise enough per-camera entries that serializing the full dictionary
+	# truncates the JSON. The UI still receives the complete dictionary above;
+	# this compact projection is the stable automation/debug contract.
+	var capability_log_summary := {
+		"available": bool(capabilities.get("available", false)),
+		"extension": str(capabilities.get("extension", "")),
+		"fps": capabilities.get("fps", []),
+		"stereo_available": bool(capabilities.get("stereo_available", false)),
+		"stereo_resolutions": capabilities.get("stereo_resolutions", []),
+	}
+	print("PICO RGB runtime capabilities: %s" % JSON.stringify(capability_log_summary))
+	if _quit_after_rgb_capability_probe:
+		_quit_after_rgb_capability_probe = false
+		call_deferred("_finish_rgb_capability_probe")
 	if settings_panel.has_method("get_options"):
 		_merge_capture_options(settings_panel.get_options())
+
+
+func _finish_rgb_capability_probe() -> void:
+	await get_tree().create_timer(0.25).timeout
+	print("PICO RGB capability probe complete; quitting")
+	get_tree().quit()
 
 
 ## Audio defaults to ON, so we proactively request the RECORD_AUDIO runtime
