@@ -63,10 +63,33 @@ var _button_b := 0.0
 var _pos: Vector3 = BASE_POS
 var _rot: Quaternion = Quaternion.IDENTITY
 
+# Dual-arm mode. A single-arm rig is driven entirely from the right controller;
+# a dual SO-101 rig runs BOTH arms at once, so the source must also present a
+# live LEFT controller (pose + grip + trigger) or the left arm is never
+# commanded and holds at home. It plays the SAME canned trajectory as the right
+# hand -- the point is to prove both arms track, not to sweep them differently --
+# baselined at a mirrored x so the two hands do not overlap in space. Enabled by
+# the controller when the descriptor's device type is a dual arm; a single-arm
+# run leaves this false and the left getters stay inert exactly as before.
+var _dual := false
+## Left baseline mirrors the right across x. Absolute value is irrelevant (the
+## robot retargets relative to the squeeze pose) but the two hands must be
+## distinct so the run is visibly two-handed.
+const BASE_POS_LEFT := Vector3(-0.20, 1.15, -0.35)
+var _pos_left: Vector3 = BASE_POS_LEFT
+
 
 ## Skip TrackingProvider._ready — we must NOT run OpenXR node discovery.
 func _ready() -> void:
 	pass
+
+
+## Drive both controllers instead of only the right. Call before engage(); the
+## controller sets it from the descriptor device type so the mode follows the
+## robot on the fly rather than a separate launch flag.
+func set_dual(enabled: bool) -> void:
+	_dual = enabled
+	print("[SyntheticTeleopSource] dual=%s" % str(enabled))
 
 
 ## Begin playback. `hold_sec` is the total engaged duration; the grip releases
@@ -107,6 +130,7 @@ func _recompute(t: float) -> void:
 		_trigger = 0.0
 		_button_b = 0.0
 		_pos = BASE_POS
+		_pos_left = BASE_POS_LEFT
 		_rot = Quaternion.IDENTITY
 		return
 
@@ -137,6 +161,9 @@ func _recompute(t: float) -> void:
 			SWEEP_POS.z * (1.0 - cos(w)) * 0.5,
 		)
 		_pos = BASE_POS + off
+		# The left hand tracks the same offset around its own baseline, so on a
+		# dual rig both arms sweep together.
+		_pos_left = BASE_POS_LEFT + off
 		# A gentle wrist roll so rotation is exercised too.
 		_rot = Quaternion(Vector3.UP, 0.25 * sin(w))
 		# Trigger pulses (gripper open/close). Descriptor inverts+offsets, so this
@@ -148,38 +175,66 @@ func _recompute(t: float) -> void:
 # --- TrackingProvider getter overrides ---------------------------------------
 
 func is_controller_mode_active(hand: int) -> bool:
-	return hand == 1  # right controller only, always "active"
+	if hand == 1:
+		return true  # right controller: always active
+	# Left controller: active only in dual mode, where it drives the left arm.
+	return hand == 0 and _dual
 
 
 func get_controller_input(hand: int) -> Dictionary:
-	if hand != 1:
-		return {}
-	return {
-		"trigger": _trigger,
-		"trigger_click": 0.0,
-		"grip": _grip,
-		"grip_click": _grip,
-		"grip_force": _grip,
-		"select_button": 0.0,
-		"primary": _stick,
-		"joystick": _stick,
-		"primary_x": _stick.x,
-		"primary_y": _stick.y,
-		"primary_click": _stick_click,
-		"ax_button": 0.0,
-		"by_button": _button_b,
-		"menu_button": 0.0,
-	}
+	if hand == 1:
+		return {
+			"trigger": _trigger,
+			"trigger_click": 0.0,
+			"grip": _grip,
+			"grip_click": _grip,
+			"grip_force": _grip,
+			"select_button": 0.0,
+			"primary": _stick,
+			"joystick": _stick,
+			"primary_x": _stick.x,
+			"primary_y": _stick.y,
+			"primary_click": _stick_click,
+			"ax_button": 0.0,
+			"by_button": _button_b,
+			"menu_button": 0.0,
+		}
+	if hand == 0 and _dual:
+		# Left arm: same deadman + gripper drive as the right. No stick nudge
+		# (that path is already covered on the right hand), so joystick is zero.
+		return {
+			"trigger": _trigger,
+			"trigger_click": 0.0,
+			"grip": _grip,
+			"grip_click": _grip,
+			"grip_force": _grip,
+			"select_button": 0.0,
+			"primary": Vector2.ZERO,
+			"joystick": Vector2.ZERO,
+			"primary_x": 0.0,
+			"primary_y": 0.0,
+			"primary_click": false,
+			"ax_button": 0.0,
+			"by_button": 0.0,
+			"menu_button": 0.0,
+		}
+	return {}
 
 
 func get_controller_pose(hand: int) -> Dictionary:
-	if hand != 1:
-		return {"is_active": false}
-	return {
-		"position": _pos,
-		"rotation": _rot,
-		"is_active": true,
-	}
+	if hand == 1:
+		return {
+			"position": _pos,
+			"rotation": _rot,
+			"is_active": true,
+		}
+	if hand == 0 and _dual:
+		return {
+			"position": _pos_left,
+			"rotation": _rot,
+			"is_active": true,
+		}
+	return {"is_active": false}
 
 
 func get_head_pose() -> Dictionary:

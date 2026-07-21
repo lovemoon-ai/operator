@@ -29,12 +29,18 @@ const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 @onready var _left_controller: XRController3D = $XROrigin3D/LeftController
 @onready var _right_controller: XRController3D = $XROrigin3D/RightController
 
-# Axis overlay showing the arm's true control directions at the driving hand.
+# Axis overlay showing each arm's true control directions at the hand driving
+# it. A dual-arm rig runs two arms at once from two controllers, so this is
+# per-hand state: one gizmo per hand, each with its OWN control frame and mirror
+# convention (the two SO-101 arms are configured with opposite `mirror`). A
+# single-arm rig only ever populates the driving hand's slot.
 const ControlFrameGizmoScript = preload("res://scripts/ui/control_frame_gizmo.gd")
-var _control_frame_gizmo: Node3D
-var _control_frame: Quaternion = Quaternion.IDENTITY
-var _control_frame_valid := false
-var _control_frame_mirror := true
+const HAND_LEFT := 0
+const HAND_RIGHT := 1
+var _control_frame_gizmos := {}  # hand -> Node3D
+var _control_frame := {HAND_LEFT: Quaternion.IDENTITY, HAND_RIGHT: Quaternion.IDENTITY}
+var _control_frame_valid := {HAND_LEFT: false, HAND_RIGHT: false}
+var _control_frame_mirror := {HAND_LEFT: true, HAND_RIGHT: true}
 @onready var _tracking_provider: Node = $TrackingProvider
 @onready var _tcp_handler: Node = $TcpHandler
 @onready var _discovery: Node = $Discovery
@@ -106,6 +112,16 @@ var _synth_telemetry_count := 0
 var _synth_first_joints: Array = []
 var _synth_last_joints: Array = []
 var _synth_max_delta := 0.0
+# Dual-arm run. Set from the descriptor device type at engage time, so the same
+# synthetic launch drives one or two arms depending on the robot on the other
+# end -- no separate flag. When dual, the PASS bar is that BOTH arms tracked,
+# asserted from the per-side `left_joint_angles` / `right_joint_angles`
+# telemetry, so a run where only the right arm moved cannot pass.
+var _synth_dual := false
+var _synth_left_first: Array = []
+var _synth_right_first: Array = []
+var _synth_left_max_delta := 0.0
+var _synth_right_max_delta := 0.0
 
 
 func _ready() -> void:
@@ -312,12 +328,15 @@ func _create_settings_ui_nodes() -> void:
 	_origin.add_child(_teleop_controller_panel)
 	_update_teleop_controller_panel_transform()
 
-	# Axis gizmo, in origin space like the panel: its global transform is driven
-	# each frame from the DRIVING controller, so it follows whichever hand has
-	# command rather than being parented to one of them.
-	_control_frame_gizmo = ControlFrameGizmoScript.new()
-	_control_frame_gizmo.name = "ControlFrameGizmo"
-	_origin.add_child(_control_frame_gizmo)
+	# Axis gizmos, in origin space like the panel: each one's global transform is
+	# driven every frame from its hand's controller. One per hand so a dual-arm
+	# rig can show both live arms at once; on a single-arm rig only the driving
+	# hand's gizmo is ever made visible.
+	for hand in [HAND_LEFT, HAND_RIGHT]:
+		var gizmo: Node3D = ControlFrameGizmoScript.new()
+		gizmo.name = "ControlFrameGizmo%s" % ("Left" if hand == HAND_LEFT else "Right")
+		_origin.add_child(gizmo)
+		_control_frame_gizmos[hand] = gizmo
 
 	_bind_operator_interaction()
 
@@ -763,9 +782,16 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	# Synthetic: the descriptor has landed and sending is on — start the canned
 	# operator trajectory now so the robot seeds its retarget reference cleanly.
 	if _synthetic and _synth_source and not _synth_engaged:
+		# The robot's descriptor decides one arm vs two. Drive both controllers
+		# and raise the verdict bar to "both arms moved" when it is a dual rig.
+		_synth_dual = device_type.to_lower().contains("dual")
+		if _synth_source.has_method("set_dual"):
+			_synth_source.call("set_dual", _synth_dual)
 		_synth_engaged = true
 		_synth_source.call("engage", _synth_duration)
-		print("[TeleopSynthetic] descriptor device=%s — engaging synthetic operator" % device_type)
+		print("[TeleopSynthetic] descriptor device=%s dual=%s — engaging synthetic operator" % [
+			device_type, str(_synth_dual),
+		])
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_update_teleop_controller_panel()
@@ -795,41 +821,78 @@ func _on_telemetry_received(_data: Dictionary) -> void:
 		_synth_capture_telemetry(_data)
 
 
-## Latch the robot's control frame for the axis gizmo.
+## Latch each arm's control frame for its axis gizmo.
 ##
 ## `operator_frame` is only present while the deadman is held -- the adapter
 ## clears it on release -- so its absence is the authoritative "not driving"
 ## signal. Orientation only changes when the operator re-squeezes, so latching it
 ## here at telemetry rate (~10Hz) is plenty; the gizmo's POSITION is refreshed
 ## every frame in `_update_control_frame_gizmo`.
+##
+## Two telemetry layouts are accepted. A dual-arm adapter publishes a prefixed
+## block per side (`left_operator_frame`, `right_pose_mirror`, ...) because its
+## arms hold independent frames and opposite mirror conventions. A single-arm
+## adapter publishes one unprefixed pair, which belongs to whichever hand is
+## driving. We detect dual by `*_pose_mirror`, not `*_operator_frame`: mirror is
+## published unconditionally, whereas the frame vanishes on deadman release --
+## keying off the frame would make a dual rig look single-arm the moment both
+## operators let go.
 func _capture_control_frame(data: Dictionary) -> void:
 	var values: Dictionary = data.get("values", {})
-	var frame_any: Variant = values.get("operator_frame", null)
+	var dual := values.has("left_pose_mirror") or values.has("right_pose_mirror")
+	for hand in [HAND_LEFT, HAND_RIGHT]:
+		if dual:
+			var prefix := "left_" if hand == HAND_LEFT else "right_"
+			_capture_control_frame_for_hand(
+				values, hand, prefix + "operator_frame", prefix + "pose_mirror"
+			)
+		elif hand == _driving_hand():
+			_capture_control_frame_for_hand(values, hand, "operator_frame", "pose_mirror")
+		else:
+			_control_frame_valid[hand] = false
+
+
+func _capture_control_frame_for_hand(
+	values: Dictionary, hand: int, frame_key: String, mirror_key: String
+) -> void:
+	var frame_any: Variant = values.get(frame_key, null)
 	if frame_any is Array and (frame_any as Array).size() == 4:
 		var f: Array = frame_any
-		_control_frame = Quaternion(float(f[0]), float(f[1]), float(f[2]), float(f[3])).normalized()
-		_control_frame_valid = true
+		_control_frame[hand] = Quaternion(
+			float(f[0]), float(f[1]), float(f[2]), float(f[3])
+		).normalized()
+		_control_frame_valid[hand] = true
 	else:
-		_control_frame_valid = false
-	_control_frame_mirror = bool(values.get("pose_mirror", true))
+		_control_frame_valid[hand] = false
+	_control_frame_mirror[hand] = bool(values.get(mirror_key, true))
 
 
 func _update_control_frame_gizmo() -> void:
-	if _control_frame_gizmo == null:
+	for hand in [HAND_LEFT, HAND_RIGHT]:
+		_update_control_frame_gizmo_for_hand(hand)
+
+
+func _update_control_frame_gizmo_for_hand(hand: int) -> void:
+	var gizmo: Node3D = _control_frame_gizmos.get(hand, null)
+	if gizmo == null:
 		return
 	# Hide the moment the operator lets go. We use the LOCAL deadman state rather
 	# than waiting for the next telemetry frame to drop `operator_frame`, so the
 	# gizmo disappears with the release instead of up to a telemetry period later.
-	if not _control_frame_valid or not _is_deadman_held():
-		_control_frame_gizmo.visible = false
+	# The deadman is queried PER HAND so that on a dual rig releasing one grip
+	# drops only that arm's overlay while the other stays live.
+	if not bool(_control_frame_valid.get(hand, false)) or not _is_deadman_held(hand):
+		gizmo.visible = false
 		return
-	var controller := _driving_controller()
-	if controller == null:
-		_control_frame_gizmo.visible = false
+	var controller := _controller_for_hand(hand)
+	if controller == null or not controller.get_is_active():
+		gizmo.visible = false
 		return
-	_control_frame_gizmo.visible = true
-	_control_frame_gizmo.apply(
-		controller.global_transform.origin, _control_frame, _control_frame_mirror
+	gizmo.visible = true
+	gizmo.apply(
+		controller.global_transform.origin,
+		_control_frame.get(hand, Quaternion.IDENTITY),
+		bool(_control_frame_mirror.get(hand, true)),
 	)
 
 
@@ -844,20 +907,31 @@ func _active_control_mode():
 	return _command_sender.control_mode
 
 
-## The controller currently commanding the arm.
-func _driving_controller() -> XRController3D:
+## Which hand currently commands the arm on a single-arm rig. Meaningless for a
+## dual rig, where both hands command their own arm.
+func _driving_hand() -> int:
 	var mode = _active_control_mode()
-	var hand := 1
 	if mode and mode.has_method("get_driving_hand"):
-		hand = int(mode.get_driving_hand())
-	return _right_controller if hand == 1 else _left_controller
+		return int(mode.get_driving_hand())
+	return HAND_RIGHT
 
 
-func _is_deadman_held() -> bool:
+func _controller_for_hand(hand: int) -> XRController3D:
+	return _left_controller if hand == HAND_LEFT else _right_controller
+
+
+func _is_deadman_held(hand: int) -> bool:
 	var mode = _active_control_mode()
-	if mode == null or not mode.has_method("is_deadman_engaged"):
+	if mode == null:
 		return false
-	return bool(mode.is_deadman_engaged())
+	# Prefer the per-hand query. The any-target fallback reports true for both
+	# hands once either grip is squeezed, which is right for a single-arm rig but
+	# would leave a dual rig's idle overlay drawn as if that arm were live.
+	if mode.has_method("is_deadman_engaged_for_hand"):
+		return bool(mode.is_deadman_engaged_for_hand(hand))
+	if mode.has_method("is_deadman_engaged"):
+		return bool(mode.is_deadman_engaged())
+	return false
 
 
 func _configure_robot_video_stream(descriptor: Dictionary) -> void:
@@ -1098,8 +1172,38 @@ func _synth_capture_telemetry(data: Dictionary) -> void:
 			return
 		_synth_first_joints = joints.duplicate()
 		print("[TeleopSynthetic] telemetry baseline joints=%s" % JSON.stringify(joints))
+		if _synth_dual:
+			_synth_capture_side_baseline(values)
 		return
 	_synth_max_delta = maxf(_synth_max_delta, _synth_joint_delta(_synth_first_joints, joints))
+	if _synth_dual:
+		_synth_capture_side_deltas(values)
+
+
+## Latch each arm's first-seen (post-engage) joints so per-side motion is
+## measured against the same baseline the combined check uses. Only the SIDE
+## arrays gate a dual PASS; the combined array can hide a dead arm behind a
+## live one.
+func _synth_capture_side_baseline(values: Dictionary) -> void:
+	var left: Variant = values.get("left_joint_angles", [])
+	var right: Variant = values.get("right_joint_angles", [])
+	if left is Array and not (left as Array).is_empty():
+		_synth_left_first = (left as Array).duplicate()
+	if right is Array and not (right as Array).is_empty():
+		_synth_right_first = (right as Array).duplicate()
+
+
+func _synth_capture_side_deltas(values: Dictionary) -> void:
+	var left: Variant = values.get("left_joint_angles", [])
+	var right: Variant = values.get("right_joint_angles", [])
+	if left is Array and not _synth_left_first.is_empty():
+		_synth_left_max_delta = maxf(
+			_synth_left_max_delta, _synth_joint_delta(_synth_left_first, left)
+		)
+	if right is Array and not _synth_right_first.is_empty():
+		_synth_right_max_delta = maxf(
+			_synth_right_max_delta, _synth_joint_delta(_synth_right_first, right)
+		)
 
 
 func _synth_joint_delta(a: Array, b: Array) -> float:
@@ -1117,23 +1221,42 @@ func _finish_synthetic(reason: String) -> void:
 	if _robot_control_sink:
 		_robot_control_sink.set_sending(false)
 	var connected: bool = _tcp_handler != null and _tcp_handler.is_connected_to_robot()
-	var moved := _synth_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG
-	print("[TeleopSynthetic] summary connected=%s engaged=%s telemetry_frames=%d max_joint_delta_deg=%.3f first=%s last=%s" % [
-		str(connected), str(_synth_engaged), _synth_telemetry_count, _synth_max_delta,
+	# Single-arm: the combined delta is enough. Dual: require BOTH sides so a
+	# stuck/uncommanded arm cannot ride the other's motion to a green.
+	var moved: bool
+	if _synth_dual:
+		moved = _synth_left_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG \
+			and _synth_right_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG
+	else:
+		moved = _synth_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG
+	print("[TeleopSynthetic] summary connected=%s engaged=%s dual=%s telemetry_frames=%d max_joint_delta_deg=%.3f left_delta=%.3f right_delta=%.3f first=%s last=%s" % [
+		str(connected), str(_synth_engaged), str(_synth_dual), _synth_telemetry_count,
+		_synth_max_delta, _synth_left_max_delta, _synth_right_max_delta,
 		JSON.stringify(_synth_first_joints), JSON.stringify(_synth_last_joints),
 	])
 	if reason.is_empty() and connected and _synth_engaged and moved:
-		print("[TeleopSynthetic] PASS arm tracked synthetic operator (max_joint_delta=%.2f deg over %d frames)" % [
-			_synth_max_delta, _synth_telemetry_count,
-		])
+		if _synth_dual:
+			print("[TeleopSynthetic] PASS both arms tracked synthetic operator (left=%.2f right=%.2f deg over %d frames)" % [
+				_synth_left_max_delta, _synth_right_max_delta, _synth_telemetry_count,
+			])
+		else:
+			print("[TeleopSynthetic] PASS arm tracked synthetic operator (max_joint_delta=%.2f deg over %d frames)" % [
+				_synth_max_delta, _synth_telemetry_count,
+			])
 		_synth_quit(0)
 	else:
 		var why := reason
 		if why.is_empty():
-			why = "connected=%s engaged=%s moved=%s (max_delta=%.2f < %.2f deg)" % [
-				str(connected), str(_synth_engaged), str(moved),
-				_synth_max_delta, SYNTH_MIN_JOINT_DELTA_DEG,
-			]
+			if _synth_dual:
+				why = "connected=%s engaged=%s moved=%s (left=%.2f right=%.2f, need >=%.2f deg on BOTH)" % [
+					str(connected), str(_synth_engaged), str(moved),
+					_synth_left_max_delta, _synth_right_max_delta, SYNTH_MIN_JOINT_DELTA_DEG,
+				]
+			else:
+				why = "connected=%s engaged=%s moved=%s (max_delta=%.2f < %.2f deg)" % [
+					str(connected), str(_synth_engaged), str(moved),
+					_synth_max_delta, SYNTH_MIN_JOINT_DELTA_DEG,
+				]
 		push_error("[TeleopSynthetic] FAIL %s" % why)
 		_synth_quit(2)
 

@@ -119,6 +119,43 @@ telemetry_schema:
     - name: "connected"
       display: "Connected"
       type: "bool"
+    # Control-frame overlay, PER SIDE. The headset draws an axis gizmo at each
+    # controller showing the TRUE directions that arm will move. Unlike the
+    # single-arm descriptor these are prefixed, because the two arms hold
+    # independent reference frames and opposite `mirror` settings (see
+    # so101_dual_real.yaml) -- one shared pair would make the right gizmo point
+    # the wrong way. `{side}_operator_frame` is present only while THAT side's
+    # deadman is held, which is how the client hides each gizmo independently.
+    - name: "left_operator_frame"
+      display: "Left Operator Alignment Frame"
+      type: "array"
+      length: 4
+    - name: "left_pose_scale"
+      display: "Left Pose Scale"
+      type: "float"
+    - name: "left_pose_mirror"
+      display: "Left Lateral Mirrored"
+      type: "bool"
+    - name: "left_nudge_offset"
+      display: "Left Stick Fine-Adjust Offset"
+      unit: "m"
+      type: "array"
+      length: 3
+    - name: "right_operator_frame"
+      display: "Right Operator Alignment Frame"
+      type: "array"
+      length: 4
+    - name: "right_pose_scale"
+      display: "Right Pose Scale"
+      type: "float"
+    - name: "right_pose_mirror"
+      display: "Right Lateral Mirrored"
+      type: "bool"
+    - name: "right_nudge_offset"
+      display: "Right Stick Fine-Adjust Offset"
+      unit: "m"
+      type: "array"
+      length: 3
 
 video_feeds: []
 

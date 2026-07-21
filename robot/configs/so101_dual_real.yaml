@@ -95,3 +95,8 @@ bridge:
   discovery_port: 63900
   pose_udp_port: 63902
   telemetry_port: 63903
+  # No discovery_unicast_targets committed here: this network drops UDP
+  # broadcast, so the beacon must be unicast to a specific headset IP — but that
+  # IP is per-machine and changes with DHCP. The manual bring-up
+  # (examples/quest_so101_teleop_manual.sh) injects the headset's current IP into
+  # a runtime copy of this config, so no machine-specific address is checked in.
