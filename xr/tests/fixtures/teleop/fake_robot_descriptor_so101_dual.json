@@ -1,0 +1,32 @@
+{
+  "id": "fake_robot_descriptor_so101_dual",
+  "version": 1,
+  "descriptor": {
+    "protocol_version": 2,
+    "device": {
+      "name": "so101_dual_arm",
+      "vendor": "operator-tests",
+      "version": "1.0"
+    },
+    "control_schema": {
+      "axes": [
+        {"name": "left_gripper", "dead_zone": 0.02, "min": 0.0, "max": 1.0},
+        {"name": "right_gripper", "dead_zone": 0.02, "min": 0.0, "max": 1.0}
+      ],
+      "buttons": [
+        {"name": "left_enable", "mode": "momentary"},
+        {"name": "right_enable", "mode": "momentary"},
+        {"name": "reset", "mode": "momentary"}
+      ]
+    },
+    "input_mapping": [
+      {"source": "left_controller_pose", "target": "left_end_effector"},
+      {"source": "right_controller_pose", "target": "right_end_effector"},
+      {"source": "head_pose", "target": "operator_frame"},
+      {"source": "left_trigger", "target": "left_gripper", "scale": 1.0, "invert": true, "offset": 1.0},
+      {"source": "right_trigger", "target": "right_gripper", "scale": 1.0, "invert": true, "offset": 1.0},
+      {"source": "left_grip", "target": "left_enable", "scale": 1.0, "invert": false, "offset": 0.0},
+      {"source": "right_grip", "target": "right_enable", "scale": 1.0, "invert": false, "offset": 0.0}
+    ]
+  }
+}
