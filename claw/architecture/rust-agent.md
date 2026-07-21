@@ -203,6 +203,13 @@ The dual path advertises separate XR controls for `left_end_effector`,
 `right_end_effector`, `left_gripper`, `right_gripper`, `left_enable`, and
 `right_enable`. See `configs/so101_dual_real.yaml` for both plugin invocations.
 
+Each side also publishes its own control-frame telemetry block
+(`left_operator_frame`, `right_pose_mirror`, ...) so the headset can draw one
+axis gizmo per hand with that arm's true directions; see
+`claw/architecture/wire-protocol.md` for the key list and the reason the block is
+per-side rather than shared. The deadmen are independent: releasing one grip
+stops and un-draws only that arm.
+
 Run top-level E2E scripts from the repo root:
 
 ```bash

@@ -75,6 +75,19 @@ The client renders the overlay from these rather than re-deriving the retarget
 rule, so a change to `scale`/`mirror` in robot-side config cannot leave the
 overlay silently lying about which way the arm will move.
 
+**Dual-arm rigs publish this block once per side, prefixed** — `left_operator_frame`,
+`right_pose_mirror`, and so on for all four keys. The two arms hold independent
+reference frames and are configured with opposite `mirror` (see
+`configs/so101_dual_real.yaml`), so one shared block would draw the right gizmo
+with the left arm's lateral convention and point it the wrong way. Each side's
+`{side}_operator_frame` is absent while *that* side's deadman is released, which
+is how the headset hides one arm's gizmo while the other stays live.
+
+Clients detect the dual layout by the presence of `left_pose_mirror` /
+`right_pose_mirror`, not `*_operator_frame`: mirror is published unconditionally,
+whereas the frame vanishes on release, so keying off the frame would make a dual
+rig look single-arm the moment both operators let go.
+
 ### Adapter → plugin control state
 
 `AdapterToLerobot::Control` carries two gates with strictly separate owners
