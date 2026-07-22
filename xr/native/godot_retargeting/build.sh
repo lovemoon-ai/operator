@@ -117,15 +117,31 @@ cmake -B "$BUILD_DIR" \
 cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
 
 SO="$BUILD_DIR/libgodot_retargeting.so"
-[[ -s "$SO" ]] || { echo "ERROR: build produced empty $SO" >&2; exit 1; }
+MUJOCO_SO="$MUJOCO_ANDROID_ROOT/lib/libmujoco.so"
+
+# Validate both libraries are non-empty ELF shared objects before staging. A
+# 0-byte or non-ELF file here is exactly what shipped an unloadable extension
+# into the APK (dlopen -> "bad ELF magic: 504b0304"), so fail loudly instead.
+assert_elf() {
+    local f="$1"
+    [[ -s "$f" ]] || { echo "ERROR: $f is empty" >&2; exit 1; }
+    local magic
+    magic="$(od -An -tx1 -N4 "$f" | tr -d ' \n')"
+    [[ "$magic" == "7f454c46" ]] || { echo "ERROR: $f is not an ELF object (magic=$magic)" >&2; exit 1; }
+}
+assert_elf "$SO"
+assert_elf "$MUJOCO_SO"
 
 ADDON_DIR="$SCRIPT_DIR/../../addons/godot_retargeting/bin"
-JNI_DIR="$SCRIPT_DIR/../../android/build/libs/${ANDROID_ABI}"
+# RELEASE gradle packages jniLibs from libs/release/<abi> (see
+# android/build/build.gradle: release.jniLibs.srcDirs = ['libs/release']), so
+# stage there — NOT libs/<abi>, which release builds ignore.
+JNI_DIR="$SCRIPT_DIR/../../android/build/libs/release/${ANDROID_ABI}"
 mkdir -p "$ADDON_DIR" "$JNI_DIR"
 cp "$SO" "$ADDON_DIR/libgodot_retargeting.so"
-cp "$MUJOCO_ANDROID_ROOT/lib/libmujoco.so" "$ADDON_DIR/libmujoco.so"
+cp "$MUJOCO_SO" "$ADDON_DIR/libmujoco.so"
 cp "$SO" "$JNI_DIR/libgodot_retargeting.so"
-cp "$MUJOCO_ANDROID_ROOT/lib/libmujoco.so" "$JNI_DIR/libmujoco.so"
+cp "$MUJOCO_SO" "$JNI_DIR/libmujoco.so"
 
 echo
 echo "Built $(stat -f '%z' "$SO" 2>/dev/null || stat -c '%s' "$SO") byte libgodot_retargeting.so"
