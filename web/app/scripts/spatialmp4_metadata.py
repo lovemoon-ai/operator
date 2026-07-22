@@ -84,6 +84,42 @@ def extract_android_timebase(
     return None
 
 
+def resolve_rgb_camera_count(
+    manifest: Optional[Dict[str, Any]],
+    operator_static: Optional[Dict[str, Any]],
+) -> Optional[int]:
+    """Resolve whether the encoded RGB frame is mono or side-by-side stereo.
+
+    The pinned SpatialMP4 SDK always splits decoded RGB frames in half because
+    its original container contract was stereo-only. Operator now also writes
+    mono Quest captures, so the converter needs an out-of-band layout hint to
+    join those two decoded halves back into the original image.
+    """
+
+    option_sets: List[Dict[str, Any]] = []
+    if isinstance(manifest, dict):
+        for key in ("resolved_capture_options", "capture_options"):
+            value = manifest.get(key)
+            if isinstance(value, dict):
+                option_sets.append(value)
+    if isinstance(operator_static, dict):
+        option_sets.append(operator_static)
+
+    for options in option_sets:
+        raw_count = options.get("rgb_camera_count")
+        if isinstance(raw_count, (int, float)) and not isinstance(raw_count, bool):
+            return 2 if int(raw_count) == 2 else 1
+        stereo = options.get("stereo_rgb")
+        if isinstance(stereo, bool):
+            return 2 if stereo else 1
+
+    left = extract_camera2_characteristics(operator_static, "left")
+    right = extract_camera2_characteristics(operator_static, "right")
+    if left is not None:
+        return 2 if right is not None else 1
+    return None
+
+
 def camera2_metadata_candidates(
     input_path: Path,
     operator_static: Optional[Dict[str, Any]],
