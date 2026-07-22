@@ -34,7 +34,7 @@ The source model is pinned to `unitreerobotics/unitree_ros` at
 Generate the Unitree G1 29-DoF humanoid:
 
 ```bash
-bash scripts/make-robot/make_g1.sh
+bash scripts/make-robot/make_unitree_g1.sh
 ```
 
 Outputs:

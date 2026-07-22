@@ -4,9 +4,6 @@
 # Source: GalaxyGeneralRobotics/galbot_one_golf_description urdf/galbot_one_golf.urdf
 # (visual meshes are .glb -> converted to .stl for the URDF; collision is .stl).
 # Wheeled dual-arm mobile manipulator. Mirrors make_dexmate_vega_u.sh.
-#
-# NOTE: this is a DIFFERENT robot from the Unitree "g1" (make_g1.sh /
-# xr/assets/robots/unitree-g1). Keep the galbot-g1 slug distinct.
 
 set -euo pipefail
 

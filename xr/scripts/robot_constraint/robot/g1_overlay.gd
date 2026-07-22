@@ -173,7 +173,7 @@ var _vr_pose_mat: StandardMaterial3D = null
 
 func _ready() -> void:
 	if not ResourceLoader.exists(GLB_PATH):
-		push_error("[G1Overlay] GLB not found at %s. Run scripts/make-robot/make_g1.sh." % GLB_PATH)
+		push_error("[G1Overlay] GLB not found at %s. Run scripts/make-robot/make_unitree_g1.sh." % GLB_PATH)
 		return
 	_load_glb()
 	if _pelvis_node == null:
