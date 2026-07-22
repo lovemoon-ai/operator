@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from spatialmp4_metadata import (  # noqa: E402
     RERUN_FRAME_METADATA_KINDS,
     camera2_metadata_candidates,
+    resolve_rgb_camera_count,
     resolve_android_timebase_metadata,
 )
 
@@ -65,6 +66,30 @@ class SpatialMp4MetadataTest(unittest.TestCase):
             self.assertIsNone(timebase)
             self.assertEqual("", source)
             self.assertIsNone(timebase_error)
+
+    def test_rgb_camera_count_prefers_resolved_manifest_options(self) -> None:
+        manifest = {
+            "capture_options": {"stereo_rgb": True},
+            "resolved_capture_options": {"rgb_camera_count": 1},
+        }
+        operator_static = {
+            "camera2_characteristics": {"left": {}, "right": {}},
+        }
+
+        self.assertEqual(1, resolve_rgb_camera_count(manifest, operator_static))
+
+    def test_rgb_camera_count_falls_back_to_embedded_camera2_eyes(self) -> None:
+        mono_static = {"camera2_characteristics": {"left": {"camera_id": "50"}}}
+        stereo_static = {
+            "camera2_characteristics": {
+                "left": {"camera_id": "50"},
+                "right": {"camera_id": "51"},
+            }
+        }
+
+        self.assertEqual(1, resolve_rgb_camera_count(None, mono_static))
+        self.assertEqual(2, resolve_rgb_camera_count(None, stereo_static))
+        self.assertIsNone(resolve_rgb_camera_count(None, None))
 
 
 if __name__ == "__main__":
