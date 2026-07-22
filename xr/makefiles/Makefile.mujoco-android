@@ -42,7 +42,7 @@ DEPS_SCRIPT ?= ../scripts/sync_deps.sh
 
 .PHONY: build-mujoco-android clean-mujoco-android mujoco-android-info
 
-build-mujoco-android: $(MUJOCO_ANDROID_LIB)
+build-mujoco-android: verify-ndk $(MUJOCO_ANDROID_LIB)
 
 $(MUJOCO_ANDROID_LIB):
 	@if [ ! -d "$(MUJOCO_ANDROID_SOURCE)/.git" ]; then \

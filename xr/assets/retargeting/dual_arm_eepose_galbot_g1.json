@@ -1,0 +1,143 @@
+{
+  "damping": 0.001,
+  "max_iterations": 12,
+  "configuration_limit_gain": 0.95,
+  "max_iteration_update": 0.25,
+  "max_frame_update": 0.55,
+  "position_weight": 80.0,
+  "rotation_weight": 4.0,
+  "posture_weight": 0.12,
+  "source": {
+    "mode": "shoulder_delta",
+    "orientation_mode": "relative_wrist_roll",
+    "workspace_scale": 1.0,
+    "arm_reach_scale": 0.82,
+    "fps": 60.0,
+    "filter": {
+      "min_cutoff": 0.6,
+      "beta": 0.03,
+      "d_cutoff": 1.0
+    }
+  },
+  "posture_reference": {
+    "left_arm_joint1": 0.286632,
+    "left_arm_joint2": -1.279879,
+    "left_arm_joint3": 0.080134,
+    "left_arm_joint4": -1.193535,
+    "left_arm_joint5": -0.739451,
+    "left_arm_joint6": 0.735398,
+    "left_arm_joint7": -0.566032,
+    "right_arm_joint1": -0.319888,
+    "right_arm_joint2": 1.357153,
+    "right_arm_joint3": 0.065231,
+    "right_arm_joint4": 1.237595,
+    "right_arm_joint5": 0.624194,
+    "right_arm_joint6": -0.735398,
+    "right_arm_joint7": 0.461851
+  },
+  "tasks": [
+    {
+      "name": "left",
+      "target": "LeftWrist",
+      "target_aliases": ["left_eepose", "left_ee", "left_tcp"],
+      "reference_target": "LeftShoulder",
+      "base_body": "left_arm_base_link",
+      "body": "left_gripper_tcp_link",
+      "elbow_constraint": {
+        "enabled": true,
+        "source_target": "LeftArmLower",
+        "robot_body": "left_arm_link4",
+        "weight": 8.0,
+        "gain": 0.5
+      },
+      "joint_names": [
+        "left_arm_joint1",
+        "left_arm_joint2",
+        "left_arm_joint3",
+        "left_arm_joint4",
+        "left_arm_joint5",
+        "left_arm_joint6",
+        "left_arm_joint7"
+      ],
+      "rotation_joint_names": [
+        "left_arm_joint5",
+        "left_arm_joint6",
+        "left_arm_joint7"
+      ],
+      "rotation_leak_weight": 0.0,
+      "rotation_roll_axis": [1.0, 0.0, 0.0],
+      "rotation_roll_scale": 1.0
+    },
+    {
+      "name": "right",
+      "target": "RightWrist",
+      "target_aliases": ["right_eepose", "right_ee", "right_tcp"],
+      "reference_target": "RightShoulder",
+      "base_body": "right_arm_base_link",
+      "body": "right_gripper_tcp_link",
+      "elbow_constraint": {
+        "enabled": true,
+        "source_target": "RightArmLower",
+        "robot_body": "right_arm_link4",
+        "weight": 8.0,
+        "gain": 0.5
+      },
+      "joint_names": [
+        "right_arm_joint1",
+        "right_arm_joint2",
+        "right_arm_joint3",
+        "right_arm_joint4",
+        "right_arm_joint5",
+        "right_arm_joint6",
+        "right_arm_joint7"
+      ],
+      "rotation_joint_names": [
+        "right_arm_joint5",
+        "right_arm_joint6",
+        "right_arm_joint7"
+      ],
+      "rotation_leak_weight": 0.0,
+      "rotation_roll_axis": [1.0, 0.0, 0.0],
+      "rotation_roll_scale": 1.0
+    }
+  ],
+  "collision": {
+    "enabled": true,
+    "min_distance": 0.06,
+    "activation_distance": 0.12,
+    "gain": 0.75,
+    "weight": 120.0,
+    "projection_iterations": 8,
+    "geom_groups": {
+      "left_arm": [
+        "left_arm_link3_proxy",
+        "left_arm_link4_proxy",
+        "left_arm_link5_proxy",
+        "left_arm_link6_proxy",
+        "left_arm_link7_proxy",
+        "left_arm_end_effector_mount_link_proxy",
+        "left_gripper_base_link_proxy",
+        "left_gripper_tcp_link_proxy"
+      ],
+      "right_arm": [
+        "right_arm_link3_proxy",
+        "right_arm_link4_proxy",
+        "right_arm_link5_proxy",
+        "right_arm_link6_proxy",
+        "right_arm_link7_proxy",
+        "right_arm_end_effector_mount_link_proxy",
+        "right_gripper_base_link_proxy",
+        "right_gripper_tcp_link_proxy"
+      ],
+      "torso": [
+        "torso_base_link_proxy",
+        "torso_head_mount_link_proxy"
+      ]
+    },
+    "avoid_group_pairs": [
+      ["left_arm", "right_arm"],
+      ["left_arm", "torso"],
+      ["right_arm", "torso"]
+    ]
+  }
+}
