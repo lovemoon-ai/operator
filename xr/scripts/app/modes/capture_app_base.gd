@@ -993,6 +993,10 @@ func _compact_dict(d: Dictionary) -> String:
 
 
 func _exit_tree() -> void:
+	# Release native-resource debug overlays (galbot MuJoCo retargeter + OpenXR
+	# trackers) first, synchronously, before the rest of teardown — see
+	# _shutdown_debug_overlays_sync().
+	_shutdown_debug_overlays_sync()
 	stop_capture()
 	_stop_live_pull()
 	var interaction := _operator_interaction()
@@ -1011,6 +1015,13 @@ func _exit_tree() -> void:
 
 
 func _notification(what: int) -> void:
+	# App is being closed / sent to the launcher: tear down native-resource debug
+	# overlays synchronously before the process exits, so the galbot MuJoCo
+	# retargeter + OpenXR trackers are released while the OpenXR session is still
+	# alive (prevents the ~14s compositor churn returning to the launcher).
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		_shutdown_debug_overlays_sync()
+
 	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_RESUMED:
 		_reset_ui_input_state()
 		# WP3: track transient pause/resume in the capture state machine
@@ -1607,18 +1618,20 @@ func _start_g1_debug_overlay() -> void:
 	print("[CaptureApp] G1 retarget overlay on")
 
 
-func _stop_g1_debug_overlay() -> void:
+func _stop_g1_debug_overlay(immediate: bool = false) -> void:
+	# Same ordered teardown as galbot: the G1 overlay also owns a native
+	# GMRRetargeter (MuJoCo) + OpenXR providers, so disable sampling first, then
+	# free overlay, then providers — synchronously on shutdown (see
+	# _shutdown_debug_overlays_sync).
 	var had_overlay := _g1_debug_overlay != null or _g1_debug_provider != null
-	if _g1_debug_overlay != null:
-		_g1_debug_overlay.queue_free()
-		_g1_debug_overlay = null
 	if _g1_debug_provider != null:
 		_g1_debug_provider.call("set_enabled", false)
-		_g1_debug_provider.queue_free()
-		_g1_debug_provider = null
-	if _g1_debug_tracking_provider != null:
-		_g1_debug_tracking_provider.queue_free()
-		_g1_debug_tracking_provider = null
+	_free_node(_g1_debug_overlay, immediate)
+	_g1_debug_overlay = null
+	_free_node(_g1_debug_provider, immediate)
+	_g1_debug_provider = null
+	_free_node(_g1_debug_tracking_provider, immediate)
+	_g1_debug_tracking_provider = null
 	if had_overlay:
 		print("[CaptureApp] G1 retarget overlay off")
 	_set_debug_panel_state()
@@ -1671,21 +1684,57 @@ func _start_galbot_g1_debug_overlay() -> void:
 	print("[CaptureApp] Galbot G1 retarget overlay on")
 
 
-func _stop_galbot_g1_debug_overlay() -> void:
+func _stop_galbot_g1_debug_overlay(immediate: bool = false) -> void:
 	var had_overlay := _galbot_g1_debug_overlay != null or _galbot_g1_debug_provider != null
-	if _galbot_g1_debug_overlay != null:
-		_galbot_g1_debug_overlay.queue_free()
-		_galbot_g1_debug_overlay = null
+	# Ordered teardown. Stop the OpenXR body/hand sampling FIRST so no
+	# canonical_frame_ready callback fires into a half-freed overlay, THEN release
+	# the overlay (its _exit_tree drops the MuJoCo GMRRetargeter), THEN the
+	# providers. On app quit / scene swap we must release the native retargeter and
+	# OpenXR trackers deterministically here — leaving them to the abrupt process
+	# teardown left the Meta compositor churning for ~14s before returning to the
+	# launcher (and wedged the next galbot session). `immediate` uses free() instead
+	# of queue_free() so everything is gone before quit()/scene change proceeds.
 	if _galbot_g1_debug_provider != null:
 		_galbot_g1_debug_provider.call("set_enabled", false)
-		_galbot_g1_debug_provider.queue_free()
-		_galbot_g1_debug_provider = null
-	if _galbot_g1_debug_tracking_provider != null:
-		_galbot_g1_debug_tracking_provider.queue_free()
-		_galbot_g1_debug_tracking_provider = null
+	_free_node(_galbot_g1_debug_overlay, immediate)
+	_galbot_g1_debug_overlay = null
+	_free_node(_galbot_g1_debug_provider, immediate)
+	_galbot_g1_debug_provider = null
+	_free_node(_galbot_g1_debug_tracking_provider, immediate)
+	_galbot_g1_debug_tracking_provider = null
 	if had_overlay:
 		print("[CaptureApp] Galbot G1 retarget overlay off")
 	_set_debug_panel_state()
+
+
+# Release a node now (immediate) or at end of frame. Immediate free detaches from
+# the tree first and is used on shutdown so native GDExtension resources (MuJoCo
+# retargeter, OpenXR trackers) are freed synchronously before the process exits.
+func _free_node(node: Node, immediate: bool) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	if immediate:
+		var parent := node.get_parent()
+		if parent != null:
+			parent.remove_child(node)
+		node.free()
+	else:
+		node.queue_free()
+
+
+# Deterministic, synchronous teardown of any active in-headset debug overlay that
+# owns native GDExtension resources (galbot + G1 both hold a MuJoCo GMRRetargeter
+# and OpenXR providers). Called on scene exit and on the OS close/quit request so
+# those natives are released while the engine and OpenXR session are still fully
+# alive — otherwise the abrupt process teardown leaves the compositor churning
+# for ~14s before the launcher returns.
+func _shutdown_debug_overlays_sync() -> void:
+	if _galbot_g1_debug_overlay != null or _galbot_g1_debug_provider != null \
+			or _galbot_g1_debug_tracking_provider != null:
+		_stop_galbot_g1_debug_overlay(true)
+	if _g1_debug_overlay != null or _g1_debug_provider != null \
+			or _g1_debug_tracking_provider != null:
+		_stop_g1_debug_overlay(true)
 
 
 func _any_debug_overlay_visible() -> bool:
