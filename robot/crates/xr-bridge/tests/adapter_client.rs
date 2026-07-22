@@ -50,6 +50,7 @@ fn test_descriptor() -> DeviceDescriptor {
             command_timeout_ms: 500,
             limits: HashMap::new(),
         },
+        xr_stream: None,
     }
 }
 
@@ -86,7 +87,7 @@ async fn spawn_mock_adapter(descriptor: DeviceDescriptor) -> MockAdapter {
             match msg {
                 BridgeToAdapter::Hello => {
                     framed
-                        .send(AdapterToBridge::Descriptor(descriptor.clone()))
+                        .send(AdapterToBridge::Descriptor(Box::new(descriptor.clone())))
                         .await
                         .expect("send descriptor");
                 }
@@ -135,7 +136,7 @@ async fn spawn_bursting_adapter(descriptor: DeviceDescriptor, frames: u64) -> En
             match msg {
                 BridgeToAdapter::Hello => {
                     framed
-                        .send(AdapterToBridge::Descriptor(descriptor.clone()))
+                        .send(AdapterToBridge::Descriptor(Box::new(descriptor.clone())))
                         .await
                         .expect("send descriptor");
                     for timestamp_ns in 0..frames {

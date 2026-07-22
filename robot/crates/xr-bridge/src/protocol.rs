@@ -633,7 +633,12 @@ mod tests {
             kind: POSE_UDP_KIND_POSE,
             payload: PoseUdpPayload::Pose {
                 position: [0.1, -0.2, 1.0],
-                rotation: [0.0, 0.0, 0.7071, 0.7071],
+                rotation: [
+                    0.0,
+                    0.0,
+                    std::f64::consts::FRAC_1_SQRT_2,
+                    std::f64::consts::FRAC_1_SQRT_2,
+                ],
                 gripper: 0.5,
             },
         };
@@ -650,7 +655,15 @@ mod tests {
                 gripper,
             } => {
                 assert_eq!(position, [0.1, -0.2, 1.0]);
-                assert_eq!(rotation, [0.0, 0.0, 0.7071, 0.7071]);
+                assert_eq!(
+                    rotation,
+                    [
+                        0.0,
+                        0.0,
+                        std::f64::consts::FRAC_1_SQRT_2,
+                        std::f64::consts::FRAC_1_SQRT_2,
+                    ]
+                );
                 assert_eq!(gripper, 0.5);
             }
         }

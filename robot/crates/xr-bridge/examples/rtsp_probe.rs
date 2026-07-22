@@ -106,20 +106,17 @@ async fn main() {
                         let _ = file.write_all(nal);
                         stats_c.nals.fetch_add(1, Ordering::Relaxed);
                         stats_c.bytes.fetch_add(nal.len() as u64, Ordering::Relaxed);
-                        match nal_type(nal) {
-                            Some(7) => {
-                                // SPS: profile_idc/level_idc sit right after the
-                                // 4-byte start code + 1-byte NAL header.
-                                if nal.len() >= 8 {
-                                    stats_c
-                                        .sps_profile_idc
-                                        .store(nal[5] as u64, Ordering::Relaxed);
-                                    stats_c
-                                        .sps_level_idc
-                                        .store(nal[7] as u64, Ordering::Relaxed);
-                                }
+                        if let Some(7) = nal_type(nal) {
+                            // SPS: profile_idc/level_idc sit right after the
+                            // 4-byte start code + 1-byte NAL header.
+                            if nal.len() >= 8 {
+                                stats_c
+                                    .sps_profile_idc
+                                    .store(nal[5] as u64, Ordering::Relaxed);
+                                stats_c
+                                    .sps_level_idc
+                                    .store(nal[7] as u64, Ordering::Relaxed);
                             }
-                            _ => {}
                         }
                         if is_idr(nal) && !stats_c.got_idr.swap(true, Ordering::Relaxed) {
                             stats_c

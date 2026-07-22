@@ -155,22 +155,26 @@ fn build_video_only_descriptor(config: &BridgeConfig) -> Result<DeviceDescriptor
         telemetry_schema: Default::default(),
         video_feeds: Vec::new(),
         safety: Default::default(),
+        xr_stream: None,
     };
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
     Ok(descriptor)
 }
 
-fn video_feed_relays(feeds: &[VideoFeedConfig]) -> Vec<VideoFeed> {
+pub(crate) fn video_feed_relays(feeds: &[VideoFeedConfig]) -> Vec<VideoFeed> {
     feeds.iter().map(feed_config_to_relay).collect()
 }
 
-fn append_video_feed_infos(descriptor: &mut DeviceDescriptor, feeds: &[VideoFeedConfig]) {
+pub(crate) fn append_video_feed_infos(
+    descriptor: &mut DeviceDescriptor,
+    feeds: &[VideoFeedConfig],
+) {
     for fc in feeds {
         descriptor.video_feeds.push(feed_config_to_info(fc));
     }
 }
 
-fn log_video_feeds(video_feeds: &[VideoFeed]) {
+pub(crate) fn log_video_feeds(video_feeds: &[VideoFeed]) {
     if !video_feeds.is_empty() {
         tracing::info!(
             "Video relay: advertising {} feed(s): {}",

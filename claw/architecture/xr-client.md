@@ -123,6 +123,8 @@ headsets with different camera shapes.
 
 - `Session` for Hello, descriptor, telemetry, and legacy fallback.
 - `CommandSender` for controller/tracking command frames.
+- `XrStateSender` for one atomic raw tracking snapshot when `xr_stream` is
+  advertised by an embedded `pyoperator` session.
 - `RobotControlSink` as the mode-facing command output.
 - `TcpHandler` for command and TCP video streams.
 - `UdpVideoHandler` for UDP timed video packets.
@@ -138,6 +140,12 @@ headsets with different camera shapes.
 Video transport is descriptor-driven. TCP is the default and supports USB
 `adb reverse`; UDP is selected when the descriptor advertises a usable UDP
 port and `transport` is `udp` or `auto`.
+
+`XrStateSender` samples in `_process` after Godot advances OpenXR for the render
+frame. Head/controllers/input/hands are collected without yielding; body and
+motion trackers retain their own lower-rate sample timestamp. It is disabled
+for normal robot descriptors, so `CommandSender` behavior and bandwidth are
+unchanged outside Python SDK mode.
 
 ## Capture Runtime
 

@@ -80,7 +80,7 @@ fn bridge_to_adapter_roundtrip_all_variants() {
 #[test]
 fn adapter_to_bridge_roundtrip_all_variants() {
     let variants = vec![
-        AdapterToBridge::Descriptor(sample_descriptor()),
+        AdapterToBridge::Descriptor(Box::new(sample_descriptor())),
         AdapterToBridge::Telemetry(sample_telemetry()),
         AdapterToBridge::Event {
             kind: "warn".to_string(),

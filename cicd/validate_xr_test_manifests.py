@@ -9,7 +9,7 @@ Runs on the host, no Godot required. Checks:
   (3) required_features reference known operator_feature_* names;
   (4) required_capabilities reference known SensorCapability names;
   (5) referenced fixtures exist under xr/tests/fixtures/**/<id>.json;
-  (6) referenced test scripts (res://...) exist on disk;
+  (6) referenced Godot scripts and host-side pytest cases exist on disk;
   (7) test case levels are known, case ids unique per manifest;
   (8) every feature has at least one static preset_matrix case and one
       integration case;
@@ -210,6 +210,12 @@ def main():
             if script and not res_path_exists(script):
                 errors.append("(6) %s: case '%s' references missing script '%s'"
                               % (path.name, cid, script))
+            host_test = case.get("host_test")
+            if host_test:
+                host_path = ROOT / str(host_test).split("::", 1)[0]
+                if not host_path.is_file():
+                    errors.append("(6) %s: case '%s' references missing host test '%s'"
+                                  % (path.name, cid, host_test))
         if not has_static_matrix:
             errors.append("(8) %s: needs at least one static preset_matrix case" % path.name)
         if not has_integration:

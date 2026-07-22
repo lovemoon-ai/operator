@@ -1,0 +1,56 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pyoperator"
+version = "0.1.0"
+description = "Python-first XR library for Operator"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+  "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+ik = ["numpy>=1.24"]
+test = [
+  "numpy>=1.24",
+  "pytest>=8",
+  "pytest-cov>=5",
+]
+
+[tool.maturin]
+manifest-path = "../robot/crates/pyoperator-native/Cargo.toml"
+python-source = "."
+module-name = "pyoperator._native"
+bindings = "pyo3"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+  "-ra",
+  "--strict-config",
+  "--strict-markers",
+  "--cov=pyoperator",
+  "--cov-branch",
+  "--cov-report=term-missing",
+]
+markers = [
+  "device: requires physical hardware and is skipped in normal host-only runs",
+  "xr_device: requires a real Quest or Pico headset running Operator XR",
+  "fake_headset: uses a host-side socket peer instead of a physical headset",
+  "loopback: uses only host-local network resources",
+]
+
+[tool.coverage.run]
+source = ["pyoperator"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true

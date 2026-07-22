@@ -41,6 +41,21 @@
       "suite": "teleop.visualization",
       "module": "core/teleop",
       "script": "res://tests/unit/teleop/ee_pose_trajectory_test.gd"
+    },
+    {
+      "id": "teleop.sdk_mode_suspension",
+      "level": "unit",
+      "suite": "teleop.lifecycle",
+      "module": "app/modes",
+      "script": "res://tests/unit/teleop/sdk_mode_suspension_test.gd"
+    },
+    {
+      "id": "teleop.pyoperator_real_headset_stream",
+      "level": "device",
+      "suite": "python.pyoperator",
+      "module": "python/pyoperator",
+      "required_device": "quest_or_pico",
+      "host_test": "python/tests/test_real_headset.py::test_pyoperator_receives_real_headset_frames"
     }
   ]
 }

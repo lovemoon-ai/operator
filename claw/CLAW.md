@@ -16,6 +16,9 @@ so design intent belongs in the live architecture docs.
   wire contracts.
 - `architecture/live-feed-cloud.md` - Live Feed server integration.
 - `architecture/rust-agent.md` - Rust crates and runtime responsibilities.
+- `architecture/pyoperator-app-control.md` - proposed RFC for making
+  `pyoperator` a first-class lifecycle and in-app control surface for the XR
+  client.
 - `sop/add-new-video-source.md` - procedure for adding a video source.
 - `sop/add-new-vr-device-or-brand.md` - procedure for adding a headset model
   or vendor family.

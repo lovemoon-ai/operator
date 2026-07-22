@@ -148,7 +148,8 @@ func get_controller_pose(hand: int) -> Dictionary:
 	var pose := {
 		"position": t.origin,
 		"rotation": t.basis.get_rotation_quaternion(),
-		"is_active": true
+		"is_active": true,
+		"timestamp_ns": Time.get_ticks_usec() * 1000,
 	}
 	_last_controller_poses[hand] = pose
 	_last_controller_pose_msec[hand] = Time.get_ticks_msec()
@@ -181,6 +182,7 @@ func get_controller_input(hand: int) -> Dictionary:
 		"ax_button": controller.get_float("ax_button"),
 		"by_button": controller.get_float("by_button"),
 		"menu_button": controller.get_float("menu_button"),
+		"timestamp_ns": Time.get_ticks_usec() * 1000,
 	}
 	_last_controller_inputs[hand] = input
 	_last_controller_input_msec[hand] = Time.get_ticks_msec()
@@ -262,6 +264,11 @@ func _controller_profile(controller: XRController3D) -> String:
 	if tracker is XRPositionalTracker:
 		return String((tracker as XRPositionalTracker).profile)
 	return ""
+
+
+func get_controller_profile(hand: int) -> String:
+	var controller: XRController3D = _left_controller if hand == 0 else _right_controller
+	return _controller_profile(controller)
 
 
 ## Collect all tracking data into a single dictionary.

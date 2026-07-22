@@ -26,6 +26,7 @@ XR implementation:
 - `xr/scripts/network/tcp_handler.gd`
 - `xr/scripts/network/session.gd`
 - `xr/scripts/input/command_sender.gd`
+- `xr/scripts/input/xr_state_sender.gd`
 
 Rust implementation:
 
@@ -36,6 +37,32 @@ Rust implementation:
 
 The v2 session starts with Hello and device descriptor negotiation. Old peers
 can still fall back to the legacy path through `Session`.
+
+### Atomic XR state stream
+
+An SDK-mode descriptor contains `xr_stream` with schema version, requested
+rate, and stream names. The XR client then sends `XrStateFrame` on the same TCP
+envelope. Its JSON payload is defined by
+`robot/crates/teleop-protocol/src/xr_state.rs` and contains:
+
+- one `frame_id` and headset monotonic `timestamp_ns`;
+- head pose, both controllers and their complete input maps;
+- both 26-joint hands;
+- optional body joint set and external motion trackers;
+- a `sample_timestamp_ns` on every pose/input/hand/body sample.
+
+The headset builds the dictionary without yielding during one Godot render
+tick. The bridge publishes it through a Rust `watch` channel: backpressure
+drops complete old frames (latest-wins), never individual fields. Existing
+robot descriptors omit `xr_stream`, so their command protocol is unchanged.
+
+SDK mode requires the headset `Hello.capabilities` list to contain
+`xr_state_v1`; otherwise the connection is closed and the compatibility error
+is exposed through Python bridge stats. Exactly one headset owns an embedded
+SDK stream, and a newer connection replaces the old socket. `frame_id` is local
+to the headset process and may reset after reconnect, so consumers treat a
+different id as the next snapshot rather than assuming it is globally
+monotonic.
 
 ### Input sources are hand-agnostic
 

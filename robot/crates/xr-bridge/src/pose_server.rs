@@ -23,13 +23,28 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio_util::codec::Framed;
 
-use teleop_protocol::{DeviceCommand, DeviceDescriptor, DeviceTelemetry};
+use teleop_protocol::{
+    DeviceCommand, DeviceDescriptor, DeviceTelemetry, XrStateFrame, XR_STATE_SCHEMA_VERSION,
+};
 
 use crate::latency::{self, LatencyRecorder};
 use crate::protocol::{CommandCodec, CommandFrame};
+use crate::sdk::XrStateSink;
 use crate::wire_runtime::{build_descriptor_frame, TimedCommand};
+
+/// Tokio tasks detach when their handle is dropped. Connection-local tasks
+/// must instead be cancelled with their parent so they release socket halves
+/// when a newer SDK headset takes ownership.
+struct AbortTaskOnDrop(JoinHandle<()>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// Run the command server, binding `port` on all interfaces. Never returns
 /// under normal operation.
@@ -44,6 +59,47 @@ pub async fn run(
     run_on(listener, descriptor, device_cmd_tx, telemetry_rx, latency).await
 }
 
+/// SDK variant of [`run`] that additionally publishes raw XR snapshots.
+pub async fn run_with_xr_state(
+    port: u16,
+    descriptor: Arc<DeviceDescriptor>,
+    device_cmd_tx: watch::Sender<Option<TimedCommand>>,
+    telemetry_rx: watch::Receiver<DeviceTelemetry>,
+    latency: Arc<LatencyRecorder>,
+    xr_state_sink: XrStateSink,
+) -> Result<()> {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    run_on_inner(
+        listener,
+        descriptor,
+        device_cmd_tx,
+        telemetry_rx,
+        latency,
+        Some(xr_state_sink),
+    )
+    .await
+}
+
+/// Test/embedder variant that accepts an already-bound listener.
+pub async fn run_on_with_xr_state(
+    listener: TcpListener,
+    descriptor: Arc<DeviceDescriptor>,
+    device_cmd_tx: watch::Sender<Option<TimedCommand>>,
+    telemetry_rx: watch::Receiver<DeviceTelemetry>,
+    latency: Arc<LatencyRecorder>,
+    xr_state_sink: XrStateSink,
+) -> Result<()> {
+    run_on_inner(
+        listener,
+        descriptor,
+        device_cmd_tx,
+        telemetry_rx,
+        latency,
+        Some(xr_state_sink),
+    )
+    .await
+}
+
 /// Run the command server on a pre-bound [`TcpListener`]. Used by tests that
 /// bind an ephemeral port and need to read `local_addr()` first.
 pub async fn run_on(
@@ -53,7 +109,27 @@ pub async fn run_on(
     telemetry_rx: watch::Receiver<DeviceTelemetry>,
     latency: Arc<LatencyRecorder>,
 ) -> Result<()> {
+    run_on_inner(
+        listener,
+        descriptor,
+        device_cmd_tx,
+        telemetry_rx,
+        latency,
+        None,
+    )
+    .await
+}
+
+async fn run_on_inner(
+    listener: TcpListener,
+    descriptor: Arc<DeviceDescriptor>,
+    device_cmd_tx: watch::Sender<Option<TimedCommand>>,
+    telemetry_rx: watch::Receiver<DeviceTelemetry>,
+    latency: Arc<LatencyRecorder>,
+    xr_state_sink: Option<XrStateSink>,
+) -> Result<()> {
     tracing::info!("Command server listening on {}", listener.local_addr()?);
+    let mut active_sdk_connection: Option<JoinHandle<()>> = None;
 
     loop {
         let (socket, addr) = listener.accept().await?;
@@ -64,12 +140,29 @@ pub async fn run_on(
         let device_cmd_tx = device_cmd_tx.clone();
         let telemetry_rx = telemetry_rx.clone();
         let latency = latency.clone();
+        let xr_state_sink = xr_state_sink.clone();
+        let sdk_mode = xr_state_sink.is_some();
 
         // Stamp a fresh session id so any in-flight stale frames from a
         // previous connection get ignored by the aggregator.
         latency.new_session();
 
-        tokio::spawn(async move {
+        // The SDK exports one atomic latest-state stream. Mixing two headset
+        // producers would destroy that guarantee, so a newly accepted SDK
+        // connection replaces the previous one. Normal robot-service mode
+        // keeps its existing multi-client behavior.
+        if sdk_mode {
+            if let Some(active) = active_sdk_connection.take() {
+                active.abort();
+                let _ = active.await;
+                if let Some(sink) = &xr_state_sink {
+                    sink.stats.set_connected(false);
+                }
+                tracing::info!("Replaced previous SDK headset connection");
+            }
+        }
+
+        let task = tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 socket,
                 addr,
@@ -77,13 +170,20 @@ pub async fn run_on(
                 device_cmd_tx,
                 telemetry_rx,
                 latency,
+                xr_state_sink.clone(),
             )
             .await
             {
                 tracing::warn!("Connection error for {addr}: {e}");
             }
+            if let Some(sink) = xr_state_sink {
+                sink.stats.set_connected(false);
+            }
             tracing::info!("Headset disconnected from {addr}");
         });
+        if sdk_mode {
+            active_sdk_connection = Some(task);
+        }
     }
 }
 
@@ -97,6 +197,7 @@ async fn handle_connection(
     device_cmd_tx: watch::Sender<Option<TimedCommand>>,
     mut telemetry_rx: watch::Receiver<DeviceTelemetry>,
     latency: Arc<LatencyRecorder>,
+    xr_state_sink: Option<XrStateSink>,
 ) -> Result<()> {
     let mut framed = Framed::new(socket, CommandCodec);
 
@@ -105,11 +206,32 @@ async fn handle_connection(
     match tokio::time::timeout(handshake_timeout, framed.next()).await {
         Ok(Some(Ok(frame))) => {
             if frame.command == "Hello" {
+                if let Some(sink) = &xr_state_sink {
+                    if !hello_supports_xr_state(&frame.data) {
+                        let error = format!(
+                            "headset {addr} does not advertise required capability xr_state_v1; update the Operator XR app"
+                        );
+                        sink.stats.record_error(error.clone());
+                        anyhow::bail!(error);
+                    }
+                }
                 tracing::info!("Hello received from {addr}");
                 let resp = build_descriptor_frame(&descriptor);
                 framed.send(resp).await?;
                 tracing::info!("Sent DeviceDescriptor to {addr}");
+                if let Some(sink) = &xr_state_sink {
+                    sink.stats.clear_error();
+                    sink.stats.set_connected(true);
+                }
             } else {
+                if let Some(sink) = &xr_state_sink {
+                    let error = format!(
+                        "expected Hello with xr_state_v1 capability from SDK headset, got '{}'",
+                        frame.command
+                    );
+                    sink.stats.record_error(error.clone());
+                    anyhow::bail!(error);
+                }
                 // Not a Hello — treat as DeviceCommand directly (no handshake).
                 tracing::warn!(
                     "Expected Hello but got '{}', proceeding anyway",
@@ -130,6 +252,10 @@ async fn handle_connection(
         }
         Ok(Some(Err(e))) => {
             tracing::error!("Handshake decode error from {addr}: {e}");
+            if let Some(sink) = &xr_state_sink {
+                sink.stats
+                    .record_error(format!("invalid SDK headset handshake: {e}"));
+            }
             return Ok(());
         }
         Ok(None) => {
@@ -137,6 +263,13 @@ async fn handle_connection(
             return Ok(());
         }
         Err(_) => {
+            if let Some(sink) = &xr_state_sink {
+                let error = format!(
+                    "headset {addr} did not send Hello with xr_state_v1 capability within 5 seconds"
+                );
+                sink.stats.record_error(error.clone());
+                anyhow::bail!(error);
+            }
             tracing::warn!("Handshake timeout from {addr}, proceeding without Hello");
         }
     }
@@ -150,18 +283,18 @@ async fn handle_connection(
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<CommandFrame>(64);
 
     // Writer task: forward anything sent on outbound_rx to the socket.
-    let writer_task = tokio::spawn(async move {
+    let _writer_task = AbortTaskOnDrop(tokio::spawn(async move {
         while let Some(frame) = outbound_rx.recv().await {
             if writer.send(frame).await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
     // Telemetry sender: push device state to headset at ~10Hz via the outbound
     // channel.
     let telemetry_outbound = outbound_tx.clone();
-    let telemetry_task = tokio::spawn(async move {
+    let _telemetry_task = AbortTaskOnDrop(tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
         loop {
             interval.tick().await;
@@ -178,7 +311,7 @@ async fn handle_connection(
                 break; // Outbound channel closed -> writer task exited.
             }
         }
-    });
+    }));
 
     // Command receiver: read frames from headset.
     while let Some(result) = reader.next().await {
@@ -200,6 +333,30 @@ async fn handle_connection(
                     }
                     Err(e) => tracing::warn!("Bad DeviceCommand JSON: {e}"),
                 },
+                "XrStateFrame" => {
+                    let Some(sink) = &xr_state_sink else {
+                        tracing::debug!("Ignoring XrStateFrame outside SDK mode");
+                        continue;
+                    };
+                    match serde_json::from_slice::<XrStateFrame>(&frame.data) {
+                        Ok(state) if state.schema_version == XR_STATE_SCHEMA_VERSION => {
+                            sink.stats.record_frame(&state);
+                            sink.frame_tx.send_replace(Some(Arc::new(state)));
+                        }
+                        Ok(state) => {
+                            let error = format!(
+                                "unsupported XrStateFrame schema {} (expected {})",
+                                state.schema_version, XR_STATE_SCHEMA_VERSION
+                            );
+                            sink.stats.record_parse_error(error.clone());
+                            tracing::warn!("{error}");
+                        }
+                        Err(error) => {
+                            sink.stats.record_parse_error(error.to_string());
+                            tracing::warn!("Bad XrStateFrame JSON: {error}");
+                        }
+                    }
+                }
                 "Heartbeat" => {
                     tracing::trace!("Heartbeat from {addr}");
                 }
@@ -237,9 +394,21 @@ async fn handle_connection(
         }
     }
 
-    telemetry_task.abort();
-    writer_task.abort();
     Ok(())
+}
+
+fn hello_supports_xr_state(data: &[u8]) -> bool {
+    match serde_json::from_slice::<serde_json::Value>(data) {
+        Ok(hello) => hello
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability.as_str() == Some("xr_state_v1"))
+            }),
+        Err(_) => false,
+    }
 }
 
 /// Wall-clock nanoseconds since UNIX epoch, signed (for the clock-sync
@@ -286,5 +455,14 @@ mod tests {
     #[test]
     fn parse_clock_ping_missing_field_yields_zero() {
         assert_eq!(parse_clock_ping_t_send(b"{\"other\":1}"), 0);
+    }
+
+    #[test]
+    fn sdk_capability_is_required_in_hello() {
+        assert!(hello_supports_xr_state(
+            br#"{"capabilities":["xr_state_v1","controller"]}"#
+        ));
+        assert!(!hello_supports_xr_state(br#"{"version":"2.0"}"#));
+        assert!(!hello_supports_xr_state(b"not json"));
     }
 }

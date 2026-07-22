@@ -83,13 +83,8 @@ impl NalParser {
         self.buffer.extend_from_slice(data);
         let mut nals = Vec::new();
 
-        loop {
+        while let Some(first) = find_start_code(&self.buffer, 0) {
             // Find first start code in buffer.
-            let first = match find_start_code(&self.buffer, 0) {
-                Some(pos) => pos,
-                None => break,
-            };
-
             // Find next start code after the first one.
             let search_from = first.offset + first.len;
             match find_start_code(&self.buffer, search_from) {

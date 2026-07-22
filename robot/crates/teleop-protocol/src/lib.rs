@@ -34,8 +34,10 @@ pub mod adapter;
 pub mod descriptor;
 pub mod transport;
 pub mod wire;
+pub mod xr_state;
 
 pub use adapter::*;
 pub use descriptor::*;
 pub use transport::*;
 pub use wire::*;
+pub use xr_state::*;

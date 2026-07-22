@@ -138,7 +138,9 @@ async fn handle_message(
         BridgeToAdapter::Hello => {
             tracing::debug!("Hello -> Descriptor");
             framed
-                .send(AdapterToBridge::Descriptor(device.descriptor().clone()))
+                .send(AdapterToBridge::Descriptor(Box::new(
+                    device.descriptor().clone(),
+                )))
                 .await?;
         }
         BridgeToAdapter::Command(cmd) => {
