@@ -118,7 +118,7 @@ acceleration. `--robot.max_relative_target` does **not** help: it clamps
 
 Seed `Goal_Position` ← `Present_Position` while torque is off first (writing a
 goal with torque disabled causes no motion, and makes the subsequent
-`enable_torque` a no-op hold). `cicd/06_so101_lerobot_device.sh` does this as a
+`enable_torque` a no-op hold). `cicd/06_single_so101_lerobot_device.sh` does this as a
 pre-flight; copy it.
 
 ## Safety contract

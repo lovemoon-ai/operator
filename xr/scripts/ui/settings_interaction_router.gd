@@ -366,12 +366,14 @@ func _show_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3, target
 	# have their own in-viewport 2D cursor — suppress our 3D sphere in that
 	# case and let the laser carry the directional cue.
 	var suppress_target := target is OpenXRCompositionLayer
+	_sync_pointer_visual_dimming()
 	ui_pointer_visual.show_ray(ray_origin, ray_direction, hit_point, pressed, suppress_target)
 
 
 func _show_idle_ui_pointer_visual(ray_origin: Vector3, ray_direction: Vector3) -> void:
 	if ui_pointer_visual == null:
 		return
+	_sync_pointer_visual_dimming()
 	if ui_pointer_visual.has_method("show_idle_ray"):
 		ui_pointer_visual.show_idle_ray(ray_origin, ray_direction)
 	elif ui_pointer_visual.has_method("clear"):
@@ -767,6 +769,15 @@ func _get_haptics_bus() -> Node:
 	if not is_inside_tree():
 		return null
 	return get_tree().root.get_node_or_null("Haptics")
+
+
+func _sync_pointer_visual_dimming() -> void:
+	## `busy` mirrors the capture recording state (CaptureAppBase calls
+	## OperatorInteraction.set_busy(_recording)). While recording, the pointer
+	## stays fully interactive in controllers mode but its visuals are dimmed
+	## so the laser does not dominate the view.
+	if ui_pointer_visual and ui_pointer_visual.has_method("set_dimmed"):
+		ui_pointer_visual.set_dimmed(busy)
 
 
 func _hide_ui_pointer_visual() -> void:

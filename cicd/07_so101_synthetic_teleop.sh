@@ -50,6 +50,14 @@
 #
 # Requires: one real SO-101 on USB (two for DUAL=1), and a Quest on USB (adb) +
 # the same wifi as the host (so it can reach HOST_IP:63901).
+#
+# For dual SO101 arm:
+#   DUAL=1 \
+#   SO101_PORT_LEFT=/dev/tty.usbmodem5AAF2192831 \
+#   SO101_PORT_RIGHT=/dev/tty.usbmodem58FA1019921 \
+#   ROBOT_ID_LEFT=so101_follower_left \
+#   ROBOT_ID_RIGHT=so101_follower_right \
+#   bash cicd/07_so101_synthetic_teleop.sh
 
 set -euo pipefail
 

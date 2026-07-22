@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Make the SO-101 LeRobot teleop environment READY, deterministically.
 #
-# The device tests 06_so101_lerobot_device.sh and 07_so101_synthetic_teleop.sh
+# The device tests 06_single_so101_lerobot_device.sh and 07_so101_synthetic_teleop.sh
 # (and the manual example examples/quest_so101_teleop_manual.sh) drive a real
 # SO-101 through LeRobot's `lerobot-teleoperate` + the out-of-tree `vr_operator`
 # plugin. That needs three things in place before the test can run:
