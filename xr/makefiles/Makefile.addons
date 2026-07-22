@@ -118,7 +118,7 @@ GODOT_CPP_BUILD_DIR := $(DEPS_BUILD_DIR)/godot-cpp
 # Phony targets exposed to xr/Makefile
 # ---------------------------------------------------------------------------
 
-.PHONY: deps setup-vendors prepare-android-libs build-ahb build-godot-mujoco build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins build-pinocchio-gdext clean-addons
+.PHONY: deps setup-vendors prepare-android-libs build-ahb build-godot-mujoco build-retargeting verify-retargeting-lib build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins build-pinocchio-gdext clean-addons
 
 # ---------------------------------------------------------------------------
 # Third-party vendored addons
@@ -243,6 +243,58 @@ $(GODOT_MUJOCO_JNI_LIB): $(GODOT_MUJOCO_ADDON_LIB)
 	@echo "[godot-mujoco] installed $@"
 
 build-godot-mujoco: $(GODOT_MUJOCO_ADDON_SO) $(GODOT_MUJOCO_ADDON_LIB) $(GODOT_MUJOCO_JNI_SO) $(GODOT_MUJOCO_JNI_LIB)
+
+# ---------------------------------------------------------------------------
+# Retargeting GDExtension (native/godot_retargeting) — GMRRetargeter / Galbot
+# ---------------------------------------------------------------------------
+# Builds libgodot_retargeting.so (+ stages libmujoco.so) via CMake+NDK. Needs
+# the MuJoCo Android install ($(MUJOCO_ANDROID_LIB), order-only so a fresh tree
+# builds it first). build.sh validates ELF + stages into addons/bin (res:// for
+# Godot's GDExtension export) and libs/release/<abi> (gradle release jniLibs).
+# Same staleness rule as godot-mujoco: keep a stale .so when NDK is unset rather
+# than hard-failing an unrelated build. `verify-retargeting-lib` is the backstop
+# that stops an empty/invalid .so from ever shipping in the APK.
+RETARGETING_DIR       := native/godot_retargeting
+RETARGETING_ADDON_SO  := addons/godot_retargeting/bin/libgodot_retargeting.so
+RETARGETING_ADDON_LIB := addons/godot_retargeting/bin/libmujoco.so
+RETARGETING_JNI_SO    := android/build/libs/release/arm64-v8a/libgodot_retargeting.so
+RETARGETING_JNI_LIB   := android/build/libs/release/arm64-v8a/libmujoco.so
+RETARGETING_SRC       := $(wildcard $(RETARGETING_DIR)/src/*.cpp $(RETARGETING_DIR)/src/*.h) $(RETARGETING_DIR)/CMakeLists.txt $(RETARGETING_DIR)/build.sh
+
+# The xr/Makefile always exports the pinned $ANDROID_NDK, so there is no
+# "keep stale when NDK unset" branch here (unlike the older godot-mujoco rule):
+# build-retargeting depends on verify-ndk, and build.sh re-checks the NDK and
+# validates the produced ELF. build-quest must ship a real lib, not a stale one.
+$(RETARGETING_ADDON_SO): $(RETARGETING_SRC) | $(MUJOCO_ANDROID_LIB)
+	OPERATOR_DEPS_CACHE_ROOT="$(OPERATOR_DEPS_CACHE_ROOT_ABS)" $(RETARGETING_DIR)/build.sh Release
+
+$(RETARGETING_ADDON_LIB): $(RETARGETING_ADDON_SO)
+	@test -s $@ || { echo "[retargeting] missing $@ after build" >&2; exit 1; }
+
+$(RETARGETING_JNI_SO): $(RETARGETING_ADDON_SO)
+	@mkdir -p $(@D)
+	@cp -f $< $@
+	@echo "[retargeting] installed $@"
+
+$(RETARGETING_JNI_LIB): $(RETARGETING_ADDON_LIB)
+	@mkdir -p $(@D)
+	@cp -f $< $@
+	@echo "[retargeting] installed $@"
+
+build-retargeting: verify-ndk $(RETARGETING_ADDON_SO) $(RETARGETING_ADDON_LIB) $(RETARGETING_JNI_SO) $(RETARGETING_JNI_LIB)
+
+# Backstop: refuse to ship an empty / non-ELF retargeting library. Catches the
+# historical failure where a 0-byte .so was packaged and dlopen failed at runtime.
+# Depends on build-retargeting so it never races ahead of the build under `make -j`.
+verify-retargeting-lib: build-retargeting
+	@for f in "$(RETARGETING_ADDON_SO)" "$(RETARGETING_JNI_SO)"; do \
+	    if [ ! -s "$$f" ]; then \
+	        echo "[retargeting] FATAL: $$f is missing or empty — run 'make build-retargeting' (needs NDK + MuJoCo)." >&2; exit 1; fi; \
+	    magic=$$(od -An -tx1 -N4 "$$f" | tr -d ' \n'); \
+	    if [ "$$magic" != "7f454c46" ]; then \
+	        echo "[retargeting] FATAL: $$f is not an ELF object (magic=$$magic) — would fail dlopen on device." >&2; exit 1; fi; \
+	done
+	@echo "[retargeting] verified libgodot_retargeting.so is a valid ELF"
 
 # ---------------------------------------------------------------------------
 # PICO OpenXR GDExtension (native/pico_openxr)
