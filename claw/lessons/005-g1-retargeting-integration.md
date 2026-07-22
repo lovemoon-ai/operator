@@ -3,7 +3,7 @@
 Date: 2026-06-18
 
 Bringing up the in-headset Unitree G1 retarget overlay
-(`xr/scripts/robot_constraint/robot/g1_overlay.gd`, driven by the
+(`xr/scripts/robot_constraint/robot/unitree_g1_overlay.gd`, driven by the
 `DuinoDu/retargeting` GMR toolkit via the `godot_retargeting` GDExtension)
 surfaced a chain of bugs. The retargeting *result* (qpos) was repeatedly correct
 offline yet the headset looked wrong — the gap was always in how the live VR pose

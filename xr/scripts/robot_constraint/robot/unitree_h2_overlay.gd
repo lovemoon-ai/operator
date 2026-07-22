@@ -1,4 +1,4 @@
-class_name H2Overlay
+class_name UnitreeH2Overlay
 extends Node3D
 
 ## In-headset rest-state overlay of the H2 robot for visual debugging.
@@ -41,16 +41,16 @@ var _debug_front_locked: bool = false
 
 func _ready() -> void:
 	if not ResourceLoader.exists(GLB_PATH):
-		push_error("[H2Overlay] GLB not found at %s. Run scripts/make-robot/make_h2_sharpa.sh to produce it." % GLB_PATH)
+		push_error("[UnitreeH2Overlay] GLB not found at %s. Run scripts/make-robot/make_h2_sharpa.sh to produce it." % GLB_PATH)
 		return
 	_load_glb()
 	if _pelvis_node == null:
-		push_error("[H2Overlay] GLB did not contain a 'pelvis' node; overlay disabled.")
+		push_error("[UnitreeH2Overlay] GLB did not contain a 'pelvis' node; overlay disabled.")
 		return
 	_apply_overlay_material()
 	if debug_place_in_front_of_view:
 		call_deferred("_lock_in_front_of_view")
-	print("[H2Overlay] ready: %d link nodes" % _link_nodes.size())
+	print("[UnitreeH2Overlay] ready: %d link nodes" % _link_nodes.size())
 
 
 func _process(_delta: float) -> void:
@@ -70,7 +70,7 @@ func set_head_camera(camera: Node3D) -> void:
 func _load_glb() -> void:
 	var packed: PackedScene = load(GLB_PATH)
 	if packed == null:
-		push_error("[H2Overlay] failed to load GLB: %s" % GLB_PATH)
+		push_error("[UnitreeH2Overlay] failed to load GLB: %s" % GLB_PATH)
 		return
 	var instance: Node = packed.instantiate()
 	var parent: Node3D = self

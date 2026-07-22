@@ -6,8 +6,8 @@ const DepthSamplerScript := preload("res://scripts/core/sensors/depth_sampler.gd
 const BodyMotionSamplerScript := preload("res://scripts/core/sensors/body_motion_sampler.gd")
 const BodyPoseProviderScript := preload("res://scripts/robot_constraint/body_pose_provider.gd")
 const BodyPoseDebugOverlayScript := preload("res://scripts/robot_constraint/body_pose_debug_overlay.gd")
-const H2OverlayScript := preload("res://scripts/robot_constraint/robot/h2_overlay.gd")
-const G1OverlayScript := preload("res://scripts/robot_constraint/robot/g1_overlay.gd")
+const UnitreeH2OverlayScript := preload("res://scripts/robot_constraint/robot/unitree_h2_overlay.gd")
+const UnitreeG1OverlayScript := preload("res://scripts/robot_constraint/robot/unitree_g1_overlay.gd")
 const GalbotG1OverlayScript := preload("res://scripts/robot_constraint/robot/galbot_g1_overlay.gd")
 const TrackingProviderScript := preload("res://scripts/xr/tracking_provider.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/ui/view_locked_capture_panel.gd")
@@ -112,7 +112,8 @@ var _g1_debug_overlay: Node3D = null
 var _galbot_g1_debug_tracking_provider: Node = null
 var _galbot_g1_debug_provider: Node = null
 var _galbot_g1_debug_overlay: Node3D = null
-## DEBUG toggles for diagnosing the G1 retarget overlay (see g1_overlay.gd #1/#3).
+## DEBUG toggles for diagnosing the Unitree G1 retarget overlay
+## (see unitree_g1_overlay.gd #1/#3).
 ## DUMP_FRAMES > 0  -> write user://g1_debug.jsonl (per-stage capture for offline diff).
 ## REPLAY_QPOS true -> drive the GLB from the bundled known-good qpos sequence,
 ##                     bypassing live retargeting (isolates GLB render from input).
@@ -1570,15 +1571,15 @@ func _start_h2_debug_overlay() -> void:
 	if _h2_debug_overlay != null:
 		return
 
-	var overlay: Node3D = H2OverlayScript.new()
-	overlay.name = "DebugH2RestOverlay"
+	var overlay: Node3D = UnitreeH2OverlayScript.new()
+	overlay.name = "DebugUnitreeH2RestOverlay"
 	overlay.set("debug_place_in_front_of_view", true)
 	overlay.call("set_head_camera", hmd_camera)
 	add_child(overlay)
 
 	_h2_debug_provider = null
 	_h2_debug_overlay = overlay
-	print("[CaptureApp] H2 debug rest overlay on")
+	print("[CaptureApp] Unitree H2 debug rest overlay on")
 
 
 func _stop_h2_debug_overlay() -> void:
@@ -1591,7 +1592,7 @@ func _stop_h2_debug_overlay() -> void:
 		_h2_debug_provider.queue_free()
 		_h2_debug_provider = null
 	if had_overlay:
-		print("[CaptureApp] H2 debug overlay off")
+		print("[CaptureApp] Unitree H2 debug overlay off")
 	_set_debug_panel_state()
 
 
@@ -1628,8 +1629,8 @@ func _start_g1_debug_overlay() -> void:
 	add_child(provider)
 	provider.call("set_enabled", true)
 
-	var overlay: Node3D = G1OverlayScript.new()
-	overlay.name = "DebugG1RetargetOverlay"
+	var overlay: Node3D = UnitreeG1OverlayScript.new()
+	overlay.name = "DebugUnitreeG1RetargetOverlay"
 	overlay.set("debug_place_in_front_of_view", true)
 	if G1_DEBUG_DUMP_FRAMES > 0:
 		overlay.set("debug_dump_frames", G1_DEBUG_DUMP_FRAMES)
@@ -1646,11 +1647,11 @@ func _start_g1_debug_overlay() -> void:
 	_g1_debug_tracking_provider = tracking_provider
 	_g1_debug_provider = provider
 	_g1_debug_overlay = overlay
-	print("[CaptureApp] G1 retarget overlay on")
+	print("[CaptureApp] Unitree G1 retarget overlay on")
 
 
 func _stop_g1_debug_overlay(immediate: bool = false) -> void:
-	# Same ordered teardown as galbot: the G1 overlay also owns a native
+	# Same ordered teardown as galbot: the Unitree G1 overlay also owns a native
 	# GMRRetargeter (MuJoCo) + OpenXR providers, so disable sampling first, then
 	# free overlay, then providers — synchronously on shutdown (see
 	# _shutdown_debug_overlays_sync).
@@ -1664,7 +1665,7 @@ func _stop_g1_debug_overlay(immediate: bool = false) -> void:
 	_free_node(_g1_debug_tracking_provider, immediate)
 	_g1_debug_tracking_provider = null
 	if had_overlay:
-		print("[CaptureApp] G1 retarget overlay off")
+		print("[CaptureApp] Unitree G1 retarget overlay off")
 	_set_debug_panel_state()
 
 

@@ -1,4 +1,4 @@
-class_name G1Overlay
+class_name UnitreeG1Overlay
 extends Node3D
 
 ## In-headset overlay of the Unitree G1 robot, driven by retargeting.
@@ -8,7 +8,7 @@ extends Node3D
 ## the native GMRRetargeter GDExtension is available — drives the upper body each
 ## frame by retargeting the operator's tracked VR body pose onto G1 joint angles
 ## (GMR algorithm, MuJoCo backend). If the extension or a body frame is missing
-## it degrades to a static rest-pose overlay (same behaviour as H2Overlay).
+## it degrades to a static rest-pose overlay (same behaviour as UnitreeH2Overlay).
 ##
 ## Pipeline per frame:
 ##   canonical VR body frame  -> GMR-coordinate source poses (position tasks)
@@ -173,11 +173,11 @@ var _vr_pose_mat: StandardMaterial3D = null
 
 func _ready() -> void:
 	if not ResourceLoader.exists(GLB_PATH):
-		push_error("[G1Overlay] GLB not found at %s. Run scripts/make-robot/make_unitree_g1.sh." % GLB_PATH)
+		push_error("[UnitreeG1Overlay] GLB not found at %s. Run scripts/make-robot/make_unitree_g1.sh." % GLB_PATH)
 		return
 	_load_glb()
 	if _pelvis_node == null:
-		push_error("[G1Overlay] GLB did not contain a 'pelvis' node; overlay disabled.")
+		push_error("[UnitreeG1Overlay] GLB did not contain a 'pelvis' node; overlay disabled.")
 		return
 	_apply_overlay_material()
 	if show_ground_grid:
@@ -189,14 +189,14 @@ func _ready() -> void:
 	if debug_dump_frames > 0:
 		_dump_file = FileAccess.open("user://g1_debug.jsonl", FileAccess.WRITE)
 		if _dump_file != null:
-			print("[G1Overlay] DEBUG: dumping first %d frames -> user://g1_debug.jsonl" % debug_dump_frames)
+			print("[UnitreeG1Overlay] DEBUG: dumping first %d frames -> user://g1_debug.jsonl" % debug_dump_frames)
 		else:
-			push_warning("[G1Overlay] DEBUG: could not open user://g1_debug.jsonl for dump")
+			push_warning("[UnitreeG1Overlay] DEBUG: could not open user://g1_debug.jsonl for dump")
 	if debug_replay_qpos:
 		_load_replay()
 	if debug_place_in_front_of_view:
 		call_deferred("_lock_in_front_of_view")
-	print("[G1Overlay] ready: %d links, %d qpos joints, retarget=%s" % [
+	print("[UnitreeG1Overlay] ready: %d links, %d qpos joints, retarget=%s" % [
 		_link_nodes.size(), _qpos_joints.size(), str(_retarget_active)])
 
 
@@ -234,7 +234,7 @@ func set_body_pose_provider(provider: Node) -> void:
 func _load_glb() -> void:
 	var packed: PackedScene = load(GLB_PATH)
 	if packed == null:
-		push_error("[G1Overlay] failed to load GLB: %s" % GLB_PATH)
+		push_error("[UnitreeG1Overlay] failed to load GLB: %s" % GLB_PATH)
 		return
 	var instance: Node = packed.instantiate()
 	var parent: Node3D = self
@@ -305,7 +305,7 @@ func _parse_mocap_joints() -> void:
 	# (XMLParser.open() only reads real on-disk files).
 	var bytes := FileAccess.get_file_as_bytes(MOCAP_XML)
 	if bytes.is_empty():
-		push_warning("[G1Overlay] could not read mocap MJCF %s" % MOCAP_XML)
+		push_warning("[UnitreeG1Overlay] could not read mocap MJCF %s" % MOCAP_XML)
 		return
 	var parser := XMLParser.new()
 	if parser.open_buffer(bytes) != OK:
@@ -370,7 +370,7 @@ func _qmul(a: Quaternion, b: Quaternion) -> Quaternion:
 
 func _setup_retargeter() -> void:
 	if not ClassDB.class_exists("GMRRetargeter"):
-		print("[G1Overlay] GMRRetargeter extension not present; static overlay only.")
+		print("[UnitreeG1Overlay] GMRRetargeter extension not present; static overlay only.")
 		return
 	var robot := _extract_to_user(MOCAP_XML)
 	var ik := _extract_to_user(IK_CONFIG)
@@ -383,11 +383,11 @@ func _setup_retargeter() -> void:
 	# to rest so only the arms + waist-yaw track (matches the GMR Python pipeline).
 	var ok: bool = rt.call("configure", "upper_body", robot, ik, HUMAN_HEIGHT, LOCKED_QPOS_PREFIX, false, _clamp_indices)
 	if not ok:
-		push_warning("[G1Overlay] retargeter configure failed: %s" % str(rt.call("get_last_error")))
+		push_warning("[UnitreeG1Overlay] retargeter configure failed: %s" % str(rt.call("get_last_error")))
 		return
 	_retargeter = rt
 	_retarget_active = true
-	print("[G1Overlay] retargeter ready: nq=%d" % int(rt.call("get_nq")))
+	print("[UnitreeG1Overlay] retargeter ready: nq=%d" % int(rt.call("get_nq")))
 
 
 # Copy a res:// asset to a real user:// path (res:// inside an APK is not a real
@@ -397,7 +397,7 @@ func _extract_to_user(res_path: String) -> String:
 	if not FileAccess.file_exists(dst):
 		var data := FileAccess.get_file_as_bytes(res_path)
 		if data.is_empty():
-			push_warning("[G1Overlay] could not read %s" % res_path)
+			push_warning("[UnitreeG1Overlay] could not read %s" % res_path)
 			return ""
 		var f := FileAccess.open(dst, FileAccess.WRITE)
 		if f == null:
@@ -742,9 +742,9 @@ func _dump_glb_rest() -> void:
 		if f != null:
 			f.store_string(payload)
 			f.close()
-			print("[G1Overlay] DEBUG: wrote GLB rest (%d links, %d joints) -> %s" % [links.size(), jtab.size(), p])
+			print("[UnitreeG1Overlay] DEBUG: wrote GLB rest (%d links, %d joints) -> %s" % [links.size(), jtab.size(), p])
 			return
-	push_warning("[G1Overlay] DEBUG: could not open any GLB rest dump path")
+	push_warning("[UnitreeG1Overlay] DEBUG: could not open any GLB rest dump path")
 
 
 # (#1) Append one frame of the live pipeline to user://g1_debug.jsonl:
@@ -772,7 +772,7 @@ func _dump_frame(canon: Dictionary, src: Dictionary, qpos: PackedFloat64Array) -
 	if _dump_count >= debug_dump_frames:
 		_dump_file.close()
 		_dump_file = null
-		print("[G1Overlay] DEBUG: dump complete (%d frames) -> user://g1_debug.jsonl" % debug_dump_frames)
+		print("[UnitreeG1Overlay] DEBUG: dump complete (%d frames) -> user://g1_debug.jsonl" % debug_dump_frames)
 
 
 # (#3) Load a known-good qpos JSONL ({"joint_q":[...29...]} per line) for replay.
@@ -781,7 +781,7 @@ func _dump_frame(canon: Dictionary, src: Dictionary, qpos: PackedFloat64Array) -
 func _load_replay() -> void:
 	var bytes := FileAccess.get_file_as_bytes(debug_replay_path)
 	if bytes.is_empty():
-		push_warning("[G1Overlay] DEBUG: replay qpos file not found: %s" % debug_replay_path)
+		push_warning("[UnitreeG1Overlay] DEBUG: replay qpos file not found: %s" % debug_replay_path)
 		return
 	for line in bytes.get_string_from_utf8().split("\n", false):
 		var t := line.strip_edges()
@@ -799,7 +799,7 @@ func _load_replay() -> void:
 		for i in range(jq.size()):
 			arr[7 + i] = float(jq[i])
 		_replay_qpos.append(arr)
-	print("[G1Overlay] DEBUG: replay loaded %d qpos frames from %s" % [_replay_qpos.size(), debug_replay_path])
+	print("[UnitreeG1Overlay] DEBUG: replay loaded %d qpos frames from %s" % [_replay_qpos.size(), debug_replay_path])
 
 
 # Apply MuJoCo-convention qpos (base 7 + hinge joints) to the GLB link nodes by

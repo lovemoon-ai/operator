@@ -28,11 +28,12 @@ There is no on-device robot IK loop in this directory.
 | `canonical_resolver.gd` | `CanonicalResolver` | Fuses partial frames by source priority and tracking quality. |
 | `body_pose_provider.gd` | `BodyPoseProvider` | Samples adapters per physics tick and emits `canonical_frame_ready` plus raw vendor frames. |
 | `body_pose_debug_overlay.gd` | `BodyPoseDebugOverlay` | World-locked stick-figure renderer for the canonical VR body pose. |
-| `robot/h2_overlay.gd` | `H2Overlay` | World-locked translucent H2 rest-state GLB renderer. |
+| `robot/unitree_h2_overlay.gd` | `UnitreeH2Overlay` | World-locked translucent Unitree H2 rest-state GLB renderer. |
+| `robot/unitree_g1_overlay.gd` | `UnitreeG1Overlay` | Live-retargeted translucent Unitree G1 GLB renderer. |
 
 ## Notes
 
 `BodyPoseProvider` does not run calibration, task extraction, robot
-constraint solving, or IK. Future robot-specific constraint modules
-should live outside this provider and consume `canonical_frame_ready`
-as input.
+constraint solving, or IK. Robot-specific overlays consume
+`canonical_frame_ready`; Unitree G1 and Galbot G1 delegate retargeting to the
+native GDExtension, while Unitree H2 remains a static rest-pose reference.

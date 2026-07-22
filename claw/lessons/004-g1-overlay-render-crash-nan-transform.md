@@ -5,7 +5,7 @@ Date: 2026-06-17
 ## Symptom
 
 While the in-headset G1 retarget overlay (`xr/scripts/robot_constraint/robot/
-g1_overlay.gd`) was shown and driven by live body tracking, the app crashed
+unitree_g1_overlay.gd`) was shown and driven by live body tracking, the app crashed
 **intermittently** — uptime at crash varied widely (~10s to ~600s). Every
 tombstone was the same native Vulkan render-thread fault:
 

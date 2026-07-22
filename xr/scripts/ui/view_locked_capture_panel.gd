@@ -427,14 +427,14 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	add_interactive(robot_constraint, _body_pose_debug_button)
 
 	_h2_debug_button = Button.new()
-	_h2_debug_button.text = tr("UI_SHOW_H2_DEBUG")
+	_h2_debug_button.text = tr("UI_SHOW_UNITREE_H2_DEBUG")
 	_h2_debug_button.custom_minimum_size.y = 55
 	_h2_debug_button.add_theme_font_size_override("font_size", 21)
 	_h2_debug_button.pressed.connect(_on_h2_debug_pressed)
 	add_interactive(robot_constraint, _h2_debug_button)
 
 	_g1_debug_button = Button.new()
-	_g1_debug_button.text = tr("UI_SHOW_G1_DEBUG")
+	_g1_debug_button.text = tr("UI_SHOW_UNITREE_G1_DEBUG")
 	_g1_debug_button.custom_minimum_size.y = 55
 	_g1_debug_button.add_theme_font_size_override("font_size", 21)
 	_g1_debug_button.pressed.connect(_on_g1_debug_pressed)
@@ -678,13 +678,13 @@ func set_body_pose_debug_visible(visible_for_debug: bool) -> void:
 func set_h2_debug_visible(visible_for_debug: bool) -> void:
 	if _h2_debug_button == null:
 		return
-	_h2_debug_button.text = tr("UI_HIDE_H2_DEBUG") if visible_for_debug else tr("UI_SHOW_H2_DEBUG")
+	_h2_debug_button.text = tr("UI_HIDE_UNITREE_H2_DEBUG") if visible_for_debug else tr("UI_SHOW_UNITREE_H2_DEBUG")
 
 
 func set_g1_debug_visible(visible_for_debug: bool) -> void:
 	if _g1_debug_button == null:
 		return
-	_g1_debug_button.text = tr("UI_HIDE_G1_DEBUG") if visible_for_debug else tr("UI_SHOW_G1_DEBUG")
+	_g1_debug_button.text = tr("UI_HIDE_UNITREE_G1_DEBUG") if visible_for_debug else tr("UI_SHOW_UNITREE_G1_DEBUG")
 
 
 func set_galbot_g1_debug_visible(visible_for_debug: bool) -> void:
