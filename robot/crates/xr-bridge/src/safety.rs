@@ -483,6 +483,7 @@ mod tests {
                 command_timeout_ms: 500,
                 limits: HashMap::new(),
             },
+            xr_stream: None,
         }
     }
 
@@ -639,9 +640,8 @@ mod tests {
             SafetyResult::Ok(c) => c,
             other => panic!("expected Ok, got {other:?}"),
         };
-        assert_eq!(
-            *out.buttons.get("estop").unwrap(),
-            false,
+        assert!(
+            !*out.buttons.get("estop").unwrap(),
             "first press should arm only"
         );
 
@@ -656,9 +656,8 @@ mod tests {
             SafetyResult::Ok(c) => c,
             other => panic!("expected Ok, got {other:?}"),
         };
-        assert_eq!(
+        assert!(
             *out.buttons.get("estop").unwrap(),
-            true,
             "second press should confirm"
         );
     }
@@ -686,9 +685,8 @@ mod tests {
             SafetyResult::Ok(c) => c,
             other => panic!("expected Ok, got {other:?}"),
         };
-        assert_eq!(
-            *out.buttons.get("estop").unwrap(),
-            false,
+        assert!(
+            !*out.buttons.get("estop").unwrap(),
             "press after window should re-arm, not confirm"
         );
     }
@@ -706,23 +704,23 @@ mod tests {
 
         // Initial: false.
         let r = safety.validate(&press(false));
-        assert_eq!(extract_button(&r, "light"), false);
+        assert!(!extract_button(&r, "light"));
 
         // Rising edge → flip to true.
         let r = safety.validate(&press(true));
-        assert_eq!(extract_button(&r, "light"), true);
+        assert!(extract_button(&r, "light"));
 
         // Held: stays true (no second flip).
         let r = safety.validate(&press(true));
-        assert_eq!(extract_button(&r, "light"), true);
+        assert!(extract_button(&r, "light"));
 
         // Release: stays true (latched).
         let r = safety.validate(&press(false));
-        assert_eq!(extract_button(&r, "light"), true);
+        assert!(extract_button(&r, "light"));
 
         // Next rising edge → flip to false.
         let r = safety.validate(&press(true));
-        assert_eq!(extract_button(&r, "light"), false);
+        assert!(!extract_button(&r, "light"));
     }
 
     #[test]

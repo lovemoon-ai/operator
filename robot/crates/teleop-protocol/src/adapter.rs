@@ -45,7 +45,7 @@ pub enum BridgeToAdapter {
 #[serde(tag = "type")]
 pub enum AdapterToBridge {
     /// The adapter's device self-description (sent on connect).
-    Descriptor(DeviceDescriptor),
+    Descriptor(Box<DeviceDescriptor>),
     /// Periodic telemetry from the device.
     Telemetry(DeviceTelemetry),
     /// An out-of-band event/log line (e.g. a warning or state change).

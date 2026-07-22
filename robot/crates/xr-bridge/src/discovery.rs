@@ -20,11 +20,29 @@ use mdns_sd::{ServiceDaemon, ServiceInfo};
 
 use crate::config::BridgeConfig;
 
+pub(crate) struct PreparedDiscovery {
+    _mdns: ServiceDaemon,
+    udp_socket: tokio::net::UdpSocket,
+    broadcast_msg: String,
+    discovery_addrs: Vec<SocketAddr>,
+}
+
 /// Run the discovery subsystem. Never returns under normal operation.
 ///
 /// `device_type` / `device_name` come from the descriptor the bridge
 /// negotiated with the adapter at handshake time.
 pub async fn run(config: &BridgeConfig, device_type: &str, device_name: &str) -> Result<()> {
+    run_prepared(prepare(config, device_type, device_name).await?).await
+}
+
+/// Prepare every fallible discovery resource before the owning service reports
+/// itself ready. Keeping the mDNS daemon in the returned value also keeps the
+/// registration alive for the lifetime of the service.
+pub(crate) async fn prepare(
+    config: &BridgeConfig,
+    device_type: &str,
+    device_name: &str,
+) -> Result<PreparedDiscovery> {
     // --- mDNS registration ---
     let mdns = ServiceDaemon::new().map_err(|e| anyhow::anyhow!("mDNS daemon error: {e}"))?;
 
@@ -92,6 +110,22 @@ pub async fn run(config: &BridgeConfig, device_type: &str, device_name: &str) ->
         .join(", ");
 
     tracing::info!("UDP discovery: sending to {} every 3s", discovery_label);
+
+    Ok(PreparedDiscovery {
+        _mdns: mdns,
+        udp_socket,
+        broadcast_msg,
+        discovery_addrs,
+    })
+}
+
+pub(crate) async fn run_prepared(prepared: PreparedDiscovery) -> Result<()> {
+    let PreparedDiscovery {
+        _mdns,
+        udp_socket,
+        broadcast_msg,
+        discovery_addrs,
+    } = prepared;
 
     loop {
         for discovery_addr in &discovery_addrs {
@@ -179,9 +213,11 @@ mod tests {
 
     #[test]
     fn includes_configured_unicast_discovery_targets() {
-        let mut config = BridgeConfig::default();
-        config.discovery_port = 63900;
-        config.discovery_unicast_targets = vec![IpAddr::V4(Ipv4Addr::new(10, 79, 151, 145))];
+        let config = BridgeConfig {
+            discovery_port: 63900,
+            discovery_unicast_targets: vec![IpAddr::V4(Ipv4Addr::new(10, 79, 151, 145))],
+            ..BridgeConfig::default()
+        };
 
         let targets = udp_discovery_targets(&config);
 

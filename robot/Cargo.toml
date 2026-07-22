@@ -7,6 +7,7 @@ members = [
     "crates/xr-bridge",
     "crates/robot-service",
     "crates/e2e-tests",
+    "crates/pyoperator-native",
 ]
 resolver = "2"
 

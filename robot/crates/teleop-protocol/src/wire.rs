@@ -39,7 +39,7 @@ pub struct Pose6D {
 }
 
 /// Telemetry data reported by the device back to the headset.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceTelemetry {
     /// Keyed telemetry values.
     pub values: HashMap<String, TelemetryValue>,
@@ -56,13 +56,4 @@ pub enum TelemetryValue {
     Bool(bool),
     Text(String),
     Array(Vec<f64>),
-}
-
-impl Default for DeviceTelemetry {
-    fn default() -> Self {
-        Self {
-            values: HashMap::new(),
-            timestamp_ns: 0,
-        }
-    }
 }

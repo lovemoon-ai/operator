@@ -55,6 +55,9 @@ var _session: Session
 ## composition — wire JSON, 72 Hz rate, enable prints all unchanged.
 var _robot_control_sink: RobotControlSink
 var _command_sender: CommandSender
+## Raw atomic state publisher, enabled only when the descriptor advertises
+## `xr_stream` (the embedded pyoperator SDK mode).
+var _xr_state_sender: XrStateSender
 ## TCP video handler — used when the descriptor selects "tcp" or as the
 ## fallback for "auto"-mode descriptors that didn't supply a UDP port.
 var _video_tcp_handler: TcpHandler
@@ -72,10 +75,13 @@ var _settings_panel: Node3D
 var _settings_button: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
-# True while the settings panel is open: teleop is suspended — no commands
-# stream to the robot and the controller overlay is hidden — so the panel
-# owns the controllers exclusively.
+# True while the settings panel is open: teleop is suspended — neither
+# DeviceCommand nor XrStateFrame streams, and the controller overlay is hidden
+# — so the panel owns the controllers exclusively.
 var _teleop_suspended := false
+# Persisted from the active descriptor. SDK mode and robot-control mode are
+# mutually exclusive across every suspend/resume transition.
+var _sdk_mode := false
 
 var _xr_started: bool = false
 var _launch_window_active: bool = false
@@ -93,8 +99,8 @@ const SyntheticTeleopSourceScript = preload("res://scripts/xr/synthetic_teleop_s
 # same convention as --operator-mode / --mujoco-duration), not `key=value`.
 const SYNTH_KEY_ENABLE := "--operator-teleop-synthetic"
 const SYNTH_KEY_DURATION := "--operator-teleop-duration"
-const SYNTH_KEY_HOST := "--operator-teleop-host"
-const SYNTH_KEY_PORT := "--operator-teleop-port"
+const TELEOP_KEY_HOST := "--operator-teleop-host"
+const TELEOP_KEY_PORT := "--operator-teleop-port"
 const SYNTH_DEFAULT_DURATION := 25.0
 const SYNTH_DEFAULT_PORT := 63901
 ## Minimum peak joint excursion (deg) that counts as "the arm tracked".
@@ -176,6 +182,8 @@ func _ready() -> void:
 	# Configure command sender references
 	_command_sender.tracking_provider = _tracking_provider
 	_command_sender.tcp_handler = _tcp_handler
+	_xr_state_sender.tracking_provider = _tracking_provider
+	_xr_state_sender.tcp_handler = _tcp_handler
 
 	# Start discovery scanning in the background; the Settings panel opens
 	# as soon as XR is ready and shows discovery progress while this runs.
@@ -289,6 +297,10 @@ func _create_v2_nodes() -> void:
 	_ee_pose_trajectory.name = "EEPoseTrajectory"
 	add_child(_ee_pose_trajectory)
 	_command_sender.command_sent.connect(_on_command_sent)
+
+	_xr_state_sender = XrStateSender.new()
+	_xr_state_sender.name = "XrStateSender"
+	add_child(_xr_state_sender)
 
 	# Dedicated video stream handler. [issue 005 / item 6] Bumped to
 	# 32 MiB so a freshly connected client surviving a brief WiFi
@@ -411,7 +423,18 @@ func _on_xr_started() -> void:
 
 	# Synthetic runs own their own connection lifecycle and must never pop the
 	# discovery/settings panel (which would suspend teleop and block sending).
-	if not _synthetic:
+	var launch_host := _teleop_arg(TELEOP_KEY_HOST, "")
+	if not _synthetic and not launch_host.is_empty():
+		var launch_port := int(_teleop_arg(TELEOP_KEY_PORT, str(SYNTH_DEFAULT_PORT)))
+		if _settings_panel and _settings_panel.has_method("close"):
+			_settings_panel.close()
+		else:
+			_settings_panel.visible = false
+		_settings_button.visible = true
+		_set_teleop_suspended(false)
+		print("[Operator] Direct-connect launch override %s:%d" % [launch_host, launch_port])
+		_connect_to_robot(launch_host, launch_port)
+	elif not _synthetic:
 		_begin_launch_window()
 
 
@@ -509,25 +532,38 @@ func _on_settings_exit_requested() -> void:
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 
-## Pause/resume teleop around the settings panel. While suspended no
-## DeviceCommands stream to the robot (the robot-side deadman/watchdog holds
-## the arm) and the controller overlay hides, so panel interaction can't
+## Pause/resume teleop around the settings panel. While suspended neither
+## DeviceCommands nor XrStateFrames stream (the robot-side deadman/watchdog
+## holds the arm) and the controller overlay hides, so panel interaction can't
 ## move the arm or show stale grip/trigger hints.
 func _set_teleop_suspended(suspended: bool) -> void:
 	if _teleop_suspended == suspended:
 		return
 	_teleop_suspended = suspended
-	if _robot_control_sink:
-		if suspended:
-			_robot_control_sink.set_sending(false)
-		elif _tcp_handler and _tcp_handler.is_connected_to_robot():
-			_robot_control_sink.set_sending(true)
+	_sync_stream_senders()
 	if suspended and _ee_pose_trajectory:
 		# Do not bridge the hand motion performed while settings owns the
 		# controllers with one long segment when teleop resumes.
 		_ee_pose_trajectory.break_all()
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_suspended"):
 		_teleop_controller_panel.call("set_suspended", suspended)
+
+
+## Apply the single stream-selection invariant at connection, descriptor and
+## UI-suspension boundaries. The settings panel pauses all tracking output;
+## resuming restores exactly one protocol for the active descriptor.
+func _sync_stream_senders() -> void:
+	# _tcp_handler is scene-typed as Node, so its method result is a Variant.
+	# Keep these booleans explicit: Godot 4.5 cannot infer `:=` through the
+	# dynamic call when this base script is compiled from an exported APK.
+	var connected: bool = (
+		_tcp_handler != null and bool(_tcp_handler.call("is_connected_to_robot"))
+	)
+	var active: bool = connected and not _teleop_suspended
+	if _robot_control_sink:
+		_robot_control_sink.set_sending(active and not _sdk_mode)
+	if _xr_state_sender:
+		_xr_state_sender.set_sending(active and _sdk_mode)
 
 
 func _show_settings_panel() -> void:
@@ -758,6 +794,7 @@ func _on_connected() -> void:
 func _on_disconnected() -> void:
 	_set_status(tr("UI_DISCONNECTED"))
 	_robot_control_sink.set_sending(false)
+	_xr_state_sender.set_sending(false)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.clear()
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
@@ -818,12 +855,15 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	_set_status(tr("UI_DRIVER_ACTIVE") % [device_name, _robot_type_display(device_type)])
 	print("[Operator] Connected to %s (type=%s per descriptor)" % [device_name, device_type])
 	_robot_control_sink.configure_for_device(descriptor)
+	var xr_stream: Variant = descriptor.get("xr_stream", null)
+	_sdk_mode = xr_stream is Dictionary
+	if _sdk_mode:
+		_xr_state_sender.configure(xr_stream as Dictionary)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.configure_for_device(descriptor)
-	# If the settings panel is up, stay paused; _set_teleop_suspended(false)
-	# re-enables sending when it closes.
-	if not _teleop_suspended:
-		_robot_control_sink.set_sending(true)
+	# SDK mode consumes raw state in Python; robot-control mode emits
+	# DeviceCommand. Suspension keeps both disabled.
+	_sync_stream_senders()
 	# Synthetic: the descriptor has landed and sending is on — start the canned
 	# operator trajectory now so the robot seeds its retarget reference cleanly.
 	if _synthetic and _synth_source and not _synth_engaged:
@@ -849,7 +889,9 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 
 
 func _on_device_disconnected() -> void:
+	_sdk_mode = false
 	_robot_control_sink.set_sending(false)
+	_xr_state_sender.set_sending(false)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.configure_for_device({})
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
@@ -1136,7 +1178,7 @@ func _robot_type_display(robot_type: String) -> String:
 ## Read an intent-extra / cmdline value. Android `--es KEY VAL` surfaces as the
 ## token `KEY=VAL`; the `KEY VAL` pair form is also accepted. Mirrors the
 ## convention used by mode_select and the mujoco device test.
-func _synthetic_arg(key: String, fallback: String) -> String:
+func _teleop_arg(key: String, fallback: String) -> String:
 	var args: Array = []
 	args.append_array(OS.get_cmdline_user_args())
 	args.append_array(OS.get_cmdline_args())
@@ -1150,7 +1192,7 @@ func _synthetic_arg(key: String, fallback: String) -> String:
 
 
 func _synthetic_flag_set() -> bool:
-	var raw := _synthetic_arg(SYNTH_KEY_ENABLE, "").to_lower()
+	var raw := _teleop_arg(SYNTH_KEY_ENABLE, "").to_lower()
 	return raw == "1" or raw == "true" or raw == "yes" or raw == "on"
 
 
@@ -1160,9 +1202,9 @@ func _maybe_setup_synthetic() -> void:
 	if not _synthetic_flag_set():
 		return
 	_synthetic = true
-	_synth_duration = float(_synthetic_arg(SYNTH_KEY_DURATION, str(SYNTH_DEFAULT_DURATION)))
-	_synth_host = _synthetic_arg(SYNTH_KEY_HOST, "")
-	_synth_port = int(_synthetic_arg(SYNTH_KEY_PORT, str(SYNTH_DEFAULT_PORT)))
+	_synth_duration = float(_teleop_arg(SYNTH_KEY_DURATION, str(SYNTH_DEFAULT_DURATION)))
+	_synth_host = _teleop_arg(TELEOP_KEY_HOST, "")
+	_synth_port = int(_teleop_arg(TELEOP_KEY_PORT, str(SYNTH_DEFAULT_PORT)))
 
 	var src: Node = SyntheticTeleopSourceScript.new()
 	src.name = "SyntheticTeleopSource"

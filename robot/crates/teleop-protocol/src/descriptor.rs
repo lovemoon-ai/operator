@@ -30,6 +30,29 @@ pub struct DeviceDescriptor {
     /// Safety configuration.
     #[serde(default)]
     pub safety: DeviceSafetyConfig,
+    /// Optional raw XR snapshot stream requested by an embedded SDK consumer.
+    /// Omitted for existing robot descriptors, preserving their wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xr_stream: Option<XrStreamConfig>,
+}
+
+/// Headset-side raw state stream negotiated through `DeviceDescriptor`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct XrStreamConfig {
+    #[serde(default = "default_xr_schema_version")]
+    pub schema_version: u16,
+    #[serde(default = "default_xr_rate_hz")]
+    pub rate_hz: u16,
+    #[serde(default)]
+    pub streams: Vec<String>,
+}
+
+fn default_xr_schema_version() -> u16 {
+    crate::XR_STATE_SCHEMA_VERSION
+}
+
+fn default_xr_rate_hz() -> u16 {
+    72
 }
 
 /// Basic device identification.

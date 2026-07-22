@@ -7,6 +7,7 @@ collection.
 
 - `robot/` - Rust crates for `teleop-protocol`, `xr-bridge`, and
   `robot-adapter`.
+- `python/` - Python-first `pyoperator` package, examples, and tests.
 - `xr/` - Godot 4.5 Android XR client APK. It runs in-headset.
 - `web/` - local ingest and review app for egocentric recordings.
 - `claw/` - current architecture documentation.
@@ -64,6 +65,8 @@ bash cicd/01_rtsp_test.sh
 bash cicd/02_ego_record.sh
 bash cicd/03_godot_mujoco_device.sh
 bash cicd/04_live_feed_e2e.sh
+cd python && .venv/bin/python -m pytest -m xr_device --no-cov \
+  --run-device --require-device --adb-serial SERIAL
 ```
 
 Static checks that do not run the XR runtime:

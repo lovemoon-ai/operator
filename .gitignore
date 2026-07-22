@@ -53,6 +53,16 @@ web/app/data/
 __pycache__/
 *.pyc
 
+# pyoperator local environments, test data, and native extension builds
+python/.venv/
+python/.pytest_cache/
+.coverage
+.coverage.*
+python/*.egg-info/
+python/pyoperator/_native*.so
+python/pyoperator/_native*.pyd
+python/pyoperator/_native*.dylib
+
 # OS
 .DS_Store
 Thumbs.db

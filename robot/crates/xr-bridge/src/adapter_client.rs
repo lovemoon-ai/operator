@@ -128,7 +128,7 @@ impl AdapterClient {
         self.state = ConnState::Connected(sink);
         self.spawn_reader(stream);
 
-        Ok(descriptor)
+        Ok(*descriptor)
     }
 
     /// Frame and send a single sanitized command to the adapter.

@@ -346,6 +346,7 @@ impl DualSo101Device {
             },
             video_feeds: Vec::new(),
             safety: Default::default(),
+            xr_stream: None,
         }
     }
 

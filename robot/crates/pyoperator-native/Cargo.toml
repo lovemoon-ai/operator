@@ -1,0 +1,16 @@
+[package]
+name = "pyoperator-native"
+version = "0.1.0"
+edition = "2021"
+description = "In-process Python bindings for the Operator XR bridge"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+xr-bridge = { path = "../xr-bridge" }
+teleop-protocol = { path = "../teleop-protocol" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+serde_json = "1"

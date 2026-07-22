@@ -14,6 +14,8 @@ Usage:
     stub_vr_plugin.py --endpoint uds:/tmp/x.sock [--fail-ee] [--delay-ee-ms N]
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import socket

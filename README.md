@@ -207,6 +207,26 @@ cargo run -p robot-service -- --config configs/so101_real.yaml
 cargo run -p robot-service -- --config configs/so101_dual_real.yaml
 ```
 
+Python-first embedded XR (the Python process owns bridge, retargeting, IK, and
+the robot integration):
+
+```bash
+# Editable installs require a modern pip with PEP 660 support.
+python -m pip install -e ./python
+```
+
+```python
+from pyoperator import xr_bridge
+
+xr_bridge.start()
+frame = xr_bridge.wait_next(timeout=5.0)  # one atomic immutable snapshot
+print(frame.timestamp_ns, frame.controllers.right.pose if frame else None)
+xr_bridge.stop()
+```
+
+See [`python/README.md`](python/README.md) for custom `Robot`,
+retargeting/IK, record/replay, and the existing standalone-bridge hosted mode.
+
 Web ingest and review app commands run from `web/`:
 
 ```bash

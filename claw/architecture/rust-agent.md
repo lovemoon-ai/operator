@@ -17,6 +17,7 @@ robot/
     teleop-protocol/
     robot-service/
     xr-bridge/
+    pyoperator-native/
     robot-adapter/
     e2e-tests/
 ```
@@ -31,6 +32,7 @@ Shared protocol crate. It owns:
 - device descriptor parsing;
 - transport-level helpers;
 - adapter-facing shared types.
+- atomic `XrStateFrame` snapshot types.
 
 Key paths:
 
@@ -38,6 +40,7 @@ Key paths:
 - `robot/crates/teleop-protocol/src/descriptor.rs`
 - `robot/crates/teleop-protocol/src/transport.rs`
 - `robot/crates/teleop-protocol/src/adapter/`
+- `robot/crates/teleop-protocol/src/xr_state.rs`
 
 ### `robot-service`
 
@@ -73,6 +76,16 @@ Key paths:
 - `robot/crates/xr-bridge/src/pose_udp_server.rs`
 - `robot/crates/xr-bridge/src/telemetry_server.rs`
 - `robot/crates/xr-bridge/src/video/`
+- `robot/crates/xr-bridge/src/sdk.rs`
+
+### `pyoperator-native`
+
+PyO3 `abi3` extension loaded by the `python/pyoperator` package. It starts
+the shared `xr-bridge` SDK service on a background Tokio runtime inside the
+Python process. It owns no robot policy: Python receives serialized immutable
+frames and applies the public `Robot`, `Retargeter`, and `IKSolver` contracts.
+`NativeSession.close()` signals shutdown and joins the runtime thread; no
+visible `xr-bridge` subprocess is launched.
 
 ### `robot-adapter`
 
@@ -112,6 +125,7 @@ The robot side keeps these concerns separate even when they run inside
 - process composition belongs in `robot-service`;
 - network fan-out and video transport belong in `xr-bridge`;
 - device control and safety belong in `robot-adapter`;
+- Python process embedding belongs in `pyoperator-native` and `python/`;
 - scenario-level verification belongs in `e2e-tests` or top-level shell tests.
 
 ## Video

@@ -251,11 +251,9 @@ impl AccessUnitAssembler {
             Codec::Hevc => (matches!(typ, Some(0..=31)), typ == Some(HEVC_NAL_AUD)),
         };
 
-        if is_aud && !self.pending.is_empty() {
-            if let Some(unit) = self.take_pending() {
-                complete.push(unit);
-            }
-        } else if is_vcl && self.has_vcl && starts_new_picture(&nal, self.codec) {
+        if (is_aud && !self.pending.is_empty())
+            || (is_vcl && self.has_vcl && starts_new_picture(&nal, self.codec))
+        {
             if let Some(unit) = self.take_pending() {
                 complete.push(unit);
             }
@@ -334,7 +332,7 @@ fn publish_access_unit(
 /// progress over unbounded buffering.
 fn starts_new_picture(nal: &[u8], codec: Codec) -> bool {
     match codec {
-        Codec::H264 => first_mb_in_slice(nal).map_or(true, |v| v == 0),
+        Codec::H264 => first_mb_in_slice(nal).is_none_or(|v| v == 0),
         Codec::Hevc => hevc_first_slice_in_pic(nal).unwrap_or(true),
     }
 }

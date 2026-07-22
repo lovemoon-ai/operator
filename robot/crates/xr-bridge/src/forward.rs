@@ -179,7 +179,7 @@ mod tests {
 
         tokio::spawn(async move {
             let conn = listener.accept().await.expect("accept");
-            let mut framed = Framed::new(conn, AdapterCodec::default());
+            let mut framed = Framed::new(conn, AdapterCodec);
             while let Some(item) = framed.next().await {
                 let msg = match item {
                     Ok(m) => m,
@@ -188,7 +188,7 @@ mod tests {
                 match msg {
                     BridgeToAdapter::Hello => {
                         framed
-                            .send(AdapterToBridge::Descriptor(descriptor.clone()))
+                            .send(AdapterToBridge::Descriptor(Box::new(descriptor.clone())))
                             .await
                             .expect("send descriptor");
                     }
@@ -233,6 +233,7 @@ mod tests {
                 command_timeout_ms: timeout_ms,
                 limits: HashMap::new(),
             },
+            xr_stream: None,
         }
     }
 
@@ -247,12 +248,7 @@ mod tests {
         client.handshake().await.unwrap();
 
         let (cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
-        let forward = tokio::spawn(run(
-            Arc::new(desc),
-            cmd_rx,
-            client,
-            LatencyRecorder::new(),
-        ));
+        let forward = tokio::spawn(run(Arc::new(desc), cmd_rx, client, LatencyRecorder::new()));
 
         // Out-of-range throttle (5.0) → must arrive clamped to 1.0.
         let mut cmd = DeviceCommand::default();
@@ -292,12 +288,7 @@ mod tests {
         client.handshake().await.unwrap();
 
         let (cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
-        let forward = tokio::spawn(run(
-            Arc::new(desc),
-            cmd_rx,
-            client,
-            LatencyRecorder::new(),
-        ));
+        let forward = tokio::spawn(run(Arc::new(desc), cmd_rx, client, LatencyRecorder::new()));
 
         let mut cmd = DeviceCommand::default();
         cmd.axes.insert("nonexistent".into(), 0.5);
@@ -328,12 +319,7 @@ mod tests {
         client.handshake().await.unwrap();
 
         let (cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
-        let forward = tokio::spawn(run(
-            Arc::new(desc),
-            cmd_rx,
-            client,
-            LatencyRecorder::new(),
-        ));
+        let forward = tokio::spawn(run(Arc::new(desc), cmd_rx, client, LatencyRecorder::new()));
 
         // Send one command to start the idle timer.
         let mut cmd = DeviceCommand::default();

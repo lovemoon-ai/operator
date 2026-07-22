@@ -1,9 +1,10 @@
 # Architecture Overview
 
-Operator has three runtime surfaces:
+Operator has four runtime surfaces:
 
 - `xr/` - in-headset Godot Android client.
 - `robot/` - Rust robot-side bridge, protocol, and adapter crates.
+- `python/` - Python-first in-process XR, robot, retargeting, and IK API.
 - `web/` - local ingest and review app for ego recordings.
 
 The project supports two primary workflows:
@@ -24,6 +25,12 @@ robot/
   crates/robot-service     robot-side service entry point
   crates/xr-bridge         discovery, video relay, pose/control bridge
   crates/robot-adapter     device abstraction and robot drivers
+  crates/pyoperator-native PyO3 in-process bridge binding
+
+python/
+  pyoperator/             immutable frames, session, robot/control APIs
+  examples/                embedded and custom-robot examples
+  tests/                   deterministic model/control/replay tests
 
 xr/
   scenes/                  Godot scene resources only
@@ -63,6 +70,21 @@ robot-service xr-bridge component
   -> scripts/ui/teleop_panel.gd
   -> addons/live_video/live_video_view.gd
 ```
+
+### Python-embedded Teleop
+
+```text
+Python application
+  -> pyoperator.xr_bridge.start()
+  -> PyO3 in-process xr-bridge SDK mode
+  <- one immutable XrStateFrame per headset render sample
+  -> Python Retargeter -> optional IKSolver -> user Robot
+```
+
+The embedded path and the existing `robot-service` path are peers. SDK mode is
+selected by the descriptor's optional `xr_stream` block; descriptors without
+that block continue to use `DeviceCommand`. The Python consumer receives one
+latest-wins frame and never assembles state from granular getters.
 
 ### Ego Capture
 
