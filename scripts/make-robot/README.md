@@ -48,6 +48,49 @@ The source model is pinned to `unitreerobotics/unitree_ros` at
 `cdf67e6eb4c98d73202f29a25e3d098e2aa3b247`, path `robots/g1_description`
 (`g1_29dof.urdf`, all-STL meshes).
 
+## Galbot G1 (Galbot One Golf)
+
+Generate the Galbot One Golf wheeled dual-arm mobile manipulator (referred to as
+"Galbot G1"; a different robot from the Unitree G1 above):
+
+```bash
+bash scripts/make-robot/make_galbot_g1.sh
+```
+
+Outputs:
+
+- `xr/assets/robots/galbot-g1/galbot_g1.glb` - static rest-pose visual overlay for Godot.
+- `xr/assets/robots/galbot-g1/galbot_g1.urdf` - URDF metadata copy with STL mesh references
+  (upstream visual meshes are `.glb`, converted to `.stl` for the URDF).
+- `xr/assets/robots/galbot-g1/meshes/` - URDF mesh files, colocated for `meshes/...` references.
+- `xr/assets/mujoco/galbot_g1.xml` - MuJoCo-loadable proxy XML with the same body/joint names.
+
+The generated `xr/assets/robots/galbot-g1/` visual assets are intentionally
+ignored by Git; run the script locally before building or using the Galbot G1
+overlay on a fresh checkout.
+
+The source model is pinned to `GalaxyGeneralRobotics/galbot_one_golf_description`
+at `4047d57816dd53ef9f9df923b57643826df80b7d`, path `urdf/galbot_one_golf.urdf`.
+
+### Dual-arm EE-pose retargeting
+
+The in-headset overlay `xr/scripts/robot_constraint/robot/galbot_g1_overlay.gd`
+uses retargeting v0.1.3's `dual_arm_eepose` algorithm. VR wrist pose deltas are
+converted to left/right TCP targets, then the native retargeter outputs a named
+robot pose for the 14 arm joints. The wheeled base, leg/lift column, head,
+wheels and grippers are not controlled by this overlay.
+
+Supporting retargeting assets:
+
+- `xr/assets/mujoco/galbot_g1.xml` - full MuJoCo proxy model with TCP bodies and
+  collision proxy geoms used by `dual_arm_eepose`.
+- `xr/assets/retargeting/dual_arm_eepose_galbot_g1.json` - algorithm config
+  copied from `retargeting` v0.1.3; `left/right_gripper_tcp_link` track
+  `LeftWrist` / `RightWrist` target poses.
+
+Reach it in-app via the capture Settings panel → "Robot Constraint" group →
+"Show Galbot G1 model", or the `--operator-galbot-debug` launch flag.
+
 ## Dexmate Vega U
 
 Generate Dexmate Vega U upper-body robot with F5D6 dexterous hands:
