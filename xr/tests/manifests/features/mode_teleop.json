@@ -34,6 +34,13 @@
       "module": "core/teleop",
       "fixture": "fake_robot_descriptor_so101_dual",
       "script": "res://tests/unit/teleop/dual_arm_mapping_test.gd"
+    },
+    {
+      "id": "teleop.ee_pose_trajectory",
+      "level": "unit",
+      "suite": "teleop.visualization",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/ee_pose_trajectory_test.gd"
     }
   ]
 }
