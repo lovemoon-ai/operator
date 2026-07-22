@@ -86,6 +86,13 @@ sequentially (see `app/lib/workers/`):
    so a coordinate-frame intuition built against the local viewer
    transfers 1-for-1 to the embedded one.
 
+   Captures that intentionally disable head pose still produce an RRD with
+   2D RGB/depth plus absolute controller, hand, body, and input streams. The
+   converter omits world-space camera transforms, head-relative views, and
+   camera-image overlays because those cannot be reconstructed without the
+   head trajectory. Mono RGB captures are reassembled before logging because
+   the pinned SpatialMP4 SDK exposes every decoded video frame as two halves.
+
    The sidecar's Python environment is managed by
    [`uv`](https://docs.astral.sh/uv/) via PEP 723 inline metadata at
    the top of the script — `rerun-sdk`, `numpy`, `scipy`, and
