@@ -113,6 +113,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from spatialmp4_metadata import (
     RERUN_FRAME_METADATA_KINDS,
     camera2_metadata_candidates,
+    resolve_rgb_camera_count,
     resolve_android_timebase_metadata,
 )
 from environment_depth_geometry import (
@@ -386,18 +387,29 @@ class PoseLookup:
         return self._frames
 
 
-def reader_duration_seconds(reader, pose_lookup: PoseLookup) -> float:
+def reader_duration_seconds(
+    reader,
+    pose_lookup: PoseLookup,
+    reference_timestamps: Sequence[float] = (),
+) -> float:
     """Return reader duration in seconds.
 
     Current SpatialMP4 bindings report frame timestamps in seconds but
     get_duration() in microseconds for Android captures. Normalize the display
-    value using the pose timestamp range as a unit sanity check.
+    value using the available timed-metadata range as a unit sanity check.
+    Head pose is normally the best reference, but captures are allowed to
+    disable that stream, so controller (or other caller-supplied) timestamps
+    can provide the same check.
     """
     raw = float(reader.get_duration())
-    if raw <= 0.0 or pose_lookup.empty():
+    if raw <= 0.0:
         return raw
-    max_pose_ts = max(float(f.timestamp) for f in pose_lookup.frames)
-    if max_pose_ts > 0.0 and raw > max_pose_ts * 1000.0:
+    timestamps = [float(t) for t in reference_timestamps if float(t) >= 0.0]
+    timestamps.extend(float(f.timestamp) for f in pose_lookup.frames)
+    if not timestamps:
+        return raw
+    max_reference_ts = max(timestamps)
+    if max_reference_ts > 0.0 and raw > max_reference_ts * 1000.0:
         return raw / 1_000_000.0
     return raw
 
@@ -3244,7 +3256,10 @@ def maybe_log_robot(
 # ---------------------------------------------------------------------------
 
 
-def build_blueprint(has_depth_panel: bool) -> "rrb.ContainerLike":
+def build_blueprint(
+    has_depth_panel: bool,
+    has_head_relative_panel: bool,
+) -> "rrb.ContainerLike":
     """Reference layout minus the spool-only rgb_depth_overlay tab.
 
     The RGB image is logged on the same entity as the Pinhole
@@ -3272,12 +3287,22 @@ def build_blueprint(has_depth_panel: bool) -> "rrb.ContainerLike":
                 contents="depth2d/depth",
             )
         )
+    right_children: List["rrb.ContainerLike"] = [rrb.Tabs(*tabs_children)]
+    row_shares = [3]
+    if has_head_relative_panel:
+        right_children.append(
+            rrb.Spatial3DView(
+                name="3D Body+Hands (head-relative)",
+                origin="head_relative",
+            )
+        )
+        row_shares.append(3)
+    right_children.append(rrb.TimeSeriesView(name="Inputs", origin="plots"))
+    row_shares.append(2)
     right = rrb.Vertical(
-        rrb.Tabs(*tabs_children),
-        rrb.Spatial3DView(name="3D Body+Hands (head-relative)", origin="head_relative"),
-        rrb.TimeSeriesView(name="Inputs", origin="plots"),
-        name="2D + head-relative",
-        row_shares=[3, 3, 2],
+        *right_children,
+        name="2D + tracking",
+        row_shares=row_shares,
     )
     return rrb.Horizontal(left, right, column_shares=[2, 1])
 
@@ -3377,9 +3402,23 @@ def run(args: argparse.Namespace) -> int:
     else:
         head_frames = []
     head_lookup = PoseLookup(head_frames)
-    if head_lookup.empty():
-        fatal("no head pose data — refusing to write a .rrd without it")
-    info(f"head pose samples: {len(head_lookup)}")
+    has_head_pose = not head_lookup.empty()
+    if has_head_pose:
+        info(f"head pose samples: {len(head_lookup)}")
+    else:
+        info(
+            "no head pose data; continuing with 2D RGB/depth and absolute "
+            "tracking streams. World-space camera transforms, head-relative "
+            "views, and camera-image tracking overlays are unavailable."
+        )
+
+    duration_reference_timestamps = [
+        float(frame.timestamp)
+        for track_id in tracks["rigid_pose"]
+        if track_id != "head"
+        for frame in reader.get_rigid_pose_frames(track_id)
+        if frame.timestamp >= 0
+    ]
 
     hand_lookups: Dict[str, HandFrameLookup] = {
         tid: HandFrameLookup(reader.get_hand_joint_frames(tid))
@@ -3398,7 +3437,12 @@ def run(args: argparse.Namespace) -> int:
     rec_name = f"spatialmp4_{input_path.stem}"
     rr.init(rec_name, spawn=False)
     rr.save(str(output_path))
-    rr.send_blueprint(build_blueprint(has_depth_panel=has_depth))
+    rr.send_blueprint(
+        build_blueprint(
+            has_depth_panel=has_depth,
+            has_head_relative_panel=has_head_pose,
+        )
+    )
 
     # ---- world coord system ----------------------------------------------
     # Device profile selects the camera local frame. Current Quest and
@@ -3423,7 +3467,7 @@ def run(args: argparse.Namespace) -> int:
     # rough "ground ≈ 1.2 m below the lowest head sample" heuristic the
     # reference uses (works for standing capture; for floor-level
     # capture the grid sinks correspondingly).
-    if not args.no_floor:
+    if has_head_pose and not args.no_floor:
         traj = device_logged_capture_points(head_lookup.trajectory_xyz(), profile)
         max_xz = float(np.max(np.abs(np.concatenate([traj[:, 0], traj[:, 2]]))))
         log_floor_grid(
@@ -3434,8 +3478,15 @@ def run(args: argparse.Namespace) -> int:
         )
 
     # ---- cameras / intrinsics --------------------------------------------
-    rgb_w = reader.get_rgb_width() if has_rgb else 0
+    rgb_camera_count = resolve_rgb_camera_count(manifest_data, operator_static)
+    mono_rgb = has_rgb and rgb_camera_count == 1
+    rgb_w = reader.get_rgb_width() * (2 if mono_rgb else 1) if has_rgb else 0
     rgb_h = reader.get_rgb_height() if has_rgb else 0
+    if mono_rgb:
+        info(
+            "mono RGB layout: rejoining the SpatialMP4 SDK's two decoded "
+            f"{reader.get_rgb_width()}x{rgb_h} halves into {rgb_w}x{rgb_h}"
+        )
     K_rgb_raw = reader.get_rgb_intrinsics_left() if has_rgb else None
     T_I_Srgb_raw = reader.get_rgb_extrinsics_left().as_se3() if has_rgb else None
     T_I_Srgb, rgb_head_model_forward_m = rgb_extrinsics_for_profile(T_I_Srgb_raw, profile)
@@ -3534,11 +3585,11 @@ def run(args: argparse.Namespace) -> int:
     info(
         f"RGB {rgb_w}x{rgb_h} @ {reader.get_rgb_fps():.1f}fps  "
         f"Depth {depth_w}x{depth_h} @ {reader.get_depth_fps():.1f}fps  "
-        f"duration={reader_duration_seconds(reader, head_lookup):.2f}s"
+        f"duration={reader_duration_seconds(reader, head_lookup, duration_reference_timestamps):.2f}s"
     )
 
     # ---- static pinholes -------------------------------------------------
-    if has_rgb and K_rgb is not None:
+    if has_rgb and K_rgb is not None and has_head_pose:
         rr.log(
             "world/camera/image",
             rr.Pinhole(
@@ -3549,7 +3600,13 @@ def run(args: argparse.Namespace) -> int:
             ),
             static=True,
         )
-    if has_depth:
+    if has_depth and (
+        has_head_pose
+        or (
+            environment_depth_meta_lookup is not None
+            and not environment_depth_meta_lookup.empty()
+        )
+    ):
         rr.log(
             "world/depth_camera/image",
             rr.Pinhole(
@@ -3565,14 +3622,7 @@ def run(args: argparse.Namespace) -> int:
     log_head_pose_track(head_lookup, profile)
     log_all_rigid_pose_tracks(reader, tracks["rigid_pose"], profile)
     log_all_hand_tracks(reader, tracks["hand_joints"], profile)
-    log_all_hand_tracks_head_relative(reader, tracks["hand_joints"], head_lookup)
     log_all_body_tracks(reader, tracks["body_joints"], body_frames_by_track)
-    log_all_body_tracks_head_relative(
-        reader,
-        tracks["body_joints"],
-        head_lookup,
-        body_frames_by_track,
-    )
     log_all_body_hand_bridges(
         reader,
         tracks["body_joints"],
@@ -3581,14 +3631,22 @@ def run(args: argparse.Namespace) -> int:
         profile,
         body_to_hand_bridges,
     )
-    log_all_body_hand_bridges_head_relative(
-        reader,
-        tracks["body_joints"],
-        body_frames_by_track,
-        head_lookup,
-        hand_lookups,
-        body_to_hand_bridges,
-    )
+    if has_head_pose:
+        log_all_hand_tracks_head_relative(reader, tracks["hand_joints"], head_lookup)
+        log_all_body_tracks_head_relative(
+            reader,
+            tracks["body_joints"],
+            head_lookup,
+            body_frames_by_track,
+        )
+        log_all_body_hand_bridges_head_relative(
+            reader,
+            tracks["body_joints"],
+            body_frames_by_track,
+            head_lookup,
+            hand_lookups,
+            body_to_hand_bridges,
+        )
     log_all_controller_input_tracks(reader, tracks["controller_input"])
     log_all_motion_tracker_tracks(json_metadata_tracks.get("motion_trackers", {}), profile)
 
@@ -3611,28 +3669,29 @@ def run(args: argparse.Namespace) -> int:
             solution_jsonl=solution_path,
         )
 
-    # Head-relative view origin + axes (head at origin, looks down -Z).
-    rr.log("head_relative", rr.ViewCoordinates.RUB, static=True)
-    rr.log(
-        "head_relative/origin",
-        rr.Arrows3D(
-            origins=[[0, 0, 0]] * 4,
-            vectors=[
-                [0.2, 0, 0],   # +X (right)
-                [0, 0.2, 0],   # +Y (up)
-                [0, 0, 0.2],   # +Z (back)
-                [0, 0, -0.3],  # head forward (-Z)
-            ],
-            colors=[[255, 60, 60], [60, 255, 60], [60, 60, 255], [255, 80, 200]],
-            labels=["X", "Y", "Z", "gaze"],
-        ),
-        static=True,
-    )
-    rr.log(
-        "head_relative/head_marker",
-        rr.Points3D(positions=[[0, 0, 0]], colors=[[255, 255, 255]], radii=[0.04]),
-        static=True,
-    )
+    if has_head_pose:
+        # Head-relative view origin + axes (head at origin, looks down -Z).
+        rr.log("head_relative", rr.ViewCoordinates.RUB, static=True)
+        rr.log(
+            "head_relative/origin",
+            rr.Arrows3D(
+                origins=[[0, 0, 0]] * 4,
+                vectors=[
+                    [0.2, 0, 0],   # +X (right)
+                    [0, 0.2, 0],   # +Y (up)
+                    [0, 0, 0.2],   # +Z (back)
+                    [0, 0, -0.3],  # head forward (-Z)
+                ],
+                colors=[[255, 60, 60], [60, 255, 60], [60, 60, 255], [255, 80, 200]],
+                labels=["X", "Y", "Z", "gaze"],
+            ),
+            static=True,
+        )
+        rr.log(
+            "head_relative/head_marker",
+            rr.Points3D(positions=[[0, 0, 0]], colors=[[255, 255, 255]], radii=[0.04]),
+            static=True,
+        )
 
     # ---- depth pass ------------------------------------------------------
     if has_depth:
@@ -3644,6 +3703,7 @@ def run(args: argparse.Namespace) -> int:
         environment_depth_ipv_frames = 0
         environment_depth_pinhole_meta_frames = 0
         depth_overlay_visible_total = 0
+        depth_without_world_pose_frames = 0
         while reader.has_next():
             df = reader.load_depth()
             ts = df.timestamp
@@ -3661,40 +3721,14 @@ def run(args: argparse.Namespace) -> int:
                 else:
                     environment_depth_meta_misses += 1
 
-            head_pose = head_lookup.nearest(ts)
-            if head_pose is None:
-                continue
-            if environment_depth_meta is not None:
-                # The extension records the actual OpenXR depth-eye pose per
-                # frame. Its local axes are converted from RDF to Godot/OpenXR
-                # by _environment_depth_camera_pose_from_frame(). This fixes
-                # providers whose MP4 static depth extrinsic is only identity.
-                T_W_root = head_pose_matrix(head_pose, profile)
-                T_W_Sd_sensor = environment_depth_meta.T_W_depth_camera
-                T_W_Sd_camera = environment_depth_meta.T_W_depth_camera
-            else:
-                # Compose T_W_I, T_W_S, and the logical camera-frame pose
-                # through the same explicit chain used for RGB hand projection.
-                T_W_root, T_W_Sd_sensor, T_W_Sd_camera = compose_world_sensor_pose(
-                    head_pose,
-                    T_I_Sd,
-                    profile,
-                )
-            T_W_Sd = device_logged_camera_pose(T_W_Sd_sensor, profile)
-            T_W_Sd[:3, :3] = ensure_right_handed_rotation(T_W_Sd[:3, :3])
-
-            # Range filter — drop pixels outside [depth_min, depth_max].
+            # Range filter and 2D logging do not require a head pose. This
+            # preserves the depth stream for captures that intentionally omit
+            # head tracking, even though a world-space point cloud cannot be
+            # reconstructed from static head-relative extrinsics alone.
             depth_raw[(depth_raw < args.depth_min) | (depth_raw > args.depth_max)] = 0
             depth_for_2d = depth_raw[::-1, :].copy() if flip_depth_y else depth_raw
             depth_ts_cache.append(ts)
-
             set_time_seconds("time", ts)
-            log_transform3d(
-                "world/depth_camera",
-                T_W_Sd[:3, 3],
-                Rotation.from_matrix(T_W_Sd[:3, :3]).as_quat(),
-                axis_len=0.0,
-            )
             try:
                 rr.log(
                     "depth2d/depth",
@@ -3706,6 +3740,43 @@ def run(args: argparse.Namespace) -> int:
                 )
             except TypeError:
                 rr.log("depth2d/depth", rr.DepthImage(depth_for_2d, meter=1.0))
+
+            head_pose = head_lookup.nearest(ts)
+            if head_pose is None and environment_depth_meta is None:
+                depth_without_world_pose_frames += 1
+                processed += 1
+                if args.topk is not None and processed >= args.topk:
+                    break
+                continue
+
+            T_W_root: Optional[np.ndarray] = None
+            if environment_depth_meta is not None:
+                # The extension records the actual OpenXR depth-eye pose per
+                # frame. Its local axes are converted from RDF to Godot/OpenXR
+                # by _environment_depth_camera_pose_from_frame(). This fixes
+                # providers whose MP4 static depth extrinsic is only identity.
+                if head_pose is not None:
+                    T_W_root = head_pose_matrix(head_pose, profile)
+                T_W_Sd_sensor = environment_depth_meta.T_W_depth_camera
+                T_W_Sd_camera = environment_depth_meta.T_W_depth_camera
+            else:
+                # Compose T_W_I, T_W_S, and the logical camera-frame pose
+                # through the same explicit chain used for RGB hand projection.
+                assert head_pose is not None
+                T_W_root, T_W_Sd_sensor, T_W_Sd_camera = compose_world_sensor_pose(
+                    head_pose,
+                    T_I_Sd,
+                    profile,
+                )
+            T_W_Sd = device_logged_camera_pose(T_W_Sd_sensor, profile)
+            T_W_Sd[:3, :3] = ensure_right_handed_rotation(T_W_Sd[:3, :3])
+
+            log_transform3d(
+                "world/depth_camera",
+                T_W_Sd[:3, 3],
+                Rotation.from_matrix(T_W_Sd[:3, :3]).as_quat(),
+                axis_len=0.0,
+            )
 
             # 3D point cloud. OpenXR Environment Depth carries a per-frame
             # inverse_projection_view matrix in depth_frame_meta; use it
@@ -3770,7 +3841,12 @@ def run(args: argparse.Namespace) -> int:
                 # extrinsic — depth + rgb cameras share the camera root,
                 # so a stale rgb pose would shear the overlay during
                 # head motion.
-                if has_rgb and args.depth_overlay_stride > 0:
+                if (
+                    has_rgb
+                    and args.depth_overlay_stride > 0
+                    and head_pose is not None
+                    and T_W_root is not None
+                ):
                     if args.depth_overlay_stride > 1:
                         pts_world_ov = pts_world[::args.depth_overlay_stride]
                     else:
@@ -3845,6 +3921,12 @@ def run(args: argparse.Namespace) -> int:
                 break
 
         info(f"logged {processed} depth frames")
+        if depth_without_world_pose_frames:
+            info(
+                f"  + {depth_without_world_pose_frames} depth frame(s) logged "
+                "in 2D only because neither head pose nor an absolute "
+                "depth-frame pose was available"
+            )
         if has_rgb and args.depth_overlay_stride > 0:
             info(
                 f"  + {depth_overlay_visible_total} depth samples projected "
@@ -3880,54 +3962,61 @@ def run(args: argparse.Namespace) -> int:
             frame_rgb = reader.load_rgb()
             ts = frame_rgb.timestamp
             head_pose = head_lookup.nearest(ts)
-            if head_pose is None:
-                continue
-            T_W_root, T_W_Srgb_sensor, T_W_Srgb_camera = compose_world_sensor_pose(
-                head_pose,
-                T_I_Srgb,
-                profile,
-            )
-            T_W_Srgb_image_projection = compose_rgb_image_projection_pose(
-                head_pose,
-                T_I_Srgb,
-                profile,
-                T_W_Srgb_camera,
-            )
-            T_W_Srgb = device_logged_camera_pose(T_W_Srgb_sensor, profile)
-            T_W_Srgb[:3, :3] = ensure_right_handed_rotation(T_W_Srgb[:3, :3])
-
             set_time_seconds("time", ts)
-            log_transform3d(
-                "world/camera",
-                T_W_Srgb[:3, 3],
-                Rotation.from_matrix(T_W_Srgb[:3, :3]).as_quat(),
-                axis_len=0.0,
-            )
             rgb_bgr = frame_rgb.left_rgb
+            if mono_rgb and rgb_bgr.shape[1] < rgb_w:
+                right_bgr = frame_rgb.right_rgb
+                if (
+                    right_bgr.ndim == rgb_bgr.ndim
+                    and right_bgr.shape[0] == rgb_bgr.shape[0]
+                    and rgb_bgr.shape[1] + right_bgr.shape[1] == rgb_w
+                ):
+                    rgb_bgr = np.concatenate([rgb_bgr, right_bgr], axis=1)
             rr.log(
                 "world/camera/image",
                 rr.Image(rgb_bgr, color_model="BGR").compress(jpeg_quality=args.jpeg_quality),
             )
 
-            # Hand-joint overlay onto the left RGB image. Pico uses the same
-            # Unity-compatible projection path as the native capture path,
-            # while 3D world tracks remain in raw OpenXR/Godot space.
-            for tid, hl in hand_lookups.items():
-                hand_frame = hl.nearest_within(ts, HAND_FRAME_MATCH_MAX_DT)
-                if hand_frame is None:
-                    continue
-                joint_drawn_total += log_hand_joints_on_image(
-                    rgb_entity_prefix="world/camera/image",
-                    track_id=tid,
-                    hand_frame=hand_frame,
-                    profile=profile,
-                    T_W_Srgb_camera=T_W_Srgb_image_projection,
-                    K_rgb=K_rgb,
-                    rgb_w=rgb_w,
-                    rgb_h=rgb_h,
-                    T_W_H_godot=T_W_root,
-                    camera2_projection=camera2_projection,
+            if head_pose is not None:
+                T_W_root, T_W_Srgb_sensor, T_W_Srgb_camera = compose_world_sensor_pose(
+                    head_pose,
+                    T_I_Srgb,
+                    profile,
                 )
+                T_W_Srgb_image_projection = compose_rgb_image_projection_pose(
+                    head_pose,
+                    T_I_Srgb,
+                    profile,
+                    T_W_Srgb_camera,
+                )
+                T_W_Srgb = device_logged_camera_pose(T_W_Srgb_sensor, profile)
+                T_W_Srgb[:3, :3] = ensure_right_handed_rotation(T_W_Srgb[:3, :3])
+                log_transform3d(
+                    "world/camera",
+                    T_W_Srgb[:3, 3],
+                    Rotation.from_matrix(T_W_Srgb[:3, :3]).as_quat(),
+                    axis_len=0.0,
+                )
+
+                # Hand-joint overlay onto the left RGB image. Pico uses the same
+                # Unity-compatible projection path as the native capture path,
+                # while 3D world tracks remain in raw OpenXR/Godot space.
+                for tid, hl in hand_lookups.items():
+                    hand_frame = hl.nearest_within(ts, HAND_FRAME_MATCH_MAX_DT)
+                    if hand_frame is None:
+                        continue
+                    joint_drawn_total += log_hand_joints_on_image(
+                        rgb_entity_prefix="world/camera/image",
+                        track_id=tid,
+                        hand_frame=hand_frame,
+                        profile=profile,
+                        T_W_Srgb_camera=T_W_Srgb_image_projection,
+                        K_rgb=K_rgb,
+                        rgb_w=rgb_w,
+                        rgb_h=rgb_h,
+                        T_W_H_godot=T_W_root,
+                        camera2_projection=camera2_projection,
+                    )
 
             processed += 1
             if args.topk is not None and processed >= args.topk:
