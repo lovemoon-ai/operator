@@ -128,6 +128,12 @@ headsets with different camera shapes.
 - `UdpVideoHandler` for UDP timed video packets.
 - `RobotClockSync` for latency reporting.
 - settings and controller overlays from `scripts/ui`.
+- `EEPoseTrajectory` for the optional descriptor-driven operation trail. It
+  observes successfully queued `DeviceCommand` poses, renders independent
+  left/right world-space paths, keeps the latest two deadman segments per hand,
+  and starts a new segment after each release so inactive controller motion is
+  never joined into the trail. A successfully queued reset-to-home command
+  clears both hands' trails before its bundled poses can be rendered.
 
 Video transport is descriptor-driven. TCP is the default and supports USB
 `adb reverse`; UDP is selected when the descriptor advertises a usable UDP

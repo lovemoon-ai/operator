@@ -4,6 +4,8 @@ extends Node
 ## Replaces PoseSender when the robot provides a DeviceDescriptor.
 ## Uses ControlMode to map VR inputs to the device's expected command format.
 
+signal command_sent(command: Dictionary)
+
 var tracking_provider: TrackingProvider
 var tcp_handler: TcpHandler
 var control_mode: ControlMode
@@ -39,7 +41,8 @@ func _process(delta: float) -> void:
 	_report_enable_transition(cmd)
 	_report_active_command_summary(cmd)
 	var json_bytes = JSON.stringify(cmd).to_utf8_buffer()
-	tcp_handler.send_command("DeviceCommand", json_bytes)
+	if tcp_handler.send_command("DeviceCommand", json_bytes) == OK:
+		command_sent.emit(cmd)
 
 
 func set_sending(enabled: bool) -> void:

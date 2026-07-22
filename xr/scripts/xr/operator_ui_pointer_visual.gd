@@ -17,6 +17,10 @@ const IDLE_CORE_COLOR := Color(0.72, 0.74, 0.76, 0.24)
 const IDLE_TIP_COLOR := Color(0.72, 0.74, 0.76, 0.04)
 const HIT_FADE_START := 0.58
 const IDLE_FADE_START := 0.24
+# While a capture session is recording the pointer stays usable (the STOP
+# button must remain clickable) but the ray/cursor alpha is scaled down so the
+# laser does not dominate the operator's view or the recording.
+const DIMMED_ALPHA_SCALE := 0.35
 # Lift the cursor + pulse off the panel along the ray so they never sit
 # half-embedded inside the UI quad (which renders with ALPHA_SCISSOR in
 # the opaque pass and would otherwise occlude the back half of the sphere).
@@ -33,6 +37,7 @@ var _target_material: StandardMaterial3D
 var _pulse_material: StandardMaterial3D
 var _pressed := false
 var _pulse_phase := 0.0
+var _alpha_scale := 1.0
 
 
 func _ready() -> void:
@@ -48,7 +53,15 @@ func _process(delta: float) -> void:
 	var radius := PULSE_RADIUS_M + pulse * 0.012
 	_pulse_mesh.radius = radius
 	_pulse_mesh.height = radius * 2.0
-	_pulse_material.albedo_color = Color(1.0, 0.647, 0.169, 0.18 - pulse * 0.08)
+	_pulse_material.albedo_color = Color(1.0, 0.647, 0.169, (0.18 - pulse * 0.08) * _alpha_scale)
+
+
+func set_dimmed(dimmed: bool) -> void:
+	## Recording-in-progress state: keep the pointer functional but scale down
+	## the ray/cursor alpha. Style parameters are re-applied on every
+	## show_ray()/show_idle_ray() call, so the new scale takes effect on the
+	## next pointer update.
+	_alpha_scale = DIMMED_ALPHA_SCALE if dimmed else 1.0
 
 
 func show_ray(
@@ -86,7 +99,7 @@ func show_ray(
 
 	_target_mesh.radius = TARGET_PRESSED_RADIUS_M if pressed else TARGET_RADIUS_M
 	_target_mesh.height = _target_mesh.radius * 2.0
-	_target_material.albedo_color = Color(1.0, 0.647, 0.169, 0.72 if pressed else 0.50)
+	_target_material.albedo_color = Color(1.0, 0.647, 0.169, (0.72 if pressed else 0.50) * _alpha_scale)
 	# Float the cursor slightly off the panel surface along the ray so the
 	# back of the sphere doesn't sink into the UI quad.
 	var lifted := hit_point - direction * (_target_mesh.radius + TARGET_SURFACE_CLEARANCE_M)
@@ -203,7 +216,7 @@ func _apply_ray_style(core_color: Color, tip_color: Color, fade_start: float, al
 	_ray_material.set_shader_parameter("core_color", core_color)
 	_ray_material.set_shader_parameter("tip_color", tip_color)
 	_ray_material.set_shader_parameter("fade_start", fade_start)
-	_ray_material.set_shader_parameter("alpha_multiplier", alpha_multiplier)
+	_ray_material.set_shader_parameter("alpha_multiplier", alpha_multiplier * _alpha_scale)
 
 
 func _safe_up(direction: Vector3) -> Vector3:
