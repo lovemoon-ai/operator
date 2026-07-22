@@ -1,7 +1,14 @@
 extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name TeleopSettingsPanel
 
-signal settings_applied(ip: String, port: int, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool)
+signal settings_applied(
+	ip: String,
+	port: int,
+	video_face_locked: bool,
+	show_video_panel: bool,
+	show_operation_trajectory: bool,
+	show_on_launch: bool
+)
 signal close_requested
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
@@ -14,6 +21,7 @@ const DEFAULT_FACE_LOCKED: bool = true
 # front of the user. Showing the panel requires both this opt-in AND the robot
 # actually sending frames — see LiveVideoView._update_panel_visibility.
 const DEFAULT_SHOW_VIDEO_PANEL: bool = false
+const DEFAULT_SHOW_OPERATION_TRAJECTORY: bool = false
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
 
@@ -65,6 +73,7 @@ var _ip_test_token := 0
 var _port_input: LineEdit
 var _video_face_toggle: CheckButton
 var _show_video_panel_toggle: CheckButton
+var _show_operation_trajectory_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
 var _status_label: Label
 var _discovery_spinner: DiscoverySpinner
@@ -112,6 +121,13 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	_discovery_option = OptionButton.new()
 	_discovery_option.custom_minimum_size.y = 55
+	# Robot names and types come from the service descriptor and are not
+	# length-bounded.  OptionButton otherwise uses its longest item to compute
+	# its minimum width, which can widen the whole settings layout and push the
+	# bottom action row (including Exit) outside the viewport.
+	_discovery_option.fit_to_longest_item = false
+	_discovery_option.clip_text = true
+	_discovery_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_discovery_option.add_theme_font_size_override("font_size", 23)
 	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 	_discovery_option.item_selected.connect(_on_discovery_selected)
@@ -170,6 +186,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
 	_video_face_toggle = add_toggle(display, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
 	_show_video_panel_toggle = add_toggle(display, tr("UI_SHOW_VIDEO_PANEL"), DEFAULT_SHOW_VIDEO_PANEL, 22)
+	_show_operation_trajectory_toggle = add_toggle(
+		display,
+		tr("UI_SHOW_OPERATION_TRAJECTORY"),
+		DEFAULT_SHOW_OPERATION_TRAJECTORY,
+		22
+	)
 
 	# --- Startup group -----------------------------------------------------
 	var startup := register_group("startup", "UI_GROUP_STARTUP", "power")
@@ -195,9 +217,10 @@ func _on_confirm_requested() -> void:
 	settings_applied.emit(
 			str(options.get("ip", DEFAULT_IP)),
 			int(options.get("port", DEFAULT_PORT)),
-			bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED)),
-			bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL)),
-			bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
+		bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED)),
+		bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL)),
+		bool(options.get("show_operation_trajectory", DEFAULT_SHOW_OPERATION_TRAJECTORY)),
+		bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
 	)
 
 
@@ -265,6 +288,7 @@ func get_options() -> Dictionary:
 		"port": _port_input.text.strip_edges().to_int(),
 		"video_face_locked": _video_face_toggle.button_pressed,
 		"show_video_panel": _show_video_panel_toggle.button_pressed,
+		"show_operation_trajectory": _show_operation_trajectory_toggle.button_pressed,
 		"show_on_launch": _show_on_launch_toggle.button_pressed
 	}
 
@@ -274,6 +298,9 @@ func set_options(options: Dictionary) -> void:
 	_port_input.text = str(int(options.get("port", DEFAULT_PORT)))
 	_video_face_toggle.button_pressed = bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED))
 	_show_video_panel_toggle.button_pressed = bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL))
+	_show_operation_trajectory_toggle.button_pressed = bool(
+		options.get("show_operation_trajectory", DEFAULT_SHOW_OPERATION_TRAJECTORY)
+	)
 	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
 
 
@@ -442,5 +469,6 @@ static func _default_options() -> Dictionary:
 		"port": DEFAULT_PORT,
 		"video_face_locked": DEFAULT_FACE_LOCKED,
 		"show_video_panel": DEFAULT_SHOW_VIDEO_PANEL,
+		"show_operation_trajectory": DEFAULT_SHOW_OPERATION_TRAJECTORY,
 		"show_on_launch": DEFAULT_SHOW_ON_LAUNCH
 	}

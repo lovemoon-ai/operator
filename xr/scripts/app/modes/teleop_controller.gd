@@ -35,12 +35,14 @@ const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 # convention (the two SO-101 arms are configured with opposite `mirror`). A
 # single-arm rig only ever populates the driving hand's slot.
 const ControlFrameGizmoScript = preload("res://scripts/ui/control_frame_gizmo.gd")
+const EEPoseTrajectoryScript = preload("res://scripts/ui/ee_pose_trajectory.gd")
 const HAND_LEFT := 0
 const HAND_RIGHT := 1
 var _control_frame_gizmos := {}  # hand -> Node3D
 var _control_frame := {HAND_LEFT: Quaternion.IDENTITY, HAND_RIGHT: Quaternion.IDENTITY}
 var _control_frame_valid := {HAND_LEFT: false, HAND_RIGHT: false}
 var _control_frame_mirror := {HAND_LEFT: true, HAND_RIGHT: true}
+var _ee_pose_trajectory: EEPoseTrajectory
 @onready var _tracking_provider: Node = $TrackingProvider
 @onready var _tcp_handler: Node = $TcpHandler
 @onready var _discovery: Node = $Discovery
@@ -196,6 +198,8 @@ func _ready() -> void:
 		# has sent a frame. The user opts in via the Settings panel toggle.
 		if _robot_view.has_method("set_show_video_panel"):
 			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
+	if _ee_pose_trajectory:
+		_ee_pose_trajectory.set_enabled(bool(persisted.get("show_operation_trajectory", false)))
 
 	var xr_interface := XRServer.find_interface("OpenXR")
 	if xr_interface and xr_interface.is_initialized():
@@ -281,6 +285,10 @@ func _create_v2_nodes() -> void:
 	var teleop := TeleopComposition.build(self)
 	_command_sender = teleop.get("command_sender")
 	_robot_control_sink = teleop.get("robot_control_sink")
+	_ee_pose_trajectory = EEPoseTrajectoryScript.new()
+	_ee_pose_trajectory.name = "EEPoseTrajectory"
+	add_child(_ee_pose_trajectory)
+	_command_sender.command_sent.connect(_on_command_sent)
 
 	# Dedicated video stream handler. [issue 005 / item 6] Bumped to
 	# 32 MiB so a freshly connected client surviving a brief WiFi
@@ -431,9 +439,21 @@ func _configure_passthrough() -> void:
 ## Saves the panel state, hides it, then connects/reconnects with the chosen
 ## endpoint. The robot type is not a client setting — the DeviceDescriptor
 ## received on handshake defines what the client sends and displays.
-func _on_settings_applied(ip: String, port: int, video_face_locked: bool, show_video_panel: bool, show_on_launch: bool) -> void:
-	print("[Operator] Settings applied: ip=%s port=%d face_locked=%s show_video=%s show_on_launch=%s" % [
-		ip, port, video_face_locked, show_video_panel, show_on_launch,
+func _on_settings_applied(
+	ip: String,
+	port: int,
+	video_face_locked: bool,
+	show_video_panel: bool,
+	show_operation_trajectory: bool,
+	show_on_launch: bool
+) -> void:
+	print("[Operator] Settings applied: ip=%s port=%d face_locked=%s show_video=%s show_trajectory=%s show_on_launch=%s" % [
+		ip,
+		port,
+		video_face_locked,
+		show_video_panel,
+		show_operation_trajectory,
+		show_on_launch,
 	])
 	_cancel_launch_window()
 
@@ -442,6 +462,8 @@ func _on_settings_applied(ip: String, port: int, video_face_locked: bool, show_v
 		_robot_view.follow_camera = video_face_locked
 		if _robot_view.has_method("set_show_video_panel"):
 			_robot_view.set_show_video_panel(show_video_panel)
+	if _ee_pose_trajectory:
+		_ee_pose_trajectory.set_enabled(show_operation_trajectory)
 
 	_hide_settings_panel()
 
@@ -500,6 +522,10 @@ func _set_teleop_suspended(suspended: bool) -> void:
 			_robot_control_sink.set_sending(false)
 		elif _tcp_handler and _tcp_handler.is_connected_to_robot():
 			_robot_control_sink.set_sending(true)
+	if suspended and _ee_pose_trajectory:
+		# Do not bridge the hand motion performed while settings owns the
+		# controllers with one long segment when teleop resumes.
+		_ee_pose_trajectory.break_all()
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_suspended"):
 		_teleop_controller_panel.call("set_suspended", suspended)
 
@@ -697,7 +723,22 @@ func _set_status(text: String) -> void:
 
 # --- Connection lifecycle -----------------------------------------------------
 
+func _on_command_sent(command: Dictionary) -> void:
+	if _ee_pose_trajectory == null:
+		return
+	_ee_pose_trajectory.record_command(
+		command,
+		_driving_hand(),
+		{
+			HAND_LEFT: _is_deadman_held(HAND_LEFT),
+			HAND_RIGHT: _is_deadman_held(HAND_RIGHT),
+		}
+	)
+
+
 func _connect_to_robot(ip: String, port: int) -> void:
+	if _ee_pose_trajectory:
+		_ee_pose_trajectory.clear()
 	_set_status(tr("UI_CONNECTING_TO") % [ip, port])
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
@@ -717,6 +758,8 @@ func _on_connected() -> void:
 func _on_disconnected() -> void:
 	_set_status(tr("UI_DISCONNECTED"))
 	_robot_control_sink.set_sending(false)
+	if _ee_pose_trajectory:
+		_ee_pose_trajectory.clear()
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	_video_tcp_handler.disconnect_from_robot()
@@ -775,6 +818,8 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	_set_status(tr("UI_DRIVER_ACTIVE") % [device_name, _robot_type_display(device_type)])
 	print("[Operator] Connected to %s (type=%s per descriptor)" % [device_name, device_type])
 	_robot_control_sink.configure_for_device(descriptor)
+	if _ee_pose_trajectory:
+		_ee_pose_trajectory.configure_for_device(descriptor)
 	# If the settings panel is up, stay paused; _set_teleop_suspended(false)
 	# re-enables sending when it closes.
 	if not _teleop_suspended:
@@ -805,6 +850,8 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 
 func _on_device_disconnected() -> void:
 	_robot_control_sink.set_sending(false)
+	if _ee_pose_trajectory:
+		_ee_pose_trajectory.configure_for_device({})
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
