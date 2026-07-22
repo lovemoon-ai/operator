@@ -3,7 +3,7 @@ extends Control
 ## Single-card UI used by the 3D launcher (scripts/app/launcher/mode_select.gd).
 ##
 ## Each launcher card is its own Viewport2DIn3D quad floating in front of the
-## user, so this Control renders exactly one card (icon + title + subtitle).
+## user, so this Control renders exactly one card (icon + title).
 ## The 2-row grid that used to live here moved up into the launcher script, which
 ## now positions one of these scenes per mode. `selected` fires when the
 ## operator clicks the card; the launcher script maps that to the scene
@@ -39,7 +39,6 @@ var _accent: Color = COL_ACCENT
 var _card: Button
 var _icon: _CardIcon
 var _title_label: Label
-var _subtitle_label: Label
 var _status_label: Label
 var _card_tween: Tween
 var _feedback_input_mode := "controllers"
@@ -51,7 +50,7 @@ func _ready() -> void:
 	_ensure_built()
 
 
-func configure(kind: int, title_text: String, subtitle_text: String) -> void:
+func configure(kind: int, title_text: String) -> void:
 	_ensure_built()
 	_kind = kind
 	_accent = COL_DANGER if kind == Kind.EXIT else COL_ACCENT
@@ -61,8 +60,6 @@ func configure(kind: int, title_text: String, subtitle_text: String) -> void:
 		_icon.queue_redraw()
 	if _title_label != null:
 		_title_label.text = title_text
-	if _subtitle_label != null:
-		_subtitle_label.text = subtitle_text
 	if _card != null:
 		_card.add_theme_stylebox_override("normal", _card_style(false))
 		_card.add_theme_stylebox_override("hover", _card_style(true))
@@ -161,16 +158,6 @@ func _build_ui() -> void:
 	_title_label.clip_text = false
 	_title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	column.add_child(_title_label)
-
-	_subtitle_label = Label.new()
-	_subtitle_label.text = ""
-	_subtitle_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_subtitle_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_subtitle_label.add_theme_font_size_override("font_size", 18)
-	_subtitle_label.add_theme_color_override("font_color", COL_MUTED)
-	_subtitle_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_subtitle_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	column.add_child(_subtitle_label)
 
 	_status_label = Label.new()
 	_status_label.text = ""

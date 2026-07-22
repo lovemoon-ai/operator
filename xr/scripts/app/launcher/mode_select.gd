@@ -178,31 +178,26 @@ func _all_card_data() -> Array:
 		{
 			"mode": MODE_TELEOP,
 			"title_key": "UI_TELEOP_MODE",
-			"subtitle_key": "UI_TELEOP_MODE_SUB",
 			"kind": CardUIScript.Kind.TELEOP,
 		},
 		{
 			"mode": MODE_EGO_CAPTURE,
 			"title_key": "UI_EGO_MODE",
-			"subtitle_key": "UI_EGO_MODE_SUB",
 			"kind": CardUIScript.Kind.EGO_CAPTURE,
 		},
 		{
 			"mode": MODE_LIVE_FEED,
 			"title_key": "UI_LIVE_FEED_MODE",
-			"subtitle_key": "UI_LIVE_FEED_MODE_SUB",
 			"kind": CardUIScript.Kind.LIVE_FEED,
 		},
 		{
 			"mode": MODE_VR,
 			"title_key": "UI_VR_MODE",
-			"subtitle_key": "UI_VR_MODE_SUB",
 			"kind": CardUIScript.Kind.VR,
 		},
 		{
 			"mode": MODE_EXIT,
 			"title_key": "UI_EXIT_MODE",
-			"subtitle_key": "UI_EXIT_MODE_SUB",
 			"kind": CardUIScript.Kind.EXIT,
 		},
 	]
@@ -401,7 +396,6 @@ func _wire_card_ui(entry: CardEntry) -> void:
 		entry.ui.configure(
 			int(data.get("kind", 0)),
 			tr(String(data.get("title_key", ""))),
-			tr(String(data.get("subtitle_key", ""))),
 		)
 	if entry.ui.has_signal("selected"):
 		entry.ui.selected.connect(_on_card_selected.bind(entry.mode))
@@ -413,17 +407,17 @@ func _wire_card_ui(entry: CardEntry) -> void:
 func _card_metadata(mode: String) -> Dictionary:
 	match mode:
 		MODE_TELEOP:
-			return {"kind": CardUIScript.Kind.TELEOP, "title_key": "UI_TELEOP_MODE", "subtitle_key": "UI_TELEOP_MODE_SUB"}
+			return {"kind": CardUIScript.Kind.TELEOP, "title_key": "UI_TELEOP_MODE"}
 		MODE_EGO_CAPTURE:
-			return {"kind": CardUIScript.Kind.EGO_CAPTURE, "title_key": "UI_EGO_MODE", "subtitle_key": "UI_EGO_MODE_SUB"}
+			return {"kind": CardUIScript.Kind.EGO_CAPTURE, "title_key": "UI_EGO_MODE"}
 		MODE_LIVE_FEED:
-			return {"kind": CardUIScript.Kind.LIVE_FEED, "title_key": "UI_LIVE_FEED_MODE", "subtitle_key": "UI_LIVE_FEED_MODE_SUB"}
+			return {"kind": CardUIScript.Kind.LIVE_FEED, "title_key": "UI_LIVE_FEED_MODE"}
 		MODE_VR:
-			return {"kind": CardUIScript.Kind.VR, "title_key": "UI_VR_MODE", "subtitle_key": "UI_VR_MODE_SUB"}
+			return {"kind": CardUIScript.Kind.VR, "title_key": "UI_VR_MODE"}
 		MODE_EXIT:
-			return {"kind": CardUIScript.Kind.EXIT, "title_key": "UI_EXIT_MODE", "subtitle_key": "UI_EXIT_MODE_SUB"}
+			return {"kind": CardUIScript.Kind.EXIT, "title_key": "UI_EXIT_MODE"}
 		_:
-			return {"kind": CardUIScript.Kind.TELEOP, "title_key": "UI_TELEOP_MODE", "subtitle_key": "UI_TELEOP_MODE_SUB"}
+			return {"kind": CardUIScript.Kind.TELEOP, "title_key": "UI_TELEOP_MODE"}
 
 
 func _set_status_for_all(text: String) -> void:
