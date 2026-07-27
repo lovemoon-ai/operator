@@ -3,7 +3,6 @@ worktree:
   symlink:
     - .deps/src
     - xr/addons/godotopenxrvendors/.bin
-    - xr/android/build/local.properties
     - xr/android/build/.gradle
     - xr/.gradle
     - examples/mujuco-arm-so101/.venv
