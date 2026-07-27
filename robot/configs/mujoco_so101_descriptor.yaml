@@ -1,3 +1,8 @@
+descriptor_version: 2
+execution:
+  kind: "outside"
+  environment: "simulation"
+
 device:
   type: "robot_arm"
   name: "MuJoCo SO-101 Arm"
@@ -77,6 +82,22 @@ telemetry_schema:
       type: "bool"
 
 video_feeds: []
+
+input_contract:
+  rate_hz: 90.0
+  coordinate_space: "operator_aligned_robot_frame"
+  channels:
+    - { name: "end_effector", type: "pose6d", frame: "right_hand" }
+    - { name: "operator_frame", type: "pose6d", frame: "head" }
+    - { name: "gripper", type: "axis", frame: "right_trigger" }
+    - { name: "enable", type: "button", frame: "right_grip" }
+    - { name: "reset", type: "button", frame: "button_b" }
+
+capabilities:
+  teleop: true
+  emergency_stop: true
+  reset: true
+  video: false
 
 safety:
   disconnect_action: "stop"

@@ -77,18 +77,18 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
 # Test-harness APK (export preset "Meta Quest Test"):
 # operator_feature_test_harness=true, includes res://tests/** and
 # res://scripts/test_support/**. Consumed by tests/xr_module_harness.sh.
-build-quest-test: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest-test: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest_test)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest Test,$(apk_quest_test))
 
-build-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-pico-openxr prepare-capture-plugins
+build-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 
@@ -111,14 +111,21 @@ build-mujoco-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build
 install-quest build-install-quest ship-quest: ADB=$(ADB_QUEST)
 install-pico build-install-pico ship-pico ship-pico-fast: ADB=$(ADB_PICO)
 
+# --no-incremental is required, not cosmetic: this APK ships its native
+# libraries uncompressed (extractNativeLibs=false) so they mmap straight from
+# the APK. adb's default incremental/streaming install can leave those Stored
+# libs at a stale offset on reinstall over the same versionCode, and the loader
+# then reads a ZIP header instead of ELF ("bad ELF magic: 504b0304"). MuJoCo
+# fails to load and every simulated robot breaks. A full push avoids it without
+# wiping app data.
 install-quest:
-	$(ADB) install -r -d $(apk_quest)
+	$(ADB) install -r -d --no-incremental $(apk_quest)
 
 install-pico:
-	$(ADB) install -r -d $(apk_pico)
+	$(ADB) install -r -d --no-incremental $(apk_pico)
 
 install-androidxr:
-	$(ADB) install -r -d $(apk_androidxr)
+	$(ADB) install -r -d --no-incremental $(apk_androidxr)
 
 uninstall:
 	$(ADB) uninstall $(package)

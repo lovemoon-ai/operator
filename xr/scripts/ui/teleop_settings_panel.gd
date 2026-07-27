@@ -1,27 +1,28 @@
 extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name TeleopSettingsPanel
 
-signal settings_applied(
-	ip: String,
-	port: int,
-	video_face_locked: bool,
-	show_video_panel: bool,
-	show_operation_trajectory: bool,
-	show_on_launch: bool
-)
+signal settings_applied(options: Dictionary)
 signal close_requested
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
 const SECTION := "settings"
+const RobotProfileRegistryScript := preload(
+	"res://scripts/teleop/retargeting/robot_profile_registry.gd"
+)
 
 const DEFAULT_IP: String = "127.0.0.1"
 const DEFAULT_PORT: int = 63901
+const DEFAULT_TARGET_SCOPE := "outside"
+const DEFAULT_RETARGETING_BACKEND := "native"
+const DEFAULT_RETARGETING_HOST := "127.0.0.1"
+const DEFAULT_RETARGETING_PORT := 8000
 const DEFAULT_FACE_LOCKED: bool = true
 # Default OFF so a freshly installed app doesn't blast a placeholder quad in
 # front of the user. Showing the panel requires both this opt-in AND the robot
 # actually sending frames — see LiveVideoView._update_panel_visibility.
 const DEFAULT_SHOW_VIDEO_PANEL: bool = false
 const DEFAULT_SHOW_OPERATION_TRAJECTORY: bool = false
+const DEFAULT_SHOW_VR_POSE: bool = false
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
 
@@ -65,6 +66,22 @@ const COL_IP_TEST_OK := Color(0.14, 0.82, 0.45)
 const COL_IP_TEST_FAIL := Color(1.0, 0.36, 0.30)
 
 var _discovery_option: OptionButton
+var _inside_scope_button: Button
+var _outside_scope_button: Button
+var _target_scope := DEFAULT_TARGET_SCOPE
+var _outside_box: VBoxContainer
+var _inside_box: VBoxContainer
+var _inside_missing_label: Label
+var _inside_profile_row: VBoxContainer
+var _profile_buttons: Dictionary = {}
+var _selected_profile := ""
+var _backend_row: HBoxContainer
+var _backend_buttons: Dictionary = {}
+var _selected_backend := DEFAULT_RETARGETING_BACKEND
+var _retargeting_host_input: LineEdit
+var _retargeting_port_input: LineEdit
+var _retargeting_tls_toggle: CheckButton
+var _retargeting_status_label: Label
 var _ip_input: LineEdit
 var _ip_test_button: Button
 var _ip_test_peer: StreamPeerTCP
@@ -74,6 +91,7 @@ var _port_input: LineEdit
 var _video_face_toggle: CheckButton
 var _show_video_panel_toggle: CheckButton
 var _show_operation_trajectory_toggle: CheckButton
+var _show_vr_pose_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
 var _status_label: Label
 var _discovery_spinner: DiscoverySpinner
@@ -90,7 +108,14 @@ func _init() -> void:
 	set_options(settings)
 	set_status(tr("UI_LOADED_SETTINGS" if bool(settings.get("loaded", false)) else "UI_USING_DEFAULTS"))
 	_apply_mode_lock()
-	print("[SettingsUI] ready (manual mode; %d discovered)" % (_discovery_option.item_count - 1))
+	print(
+		"[SettingsUI] ready (manual mode; %d discovered; scope=%s; inside robots=%s)"
+		% [
+			_discovery_option.item_count - 1,
+			_target_scope,
+			str(RobotProfileRegistryScript.ids()),
+		]
+	)
 
 
 func _settings_path() -> String:
@@ -116,8 +141,31 @@ func _settings_log_tag() -> String:
 func _build_settings_content(parent: VBoxContainer) -> void:
 	build_two_column(parent)
 
-	# --- Connection group --------------------------------------------------
-	var connection := register_group("connection", "UI_GROUP_CONNECTION", "signal")
+	# --- Robot group -------------------------------------------------------
+	# One group for the whole robot decision: pick where the embodiment lives,
+	# then configure only that side. Inside and Outside share no settings, so
+	# showing both at once was only ever noise.
+	var robot := register_group("robot", "UI_ROBOT_CONFIG", "robot-arm")
+
+	var type_label := Label.new()
+	type_label.text = tr("UI_ROBOT_SCOPE")
+	type_label.add_theme_font_size_override("font_size", 19)
+	type_label.add_theme_color_override("font_color", COL_SECTION)
+	robot.add_child(type_label)
+
+	var type_row := HBoxContainer.new()
+	type_row.add_theme_constant_override("separation", 10)
+	type_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	robot.add_child(type_row)
+	_inside_scope_button = _add_scope_button(type_row, tr("UI_INSIDE_ROBOT"), "inside")
+	_outside_scope_button = _add_scope_button(type_row, tr("UI_OUTSIDE_ROBOT"), "outside")
+
+	# --- Outside Robot (robot-service) -------------------------------------
+	var connection := VBoxContainer.new()
+	connection.add_theme_constant_override("separation", 12)
+	connection.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	robot.add_child(connection)
+	_outside_box = connection
 
 	_discovery_option = OptionButton.new()
 	_discovery_option.custom_minimum_size.y = 55
@@ -177,10 +225,73 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	status_row.add_child(_status_label)
 
-	# The robot *type* is intentionally not a user setting: what the XR
-	# client sends is defined entirely by the DeviceDescriptor the robot
-	# sends on handshake (input_mapping / control_schema). The discovery list
-	# above still shows each robot's self-reported device_type as a label.
+	# For an Outside robot the robot *type* is intentionally not a user
+	# setting: what the XR client sends is defined entirely by the
+	# DeviceDescriptor the robot sends on handshake (input_mapping /
+	# control_schema). The discovery list above still shows each robot's
+	# self-reported device_type as a label.
+
+	# --- Inside Robot (in-headset embodiment) ------------------------------
+	var inside := VBoxContainer.new()
+	inside.add_theme_constant_override("separation", 12)
+	inside.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	robot.add_child(inside)
+	_inside_box = inside
+
+	# Every robot is a button rather than a dropdown entry. An OptionButton
+	# opens a PopupMenu, which is a separate window that never reaches this
+	# panel's composition viewport — in the headset the operator would only
+	# ever see the currently selected robot and could not switch.
+	_inside_profile_row = VBoxContainer.new()
+	_inside_profile_row.add_theme_constant_override("separation", 8)
+	_inside_profile_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inside.add_child(_inside_profile_row)
+	# Robots come from the manifests shipped in this build, never from a
+	# hardcoded list: generating a robot's assets is what makes it selectable.
+	for profile in RobotProfileRegistryScript.list_profiles():
+		var profile_id := str(profile.get("profile_id", ""))
+		var button := _add_choice_button(
+			_inside_profile_row,
+			str(profile.get("display_name", profile_id)),
+			_on_inside_profile_pressed.bind(profile_id)
+		)
+		_profile_buttons[profile_id] = button
+
+	_inside_missing_label = Label.new()
+	_inside_missing_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_inside_missing_label.add_theme_font_size_override("font_size", 18)
+	_inside_missing_label.add_theme_color_override("font_color", COL_STATUS)
+	_inside_missing_label.visible = false
+	inside.add_child(_inside_missing_label)
+
+	_backend_row = HBoxContainer.new()
+	_backend_row.add_theme_constant_override("separation", 10)
+	_backend_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inside.add_child(_backend_row)
+	for backend in [["native", "UI_RETARGETING_NATIVE"], ["remote", "UI_RETARGETING_REMOTE"]]:
+		var backend_id := str(backend[0])
+		_backend_buttons[backend_id] = _add_choice_button(
+			_backend_row, tr(str(backend[1])), _on_retargeting_backend_pressed.bind(backend_id)
+		)
+
+	_retargeting_host_input = LineEdit.new()
+	_retargeting_host_input.placeholder_text = tr("UI_RETARGETING_HOST")
+	_retargeting_host_input.custom_minimum_size.y = 55
+	_retargeting_host_input.add_theme_font_size_override("font_size", 21)
+	add_interactive(inside, _retargeting_host_input)
+
+	_retargeting_port_input = LineEdit.new()
+	_retargeting_port_input.placeholder_text = tr("UI_RETARGETING_PORT")
+	_retargeting_port_input.custom_minimum_size.y = 55
+	_retargeting_port_input.add_theme_font_size_override("font_size", 21)
+	add_interactive(inside, _retargeting_port_input)
+
+	_retargeting_tls_toggle = add_toggle(inside, tr("UI_RETARGETING_TLS"), false, 21)
+	_retargeting_status_label = Label.new()
+	_retargeting_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_retargeting_status_label.add_theme_font_size_override("font_size", 18)
+	_retargeting_status_label.add_theme_color_override("font_color", COL_STATUS)
+	inside.add_child(_retargeting_status_label)
 
 	# --- Display group -----------------------------------------------------
 	var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
@@ -192,36 +303,69 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 		DEFAULT_SHOW_OPERATION_TRAJECTORY,
 		22
 	)
+	# The VR-pose skeleton is the operator's tracked body shown beside the
+	# Inside robot; off by default, on when the operator wants to inspect input.
+	_show_vr_pose_toggle = add_toggle(display, tr("UI_SHOW_VR_POSE"), DEFAULT_SHOW_VR_POSE, 22)
 
 	# --- Startup group -----------------------------------------------------
 	var startup := register_group("startup", "UI_GROUP_STARTUP", "power")
 	_show_on_launch_toggle = add_toggle(startup, tr("UI_SHOW_SETTINGS_ON_LAUNCH"), DEFAULT_SHOW_ON_LAUNCH, 22)
 
-	# Connection is shown by default (first registered), no explicit select needed.
+	# The robot group is shown by default (first registered).
+	call_deferred("_refresh_scope_ui")
+
+
+## One always-visible choice button. Every selection on this page uses these
+## instead of an OptionButton: a dropdown's PopupMenu is a separate window that
+## never reaches this panel's composition viewport, so in the headset only the
+## selected entry would be visible and the operator could not switch.
+func _add_choice_button(parent: Container, label: String, on_pressed: Callable) -> Button:
+	var button := Button.new()
+	button.text = label
+	button.toggle_mode = true
+	button.focus_mode = Control.FOCUS_NONE
+	button.custom_minimum_size.y = 58
+	button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	button.add_theme_font_size_override("font_size", 22)
+	button.pressed.connect(on_pressed)
+	add_interactive(parent, button)
+	return button
+
+
+func _add_scope_button(row: HBoxContainer, label: String, scope: String) -> Button:
+	return _add_choice_button(row, label, _on_scope_button_pressed.bind(scope))
 
 
 func _on_confirm_requested() -> void:
-	var ip := _ip_input.text.strip_edges()
-	var port := _port_input.text.strip_edges().to_int()
-	if ip.is_empty():
-		set_status(tr("UI_IP_REQUIRED"))
-		return
-	if port <= 0 or port > 65535:
-		port = DEFAULT_PORT
-		_port_input.text = str(port)
-	_ip_input.text = ip
-
 	var options := get_options()
+	var scope := str(options.get("target_scope", DEFAULT_TARGET_SCOPE))
+	if scope == "outside":
+		var ip := str(options.get("ip", "")).strip_edges()
+		var port := int(options.get("port", 0))
+		if ip.is_empty():
+			set_status(tr("UI_IP_REQUIRED"))
+			return
+		if port <= 0 or port > 65535:
+			set_status(tr("UI_INVALID_PORT"))
+			return
+	else:
+		var profile_id := str(options.get("inside_profile", ""))
+		var retargeting_backend := str(options.get("retargeting_backend", ""))
+		if not RobotProfileRegistryScript.supports_backend(profile_id, retargeting_backend):
+			set_status(tr("UI_RETARGETING_BACKEND_UNAVAILABLE"))
+			return
+		if retargeting_backend == "remote":
+			if str(options.get("retargeting_host", "")).strip_edges().is_empty():
+				set_status(tr("UI_RETARGETING_HOST_REQUIRED"))
+				return
+			var remote_port := int(options.get("retargeting_port", 0))
+			if remote_port <= 0 or remote_port > 65535:
+				set_status(tr("UI_INVALID_PORT"))
+				return
+
 	_save_settings(options)
 	set_status(tr("UI_APPLYING"))
-	settings_applied.emit(
-			str(options.get("ip", DEFAULT_IP)),
-			int(options.get("port", DEFAULT_PORT)),
-		bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED)),
-		bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL)),
-		bool(options.get("show_operation_trajectory", DEFAULT_SHOW_OPERATION_TRAJECTORY)),
-		bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
-	)
+	settings_applied.emit(options)
 
 
 func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> void:
@@ -284,24 +428,41 @@ func set_discovering(active: bool, text: String = "") -> void:
 
 func get_options() -> Dictionary:
 	return {
+		"target_scope": _target_scope,
 		"ip": _ip_input.text.strip_edges(),
 		"port": _port_input.text.strip_edges().to_int(),
+		"inside_profile": _selected_profile,
+		"retargeting_backend": _selected_backend,
+		"retargeting_host": _retargeting_host_input.text.strip_edges(),
+		"retargeting_port": _retargeting_port_input.text.strip_edges().to_int(),
+		"retargeting_tls": _retargeting_tls_toggle.button_pressed,
 		"video_face_locked": _video_face_toggle.button_pressed,
 		"show_video_panel": _show_video_panel_toggle.button_pressed,
 		"show_operation_trajectory": _show_operation_trajectory_toggle.button_pressed,
+		"show_vr_pose": _show_vr_pose_toggle.button_pressed,
 		"show_on_launch": _show_on_launch_toggle.button_pressed
 	}
 
 
 func set_options(options: Dictionary) -> void:
+	_target_scope = str(options.get("target_scope", DEFAULT_TARGET_SCOPE))
+	if _target_scope != "inside":
+		_target_scope = "outside"
 	_ip_input.text = str(options.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(options.get("port", DEFAULT_PORT)))
+	_selected_profile = str(options.get("inside_profile", _default_inside_profile()))
+	_refresh_backend_options(str(options.get("retargeting_backend", DEFAULT_RETARGETING_BACKEND)))
+	_retargeting_host_input.text = str(options.get("retargeting_host", DEFAULT_RETARGETING_HOST))
+	_retargeting_port_input.text = str(int(options.get("retargeting_port", DEFAULT_RETARGETING_PORT)))
+	_retargeting_tls_toggle.button_pressed = bool(options.get("retargeting_tls", false))
 	_video_face_toggle.button_pressed = bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED))
 	_show_video_panel_toggle.button_pressed = bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL))
 	_show_operation_trajectory_toggle.button_pressed = bool(
 		options.get("show_operation_trajectory", DEFAULT_SHOW_OPERATION_TRAJECTORY)
 	)
+	_show_vr_pose_toggle.button_pressed = bool(options.get("show_vr_pose", DEFAULT_SHOW_VR_POSE))
 	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
+	_refresh_scope_ui()
 
 
 func _on_discovery_selected(idx: int) -> void:
@@ -321,6 +482,8 @@ func _on_discovery_selected(idx: int) -> void:
 
 
 func _apply_mode_lock() -> void:
+	if _discovery_option == null:
+		return
 	var manual := _discovery_option.selected <= 0
 	_ip_input.editable = manual
 	_port_input.editable = manual
@@ -463,12 +626,159 @@ static func load_settings() -> Dictionary:
 	return BaseSettingsPanel.load_settings_from_config(SETTINGS_PATH, SECTION, _default_options(), "loaded")
 
 
+## The first robot this build ships, so a fresh install lands on something
+## that can actually start rather than on a robot that was never generated.
+static func _default_inside_profile() -> String:
+	var offered := RobotProfileRegistryScript.ids()
+	return str(offered[0]) if not offered.is_empty() else ""
+
+
 static func _default_options() -> Dictionary:
 	return {
+		"target_scope": DEFAULT_TARGET_SCOPE,
 		"ip": DEFAULT_IP,
 		"port": DEFAULT_PORT,
+		"inside_profile": _default_inside_profile(),
+		"retargeting_backend": DEFAULT_RETARGETING_BACKEND,
+		"retargeting_host": DEFAULT_RETARGETING_HOST,
+		"retargeting_port": DEFAULT_RETARGETING_PORT,
+		"retargeting_tls": false,
 		"video_face_locked": DEFAULT_FACE_LOCKED,
 		"show_video_panel": DEFAULT_SHOW_VIDEO_PANEL,
 		"show_operation_trajectory": DEFAULT_SHOW_OPERATION_TRAJECTORY,
+		"show_vr_pose": DEFAULT_SHOW_VR_POSE,
 		"show_on_launch": DEFAULT_SHOW_ON_LAUNCH
 	}
+
+
+func _on_scope_button_pressed(scope: String) -> void:
+	_target_scope = scope
+	_refresh_scope_ui()
+
+
+## The pressed state alone is easy to miss on a panel seen from a metre away,
+## so the active choice also carries the accent colour.
+func _set_choice_selected(button: Button, selected: bool) -> void:
+	button.button_pressed = selected
+	var color := COL_ACCENT if selected else COL_SECTION
+	# XR pointer interaction leaves the hovered toggle in `hover_pressed`, not
+	# plain `pressed`. Cover every visible state so the selected colour changes
+	# immediately and stays correct while the pointer is still over the button.
+	for color_name in [
+		"font_color",
+		"font_pressed_color",
+		"font_hover_color",
+		"font_hover_pressed_color",
+		"font_focus_color",
+	]:
+		button.add_theme_color_override(color_name, color)
+
+
+func _on_inside_profile_pressed(profile_id: String) -> void:
+	_selected_profile = profile_id
+	_refresh_backend_options()
+
+
+func _on_retargeting_backend_pressed(backend: String) -> void:
+	if not RobotProfileRegistryScript.supports_backend(_selected_profile, backend):
+		return
+	_selected_backend = backend
+	# Repaint the backend buttons so the accent colour follows the click;
+	# without this the selection changed but the row still looked unchanged.
+	for backend_id in _backend_buttons:
+		var button: Button = _backend_buttons[backend_id]
+		_set_choice_selected(button, backend_id == _selected_backend and not button.disabled)
+	_refresh_remote_fields()
+
+
+func _refresh_scope_ui() -> void:
+	if _inside_scope_button == null or _outside_scope_button == null:
+		return
+	# No Inside profile can be started without its assets, so a build without
+	# them offers Outside only rather than a dead selection.
+	var inside_available := not _profile_buttons.is_empty()
+	if not inside_available:
+		_target_scope = "outside"
+	var inside := _target_scope == "inside"
+	_inside_scope_button.disabled = not inside_available
+	_set_choice_selected(_inside_scope_button, inside)
+	_set_choice_selected(_outside_scope_button, not inside)
+	if _inside_box != null:
+		_inside_box.visible = inside
+	if _outside_box != null:
+		_outside_box.visible = not inside
+	if _inside_missing_label != null:
+		var unavailable := RobotProfileRegistryScript.unavailable()
+		_inside_missing_label.visible = inside and not unavailable.is_empty()
+		if _inside_missing_label.visible:
+			var names: Array = unavailable.keys()
+			names.sort()
+			_inside_missing_label.text = tr("UI_INSIDE_ROBOT_ASSETS_MISSING") % ", ".join(names)
+	_refresh_remote_fields()
+
+
+func _refresh_backend_options(preferred := "") -> void:
+	if _profile_buttons.is_empty() or _backend_buttons.is_empty():
+		return
+	if not _profile_buttons.has(_selected_profile):
+		_selected_profile = _default_inside_profile()
+	for profile_id in _profile_buttons:
+		_set_choice_selected(_profile_buttons[profile_id], profile_id == _selected_profile)
+
+	var wanted := preferred if not preferred.is_empty() else _selected_backend
+	# A backend the chosen robot cannot run must not stay selected from the
+	# previous robot; fall back to whichever one it does support.
+	if not RobotProfileRegistryScript.supports_backend(_selected_profile, wanted):
+		wanted = (
+			"native"
+			if RobotProfileRegistryScript.supports_backend(_selected_profile, "native")
+			else "remote"
+		)
+	_selected_backend = wanted
+	for backend in _backend_buttons:
+		var button: Button = _backend_buttons[backend]
+		button.disabled = not RobotProfileRegistryScript.supports_backend(
+			_selected_profile, backend
+		)
+		_set_choice_selected(button, backend == _selected_backend and not button.disabled)
+	_refresh_remote_fields()
+
+
+func _refresh_remote_fields() -> void:
+	if _backend_buttons.is_empty():
+		return
+	var remote := _selected_backend == "remote"
+	for field in [_retargeting_host_input, _retargeting_port_input, _retargeting_tls_toggle]:
+		if field != null:
+			field.visible = remote
+	if _retargeting_status_label != null:
+		var profile := RobotProfileRegistryScript.get_profile(_selected_profile)
+		var simulation := _simulation_display(str(profile.get("simulation_backend", "kinematic")))
+		_retargeting_status_label.text = tr("UI_INSIDE_RUNTIME_SUMMARY") % [
+			tr("UI_RETARGETING_REMOTE") if remote else tr("UI_RETARGETING_NATIVE"),
+			simulation,
+		]
+	refresh_keyboard()
+
+
+func _simulation_display(backend: String) -> String:
+	if backend.begins_with("mujoco"):
+		return "MuJoCo"
+	return backend.capitalize()
+
+
+func _selected_metadata(option: OptionButton, fallback: String) -> String:
+	if option == null or option.item_count <= 0 or option.selected < 0:
+		return fallback
+	return str(option.get_item_metadata(option.selected))
+
+
+func _select_metadata(option: OptionButton, value: String) -> void:
+	if option == null:
+		return
+	for index in range(option.item_count):
+		if str(option.get_item_metadata(index)) == value:
+			option.select(index)
+			return
+	if option.item_count > 0:
+		option.select(0)

@@ -1,0 +1,77 @@
+{
+  "profile_id": "so101",
+  "display_name": "SO101 Arm",
+  "input_type": "end_effector_pose_v1",
+  "output_type": "joint_positions_v1",
+  "expected_q_size": 5,
+  "simulation_backend": "mujoco",
+  "simulation_model": "res://assets/mujoco/so101_kinematic.xml",
+  "visual_model": "res://assets/robots/so101/so101.glb",
+  "native_supported": true,
+  "remote_supported": true,
+  "requires_body_tracking": false,
+  "joint_names": [
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll"
+  ],
+  "home_ee_position": [
+    0.2859170975,
+    -9.4584e-06,
+    0.0678807345
+  ],
+  "home_ee_orientation_wxyz": [
+    0.3290519067,
+    0.0229780849,
+    0.943998208,
+    0.0080145896
+  ],
+  "position_scale": 1.0,
+  "required_assets": [
+    "res://assets/mujoco/so101_kinematic.xml",
+    "res://assets/robots/so101/so101.glb"
+  ],
+  "local_control_descriptor": {
+    "device": {
+      "type": "robot_arm",
+      "name": "SO101 Inside Robot"
+    },
+    "control_schema": {
+      "axes": [
+        {
+          "name": "gripper",
+          "dead_zone": 0.02
+        }
+      ],
+      "buttons": [
+        {
+          "name": "enable",
+          "toggle": false
+        }
+      ],
+      "poses": [
+        {
+          "name": "end_effector",
+          "frame": "active_hand",
+          "dof": 6
+        }
+      ]
+    },
+    "input_mapping": [
+      {
+        "source": "active_controller_pose",
+        "target": "end_effector"
+      },
+      {
+        "source": "active_grip",
+        "target": "enable"
+      },
+      {
+        "source": "active_trigger",
+        "target": "gripper"
+      }
+    ]
+  }
+}

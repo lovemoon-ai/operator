@@ -1,6 +1,8 @@
 class_name UnitreeG1Overlay
 extends Node3D
 
+signal qpos_updated(qpos: PackedFloat64Array)
+
 ## In-headset overlay of the Unitree G1 robot, driven by retargeting.
 ##
 ## Loads the baked G1 GLB (which preserves the full URDF link hierarchy), tints
@@ -73,6 +75,7 @@ const JOINT_MAP := {
 @export var debug_front_vertical_offset_m: float = 0.0  # fine-tune above the XR floor
 @export var overlay_alpha: float = 0.55
 @export var overlay_tint: Color = Color(0.78, 0.9, 0.7, 1.0)
+@export var native_retargeting_enabled := true
 
 # --- Debug instrumentation -------------------------------------------------
 ## (#1) When > 0, dump the first N retargeting frames to user://g1_debug.jsonl:
@@ -185,7 +188,8 @@ func _ready() -> void:
 	_parse_mocap_joints()
 	if debug_dump_glb_rest:
 		_dump_glb_rest()
-	_setup_retargeter()
+	if native_retargeting_enabled:
+		_setup_retargeter()
 	if debug_dump_frames > 0:
 		_dump_file = FileAccess.open("user://g1_debug.jsonl", FileAccess.WRITE)
 		if _dump_file != null:
@@ -226,6 +230,18 @@ func set_body_pose_provider(provider: Node) -> void:
 	if provider != null and provider.has_signal("canonical_frame_ready"):
 		if not provider.is_connected("canonical_frame_ready", Callable(self, "_on_canonical_frame_ready")):
 			provider.connect("canonical_frame_ready", Callable(self, "_on_canonical_frame_ready"))
+
+
+func is_native_retargeting_ready() -> bool:
+	return _retarget_active and _retargeter != null
+
+
+func get_native_retargeting_error() -> String:
+	if is_native_retargeting_ready():
+		return ""
+	if not ClassDB.class_exists("GMRRetargeter"):
+		return "GMRRetargeter extension is unavailable for Unitree G1"
+	return "Unitree G1 native retargeting failed to initialize"
 
 
 # --- GLB load --------------------------------------------------------------
@@ -833,6 +849,11 @@ func _apply_qpos(qpos: PackedFloat64Array) -> void:
 		var godot_axis := Vector3(-axis.y, axis.z, -axis.x).normalized()
 		var angle := float(qpos[qi])
 		node.transform = rest * Transform3D(Basis(godot_axis, angle), Vector3.ZERO)
+	qpos_updated.emit(qpos)
+
+
+func apply_remote_qpos(qpos: PackedFloat64Array) -> void:
+	_apply_qpos(qpos)
 
 
 # --- Anchoring -------------------------------------------------------------

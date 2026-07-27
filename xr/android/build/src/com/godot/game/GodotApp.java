@@ -74,6 +74,12 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_TELEOP_HOST = "operator.teleop.host";
 	private static final String EXTRA_TELEOP_PORT = "operator.teleop.port";
 	private static final String EXTRA_TELEOP_DURATION = "operator.teleop.duration";
+	// Inside Robot startup (in-headset embodiment). Without these the Inside
+	// path can only be reached by hand in the headset, so its startup cannot
+	// be exercised or diagnosed from a device test.
+	private static final String EXTRA_TELEOP_SCOPE = "operator.teleop.scope";
+	private static final String EXTRA_TELEOP_PROFILE = "operator.teleop.profile";
+	private static final String EXTRA_TELEOP_BACKEND = "operator.teleop.backend";
 
 	static {
 		// .NET libraries.
@@ -118,6 +124,8 @@ public class GodotApp extends GodotActivity {
 	@Override
 	public List<String> getCommandLine() {
 		ArrayList<String> args = new ArrayList<>(super.getCommandLine());
+		Bundle launchExtras = getIntent().getExtras();
+		Log.i("Operator", "Intent extras: " + (launchExtras == null ? "<null>" : launchExtras.keySet().toString()));
 		String operatorMode = getIntent().getStringExtra(EXTRA_OPERATOR_MODE);
 		if (operatorMode == null || operatorMode.trim().isEmpty()) {
 			operatorMode = getIntent().getStringExtra(EXTRA_OPERATOR_MODE_LEGACY);
@@ -148,6 +156,9 @@ public class GodotApp extends GodotActivity {
 		appendIntentExtraArg(args, EXTRA_TELEOP_HOST, "--operator-teleop-host");
 		appendIntentExtraArg(args, EXTRA_TELEOP_PORT, "--operator-teleop-port");
 		appendIntentExtraArg(args, EXTRA_TELEOP_DURATION, "--operator-teleop-duration");
+		appendIntentExtraArg(args, EXTRA_TELEOP_SCOPE, "--operator-teleop-scope");
+		appendIntentExtraArg(args, EXTRA_TELEOP_PROFILE, "--operator-teleop-profile");
+		appendIntentExtraArg(args, EXTRA_TELEOP_BACKEND, "--operator-teleop-backend");
 		// WP7 module test harness (tests/xr_module_harness.sh): only honored
 		// by APKs exported with operator_feature_test_harness=true.
 		appendIntentExtraArg(args, "operator_test_suite", "--operator-test-suite");

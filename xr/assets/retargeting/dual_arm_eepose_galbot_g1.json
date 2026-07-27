@@ -12,9 +12,9 @@
     "orientation_mode": "relative_wrist_roll",
     "workspace_scale": 1.0,
     "arm_reach_scale": 0.82,
-    "fps": 60.0,
+    "fps": 30.0,
     "filter": {
-      "min_cutoff": 0.6,
+      "min_cutoff": 0.0,
       "beta": 0.03,
       "d_cutoff": 1.0
     }
