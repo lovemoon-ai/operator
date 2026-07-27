@@ -68,6 +68,9 @@ void MjNativeSimulation::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_geom_names"), &MjNativeSimulation::get_geom_names);
 	ClassDB::bind_method(D_METHOD("get_sensor_names"), &MjNativeSimulation::get_sensor_names);
 	ClassDB::bind_method(D_METHOD("get_body_transform", "body_name"), &MjNativeSimulation::get_body_transform);
+	ClassDB::bind_method(D_METHOD("get_body_transforms"), &MjNativeSimulation::get_body_transforms);
+	ClassDB::bind_method(D_METHOD("set_qpos", "qpos"), &MjNativeSimulation::set_qpos);
+	ClassDB::bind_method(D_METHOD("set_joint_positions", "joint_names", "values"), &MjNativeSimulation::set_joint_positions);
 	ClassDB::bind_method(D_METHOD("set_actuator_control", "actuator_name", "value"), &MjNativeSimulation::set_actuator_control);
 	ClassDB::bind_method(D_METHOD("set_control_by_index", "index", "value"), &MjNativeSimulation::set_control_by_index);
 }
@@ -186,6 +189,13 @@ Dictionary MjNativeSimulation::get_model_summary() const {
 	summary["nq"] = model->nq;
 	summary["nv"] = model->nv;
 	summary["body_names"] = get_body_names();
+	PackedStringArray body_parent_names;
+	for (int body_id = 0; body_id < model->nbody; ++body_id) {
+		const int parent_id = model->body_parentid[body_id];
+		const char *parent_name = parent_id >= 0 ? mj_id2name(model, mjOBJ_BODY, parent_id) : nullptr;
+		body_parent_names.append(parent_name ? String::utf8(parent_name) : String());
+	}
+	summary["body_parent_names"] = body_parent_names;
 	summary["joint_names"] = get_joint_names();
 	summary["actuator_names"] = get_actuator_names();
 	summary["geom_names"] = get_geom_names();
@@ -258,6 +268,55 @@ Dictionary MjNativeSimulation::get_body_transform(const String &body_name) const
 	transform["position"] = vec3_to_array(data->xpos + 3 * body_id);
 	transform["basis"] = mat3_to_array(data->xmat + 9 * body_id);
 	return transform;
+}
+
+Dictionary MjNativeSimulation::get_body_transforms() const {
+	Dictionary transforms;
+	if (!model || !data) {
+		return transforms;
+	}
+	for (int body_id = 0; body_id < model->nbody; ++body_id) {
+		const char *name = mj_id2name(model, mjOBJ_BODY, body_id);
+		if (!name) {
+			continue;
+		}
+		Dictionary transform;
+		transform["position"] = vec3_to_array(data->xpos + 3 * body_id);
+		transform["basis"] = mat3_to_array(data->xmat + 9 * body_id);
+		transforms[String::utf8(name)] = transform;
+	}
+	return transforms;
+}
+
+bool MjNativeSimulation::set_qpos(const PackedFloat64Array &qpos) {
+	if (!model || !data || qpos.size() != model->nq) {
+		last_error = "qpos size mismatch: expected " + String::num_int64(model ? model->nq : 0) +
+				", got " + String::num_int64(qpos.size());
+		return false;
+	}
+	for (int i = 0; i < model->nq; ++i) {
+		data->qpos[i] = qpos[i];
+	}
+	mj_normalizeQuat(model, data->qpos);
+	mj_forward(model, data);
+	return true;
+}
+
+bool MjNativeSimulation::set_joint_positions(const PackedStringArray &joint_names, const PackedFloat64Array &values) {
+	if (!model || !data || joint_names.size() != values.size()) {
+		last_error = "joint position names/values size mismatch";
+		return false;
+	}
+	for (int i = 0; i < joint_names.size(); ++i) {
+		const int joint_id = id_for_name(mjOBJ_JOINT, joint_names[i]);
+		if (joint_id < 0 || (model->jnt_type[joint_id] != mjJNT_HINGE && model->jnt_type[joint_id] != mjJNT_SLIDE)) {
+			last_error = "unknown or non-scalar joint: " + joint_names[i];
+			return false;
+		}
+		data->qpos[model->jnt_qposadr[joint_id]] = values[i];
+	}
+	mj_forward(model, data);
+	return true;
 }
 
 void MjNativeSimulation::set_actuator_control(const String &actuator_name, double value) {

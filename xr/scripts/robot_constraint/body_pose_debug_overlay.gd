@@ -5,9 +5,10 @@ extends Node3D
 ##
 ## The overlay subscribes to BodyPoseProvider.canonical_frame_ready, uses the
 ## Godot-defined 87-joint vocabulary, and re-projects every valid joint into a
-## copy of the user's body placed in front of the HMD. The copy follows the
-## view by default so the diagnostic pose stays visible while testing. This
-## keeps the debug view compatible with Pico and Quest because the
+## copy of the user's body placed in front of the HMD. It can instead be
+## world-locked beside a robot visual, which is how Teleop's "Show VR Pose"
+## option uses it. This keeps the debug view compatible with Pico and Quest
+## because the
 ## vendor-specific body sources have already been resolved into canonical
 ## joints by BodyPoseProvider.
 
@@ -78,8 +79,11 @@ const HAND_ROOT_FALLBACK_LINKS: Array[Array] = [
 @export var bone_radius_m: float = 0.012
 @export var hand_bone_radius_m: float = 0.006
 @export var follow_head_camera := true
+@export var robot_side_clearance_m: float = 0.70
+@export var reference_hip_height_m: float = 0.95
 
 var _head_camera: Node3D = null
+var _reference_visual: Node3D = null
 var _point_nodes: Dictionary = {}
 var _bone_nodes: Dictionary = {}
 var _bone_links: Array[Array] = []
@@ -105,7 +109,12 @@ func _ready() -> void:
 	_build_materials()
 	_build_points()
 	_build_bones()
-	_lock_display_root_to_current_view()
+	if _reference_visual == null:
+		_lock_display_root_to_current_view()
+	else:
+		# The robot overlay also performs its front-of-view placement deferred.
+		# Let that run first, then lock the pose copy beside its final position.
+		call_deferred("_lock_display_root_to_current_view")
 	print("[BodyPoseDebugOverlay] ready: %d canonical joint points, %d bones" % [_point_nodes.size(), _bone_nodes.size()])
 
 
@@ -113,7 +122,9 @@ func configure(provider: Object) -> void:
 	if provider == null:
 		return
 	if provider.has_signal("canonical_frame_ready"):
-		provider.connect("canonical_frame_ready", Callable(self, "_on_canonical_frame_ready"))
+		var callback := Callable(self, "_on_canonical_frame_ready")
+		if not provider.is_connected("canonical_frame_ready", callback):
+			provider.connect("canonical_frame_ready", callback)
 	if provider.has_method("get_latest_frame"):
 		var latest: Variant = provider.call("get_latest_frame")
 		if typeof(latest) == TYPE_DICTIONARY and not (latest as Dictionary).is_empty():
@@ -124,6 +135,17 @@ func set_head_camera(camera: Node3D) -> void:
 	_head_camera = camera
 	if is_inside_tree() and not _display_root_locked:
 		_lock_display_root_to_current_view()
+
+
+## Place the copied body on the operator-visible right side of `visual`, then
+## keep that anchor fixed in world space. Joint poses continue to animate
+## inside the copy, but turning the head or moving robot links cannot move it.
+func set_reference_visual(visual: Node3D) -> void:
+	_reference_visual = visual
+	follow_head_camera = false
+	_display_root_locked = false
+	if is_inside_tree():
+		call_deferred("_lock_display_root_to_current_view")
 
 
 func _build_materials() -> void:
@@ -217,7 +239,12 @@ func _on_canonical_frame_ready(frame: Dictionary) -> void:
 	if root_record.is_empty():
 		return
 	var source_root: Transform3D = root_record["transform"]
-	var display_root := _display_root_transform()
+	# The reference robot may still be completing its deferred front-of-view
+	# placement. Do not draw a one-frame skeleton at the world origin while
+	# waiting for that stable anchor.
+	if (follow_head_camera or not _display_root_locked) and not _lock_display_root_to_current_view():
+		return
+	var display_root := _display_root
 	var source_root_inv := Transform3D(Basis.IDENTITY, source_root.origin).affine_inverse()
 	var visible_count := 0
 	var display_positions: Dictionary = {}
@@ -388,15 +415,34 @@ func _joint_transform(joints: Dictionary, joint_name: String) -> Dictionary:
 	}
 
 
-func _display_root_transform() -> Transform3D:
-	if follow_head_camera or not _display_root_locked:
-		_lock_display_root_to_current_view()
-	return _display_root
-
-
 func _lock_display_root_to_current_view() -> bool:
 	if _head_camera == null:
 		return false
+	if _reference_visual != null and is_instance_valid(_reference_visual):
+		if not _reference_visual_is_ready():
+			return false
+		var box := _world_aabb(_reference_visual)
+		if box.size == Vector3.ZERO:
+			return false
+		var camera_basis := _head_camera.global_transform.basis.orthonormalized()
+		var right := camera_basis.x
+		right.y = 0.0
+		if right.length_squared() < 0.0001:
+			right = Vector3.RIGHT
+		else:
+			right = right.normalized()
+		var center := box.position + box.size * 0.5
+		var half := box.size * 0.5
+		var projected_half_width := absf(right.x) * half.x + absf(right.z) * half.z
+		var anchor := Vector3(
+			center.x,
+			box.position.y + reference_hip_height_m,
+			center.z
+		)
+		anchor += right * (projected_half_width + robot_side_clearance_m)
+		_display_root = Transform3D(Basis.IDENTITY, anchor)
+		_display_root_locked = true
+		return true
 	var camera_xf := _head_camera.global_transform
 	var basis := camera_xf.basis.orthonormalized()
 	var forward := -basis.z.normalized()
@@ -406,6 +452,32 @@ func _lock_display_root_to_current_view() -> bool:
 	_display_root = Transform3D(Basis.IDENTITY, anchor)
 	_display_root_locked = true
 	return true
+
+
+func _reference_visual_is_ready() -> bool:
+	if "_debug_front_locked" in _reference_visual:
+		return bool(_reference_visual.get("_debug_front_locked"))
+	if _reference_visual.has_method("matched_link_count"):
+		return int(_reference_visual.call("matched_link_count")) > 0
+	return true
+
+
+func _world_aabb(root: Node) -> AABB:
+	var out := AABB()
+	var has_bounds := false
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node is VisualInstance3D:
+			var visual := node as VisualInstance3D
+			var local := visual.get_aabb()
+			if local.size != Vector3.ZERO:
+				var world := visual.global_transform * local
+				out = world if not has_bounds else out.merge(world)
+				has_bounds = true
+		for child in node.get_children():
+			stack.append(child)
+	return out if has_bounds else AABB()
 
 
 func _material_for_joint(record: Dictionary) -> StandardMaterial3D:

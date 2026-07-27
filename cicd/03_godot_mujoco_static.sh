@@ -25,7 +25,6 @@ for path in \
   xr/addons/godot_mujoco/mj_haptics_bridge.gd \
   xr/native/godot_mujoco/src/mujoco_native.cpp \
   xr/assets/mujoco/mobile_manipulator_smoke.xml \
-  xr/assets/mujoco/so101_pickplace.xml \
   xr/assets/mujoco/so101_new_calib.urdf \
   xr/scripts/app/modes/mujoco/mujoco_device_test.gd \
   cicd/03_godot_mujoco_device.sh; do

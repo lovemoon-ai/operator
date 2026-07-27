@@ -8,6 +8,10 @@ signal command_sent(command: Dictionary)
 
 var tracking_provider: TrackingProvider
 var tcp_handler: TcpHandler
+## Preferred v3 boundary. A transport implements `is_transport_ready()` and
+## `send_operator_command(Dictionary)`. `tcp_handler` remains as a compatibility
+## fallback for tests and older composition code.
+var transport: Object
 var control_mode: ControlMode
 var _sending: bool = false
 var _min_send_interval: float = 1.0 / 72.0
@@ -31,7 +35,7 @@ func configure_for_device(descriptor: Dictionary) -> void:
 # still bounds the wire rate so a 90/120Hz headset doesn't oversend.
 func _process(delta: float) -> void:
 	if not _sending or not control_mode: return
-	if not tcp_handler or not tcp_handler.is_connected_to_robot(): return
+	if not _transport_ready(): return
 	if not tracking_provider: return
 	_time_since_last_send += delta
 	if _time_since_last_send < _min_send_interval: return
@@ -40,9 +44,23 @@ func _process(delta: float) -> void:
 	var cmd = control_mode.collect_command(tracking_provider)
 	_report_enable_transition(cmd)
 	_report_active_command_summary(cmd)
-	var json_bytes = JSON.stringify(cmd).to_utf8_buffer()
-	if tcp_handler.send_command("DeviceCommand", json_bytes) == OK:
+	if _send_command(cmd) == OK:
 		command_sent.emit(cmd)
+
+
+func _transport_ready() -> bool:
+	if transport != null and transport.has_method("is_transport_ready"):
+		return bool(transport.call("is_transport_ready"))
+	return tcp_handler != null and tcp_handler.is_connected_to_robot()
+
+
+func _send_command(command: Dictionary) -> Error:
+	if transport != null and transport.has_method("send_operator_command"):
+		return transport.call("send_operator_command", command)
+	if tcp_handler == null:
+		return ERR_CONNECTION_ERROR
+	var json_bytes = JSON.stringify(command).to_utf8_buffer()
+	return tcp_handler.send_command("DeviceCommand", json_bytes)
 
 
 func set_sending(enabled: bool) -> void:

@@ -33,6 +33,9 @@ public:
 	PackedStringArray get_geom_names() const;
 	PackedStringArray get_sensor_names() const;
 	Dictionary get_body_transform(const String &body_name) const;
+	Dictionary get_body_transforms() const;
+	bool set_qpos(const PackedFloat64Array &qpos);
+	bool set_joint_positions(const PackedStringArray &joint_names, const PackedFloat64Array &values);
 	void set_actuator_control(const String &actuator_name, double value);
 	void set_control_by_index(int index, double value);
 

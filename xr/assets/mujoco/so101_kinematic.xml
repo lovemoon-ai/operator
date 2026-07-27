@@ -1,0 +1,46 @@
+<mujoco model="so101_kinematic">
+  <compiler angle="radian" autolimits="true"/>
+  <option timestep="0.005" gravity="0 0 0" integrator="implicitfast"/>
+  <default>
+    <joint damping="0.6" armature="0.02"/>
+    <geom density="400" rgba="0.2 0.7 0.3 0.9" contype="0" conaffinity="0"/>
+    <position kp="80" kv="4"/>
+  </default>
+  <worldbody>
+    <body name="base">
+      <geom type="box" size="0.045 0.04 0.025" pos="0 0 0.025"/>
+      <body name="shoulder" pos="0.0388353 0 0.0624" quat="0 0 -1 0">
+        <joint name="shoulder_pan" type="hinge" axis="0 0 1" range="-1.91986 1.91986"/>
+        <geom type="capsule" size="0.022" fromto="0 0 0 -0.0303992 -0.0182778 -0.0542"/>
+        <body name="upper_arm" pos="-0.0303992 -0.0182778 -0.0542" quat="1 -1 -1 -1">
+          <joint name="shoulder_lift" type="hinge" axis="0 0 1" range="-1.7453293 1.7453293"/>
+          <geom type="capsule" size="0.019" fromto="0 0 0 -0.11257 -0.028 0"/>
+          <body name="lower_arm" pos="-0.11257 -0.028 0" quat="1 0 0 1">
+            <joint name="elbow_flex" type="hinge" axis="0 0 1" range="-1.69 1.69"/>
+            <geom type="capsule" size="0.017" fromto="0 0 0 -0.1349 0.0052 0"/>
+            <body name="wrist" pos="-0.1349 0.0052 0" quat="1 0 0 -1">
+              <joint name="wrist_flex" type="hinge" axis="0 0 1" range="-1.658063 1.658063"/>
+              <geom type="capsule" size="0.015" fromto="0 0 0 0 -0.0611 0.0181"/>
+              <body name="gripper" pos="0 -0.0611 0.0181" quat="0.0172091 -0.0172091 0.706897 0.706897">
+                <joint name="wrist_roll" type="hinge" axis="0 0 1" range="-2.7438473 2.84121"/>
+                <geom type="box" size="0.012 0.018 0.05" pos="-0.0079 -0.000218121 -0.0490637"/>
+                <body name="moving_jaw" pos="0.0202 0.0188 -0.0234" quat="1 1 0 0">
+                  <joint name="gripper_joint" type="hinge" axis="0 0 1" range="-0.174533 1.7453292"/>
+                  <geom type="box" size="0.008 0.01 0.035" pos="0 -0.035 0.0189"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="shoulder_pan" joint="shoulder_pan" ctrlrange="-1.91986 1.91986"/>
+    <position name="shoulder_lift" joint="shoulder_lift" ctrlrange="-1.7453293 1.7453293"/>
+    <position name="elbow_flex" joint="elbow_flex" ctrlrange="-1.69 1.69"/>
+    <position name="wrist_flex" joint="wrist_flex" ctrlrange="-1.658063 1.658063"/>
+    <position name="wrist_roll" joint="wrist_roll" ctrlrange="-2.7438473 2.84121"/>
+    <position name="gripper" joint="gripper_joint" ctrlrange="-0.174533 1.7453292"/>
+  </actuator>
+</mujoco>

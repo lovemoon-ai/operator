@@ -28,7 +28,10 @@ robot/
   crates/pyoperator-native PyO3 in-process bridge binding
 
 python/
-  pyoperator/             immutable frames, session, robot/control APIs
+  pyoperator/              immutable frames, session, robot/control APIs
+  pyoperator/protocol/     wire contracts the XR app speaks
+  pyoperator/services/     host-side services the app connects to
+  pyoperator/integrations/ adapters onto external capability libraries
   examples/                embedded and custom-robot examples
   tests/                   deterministic model/control/replay tests
 
@@ -56,13 +59,26 @@ the scene resource `xr/scenes/robot_view/robot_view.tscn`; its behavior is
 
 ### Teleop
 
+Teleop is one product entry with two execution targets. The operator chooses
+the boundary first; this is intentionally independent of whether the outside
+target is hardware or a simulator.
+
+| Target | Robot embodiment | Robot metadata | Retargeting |
+| --- | --- | --- | --- |
+| Inside Robot | In the headset | Bundled XR profile | Native in XR, or remote solver via the pyoperator retargeting service |
+| Outside Robot | Behind `robot-service` | Dynamic device descriptor | Owned by `robot-service` and its downstream stack |
+
+Remote retargeting for Inside Robot moves only the solver. Tracking originates
+in XR and the returned joints are still rendered/simulated in XR. XR never
+connects directly to the retargeting service for an Outside Robot; an outside
+deployment may use such a service internally without exposing that topology.
+
 ```text
-XR tracking/controllers
-  -> scripts/input/command_sender.gd
-  -> scripts/sinks/robot_control/robot_control_sink.gd
-  -> TCP command channel
-  -> robot-service
-  -> robot-adapter device driver
+                         +-> Inside profile -> native solver ----------------+
+XR tracking/controllers |                                                   |
+                         +-> Inside profile -> pyoperator retargeting svc --+-> in-headset embodiment
+                         |
+                         +-> Outside target -> robot-service -> robot/adapter or outside simulator
 
 robot-service xr-bridge component
   -> TCP or UDP timed H.264 packets
@@ -70,6 +86,44 @@ robot-service xr-bridge component
   -> scripts/ui/teleop_panel.gd
   -> addons/live_video/live_video_view.gd
 ```
+
+### Retargeting Ownership
+
+pyoperator is the single Python interface Operator talks to, so the XR app
+never has to speak a second package's protocol. Retargeting math lives in the
+separate `retargeting` library, which pyoperator calls.
+
+```text
+Operator XR app
+  | pyoperator wire protocol (hello/frame/result over WebSocket)
+  v
+pyoperator
+  protocol/      versioned envelopes and the RetargetingRequest/Result DTOs
+  services/      connection lifetime, session, latest-only backpressure
+  integrations/  XrFrame + payload <-> canonical solver types
+  | solve()
+  v
+retargeting (separate repository)
+  inputs/results canonical, source-agnostic solver contract
+  profiles       how a robot is retargeted, plus model fingerprints
+  runtime/       persistent sessions, warm start, native worker supervision
+  eepose/...     the algorithms
+```
+
+The dependency is one-way: `pyoperator[retargeting]` imports `retargeting`;
+`retargeting` never imports pyoperator, opens a socket, or learns about OpenXR.
+Anything Operator-shaped — wire payloads, quaternion order, body joint sets —
+is translated in `pyoperator/integrations/retargeting.py`.
+
+Both Teleop paths therefore share one solver core:
+
+| Path | Caller | Result consumer |
+| --- | --- | --- |
+| Inside Robot + remote | `pyoperator.services.retargeting` | Returned to the headset, applied to the in-headset embodiment |
+| Outside Robot + Python | `PyOperatorRetargeter` in a host control loop | Written to the user's robot |
+
+Run the service with `pyoperator serve --service retargeting` (the
+`retargeting-service` command remains as an alias for existing deployments).
 
 ### Python-embedded Teleop
 
@@ -85,6 +139,9 @@ The embedded path and the existing `robot-service` path are peers. SDK mode is
 selected by the descriptor's optional `xr_stream` block; descriptors without
 that block continue to use `DeviceCommand`. The Python consumer receives one
 latest-wins frame and never assembles state from granular getters.
+
+Ego capture owns recording only. Robot profiles, retargeting solvers, and robot
+embodiments are Teleop responsibilities and must not be attached to Ego mode.
 
 ### Ego Capture
 

@@ -1,3 +1,8 @@
+descriptor_version: 2
+execution:
+  kind: "outside"
+  environment: "real"
+
 device:
   type: "so101_dual_arm"
   name: "Dual SO-101 Arms"
@@ -158,6 +163,27 @@ telemetry_schema:
       length: 3
 
 video_feeds: []
+
+input_contract:
+  rate_hz: 90.0
+  coordinate_space: "operator_aligned_robot_frame"
+  channels:
+    - { name: "left_end_effector", type: "pose6d", frame: "left_hand" }
+    - { name: "right_end_effector", type: "pose6d", frame: "right_hand" }
+    - { name: "operator_frame", type: "pose6d", frame: "head" }
+    - { name: "left_gripper", type: "axis", frame: "left_trigger" }
+    - { name: "right_gripper", type: "axis", frame: "right_trigger" }
+    - { name: "left_enable", type: "button", frame: "left_grip" }
+    - { name: "right_enable", type: "button", frame: "right_grip" }
+    - { name: "reset", type: "button", frame: "button_b" }
+
+capabilities:
+  teleop: true
+  emergency_stop: true
+  reset: true
+  deadman: true
+  dual_arm: true
+  video: false
 
 safety:
   disconnect_action: "stop"

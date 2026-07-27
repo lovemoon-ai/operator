@@ -483,7 +483,7 @@ mod tests {
                 command_timeout_ms: 500,
                 limits: HashMap::new(),
             },
-            xr_stream: None,
+            ..Default::default()
         }
     }
 

@@ -11,9 +11,23 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// Current schema version emitted by robot-service.
+pub const CURRENT_DEVICE_DESCRIPTOR_VERSION: u32 = 2;
+
+fn legacy_descriptor_version() -> u32 {
+    1
+}
+
 /// Full device self-description sent to the headset on connect.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceDescriptor {
+    /// Descriptor schema version. Descriptors that omit this field are v1.
+    #[serde(default = "legacy_descriptor_version")]
+    pub descriptor_version: u32,
+    /// Where execution happens. A robot-service always advertises `outside`;
+    /// `environment` distinguishes hardware from a simulator hosted elsewhere.
+    #[serde(default)]
+    pub execution: ExecutionInfo,
     /// Basic device info.
     pub device: DeviceInfo,
     /// What control inputs the device accepts.
@@ -34,6 +48,13 @@ pub struct DeviceDescriptor {
     /// Omitted for existing robot descriptors, preserving their wire shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xr_stream: Option<XrStreamConfig>,
+    /// Canonical operator input channels accepted by this service.
+    #[serde(default)]
+    pub input_contract: InputContract,
+    /// Extensible feature advertisement. Values are intentionally JSON so a
+    /// service can add robot-specific capabilities without an XR release.
+    #[serde(default)]
+    pub capabilities: HashMap<String, serde_json::Value>,
 }
 
 /// Headset-side raw state stream negotiated through `DeviceDescriptor`.
@@ -55,8 +76,162 @@ fn default_xr_rate_hz() -> u16 {
     72
 }
 
-/// Basic device identification.
+impl Default for DeviceDescriptor {
+    fn default() -> Self {
+        Self {
+            descriptor_version: CURRENT_DEVICE_DESCRIPTOR_VERSION,
+            execution: ExecutionInfo::default(),
+            device: DeviceInfo::default(),
+            control_schema: ControlSchema::default(),
+            input_mapping: Vec::new(),
+            telemetry_schema: TelemetrySchema::default(),
+            video_feeds: Vec::new(),
+            safety: DeviceSafetyConfig::default(),
+            xr_stream: None,
+            input_contract: InputContract::default(),
+            capabilities: HashMap::new(),
+        }
+    }
+}
+
+impl DeviceDescriptor {
+    /// Upgrade any legacy adapter descriptor into the authoritative Outside
+    /// Robot contract sent by robot-service. Explicit v2 fields are preserved;
+    /// missing input channels and common capabilities are derived from the
+    /// existing control schema so older adapters remain usable.
+    pub fn normalize_for_outside(&mut self) {
+        self.descriptor_version = CURRENT_DEVICE_DESCRIPTOR_VERSION;
+        self.execution.kind = "outside".to_string();
+        if !matches!(
+            self.execution.environment.as_str(),
+            "real" | "simulation" | "unknown"
+        ) {
+            self.execution.environment = "unknown".to_string();
+        }
+
+        if self.input_contract.channels.is_empty() {
+            let source_for = |target: &str| {
+                self.input_mapping
+                    .iter()
+                    .find(|mapping| mapping.target == target)
+                    .map(|mapping| mapping.source.clone())
+                    .unwrap_or_default()
+            };
+            self.input_contract
+                .channels
+                .extend(self.control_schema.axes.iter().map(|axis| InputChannel {
+                    name: axis.name.clone(),
+                    value_type: "axis".to_string(),
+                    frame: source_for(&axis.name),
+                    joints: Vec::new(),
+                }));
+            self.input_contract
+                .channels
+                .extend(
+                    self.control_schema
+                        .buttons
+                        .iter()
+                        .map(|button| InputChannel {
+                            name: button.name.clone(),
+                            value_type: "button".to_string(),
+                            frame: source_for(&button.name),
+                            joints: Vec::new(),
+                        }),
+                );
+            self.input_contract
+                .channels
+                .extend(self.control_schema.poses.iter().map(|pose| InputChannel {
+                    name: pose.name.clone(),
+                    value_type: "pose6d".to_string(),
+                    frame: if pose.frame.is_empty() {
+                        source_for(&pose.name)
+                    } else {
+                        pose.frame.clone()
+                    },
+                    joints: Vec::new(),
+                }));
+        }
+
+        let has_controls = !self.input_contract.channels.is_empty();
+        let has_reset = self
+            .control_schema
+            .buttons
+            .iter()
+            .any(|button| button.name == "reset");
+        let has_deadman = self.control_schema.buttons.iter().any(|button| {
+            matches!(
+                button.name.as_str(),
+                "enable" | "left_enable" | "right_enable"
+            )
+        });
+        self.capabilities
+            .entry("teleop".to_string())
+            .or_insert(serde_json::Value::Bool(has_controls));
+        self.capabilities
+            .entry("emergency_stop".to_string())
+            .or_insert(serde_json::Value::Bool(has_controls));
+        self.capabilities
+            .entry("reset".to_string())
+            .or_insert(serde_json::Value::Bool(has_reset));
+        self.capabilities
+            .entry("deadman".to_string())
+            .or_insert(serde_json::Value::Bool(has_deadman));
+        self.capabilities
+            .entry("video".to_string())
+            .or_insert(serde_json::Value::Bool(!self.video_feeds.is_empty()));
+    }
+}
+
+/// Execution boundary described by robot-service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionInfo {
+    /// Must be `outside` for descriptors sent by robot-service.
+    pub kind: String,
+    /// `real`, `simulation`, or `unknown`.
+    pub environment: String,
+}
+
+impl Default for ExecutionInfo {
+    fn default() -> Self {
+        Self {
+            kind: "outside".to_string(),
+            environment: "unknown".to_string(),
+        }
+    }
+}
+
+/// Canonical input contract exposed by a robot-service.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InputContract {
+    /// Named input channels, independent of a concrete robot model in XR.
+    #[serde(default)]
+    pub channels: Vec<InputChannel>,
+    /// Preferred command update rate. Zero means unspecified.
+    #[serde(default)]
+    pub rate_hz: f64,
+    /// Coordinate convention used by pose channels.
+    #[serde(default)]
+    pub coordinate_space: String,
+}
+
+/// One canonical operator input channel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InputChannel {
+    /// Stable channel name, for example `end_effector`.
+    pub name: String,
+    /// Payload type, for example `pose6d`, `axis`, `button`, or `skeleton`.
+    #[serde(rename = "type")]
+    pub value_type: String,
+    /// Optional semantic source/reference frame.
+    #[serde(default)]
+    pub frame: String,
+    /// Optional joint names for array/skeleton channels.
+    #[serde(default)]
+    pub joints: Vec<String>,
+}
+
+/// Basic device identification.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceInfo {
     /// Device type identifier (e.g. "robot_arm", "rc_car").
     #[serde(rename = "type")]

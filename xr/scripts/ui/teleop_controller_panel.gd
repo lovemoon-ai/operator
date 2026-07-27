@@ -33,6 +33,8 @@ const COL_BUTTON_B := Color(1.0, 0.42, 0.30, 1.0)
 const COL_DIM := Color(0.18, 0.20, 0.23, 0.86)
 
 var _enabled_for_device := false
+var _has_control_help := false
+var _continuous_control := false
 var _controller_active := false
 var _suspended := false
 var _bridge_connected := false
@@ -42,6 +44,7 @@ var _help_visible := true
 var _last_a_pressed := false
 var _last_a_toggle_msec := 0
 var _grip_hold_until_msec := 0
+var _execution_environment := "unknown"
 
 var _help_root: Node3D
 var _status_lamp: MeshInstance3D
@@ -72,7 +75,19 @@ func _init() -> void:
 
 
 func configure_for_device(descriptor: Dictionary) -> void:
-	_enabled_for_device = _has_controller_teleop_mapping(descriptor)
+	_has_control_help = _has_controller_teleop_mapping(descriptor)
+	var execution: Dictionary = descriptor.get("execution", {})
+	_execution_environment = str(execution.get("environment", "unknown"))
+	# The controller overlay explains a real robot's controller teleop (grip
+	# deadman, trigger gripper, A/B). Inside mode is about seeing the robot, not
+	# the controller, so it is never shown there — it only cluttered the grips.
+	_enabled_for_device = _has_control_help and str(execution.get("kind", "")) != "inside"
+	_continuous_control = false
+	var input_contract: Dictionary = descriptor.get("input_contract", {})
+	for channel_value in input_contract.get("channels", []):
+		if channel_value is Dictionary and str(channel_value.get("type", "")).contains("skeleton"):
+			_continuous_control = true
+			break
 	var schema: Dictionary = descriptor.get("control_schema", {})
 	print("[ControllerHelpTip] configured enabled=%s buttons=%d mappings=%d" % [
 		str(_enabled_for_device),
@@ -290,19 +305,20 @@ func _refresh() -> void:
 
 	var lamp_material := _mat_disconnected
 	var status_text := tr("UI_TELEOP_STATUS_OFF")
-	if _bridge_connected and _grip_pressed:
+	if _bridge_connected and (_grip_pressed or _continuous_control):
 		lamp_material = _mat_active
 		status_text = tr("UI_TELEOP_STATUS_ON")
 	elif _bridge_connected:
 		lamp_material = _mat_waiting
 		status_text = tr("UI_TELEOP_STATUS_WAIT")
+	status_text = "%s %s" % [_environment_label(), status_text]
 
 	if _status_lamp:
 		_status_lamp.material_override = lamp_material
 	if _status_label:
 		_status_label.text = status_text
 		_status_label.modulate = _status_color()
-	var controls_visible := _bridge_connected and _controller_active
+	var controls_visible := _bridge_connected and _controller_active and _has_control_help
 	if _help_root:
 		_help_root.visible = controls_visible and _help_visible
 	if _grip_marker:
@@ -323,9 +339,19 @@ func _refresh() -> void:
 func _status_color() -> Color:
 	if not _bridge_connected:
 		return COL_DISCONNECTED
-	if _grip_pressed:
+	if _grip_pressed or _continuous_control:
 		return COL_ACTIVE
 	return COL_WAITING
+
+
+func _environment_label() -> String:
+	match _execution_environment:
+		"real":
+			return tr("UI_TELEOP_ENV_REAL")
+		"simulation":
+			return tr("UI_TELEOP_ENV_SIM")
+		_:
+			return tr("UI_TELEOP_ENV_OUTSIDE")
 
 
 func _has_controller_teleop_mapping(descriptor: Dictionary) -> bool:

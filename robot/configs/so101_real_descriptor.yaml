@@ -1,3 +1,8 @@
+descriptor_version: 2
+execution:
+  kind: "outside"
+  environment: "real"
+
 device:
   type: "robot_arm"
   name: "SO-101 Arm"
@@ -137,6 +142,26 @@ telemetry_schema:
       length: 3
 
 video_feeds: []
+
+input_contract:
+  rate_hz: 90.0
+  coordinate_space: "operator_aligned_robot_frame"
+  channels:
+    - { name: "end_effector", type: "pose6d", frame: "active_controller" }
+    - { name: "operator_frame", type: "pose6d", frame: "head" }
+    - { name: "gripper", type: "axis", frame: "active_trigger" }
+    - { name: "enable", type: "button", frame: "active_grip" }
+    - { name: "nudge_x", type: "axis", frame: "active_joystick_x" }
+    - { name: "nudge_y", type: "axis", frame: "active_joystick_y" }
+    - { name: "nudge_vertical", type: "button", frame: "active_joystick_click" }
+    - { name: "reset", type: "button", frame: "active_button_b" }
+
+capabilities:
+  teleop: true
+  emergency_stop: true
+  reset: true
+  deadman: true
+  video: false
 
 safety:
   disconnect_action: "stop"

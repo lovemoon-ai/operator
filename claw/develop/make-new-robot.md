@@ -108,7 +108,7 @@ Before writing code, identify the upstream robot model and pin it:
 Examples in this repo:
 
 - Unitree H2 Plus source is `unitreerobotics/unitree_ros`, pinned in
-  `make_h2_sharpa.sh`.
+  `make_unitree_h2_sharpa.sh`.
 - Dexmate Vega U source is `dexmate-ai/dexmate-urdf`, pinned in
   `make_dexmate_vega_u.sh`.
 
