@@ -12,6 +12,7 @@ Runs on the host, no Godot required. Checks:
       feature registry table (name + default);
   (f) launcher card option value equals its mode-feature value per preset
       (compat alias consistency).
+  (g) robot profiles and baked GLBs ship, while source URDF/mesh trees do not.
 
 Exits non-zero with itemized errors.
 """
@@ -36,7 +37,7 @@ CARD_ALIASES = {
 
 
 def parse_presets(text):
-    """Return {preset_index: {"name": str, "options": {key: raw_value}}}."""
+    """Return preset names, top-level settings, and option values by index."""
     presets = {}
     current = None
     in_options = None
@@ -45,13 +46,15 @@ def parse_presets(text):
         m = re.match(r"^\[preset\.(\d+)\]$", line)
         if m:
             current = int(m.group(1))
-            presets.setdefault(current, {"name": "", "options": {}})
+            presets.setdefault(current, {"name": "", "settings": {}, "options": {}})
             in_options = None
             continue
         m = re.match(r"^\[preset\.(\d+)\.options\]$", line)
         if m:
             in_options = int(m.group(1))
-            presets.setdefault(in_options, {"name": "", "options": {}})
+            presets.setdefault(
+                in_options, {"name": "", "settings": {}, "options": {}}
+            )
             continue
         if line.startswith("["):
             in_options = None
@@ -62,13 +65,19 @@ def parse_presets(text):
         key, value = key.strip(), value.strip()
         if in_options is not None:
             presets[in_options]["options"][key] = value
-        elif current is not None and key == "name":
-            presets[current]["name"] = value.strip('"')
+        elif current is not None:
+            presets[current]["settings"][key] = value
+            if key == "name":
+                presets[current]["name"] = value.strip('"')
     return presets
 
 
 def parse_bool(raw):
     return raw.strip().lower() == "true"
+
+
+def parse_filter(raw):
+    return {item.strip() for item in raw.strip('"').split(",") if item.strip()}
 
 
 def parse_plugin_table(text):
@@ -207,6 +216,35 @@ def main():
                         "(f) preset '%s': %s=%s but %s=%s"
                         % (pname, card, options[card], feature, options[feature])
                     )
+
+        # (g) dynamic profile/GLB loads must be explicit, but robot-generation
+        # source trees are never read at runtime and add roughly 90 MiB.
+        settings = preset["settings"]
+        includes = parse_filter(settings.get("include_filter", ""))
+        excludes = parse_filter(settings.get("exclude_filter", ""))
+        for required in (
+            "assets/robot_profiles/*.json",
+            "assets/robots/*/*.glb",
+        ):
+            if required not in includes:
+                errors.append("(g) preset '%s' does not include %s" % (pname, required))
+        for pattern in includes:
+            if pattern.startswith("assets/robots/") and (
+                "/meshes/" in pattern
+                or pattern.endswith("*.urdf")
+                or pattern.endswith("*.xml")
+            ):
+                errors.append(
+                    "(g) preset '%s' includes robot source asset %s" % (pname, pattern)
+                )
+        for required in (
+            "assets/robots/meshes/**",
+            "assets/robots/*/meshes/**",
+            "assets/robots/*/*.urdf",
+            "assets/robots/*/*.xml",
+        ):
+            if required not in excludes:
+                errors.append("(g) preset '%s' does not exclude %s" % (pname, required))
 
     if errors:
         print("validate_xr_features: FAILED (%d errors)" % len(errors), file=sys.stderr)

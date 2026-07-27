@@ -2,7 +2,7 @@
 # Generate XR-ready Unitree G1 (29-DoF) robot assets.
 #
 # Source: unitreerobotics/unitree_ros robots/g1_description/g1_29dof.urdf
-# (all-STL meshes, no DAE conversion needed). Mirrors make_h2_sharpa.sh.
+# (all-STL meshes, no DAE conversion needed). Mirrors make_unitree_h2_sharpa.sh.
 
 set -euo pipefail
 

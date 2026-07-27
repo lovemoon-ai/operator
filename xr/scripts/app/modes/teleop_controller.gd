@@ -3,10 +3,10 @@ extends Node3D
 ## Initializes XR with passthrough. Uses v2 protocol:
 ## Hello → DeviceDescriptor → DeviceCommand ↔ Telemetry.
 ##
-## UI model (per issue 004 / settings redesign):
+## UI model:
 ##  - At launch, view-locked composition-layer SettingsPanel is visible if
-##    discovery needs manual confirmation. User fills IP / Port / Robot Type /
-##    Video window mode, presses OK.
+##    discovery needs manual confirmation. The user chooses Inside Robot or
+##    Outside Robot, fills only that target's settings, and presses OK.
 ##  - OK → save to user://teleop_settings.cfg, hide panel, show face-locked
 ##    floating SettingsButton, kick off TCP connect.
 ##  - The floating button (face-locked, under XRCamera3D) re-opens the
@@ -18,6 +18,8 @@ extends Node3D
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
+const OUTSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/outside_robot_target.gd"
+const INSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/inside_robot_target.gd"
 
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
@@ -70,6 +72,9 @@ var _active_video_transport: String = "tcp"  # "tcp" or "udp"
 var _last_video_feed: Dictionary = {}
 var _clock_sync: RobotClockSync
 var _known_robots: Dictionary = {}
+var _outside_target: Node
+var _inside_target: Node
+var _active_target: Node
 
 var _settings_panel: Node3D
 var _settings_button: Node3D
@@ -101,6 +106,12 @@ const SYNTH_KEY_ENABLE := "--operator-teleop-synthetic"
 const SYNTH_KEY_DURATION := "--operator-teleop-duration"
 const TELEOP_KEY_HOST := "--operator-teleop-host"
 const TELEOP_KEY_PORT := "--operator-teleop-port"
+## Inside Robot launch overrides. Inside is otherwise only reachable by hand in
+## the headset, which leaves its startup — profile load, embodiment creation,
+## solver binding — impossible to exercise or diagnose from a device test.
+const TELEOP_KEY_SCOPE := "--operator-teleop-scope"
+const TELEOP_KEY_PROFILE := "--operator-teleop-profile"
+const TELEOP_KEY_BACKEND := "--operator-teleop-backend"
 const SYNTH_DEFAULT_DURATION := 25.0
 const SYNTH_DEFAULT_PORT := 63901
 ## Minimum peak joint excursion (deg) that counts as "the arm tracked".
@@ -110,6 +121,9 @@ const SYNTH_MIN_JOINT_DELTA_DEG := 1.0
 const SYNTH_CONNECT_TIMEOUT_SEC := 45.0
 
 var _synthetic := false
+## Settings last applied, so the page can restore the robot it interrupted.
+var _applied_options: Dictionary = {}
+var _inside_resume_options: Dictionary = {}
 var _synth_source: Node = null
 var _synth_duration := SYNTH_DEFAULT_DURATION
 var _synth_host := ""
@@ -182,6 +196,7 @@ func _ready() -> void:
 	# Configure command sender references
 	_command_sender.tracking_provider = _tracking_provider
 	_command_sender.tcp_handler = _tcp_handler
+	_command_sender.transport = _outside_target
 	_xr_state_sender.tracking_provider = _tracking_provider
 	_xr_state_sender.tcp_handler = _tcp_handler
 
@@ -240,6 +255,8 @@ func _process(_delta: float) -> void:
 # title-bar indicator (defined on BaseSettingsPanel) stays in sync. Cheap
 # because the panel only repaints when the mode actually changes.
 var _last_indicator_mode := ""
+
+
 func _apply_settings_input_indicator(mode: String) -> void:
 	if _settings_ui == null or not _settings_ui.has_method("set_input_mode_indicator"):
 		return
@@ -253,9 +270,15 @@ func _bind_operator_interaction() -> void:
 	var interaction := _operator_interaction()
 	if interaction == null:
 		return
-	if interaction.has_signal("input_mode_changed") \
-			and not interaction.is_connected("input_mode_changed", Callable(self, "_on_global_interaction_mode_changed")):
-		interaction.connect("input_mode_changed", Callable(self, "_on_global_interaction_mode_changed"))
+	if (
+		interaction.has_signal("input_mode_changed")
+		and not interaction.is_connected(
+			"input_mode_changed", Callable(self, "_on_global_interaction_mode_changed")
+		)
+	):
+		interaction.connect(
+			"input_mode_changed", Callable(self, "_on_global_interaction_mode_changed")
+		)
 	_apply_settings_input_indicator(_current_interaction_mode())
 
 
@@ -283,6 +306,36 @@ func _on_global_interaction_mode_changed(mode: String) -> void:
 
 
 func _create_v2_nodes() -> void:
+	var outside_script := load(OUTSIDE_ROBOT_TARGET_PATH)
+	if outside_script == null:
+		push_error("[Operator] Cannot load Outside Robot target")
+		return
+	var outside_instance: Variant = outside_script.new()
+	if outside_instance == null:
+		push_error("[Operator] Cannot instantiate Outside Robot target")
+		return
+	_outside_target = outside_instance
+	_outside_target.name = "OutsideRobotTarget"
+	_outside_target.configure(_tcp_handler)
+	_bind_target_signals(_outside_target)
+	add_child(_outside_target)
+
+	var inside_script := load(INSIDE_ROBOT_TARGET_PATH)
+	if inside_script == null:
+		push_error("[Operator] Cannot load Inside Robot target")
+	else:
+		var inside_instance: Variant = inside_script.new()
+		if inside_instance == null:
+			push_error("[Operator] Cannot instantiate Inside Robot target")
+		else:
+			_inside_target = inside_instance
+	if _inside_target != null:
+		_inside_target.name = "InsideRobotTarget"
+		_inside_target.configure_runtime(self, _origin, _camera, _tracking_provider)
+		_bind_target_signals(_inside_target)
+		add_child(_inside_target)
+	_active_target = _outside_target
+
 	_session = Session.new()
 	_session.name = "Session"
 	_session.tcp_handler = _tcp_handler
@@ -328,6 +381,7 @@ func _create_v2_nodes() -> void:
 
 # --- Settings UI wiring -------------------------------------------------------
 
+
 func _create_settings_ui_nodes() -> void:
 	_settings_panel = SettingsUI.new()
 	_settings_panel.name = "TeleopSettingsPanel"
@@ -369,16 +423,22 @@ func _update_teleop_controller_panel() -> void:
 	var controller_active := _is_right_controller_mode_active()
 	_teleop_controller_panel.call("set_controller_active", controller_active)
 	_update_teleop_controller_panel_transform(controller_active)
-	var connected: bool = _tcp_handler != null and _tcp_handler.is_connected_to_robot()
+	var connected: bool = _active_target != null and _active_target.is_ready()
 	var grip_value := 0.0
 	var trigger_value := 0.0
 	var a_pressed := false
-	if controller_active and _tracking_provider and _tracking_provider.has_method("get_controller_input"):
+	if (
+		controller_active
+		and _tracking_provider
+		and _tracking_provider.has_method("get_controller_input")
+	):
 		var input_any: Variant = _tracking_provider.call("get_controller_input", 1)
 		if input_any is Dictionary:
 			grip_value = maxf(
 				float(input_any.get("grip", 0.0)),
-				maxf(float(input_any.get("grip_click", 0.0)), float(input_any.get("grip_force", 0.0)))
+				maxf(
+					float(input_any.get("grip_click", 0.0)), float(input_any.get("grip_force", 0.0))
+				)
 			)
 			trigger_value = float(input_any.get("trigger", 0.0))
 			a_pressed = float(input_any.get("ax_button", 0.0)) >= 0.5
@@ -393,16 +453,23 @@ func _update_teleop_controller_panel_transform(controller_active: bool = true) -
 		return
 	if not controller_active:
 		return
-	_teleop_controller_panel.global_transform = _right_controller.global_transform * TELEOP_CONTROLLER_OVERLAY_OFFSET
+	_teleop_controller_panel.global_transform = (
+		_right_controller.global_transform * TELEOP_CONTROLLER_OVERLAY_OFFSET
+	)
 
 
 func _is_right_controller_mode_active() -> bool:
 	if _tracking_provider and _tracking_provider.has_method("is_controller_mode_active"):
 		return bool(_tracking_provider.call("is_controller_mode_active", 1))
-	return _right_controller != null and _right_controller.get_is_active() and _right_controller.get_has_tracking_data()
+	return (
+		_right_controller != null
+		and _right_controller.get_is_active()
+		and _right_controller.get_has_tracking_data()
+	)
 
 
 # --- XR lifecycle -------------------------------------------------------------
+
 
 func _on_xr_started() -> void:
 	if _xr_started:
@@ -423,6 +490,10 @@ func _on_xr_started() -> void:
 
 	# Synthetic runs own their own connection lifecycle and must never pop the
 	# discovery/settings panel (which would suspend teleop and block sending).
+	if not _synthetic and _teleop_arg(TELEOP_KEY_SCOPE, "") == "inside":
+		_start_inside_from_launch_args()
+		return
+
 	var launch_host := _teleop_arg(TELEOP_KEY_HOST, "")
 	if not _synthetic and not launch_host.is_empty():
 		var launch_port := int(_teleop_arg(TELEOP_KEY_PORT, str(SYNTH_DEFAULT_PORT)))
@@ -458,27 +529,30 @@ func _configure_passthrough() -> void:
 
 # --- Settings flow ------------------------------------------------------------
 
+
 ## Called by SettingsUI when the user presses Confirm.
 ## Saves the panel state, hides it, then connects/reconnects with the chosen
 ## endpoint. The robot type is not a client setting — the DeviceDescriptor
 ## received on handshake defines what the client sends and displays.
-func _on_settings_applied(
-	ip: String,
-	port: int,
-	video_face_locked: bool,
-	show_video_panel: bool,
-	show_operation_trajectory: bool,
-	show_on_launch: bool
-) -> void:
-	print("[Operator] Settings applied: ip=%s port=%d face_locked=%s show_video=%s show_trajectory=%s show_on_launch=%s" % [
-		ip,
-		port,
-		video_face_locked,
-		show_video_panel,
-		show_operation_trajectory,
-		show_on_launch,
-	])
+func _on_settings_applied(options: Dictionary) -> void:
+	var target_scope := str(options.get("target_scope", "outside"))
+	var video_face_locked := bool(options.get("video_face_locked", true))
+	var show_video_panel := bool(options.get("show_video_panel", false))
+	var show_operation_trajectory := bool(options.get("show_operation_trajectory", false))
+	print(
+		(
+			"[Operator] Settings applied: target=%s options=%s"
+			% [
+				target_scope,
+				JSON.stringify(options),
+			]
+		)
+	)
 	_cancel_launch_window()
+	# The operator chose a configuration; the robot that was running before the
+	# page opened must not come back when the page closes.
+	_inside_resume_options = {}
+	_applied_options = options.duplicate(true)
 
 	# Apply video window mode immediately.
 	if _robot_view:
@@ -488,16 +562,23 @@ func _on_settings_applied(
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.set_enabled(show_operation_trajectory)
 
+	_stop_active_target()
+	if target_scope == "inside":
+		if _inside_target == null:
+			_show_settings_panel_with_status("Inside Robot runtime is unavailable")
+			return
+		_active_target = _inside_target
+		_command_sender.transport = null
+		_robot_control_sink.set_sending(false)
+		_disconnect_outside_media()
+		_inside_target.start(options)
+	else:
+		_active_target = _outside_target
+		_command_sender.transport = _outside_target
+		_connect_to_robot(str(options.get("ip", "")), int(options.get("port", 63901)))
+	# Resume only after the old target is stopped and the new target owns the
+	# session. A not-yet-ready target remains disabled in _set_teleop_suspended.
 	_hide_settings_panel()
-
-	# Tear down any existing session before reconnecting (handles "user
-	# pressed OK twice with different IP" without leaking sockets).
-	if _tcp_handler.is_connected_to_robot():
-		_tcp_handler.disconnect_from_robot()
-		_video_tcp_handler.disconnect_from_robot()
-		_video_udp_handler.disconnect_from_robot()
-
-	_connect_to_robot(ip, port)
 
 
 func _on_settings_button_pressed() -> void:
@@ -519,6 +600,8 @@ func _on_settings_exit_requested() -> void:
 	_cancel_launch_window()
 	if _robot_control_sink:
 		_robot_control_sink.set_sending(false)
+	if _active_target:
+		_active_target.stop()
 	if _clock_sync:
 		_clock_sync.stop()
 	if _discovery and _discovery.has_method("stop_scan"):
@@ -556,18 +639,23 @@ func _sync_stream_senders() -> void:
 	# _tcp_handler is scene-typed as Node, so its method result is a Variant.
 	# Keep these booleans explicit: Godot 4.5 cannot infer `:=` through the
 	# dynamic call when this base script is compiled from an exported APK.
-	var connected: bool = (
-		_tcp_handler != null and bool(_tcp_handler.call("is_connected_to_robot"))
+	var connected: bool = _tcp_handler != null and bool(_tcp_handler.call("is_connected_to_robot"))
+	var outside_active: bool = (
+		connected and _active_target == _outside_target and not _teleop_suspended
 	)
-	var active: bool = connected and not _teleop_suspended
 	if _robot_control_sink:
-		_robot_control_sink.set_sending(active and not _sdk_mode)
+		_robot_control_sink.set_sending(outside_active and not _sdk_mode)
 	if _xr_state_sender:
-		_xr_state_sender.set_sending(active and _sdk_mode)
+		_xr_state_sender.set_sending(outside_active and _sdk_mode)
+	if _inside_target != null:
+		_inside_target.set_control_enabled(
+			_active_target == _inside_target and not _teleop_suspended and _inside_target.is_ready()
+		)
 
 
 func _show_settings_panel() -> void:
 	_set_teleop_suspended(true)
+	_suspend_inside_embodiment()
 	_release_global_interaction_pointer()
 	# Re-push the latest discovery snapshot every time we open the panel —
 	# robots may have appeared / disappeared while it was closed.
@@ -578,7 +666,9 @@ func _show_settings_panel() -> void:
 		_settings_button.clear_pointer()
 	if _settings_panel and _settings_panel.has_method("set_feedback_input_mode"):
 		var mode := _current_interaction_mode()
-		_settings_panel.set_feedback_input_mode(mode, _right_controller if mode == "controllers" else null)
+		_settings_panel.set_feedback_input_mode(
+			mode, _right_controller if mode == "controllers" else null
+		)
 	if _settings_panel and _settings_panel.has_method("open"):
 		_settings_panel.open()
 	else:
@@ -594,6 +684,33 @@ func _hide_settings_panel() -> void:
 		_settings_panel.visible = false
 	_settings_button.visible = true
 	_set_teleop_suspended(false)
+	_resume_inside_embodiment()
+
+
+## The robot configuration page owns the view while it is open: an Inside
+## embodiment left rendering behind it obscures the settings and keeps its
+## meshes resident while the operator picks a different robot. Tearing it down
+## here (rather than at Confirm) also means the next robot loads into a freed
+## scene instead of doubling up.
+func _suspend_inside_embodiment() -> void:
+	if _inside_target == null or _active_target != _inside_target:
+		return
+	if _inside_target.is_stopped():
+		return
+	_inside_resume_options = _applied_options.duplicate(true)
+	_inside_target.stop()
+
+
+## Closing the page without confirming puts the operator back where they were.
+## Confirm clears the pending options first, so applying new settings never
+## restarts the robot the operator just replaced.
+func _resume_inside_embodiment() -> void:
+	if _inside_resume_options.is_empty() or _inside_target == null:
+		return
+	var options := _inside_resume_options
+	_inside_resume_options = {}
+	_active_target = _inside_target
+	_inside_target.start(options)
 
 
 # --- Launch decision (D: hybrid auto-discover) -------------------------------
@@ -616,11 +733,18 @@ const _LAUNCH_DISCOVERY_WINDOW_SEC: float = 3.0
 
 
 func _begin_launch_window() -> void:
+	var persisted := SettingsUI.load_settings()
+	if str(persisted.get("target_scope", "outside")) == "inside":
+		print("[Operator] Inside Robot selected — opening embodiment setup")
+		_show_settings_panel_with_status(tr("UI_INSIDE_ROBOT"))
+		return
 	_launch_window_token += 1
 	_launch_window_active = true
 	print("[Operator] Discovery window started (%.1fs)" % _LAUNCH_DISCOVERY_WINDOW_SEC)
 	_show_settings_panel_discovering()
-	get_tree().create_timer(_LAUNCH_DISCOVERY_WINDOW_SEC).timeout.connect(_finalize_launch.bind(_launch_window_token))
+	get_tree().create_timer(_LAUNCH_DISCOVERY_WINDOW_SEC).timeout.connect(
+		_finalize_launch.bind(_launch_window_token)
+	)
 
 
 func _cancel_launch_window() -> void:
@@ -639,9 +763,16 @@ func _finalize_launch(token: int) -> void:
 	var last_ip: String = String(persisted.get("ip", ""))
 	var n_robots: int = _known_robots.size()
 
-	print("[Operator] Launch decision: known=%d show_on_launch=%s last_ip=%s" % [
-		n_robots, show_on_launch, last_ip,
-	])
+	print(
+		(
+			"[Operator] Launch decision: known=%d show_on_launch=%s last_ip=%s"
+			% [
+				n_robots,
+				show_on_launch,
+				last_ip,
+			]
+		)
+	)
 
 	if show_on_launch:
 		_show_settings_panel_with_status(tr("UI_SHOW_ON_LAUNCH_ENABLED"))
@@ -669,11 +800,13 @@ func _finalize_launch(token: int) -> void:
 
 func _is_loopback_host(host: String) -> bool:
 	var trimmed := host.strip_edges().to_lower()
-	return trimmed == "" \
-			or trimmed == "localhost" \
-			or trimmed == "::1" \
-			or trimmed == "0:0:0:0:0:0:0:1" \
-			or trimmed.begins_with("127.")
+	return (
+		trimmed == ""
+		or trimmed == "localhost"
+		or trimmed == "::1"
+		or trimmed == "0:0:0:0:0:0:0:1"
+		or trimmed.begins_with("127.")
+	)
 
 
 func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> void:
@@ -759,16 +892,20 @@ func _set_status(text: String) -> void:
 
 # --- Connection lifecycle -----------------------------------------------------
 
+
 func _on_command_sent(command: Dictionary) -> void:
 	if _ee_pose_trajectory == null:
 		return
-	_ee_pose_trajectory.record_command(
-		command,
-		_driving_hand(),
-		{
-			HAND_LEFT: _is_deadman_held(HAND_LEFT),
-			HAND_RIGHT: _is_deadman_held(HAND_RIGHT),
-		}
+	(
+		_ee_pose_trajectory
+		. record_command(
+			command,
+			_driving_hand(),
+			{
+				HAND_LEFT: _is_deadman_held(HAND_LEFT),
+				HAND_RIGHT: _is_deadman_held(HAND_RIGHT),
+			}
+		)
 	)
 
 
@@ -778,7 +915,9 @@ func _connect_to_robot(ip: String, port: int) -> void:
 	_set_status(tr("UI_CONNECTING_TO") % [ip, port])
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
-	_tcp_handler.connect_to_robot(ip, port)
+	_active_target = _outside_target
+	_command_sender.transport = _outside_target
+	_outside_target.start({"host": ip, "port": port})
 
 
 func _on_connected() -> void:
@@ -786,6 +925,8 @@ func _on_connected() -> void:
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", true)
 	_session.on_connected()
+	if _outside_target:
+		_outside_target.mark_transport_connected()
 	_connect_video_stream(_tcp_handler.get_host())
 	if _clock_sync:
 		_clock_sync.start()
@@ -804,12 +945,16 @@ func _on_disconnected() -> void:
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 	_session.on_disconnected()
+	if _outside_target:
+		_outside_target.mark_transport_disconnected()
 	if _clock_sync:
 		_clock_sync.stop()
 
 
 func _on_connection_failed(reason: String) -> void:
 	_set_status(tr("UI_CONNECTION_FAILED") % reason)
+	if _outside_target:
+		_outside_target.mark_connection_failed(reason)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 
@@ -854,6 +999,8 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	var device_type: String = descriptor.get("device", {}).get("type", tr("UI_UNKNOWN"))
 	_set_status(tr("UI_DRIVER_ACTIVE") % [device_name, _robot_type_display(device_type)])
 	print("[Operator] Connected to %s (type=%s per descriptor)" % [device_name, device_type])
+	if _outside_target:
+		_outside_target.apply_descriptor(descriptor)
 	_robot_control_sink.configure_for_device(descriptor)
 	var xr_stream: Variant = descriptor.get("xr_stream", null)
 	_sdk_mode = xr_stream is Dictionary
@@ -874,9 +1021,15 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 			_synth_source.call("set_dual", _synth_dual)
 		_synth_engaged = true
 		_synth_source.call("engage", _synth_duration)
-		print("[TeleopSynthetic] descriptor device=%s dual=%s — engaging synthetic operator" % [
-			device_type, str(_synth_dual),
-		])
+		print(
+			(
+				"[TeleopSynthetic] descriptor device=%s dual=%s — engaging synthetic operator"
+				% [
+					device_type,
+					str(_synth_dual),
+				]
+			)
+		)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_update_teleop_controller_panel()
@@ -898,6 +1051,8 @@ func _on_device_disconnected() -> void:
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
+	if _outside_target:
+		_outside_target.mark_transport_disconnected()
 
 
 func _on_telemetry_received(_data: Dictionary) -> void:
@@ -947,9 +1102,9 @@ func _capture_control_frame_for_hand(
 	var frame_any: Variant = values.get(frame_key, null)
 	if frame_any is Array and (frame_any as Array).size() == 4:
 		var f: Array = frame_any
-		_control_frame[hand] = Quaternion(
-			float(f[0]), float(f[1]), float(f[2]), float(f[3])
-		).normalized()
+		_control_frame[hand] = (
+			Quaternion(float(f[0]), float(f[1]), float(f[2]), float(f[3])).normalized()
+		)
 		_control_frame_valid[hand] = true
 	else:
 		_control_frame_valid[hand] = false
@@ -978,10 +1133,13 @@ func _update_control_frame_gizmo_for_hand(hand: int) -> void:
 		gizmo.visible = false
 		return
 	gizmo.visible = true
-	gizmo.apply(
-		controller.global_transform.origin,
-		_control_frame.get(hand, Quaternion.IDENTITY),
-		bool(_control_frame_mirror.get(hand, true)),
+	(
+		gizmo
+		. apply(
+			controller.global_transform.origin,
+			_control_frame.get(hand, Quaternion.IDENTITY),
+			bool(_control_frame_mirror.get(hand, true)),
+		)
 	)
 
 
@@ -991,6 +1149,12 @@ func _update_control_frame_gizmo_for_hand(hand: int) -> void:
 ## rendered frame -- the same per-frame cost that had to be stripped out of this
 ## file after it measurably cut the delivered command rate.
 func _active_control_mode():
+	if (
+		_active_target == _inside_target
+		and _inside_target != null
+		and _inside_target.has_method("get_control_mode")
+	):
+		return _inside_target.call("get_control_mode")
 	if _command_sender == null:
 		return null
 	return _command_sender.control_mode
@@ -1059,7 +1223,14 @@ func _select_video_transport(feed: Dictionary) -> String:
 	return "tcp"
 
 
-func _on_robot_found(robot_name: String, ip: String, pose_port: int, video_port: int, device_type: String, device_name: String) -> void:
+func _on_robot_found(
+	robot_name: String,
+	ip: String,
+	pose_port: int,
+	video_port: int,
+	device_type: String,
+	device_name: String
+) -> void:
 	# Discovery feed drives both (1) auto-reconnect of the video stream
 	# when the descriptor matches the currently connected host, and (2)
 	# the SettingsPanel's "Discovered" dropdown (per the D launch flow).
@@ -1072,14 +1243,25 @@ func _on_robot_found(robot_name: String, ip: String, pose_port: int, video_port:
 	}
 	# Push live update to the panel iff it's currently visible — when the
 	# panel is open, the dropdown should mirror discovery in real time.
-	if _settings_panel and _settings_panel.visible and _settings_ui and _settings_ui.has_method("add_discovered"):
-		_settings_ui.add_discovered(robot_name, {
-			"ip": ip,
-			"pose_port": pose_port,
-			"video_port": video_port,
-			"device_type": device_type,
-			"device_name": device_name,
-		})
+	if (
+		_settings_panel
+		and _settings_panel.visible
+		and _settings_ui
+		and _settings_ui.has_method("add_discovered")
+	):
+		(
+			_settings_ui
+			. add_discovered(
+				robot_name,
+				{
+					"ip": ip,
+					"pose_port": pose_port,
+					"video_port": video_port,
+					"device_type": device_type,
+					"device_name": device_name,
+				}
+			)
+		)
 	if _tcp_handler.is_connected_to_robot() and _tcp_handler.get_host() == ip:
 		_connect_video_stream(ip)
 
@@ -1094,7 +1276,12 @@ func _on_robot_lost(robot_name: String) -> void:
 			if _video_udp_handler.is_connected_to_robot() and _video_udp_handler.get_host() == ip:
 				_video_udp_handler.disconnect_from_robot()
 			break
-	if _settings_panel and _settings_panel.visible and _settings_ui and _settings_ui.has_method("remove_discovered"):
+	if (
+		_settings_panel
+		and _settings_panel.visible
+		and _settings_ui
+		and _settings_ui.has_method("remove_discovered")
+	):
 		_settings_ui.remove_discovered(robot_name)
 
 
@@ -1117,16 +1304,20 @@ func _connect_video_stream(ip: String) -> void:
 	# If the active transport is already pointed at the right host+port,
 	# don't churn the connection — that flushes decoder state.
 	if transport == "tcp":
-		if _video_tcp_handler.is_connected_to_robot() \
-				and _video_tcp_handler.get_host() == ip \
-				and _video_tcp_handler.get_port() == tcp_port:
+		if (
+			_video_tcp_handler.is_connected_to_robot()
+			and _video_tcp_handler.get_host() == ip
+			and _video_tcp_handler.get_port() == tcp_port
+		):
 			_video_udp_handler.disconnect_from_robot()
 			_active_video_transport = "tcp"
 			return
 	else:
-		if _video_udp_handler.is_connected_to_robot() \
-				and _video_udp_handler.get_host() == ip \
-				and _video_udp_handler.get_port() == udp_port:
+		if (
+			_video_udp_handler.is_connected_to_robot()
+			and _video_udp_handler.get_host() == ip
+			and _video_udp_handler.get_port() == udp_port
+		):
 			_video_tcp_handler.disconnect_from_robot()
 			_active_video_transport = "udp"
 			return
@@ -1173,11 +1364,123 @@ func _robot_type_display(robot_type: String) -> String:
 			return robot_type
 
 
+# --- Target lifecycle --------------------------------------------------------
+
+
+func _bind_target_signals(target: Node) -> void:
+	target.target_ready.connect(_on_target_ready.bind(target))
+	target.state_changed.connect(_on_target_state_changed.bind(target))
+	target.telemetry_received.connect(_on_target_telemetry.bind(target))
+	target.warning_raised.connect(_on_target_warning.bind(target))
+	target.faulted.connect(_on_target_fault.bind(target))
+
+
+func _on_target_ready(descriptor: Dictionary, target: Node) -> void:
+	if target != _active_target:
+		return
+	var execution: Dictionary = descriptor.get("execution", {})
+	var kind := str(execution.get("kind", target.get("target_kind")))
+	var environment := str(execution.get("environment", ""))
+	_set_status(
+		(
+			"%s ready%s"
+			% [
+				"Inside Robot" if kind == "inside" else "Outside Robot",
+				(" (%s)" % environment) if not environment.is_empty() else "",
+			]
+		)
+	)
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
+		_teleop_controller_panel.call("configure_for_device", descriptor)
+		_teleop_controller_panel.call("set_bridge_connected", true)
+	if target == _inside_target:
+		_inside_target.set_control_enabled(not _teleop_suspended)
+	elif not _teleop_suspended:
+		_robot_control_sink.set_sending(true)
+
+
+func _on_target_state_changed(_state: int, detail: String, target: Node) -> void:
+	if target == _active_target and not detail.is_empty():
+		_set_status(detail)
+
+
+func _on_target_telemetry(data: Dictionary, target: Node) -> void:
+	if target != _active_target:
+		return
+	if target == _inside_target:
+		_on_telemetry_received(data)
+
+
+func _on_target_warning(code: String, message: String, target: Node) -> void:
+	if target != _active_target:
+		return
+	# Recoverable solve errors stay in the active session. Surface them in
+	# logcat/the current status UI without opening Settings or suspending input.
+	_set_status("%s: %s" % [code, message])
+
+
+func _on_target_fault(code: String, message: String, target: Node) -> void:
+	if target != _active_target:
+		return
+	_set_status("%s: %s" % [code, message])
+	_show_settings_panel_with_status(message)
+
+
+func _stop_active_target() -> void:
+	_robot_control_sink.set_sending(false)
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
+		_teleop_controller_panel.call("set_bridge_connected", false)
+	if _active_target != null:
+		_active_target.stop()
+
+
+func _disconnect_outside_media() -> void:
+	if _tcp_handler:
+		_tcp_handler.disconnect_from_robot()
+	if _video_tcp_handler:
+		_video_tcp_handler.disconnect_from_robot()
+	if _video_udp_handler:
+		_video_udp_handler.disconnect_from_robot()
+	if _robot_view and _robot_view.has_method("clear_video_stream"):
+		_robot_view.clear_video_stream()
+
+
 # --- Synthetic (headless CI) autopilot ----------------------------------------
+
 
 ## Read an intent-extra / cmdline value. Android `--es KEY VAL` surfaces as the
 ## token `KEY=VAL`; the `KEY VAL` pair form is also accepted. Mirrors the
 ## convention used by mode_select and the mujoco device test.
+## Start an Inside Robot session straight from launch arguments, taking the
+## persisted panel settings for everything the arguments do not override. This
+## is the same path the Confirm button takes, so what it exercises is the real
+## startup rather than a test-only shortcut.
+func _start_inside_from_launch_args() -> void:
+	var options: Dictionary = SettingsUI.load_settings()
+	options["target_scope"] = "inside"
+	var profile_id := _teleop_arg(TELEOP_KEY_PROFILE, "")
+	if not profile_id.is_empty():
+		options["inside_profile"] = profile_id
+	var backend := _teleop_arg(TELEOP_KEY_BACKEND, "")
+	if not backend.is_empty():
+		options["retargeting_backend"] = backend
+	print(
+		"[Operator] Inside Robot launch override: profile=%s backend=%s"
+		% [str(options.get("inside_profile", "")), str(options.get("retargeting_backend", ""))]
+	)
+	if _settings_panel and _settings_panel.has_method("close"):
+		_settings_panel.close()
+	else:
+		_settings_panel.visible = false
+	_settings_button.visible = true
+	_set_teleop_suspended(false)
+	_on_settings_applied(options)
+
+
+## Read a launch argument. Intent extras reach here as the dashed form that
+## GodotApp.getCommandLine() maps them to (`operator.teleop.scope` ->
+## `--operator-teleop-scope`); an extra that is not in that allowlist never
+## arrives at all.
 func _teleop_arg(key: String, fallback: String) -> String:
 	var args: Array = []
 	args.append_array(OS.get_cmdline_user_args())
@@ -1214,9 +1517,16 @@ func _maybe_setup_synthetic() -> void:
 		_tracking_provider.queue_free()
 	_tracking_provider = src
 	_synth_source = src
-	print("[TeleopSynthetic] started duration=%.1fs host=%s port=%d" % [
-		_synth_duration, ("<discovery>" if _synth_host.is_empty() else _synth_host), _synth_port,
-	])
+	print(
+		(
+			"[TeleopSynthetic] started duration=%.1fs host=%s port=%d"
+			% [
+				_synth_duration,
+				"<discovery>" if _synth_host.is_empty() else _synth_host,
+				_synth_port,
+			]
+		)
+	)
 
 
 func _start_synthetic_autopilot() -> void:
@@ -1235,7 +1545,9 @@ func _start_synthetic_autopilot() -> void:
 func _synth_connect_watchdog() -> void:
 	if _synth_finished or _synth_engaged:
 		return
-	_finish_synthetic("never engaged (no descriptor handshake within %ds)" % int(SYNTH_CONNECT_TIMEOUT_SEC))
+	_finish_synthetic(
+		"never engaged (no descriptor handshake within %ds)" % int(SYNTH_CONNECT_TIMEOUT_SEC)
+	)
 
 
 func _tick_synthetic() -> void:
@@ -1314,38 +1626,77 @@ func _finish_synthetic(reason: String) -> void:
 	# stuck/uncommanded arm cannot ride the other's motion to a green.
 	var moved: bool
 	if _synth_dual:
-		moved = _synth_left_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG \
+		moved = (
+			_synth_left_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG
 			and _synth_right_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG
+		)
 	else:
 		moved = _synth_max_delta >= SYNTH_MIN_JOINT_DELTA_DEG
-	print("[TeleopSynthetic] summary connected=%s engaged=%s dual=%s telemetry_frames=%d max_joint_delta_deg=%.3f left_delta=%.3f right_delta=%.3f first=%s last=%s" % [
-		str(connected), str(_synth_engaged), str(_synth_dual), _synth_telemetry_count,
-		_synth_max_delta, _synth_left_max_delta, _synth_right_max_delta,
-		JSON.stringify(_synth_first_joints), JSON.stringify(_synth_last_joints),
-	])
+	print(
+		(
+			"[TeleopSynthetic] summary connected=%s engaged=%s dual=%s telemetry_frames=%d max_joint_delta_deg=%.3f left_delta=%.3f right_delta=%.3f first=%s last=%s"
+			% [
+				str(connected),
+				str(_synth_engaged),
+				str(_synth_dual),
+				_synth_telemetry_count,
+				_synth_max_delta,
+				_synth_left_max_delta,
+				_synth_right_max_delta,
+				JSON.stringify(_synth_first_joints),
+				JSON.stringify(_synth_last_joints),
+			]
+		)
+	)
 	if reason.is_empty() and connected and _synth_engaged and moved:
 		if _synth_dual:
-			print("[TeleopSynthetic] PASS both arms tracked synthetic operator (left=%.2f right=%.2f deg over %d frames)" % [
-				_synth_left_max_delta, _synth_right_max_delta, _synth_telemetry_count,
-			])
+			print(
+				(
+					"[TeleopSynthetic] PASS both arms tracked synthetic operator (left=%.2f right=%.2f deg over %d frames)"
+					% [
+						_synth_left_max_delta,
+						_synth_right_max_delta,
+						_synth_telemetry_count,
+					]
+				)
+			)
 		else:
-			print("[TeleopSynthetic] PASS arm tracked synthetic operator (max_joint_delta=%.2f deg over %d frames)" % [
-				_synth_max_delta, _synth_telemetry_count,
-			])
+			print(
+				(
+					"[TeleopSynthetic] PASS arm tracked synthetic operator (max_joint_delta=%.2f deg over %d frames)"
+					% [
+						_synth_max_delta,
+						_synth_telemetry_count,
+					]
+				)
+			)
 		_synth_quit(0)
 	else:
 		var why := reason
 		if why.is_empty():
 			if _synth_dual:
-				why = "connected=%s engaged=%s moved=%s (left=%.2f right=%.2f, need >=%.2f deg on BOTH)" % [
-					str(connected), str(_synth_engaged), str(moved),
-					_synth_left_max_delta, _synth_right_max_delta, SYNTH_MIN_JOINT_DELTA_DEG,
-				]
+				why = (
+					"connected=%s engaged=%s moved=%s (left=%.2f right=%.2f, need >=%.2f deg on BOTH)"
+					% [
+						str(connected),
+						str(_synth_engaged),
+						str(moved),
+						_synth_left_max_delta,
+						_synth_right_max_delta,
+						SYNTH_MIN_JOINT_DELTA_DEG,
+					]
+				)
 			else:
-				why = "connected=%s engaged=%s moved=%s (max_delta=%.2f < %.2f deg)" % [
-					str(connected), str(_synth_engaged), str(moved),
-					_synth_max_delta, SYNTH_MIN_JOINT_DELTA_DEG,
-				]
+				why = (
+					"connected=%s engaged=%s moved=%s (max_delta=%.2f < %.2f deg)"
+					% [
+						str(connected),
+						str(_synth_engaged),
+						str(moved),
+						_synth_max_delta,
+						SYNTH_MIN_JOINT_DELTA_DEG,
+					]
+				)
 		push_error("[TeleopSynthetic] FAIL %s" % why)
 		_synth_quit(2)
 

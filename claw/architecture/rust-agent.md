@@ -145,7 +145,14 @@ XR consumes the stream through:
 
 Descriptors advertise robot identity, control schema, input mapping, and video
 feed transport choices. XR uses them to select TCP or UDP video and configure
-teleop controls.
+teleop controls. Before transmission, `xr-bridge` normalizes every descriptor
+to v2 with `execution.kind: outside`, an explicit `real` / `simulation` /
+`unknown` environment, a canonical `input_contract`, and capability flags.
+
+This descriptor is the full compatibility boundary for Outside Robot. XR does
+not select Unitree/Galbot/SO101 profiles or connect to retargeting-service on
+the robot's behalf. If an outside robot needs retargeting-service, that is an
+internal robot-side dependency behind `robot-service`.
 
 Current config examples live in `robot/configs/`.
 

@@ -110,6 +110,28 @@ func set_actuator_control(name: String, value: float) -> void:
 		_native_backend.set_actuator_control(name, value)
 
 
+func set_configuration(qpos: PackedFloat64Array) -> bool:
+	if _native_loaded and _native_backend.has_method("set_qpos"):
+		var applied := bool(_native_backend.set_qpos(qpos))
+		if applied:
+			_sync_from_native()
+		return applied
+	return false
+
+
+func set_joint_positions(names: PackedStringArray, values: PackedFloat64Array) -> bool:
+	if names.size() != values.size():
+		return false
+	if _native_loaded and _native_backend.has_method("set_joint_positions"):
+		var applied := bool(_native_backend.set_joint_positions(names, values))
+		if applied:
+			_sync_from_native()
+		return applied
+	for index in range(names.size()):
+		joint_positions[names[index]] = values[index]
+	return true
+
+
 func apply_action(action: Dictionary) -> void:
 	var actuator_values: Dictionary = action.get("actuators", {})
 	for key in actuator_values.keys():
@@ -206,6 +228,8 @@ func _initialize_state(seed := 0) -> void:
 			model.body_names = _native_body_names
 		if native_summary.has("joint_names"):
 			model.joint_names = native_summary["joint_names"]
+		if native_summary.has("body_parent_names"):
+			model.metadata["body_parent_names"] = native_summary["body_parent_names"]
 		if native_summary.has("actuator_names"):
 			model.actuator_names = native_summary["actuator_names"]
 		if native_summary.has("geom_names"):
@@ -308,6 +332,11 @@ func _sync_from_native() -> void:
 	var body_names := _native_body_names
 	if body_names.is_empty() and model:
 		body_names = model.body_names
+	if _native_backend.has_method("get_body_transforms"):
+		var native_transforms: Dictionary = _native_backend.get_body_transforms()
+		for body_name in native_transforms:
+			body_transforms[body_name] = _dict_to_transform(native_transforms[body_name])
+		return
 	for body_name in body_names:
 		var native_transform: Dictionary = _native_backend.get_body_transform(body_name)
 		if native_transform.is_empty():

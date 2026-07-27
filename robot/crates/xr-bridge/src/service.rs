@@ -39,6 +39,7 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
     );
 
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
+    descriptor.normalize_for_outside();
     let video_feeds = video_feed_relays(&config.video.feeds);
     log_video_feeds(&video_feeds);
 
@@ -155,9 +156,10 @@ fn build_video_only_descriptor(config: &BridgeConfig) -> Result<DeviceDescriptor
         telemetry_schema: Default::default(),
         video_feeds: Vec::new(),
         safety: Default::default(),
-        xr_stream: None,
+        ..Default::default()
     };
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
+    descriptor.normalize_for_outside();
     Ok(descriptor)
 }
 

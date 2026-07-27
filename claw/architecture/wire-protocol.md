@@ -64,6 +64,32 @@ to the headset process and may reset after reconnect, so consumers treat a
 different id as the next snapshot rather than assuming it is globally
 monotonic.
 
+### Outside Robot descriptor v2
+
+Every descriptor emitted by `robot-service` is normalized to version 2. Legacy
+adapter descriptors remain accepted, but the bridge adds the execution
+boundary, derives an input contract, and advertises common capabilities before
+sending them to XR.
+
+```yaml
+descriptor_version: 2
+execution:
+  kind: outside
+  environment: real       # real | simulation | unknown
+input_contract:
+  rate_hz: 60
+  coordinate_space: robot_base
+  channels:
+    - {name: end_effector, type: pose6d, frame: active_hand}
+capabilities:
+  teleop: true
+  emergency_stop: true
+```
+
+`robot-service` is authoritative for this entire descriptor. The client must
+not infer a robot profile from `device.type`, and must not substitute a bundled
+Inside Robot profile.
+
 ### Input sources are hand-agnostic
 
 `input_mapping` sources use the `active_*` family rather than naming a hand:
@@ -192,6 +218,48 @@ payload        bytes
 ```
 
 XR reassembles fragments in `xr/scripts/network/udp_video_handler.gd`.
+
+## Inside Robot remote retargeting
+
+Default development port: `8000`. This is a separate WebSocket protocol, owned
+and served by pyoperator (`pyoperator serve --service retargeting`, or the
+`retargeting-service` alias); it is not a robot-service control plane. The
+protocol lives in `python/pyoperator/protocol/retargeting.py` and the service
+in `python/pyoperator/services/retargeting.py`. Solving is delegated to the
+`retargeting` library, which owns profiles, solvers, and model fingerprints and
+never sees this protocol.
+
+Endpoints:
+
+- `GET /healthz` reports service and available profiles.
+- `GET /v1/profiles` returns public profile metadata and model fingerprints.
+- `WS /v1/retarget` creates one persistent, warm-started solver session.
+
+The first WebSocket message is a versioned handshake:
+
+```json
+{"type":"hello","protocol_version":1,"profile_id":"unitree_g1","input_type":"skeleton_frame_v1","model_hash":""}
+```
+
+The service replies with `hello_ack` and its authoritative profile. XR checks
+the protocol, profile id, input type, output type, and expected joint-vector
+size. `model_hash` is optional for XR because the solver model is server-side;
+deployment clients that possess the same solver artifact may supply it for an
+exact fingerprint check.
+
+Frames use monotonic ids and nanosecond timestamps:
+
+```json
+{"type":"frame","frame_id":42,"timestamp_ns":123456789,"payload":{}}
+{"type":"result","frame_id":42,"profile_id":"unitree_g1","output_type":"joint_positions_v1","q":[]}
+```
+
+The server input queue and XR client pending slot are both latest-only. Slow
+solves drop stale unsolved tracking frames instead of accumulating motion lag.
+`{"type":"reset"}` clears solver warm-start state. Closing the WebSocket closes
+the solver session and its persistent native worker. A native worker that does
+not answer within its configured response timeout is terminated and the socket
+closes with a server error instead of leaving a wedged session alive.
 
 ## Video Transport Selection
 
