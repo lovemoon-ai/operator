@@ -36,7 +36,7 @@ fn descriptor() -> DeviceDescriptor {
         telemetry_schema: Default::default(),
         video_feeds: vec![],
         safety: Default::default(),
-        xr_stream: None,
+        ..Default::default()
     }
 }
 

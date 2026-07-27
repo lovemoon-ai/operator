@@ -40,6 +40,15 @@ make log
 make crash
 ```
 
+The APK ships its native libraries uncompressed (`extractNativeLibs=false`) so
+they mmap straight from the APK. Always install with `adb install
+--no-incremental` (the `make install-*` targets already do): the default
+incremental install can leave a Stored `.so` at a stale offset on reinstall,
+and the loader then reads a ZIP header instead of ELF (`bad ELF magic:
+504b0304`). MuJoCo fails to load and every simulated robot breaks. A stale
+device can be repaired with `--no-incremental` without wiping app data, or with
+`make uninstall && make install-quest`.
+
 ## Robot Side
 
 Run from `robot/`.
@@ -67,7 +76,25 @@ bash cicd/03_godot_mujoco_device.sh
 bash cicd/04_live_feed_e2e.sh
 cd python && .venv/bin/python -m pytest -m xr_device --no-cov \
   --run-device --require-device --adb-serial SERIAL
+
+# Teleop robot-configuration page (Inside/Outside switching, robot picker).
+bash cicd/xr_module_harness.sh --suite teleop.settings
+
+# Every robot this build ships must start and render on the headset. One app
+# launch per robot: instantiating several in one frame kills the renderer.
+bash cicd/08_inside_robot_display.sh --screenshots /tmp/robot_shots
+
+# Inside Robot remote retargeting, on-device against a live host service.
+# Start the service and forward it to the headset first:
+#   cd python && .venv/bin/python -m pyoperator serve --service retargeting --port 8000
+#   adb reverse tcp:8000 tcp:8000
+bash cicd/xr_module_harness.sh --suite teleop.remote
 ```
+
+Inside Robot profiles come from `xr/assets/robot_profiles/*.json` and are only
+offered when their assets exist. Generate a robot with
+`scripts/make-robot/make_<robot>.sh` before expecting it in the picker — robot
+bundles under `xr/assets/robots/` are per-checkout, not committed.
 
 Static checks that do not run the XR runtime:
 

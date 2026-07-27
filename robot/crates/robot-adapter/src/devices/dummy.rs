@@ -136,7 +136,7 @@ impl DummyDevice {
             telemetry_schema: Default::default(),
             video_feeds: Vec::new(),
             safety: Default::default(),
-            xr_stream: None,
+            ..Default::default()
         }
     }
 }

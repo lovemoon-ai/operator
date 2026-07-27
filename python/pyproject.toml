@@ -17,11 +17,25 @@ classifiers = [
 
 [project.optional-dependencies]
 ik = ["numpy>=1.24"]
+# Hosting the retargeting service. The solver library itself lives in the
+# retargeting repository (`pip install ./python` there) and is imported lazily,
+# so the rest of pyoperator works without it.
+retargeting = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
+]
 test = [
   "numpy>=1.24",
   "pytest>=8",
   "pytest-cov>=5",
+  "fastapi>=0.115",
+  "httpx>=0.28",
 ]
+
+[project.scripts]
+pyoperator = "pyoperator.cli:main"
+# Compatibility with existing deployments; the service is pyoperator's.
+retargeting-service = "pyoperator.services.retargeting:main"
 
 [tool.maturin]
 manifest-path = "../robot/crates/pyoperator-native/Cargo.toml"

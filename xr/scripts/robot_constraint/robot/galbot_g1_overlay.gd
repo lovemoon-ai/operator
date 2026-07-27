@@ -1,6 +1,8 @@
 class_name GalbotG1Overlay
 extends Node3D
 
+signal qpos_updated(qpos: PackedFloat64Array)
+
 ## Galbot G1 in-headset overlay driven by retargeting v0.1.3's
 ## "dual_arm_eepose" algorithm.
 ##
@@ -200,6 +202,7 @@ const LEG_HEIGHT_DOWN_JOINT_Q := [0.16, 0.42, 0.36, 0.28, 0.0]
 @export var debug_front_vertical_offset_m: float = 0.0
 @export var overlay_alpha: float = 0.55
 @export var overlay_tint: Color = Color(0.7, 0.85, 0.95, 1.0)
+@export var native_retargeting_enabled := true
 
 ## Scale VR wrist deltas before applying them to the robot TCP targets.
 @export var workspace_scale: float = 1.0
@@ -335,7 +338,8 @@ func _ready() -> void:
 	_parse_robot_joints()
 	_setup_arm_qpos_indices()
 	_setup_locked_control_qpos_indices()
-	_setup_retargeter()
+	if native_retargeting_enabled:
+		_setup_retargeter()
 	if debug_place_in_front_of_view:
 		call_deferred("_lock_in_front_of_view")
 	print("[GalbotG1Overlay] ready: %d links, %d robot joints, retarget=%s" % [
@@ -370,6 +374,18 @@ func set_body_pose_provider(provider: Node) -> void:
 		var cb := Callable(self, "_on_canonical_frame_ready")
 		if not provider.is_connected("canonical_frame_ready", cb):
 			provider.connect("canonical_frame_ready", cb)
+
+
+func is_native_retargeting_ready() -> bool:
+	return _retarget_active and _retargeter != null
+
+
+func get_native_retargeting_error() -> String:
+	if is_native_retargeting_ready():
+		return ""
+	if not ClassDB.class_exists("GMRRetargeter"):
+		return "GMRRetargeter extension is unavailable for Galbot G1"
+	return "Galbot G1 native retargeting failed to initialize"
 
 
 func _exit_tree() -> void:
@@ -1746,6 +1762,19 @@ func _apply_robot_pose(robot_pose: Dictionary) -> void:
 			continue
 		var godot_axis := Vector3(-axis.y, axis.z, -axis.x).normalized()
 		node.transform = rest * Transform3D(Basis(godot_axis, float(qs[i])), Vector3.ZERO)
+	var qpos: PackedFloat64Array = robot_pose.get("qpos", PackedFloat64Array())
+	if not qpos.is_empty():
+		qpos_updated.emit(qpos)
+
+
+func apply_remote_qpos(qpos: PackedFloat64Array) -> void:
+	for value in qpos:
+		if not is_finite(value):
+			return
+	var shown := _filter_arm_qpos(qpos) if output_filter_enabled else qpos
+	var robot_pose := _robot_pose_from_qpos(shown)
+	_apply_robot_pose(robot_pose)
+	_remember_robot_pose(robot_pose)
 
 
 # --- VR-pose debug skeleton ------------------------------------------------

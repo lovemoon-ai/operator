@@ -16,6 +16,7 @@ xr/
     contracts/             typed data contracts
     sinks/                 output adapters
     ui/                    UI controls and XR panels
+    teleop/                Inside/Outside targets, profiles, retargeting clients
     network/               teleop protocol clients
     platform/              Quest/Pico/OpenXR capability registry
     xr/                    OpenXR helpers and capture provider registry
@@ -119,7 +120,48 @@ headsets with different camera shapes.
 
 ## Teleop Runtime
 
-`teleop_controller.gd` creates the v2 teleop stack at runtime:
+`teleop_controller.gd` presents one Teleop entry and creates exactly one
+`TeleopTarget` at runtime:
+
+- `OutsideRobotTarget` connects to `robot-service`. The returned descriptor is
+  authoritative for robot identity, input mapping, capabilities, telemetry,
+  video, and whether execution is real or simulated. XR does not show a local
+  robot-type selector for this target.
+- `InsideRobotTarget` owns the in-headset embodiment and exposes the robot
+  profiles this build ships. Native mode runs the solver locally. Remote mode
+  sends canonical tracking frames to the pyoperator retargeting service; only
+  the solve is remote and the embodiment remains in XR.
+
+The settings page has one `Robot` group. Its first row picks the type —
+`Inside` or `Outside` — and only that side's settings are shown: the robot
+picker and retargeting backend for Inside, or discovery, address, and
+connection state for Outside.
+
+How an Inside robot is drawn depends on what its profile declares. A profile
+with an `overlay_script` uses that bespoke, retargeting-aware overlay
+(the humanoids). Otherwise a `visual_model` GLB is rendered by
+`mujoco_mesh_view.gd`, which binds the bundle's nodes to the simulation's
+bodies by name (the URDF `_link` suffix is normalised away) and drives them
+from MuJoCo body transforms; robots with neither fall back to the debug
+skeleton. Adding a robot therefore does not require writing a renderer.
+
+Inside robots are not hardcoded. `RobotProfileRegistry` scans the manifests in
+`xr/assets/robot_profiles/*.json` and offers a profile only when every path in
+its `required_assets` is present, because robot bundles under `assets/robots/`
+are generated per checkout (`scripts/make-robot/`) rather than committed. A
+build without a robot's meshes withholds it and names it under the picker
+instead of offering an embodiment it cannot render. Adding a robot therefore
+means generating its assets and dropping a manifest beside the others — no
+GDScript change. Manifests must stay in each preset's export `include_filter`,
+or the packed build discovers nothing.
+
+Changing target or leaving Teleop stops the old target before creating the new
+one. Target-owned tracking providers, solvers, sockets, overlays, and
+simulations are therefore released as one lifecycle unit. The controller panel
+always shows `REAL`, `SIM`, or `OUTSIDE` from the active descriptor before
+control can be enabled.
+
+The Outside target creates the v2 network stack at runtime:
 
 - `Session` for Hello, descriptor, telemetry, and legacy fallback.
 - `CommandSender` for controller/tracking command frames.
@@ -147,6 +189,10 @@ motion trackers retain their own lower-rate sample timestamp. It is disabled
 for normal robot descriptors, so `CommandSender` behavior and bandwidth are
 unchanged outside Python SDK mode.
 
+The Inside profile registry is deliberately not consulted by Outside Robot.
+This prevents a headset release from becoming the compatibility gate for a new
+real robot or outside simulator.
+
 ## Capture Runtime
 
 `capture_app_base.gd` handles shared capture-mode lifecycle:
@@ -156,6 +202,10 @@ unchanged outside Python SDK mode.
 - capture start/stop UI;
 - QR-based ingest configuration;
 - upload queue integration.
+
+Capture modes do not own robot constraints or retargeting UI. Body tracking may
+still be recorded as sensor data, but turning it into a robot pose is a Teleop
+concern.
 
 The Output panel also owns the export reference-space contract. Operators
 choose `STAGE`, `LOCAL`, or `LOCAL_FLOOR`; before recording starts the app asks

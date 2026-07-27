@@ -1,0 +1,17 @@
+{
+  "profile_id": "unitree_h2",
+  "display_name": "Unitree H2",
+  "input_type": "skeleton_frame_v1",
+  "output_type": "joint_positions_v1",
+  "expected_q_size": 82,
+  "simulation_backend": "mujoco_kinematic",
+  "simulation_model": "res://assets/mujoco/h2_with_sharpa.xml",
+  "overlay_script": "res://scripts/robot_constraint/robot/unitree_h2_overlay.gd",
+  "native_supported": true,
+  "remote_supported": true,
+  "requires_body_tracking": true,
+  "required_assets": [
+    "res://assets/mujoco/h2_with_sharpa.xml",
+    "res://assets/robots/h2-plus/h2_with_sharpa.glb"
+  ]
+}

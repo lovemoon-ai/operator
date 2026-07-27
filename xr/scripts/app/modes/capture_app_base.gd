@@ -4,12 +4,6 @@ const LivePullDenseMapViewScript := preload("res://addons/live-pull/live_pull_de
 const POSE_SAMPLER_PATH := "res://scripts/core/sensors/pose_sampler.gd"
 const DepthSamplerScript := preload("res://scripts/core/sensors/depth_sampler.gd")
 const BodyMotionSamplerScript := preload("res://scripts/core/sensors/body_motion_sampler.gd")
-const BodyPoseProviderScript := preload("res://scripts/robot_constraint/body_pose_provider.gd")
-const BodyPoseDebugOverlayScript := preload("res://scripts/robot_constraint/body_pose_debug_overlay.gd")
-const UnitreeH2OverlayScript := preload("res://scripts/robot_constraint/robot/unitree_h2_overlay.gd")
-const UnitreeG1OverlayScript := preload("res://scripts/robot_constraint/robot/unitree_g1_overlay.gd")
-const GalbotG1OverlayScript := preload("res://scripts/robot_constraint/robot/galbot_g1_overlay.gd")
-const TrackingProviderScript := preload("res://scripts/xr/tracking_provider.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/ui/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/ui/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/ui/view_locked_status_popup.gd")
@@ -99,34 +93,7 @@ var _live_stream_sink: LiveStreamSink = null
 var _upload_sink: UploadQueueSink = null
 var pose_sampler: Node
 var _pose_sampler_script: Script
-var _body_pose_debug_started_pico_body := false
-var _body_pose_debug_tracking_provider: Node = null
-var _body_pose_debug_provider: Node = null
-var _body_pose_debug_overlay: Node3D = null
 var _hand_skeleton_overlay: Node3D = null
-var _h2_debug_provider: Node = null
-var _h2_debug_overlay: Node3D = null
-var _g1_debug_tracking_provider: Node = null
-var _g1_debug_provider: Node = null
-var _g1_debug_overlay: Node3D = null
-var _galbot_g1_debug_tracking_provider: Node = null
-var _galbot_g1_debug_provider: Node = null
-var _galbot_g1_debug_overlay: Node3D = null
-## DEBUG toggles for diagnosing the Unitree G1 retarget overlay
-## (see unitree_g1_overlay.gd #1/#3).
-## DUMP_FRAMES > 0  -> write user://g1_debug.jsonl (per-stage capture for offline diff).
-## REPLAY_QPOS true -> drive the GLB from the bundled known-good qpos sequence,
-##                     bypassing live retargeting (isolates GLB render from input).
-## Both default OFF; flip one, `make ship-quest`, run the G1 overlay, then pull.
-const G1_DEBUG_DUMP_FRAMES := 0
-const G1_DEBUG_REPLAY_QPOS := false
-## DUMP_GLB_REST -> write user://g1_glb_rest.json once (imported link rest
-## transforms) to check Godot's runtime node frames vs the raw glTF the FK was
-## validated against. Safe to combine with REPLAY_QPOS.
-const G1_DEBUG_DUMP_GLB_REST := false
-## Drive a fixed symmetric rest pose (heading seeds to 0) to inspect whether the
-## upper-body yaw offset is downstream of the input. Set false for live use.
-const G1_DEBUG_FIXED_REST := false
 var depth_sampler: Node
 var body_motion_sampler: Node
 var ego_uploader: Node
@@ -264,9 +231,6 @@ var _tracker_status_refresh_accum := TRACKER_STATUS_REFRESH_SECONDS
 var _tracker_last_request_ticks_us := 0
 var _tracker_setup_opened_ticks_us := 0
 var _last_capture_interaction_mode := ""
-var _auto_show_body_pose_debug := false
-var _auto_show_g1_debug := false  # --operator-g1-debug: auto-start G1 overlay (device verification)
-var _auto_show_galbot_g1_debug := false  # --operator-galbot-debug: auto-start Galbot G1 overlay
 var _motion_tracker_supported_pushed := false
 var _motion_tracker_provider_known := false
 var _depth_supported_pushed := false
@@ -401,12 +365,6 @@ func _ready() -> void:
 		call_deferred("_start_capture_when_xr_tracking_ready", "auto_start", 0.0)
 	elif _is_live_feed_mode():
 		call_deferred("_open_live_feed_settings")
-	if _auto_show_body_pose_debug:
-		call_deferred("_start_body_pose_debug_overlay_from_args")
-	if _auto_show_g1_debug:
-		call_deferred("_start_g1_debug_overlay_from_args")
-	if _auto_show_galbot_g1_debug:
-		call_deferred("_start_galbot_g1_debug_overlay_from_args")
 
 
 func _apply_automation_args() -> void:
@@ -421,33 +379,6 @@ func _apply_automation_args() -> void:
 			auto_start = true
 		elif arg.begins_with("operator.auto_start="):
 			auto_start = _truthy_string(arg.substr("operator.auto_start=".length()))
-		elif arg == "--operator-body-pose-debug":
-			_auto_show_body_pose_debug = true
-		elif arg.begins_with("--operator-body-pose-debug="):
-			_auto_show_body_pose_debug = _truthy_string(arg.substr("--operator-body-pose-debug=".length()))
-		elif arg.begins_with("operator.body_pose_debug="):
-			_auto_show_body_pose_debug = _truthy_string(arg.substr("operator.body_pose_debug=".length()))
-		elif arg == "operator.body_pose_debug" and i + 1 < args.size():
-			_auto_show_body_pose_debug = _truthy_string(String(args[i + 1]))
-			i += 1
-		elif arg == "--operator-g1-debug":
-			_auto_show_g1_debug = true
-		elif arg.begins_with("--operator-g1-debug="):
-			_auto_show_g1_debug = _truthy_string(arg.substr("--operator-g1-debug=".length()))
-		elif arg.begins_with("operator.g1_debug="):
-			_auto_show_g1_debug = _truthy_string(arg.substr("operator.g1_debug=".length()))
-		elif arg == "operator.g1_debug" and i + 1 < args.size():
-			_auto_show_g1_debug = _truthy_string(String(args[i + 1]))
-			i += 1
-		elif arg == "--operator-galbot-debug":
-			_auto_show_galbot_g1_debug = true
-		elif arg.begins_with("--operator-galbot-debug="):
-			_auto_show_galbot_g1_debug = _truthy_string(arg.substr("--operator-galbot-debug=".length()))
-		elif arg.begins_with("operator.galbot_debug="):
-			_auto_show_galbot_g1_debug = _truthy_string(arg.substr("operator.galbot_debug=".length()))
-		elif arg == "operator.galbot_debug" and i + 1 < args.size():
-			_auto_show_galbot_g1_debug = _truthy_string(String(args[i + 1]))
-			i += 1
 		i += 1
 
 
@@ -534,36 +465,6 @@ func _xr_head_pose_confident() -> bool:
 	if pose == null:
 		return false
 	return int(pose.get_tracking_confidence()) != XRPose.XR_TRACKING_CONFIDENCE_NONE
-
-
-func _start_body_pose_debug_overlay_from_args() -> void:
-	await get_tree().create_timer(1.0).timeout
-	_start_body_pose_debug_overlay_when_xr_tracking_ready("body pose debug launch args")
-
-
-func _start_g1_debug_overlay_from_args() -> void:
-	await get_tree().create_timer(1.0).timeout
-	_start_g1_debug_overlay_when_xr_tracking_ready("g1 debug launch args")
-
-
-func _start_galbot_g1_debug_overlay_from_args() -> void:
-	await get_tree().create_timer(1.0).timeout
-	_start_galbot_g1_debug_overlay_when_xr_tracking_ready("galbot g1 debug launch args")
-
-
-func _start_body_pose_debug_overlay_when_xr_tracking_ready(reason: String) -> void:
-	if _body_pose_debug_overlay != null:
-		return
-	var stable := await _wait_for_xr_head_pose_tracking_stable(reason)
-	if not stable:
-		push_warning("[CaptureApp] XR tracking did not stabilize; skipping %s" % reason)
-		return
-	if _body_pose_debug_overlay != null:
-		return
-	_start_body_pose_debug_overlay()
-	_hide_settings_for_debug_overlay()
-	_set_debug_panel_state()
-	print("[CaptureApp] Godot body pose debug overlay requested: %s" % reason)
 
 
 func _capture_automation_options_from_args() -> Dictionary:
@@ -1027,10 +928,6 @@ func _compact_dict(d: Dictionary) -> String:
 
 
 func _exit_tree() -> void:
-	# Release native-resource debug overlays (galbot MuJoCo retargeter + OpenXR
-	# trackers) first, synchronously, before the rest of teardown — see
-	# _shutdown_debug_overlays_sync().
-	_shutdown_debug_overlays_sync()
 	stop_capture()
 	_stop_live_pull()
 	var interaction := _operator_interaction()
@@ -1049,13 +946,6 @@ func _exit_tree() -> void:
 
 
 func _notification(what: int) -> void:
-	# App is being closed / sent to the launcher: tear down native-resource debug
-	# overlays synchronously before the process exits, so the galbot MuJoCo
-	# retargeter + OpenXR trackers are released while the OpenXR session is still
-	# alive (prevents the ~14s compositor churn returning to the launcher).
-	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_WM_GO_BACK_REQUEST:
-		_shutdown_debug_overlays_sync()
-
 	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_RESUMED:
 		_reset_ui_input_state()
 		# WP3: track transient pause/resume in the capture state machine
@@ -1406,14 +1296,6 @@ func _setup_xr_scene() -> void:
 		settings_panel.connect_live_server_requested.connect(_on_connect_live_server_requested)
 	if settings_panel.has_signal("manual_upload_requested"):
 		settings_panel.manual_upload_requested.connect(_on_manual_upload_requested)
-	if settings_panel.has_signal("body_pose_debug_toggled"):
-		settings_panel.body_pose_debug_toggled.connect(_on_body_pose_debug_toggled)
-	if settings_panel.has_signal("h2_debug_toggled"):
-		settings_panel.h2_debug_toggled.connect(_on_h2_debug_toggled)
-	if settings_panel.has_signal("g1_debug_toggled"):
-		settings_panel.g1_debug_toggled.connect(_on_g1_debug_toggled)
-	if settings_panel.has_signal("galbot_g1_debug_toggled"):
-		settings_panel.galbot_g1_debug_toggled.connect(_on_galbot_g1_debug_toggled)
 	origin.add_child(settings_panel)
 
 	# QR scanner overlay (Camera2 + ZXing). Sits in the same scene tree as
@@ -1447,7 +1329,7 @@ func _setup_xr_scene() -> void:
 
 	settings_button = SettingsLauncherButtonScript.new()
 	settings_button.name = "CaptureSettingsButton"
-	settings_button.pressed.connect(_on_debug_settings_button_pressed)
+	settings_button.pressed.connect(_on_settings_requested)
 	origin.add_child(settings_button)
 
 	status_popup = ViewLockedStatusPopupScript.new()
@@ -1458,370 +1340,6 @@ func _setup_xr_scene() -> void:
 	# Targets (qr_scanner, settings_panel, settings_button, status_popup,
 	# record_control) self-register into the OperatorInteraction group, so we
 	# no longer build an explicit target list here.
-
-
-func _on_body_pose_debug_toggled() -> void:
-	if _body_pose_debug_overlay != null:
-		_stop_body_pose_debug_overlay()
-	else:
-		_start_body_pose_debug_overlay_when_xr_tracking_ready("body pose debug toggle")
-
-
-func _start_body_pose_debug_overlay() -> void:
-	if _body_pose_debug_overlay != null:
-		return
-	_prepare_body_pose_debug_sources()
-	var tracking_provider: Node = TrackingProviderScript.new()
-	tracking_provider.name = "DebugBodyPoseTrackingProvider"
-	add_child(tracking_provider)
-
-	var provider: Node = BodyPoseProviderScript.new()
-	provider.name = "DebugBodyPoseProvider"
-	provider.call("configure", tracking_provider, pico_openxr_bridge)
-	provider.set("source_mode", _body_pose_debug_source_mode())
-	provider.set("sample_rate_hz", 60.0)
-	add_child(provider)
-	provider.call("set_enabled", true)
-
-	var overlay: Node3D = BodyPoseDebugOverlayScript.new()
-	overlay.name = "GodotBodyPoseDebugOverlay"
-	overlay.call("set_head_camera", hmd_camera)
-	add_child(overlay)
-	overlay.call("configure", provider)
-
-	_body_pose_debug_tracking_provider = tracking_provider
-	_body_pose_debug_provider = provider
-	_body_pose_debug_overlay = overlay
-	print("[CaptureApp] Godot body pose debug overlay on")
-
-
-func _stop_body_pose_debug_overlay() -> void:
-	var had_overlay := _body_pose_debug_overlay != null or _body_pose_debug_provider != null
-	if _body_pose_debug_overlay != null:
-		_body_pose_debug_overlay.queue_free()
-		_body_pose_debug_overlay = null
-	if _body_pose_debug_provider != null:
-		_body_pose_debug_provider.call("set_enabled", false)
-		_body_pose_debug_provider.queue_free()
-		_body_pose_debug_provider = null
-	if _body_pose_debug_tracking_provider != null:
-		_body_pose_debug_tracking_provider.queue_free()
-		_body_pose_debug_tracking_provider = null
-	if _body_pose_debug_started_pico_body:
-		if not _recording \
-				and pico_openxr_bridge != null \
-				and pico_openxr_bridge.has_method("stop_body_tracking"):
-			pico_openxr_bridge.call("stop_body_tracking")
-		_body_pose_debug_started_pico_body = false
-	if had_overlay:
-		print("[CaptureApp] Godot body pose debug overlay off")
-	_set_debug_panel_state()
-
-
-func _prepare_body_pose_debug_sources() -> void:
-	if pico_openxr_bridge == null:
-		_setup_pico_openxr_bridge()
-	if pico_openxr_bridge == null:
-		return
-	var options: Dictionary = capture_options
-	if settings_panel != null and settings_panel.has_method("get_options"):
-		options = settings_panel.get_options()
-	if pico_openxr_bridge.has_method("start_body_tracking"):
-		var had_body_tracker := bool(
-			_pico_openxr_status().get("body_tracker_created", false)
-		)
-		var started := bool(pico_openxr_bridge.call("start_body_tracking", {}))
-		if started:
-			if not had_body_tracker:
-				_body_pose_debug_started_pico_body = true
-			print("[CaptureApp] Pico body tracking started for debug overlay")
-		else:
-			push_warning(
-				"[CaptureApp] Pico body tracking did not start for debug overlay: %s"
-				% JSON.stringify(_pico_openxr_status())
-			)
-	if pico_openxr_bridge.has_method("sample_body_joints"):
-		var body_v: Variant = pico_openxr_bridge.call("sample_body_joints")
-		if typeof(body_v) == TYPE_DICTIONARY:
-			var body := body_v as Dictionary
-			if _pico_body_debug_needs_setup(body):
-				_open_pico_body_tracking_setup("body pose debug", body)
-
-
-func _body_pose_debug_source_mode() -> int:
-	if OS.has_feature("pico"):
-		return BodyPoseProviderScript.SourceMode.PICO_ONLY
-	var status := _pico_openxr_status()
-	if bool(status.get("bd_body_tracking_extension", false)) \
-			or bool(status.get("pico_body_tracking2_extension", false)):
-		return BodyPoseProviderScript.SourceMode.PICO_ONLY
-	return BodyPoseProviderScript.SourceMode.AUTO
-
-
-func _on_h2_debug_toggled() -> void:
-	if _h2_debug_overlay != null:
-		_stop_h2_debug_overlay()
-	else:
-		_start_h2_debug_overlay()
-		_hide_settings_for_debug_overlay()
-	_set_debug_panel_state()
-
-
-func _start_h2_debug_overlay() -> void:
-	if _h2_debug_overlay != null:
-		return
-
-	var overlay: Node3D = UnitreeH2OverlayScript.new()
-	overlay.name = "DebugUnitreeH2RestOverlay"
-	overlay.set("debug_place_in_front_of_view", true)
-	overlay.call("set_head_camera", hmd_camera)
-	add_child(overlay)
-
-	_h2_debug_provider = null
-	_h2_debug_overlay = overlay
-	print("[CaptureApp] Unitree H2 debug rest overlay on")
-
-
-func _stop_h2_debug_overlay() -> void:
-	var had_overlay := _h2_debug_overlay != null or _h2_debug_provider != null
-	if _h2_debug_overlay != null:
-		_h2_debug_overlay.queue_free()
-		_h2_debug_overlay = null
-	if _h2_debug_provider != null:
-		_h2_debug_provider.call("set_enabled", false)
-		_h2_debug_provider.queue_free()
-		_h2_debug_provider = null
-	if had_overlay:
-		print("[CaptureApp] Unitree H2 debug overlay off")
-	_set_debug_panel_state()
-
-
-func _on_g1_debug_toggled() -> void:
-	if _g1_debug_overlay != null:
-		_stop_g1_debug_overlay()
-	else:
-		_start_g1_debug_overlay_when_xr_tracking_ready("g1 debug toggle")
-		_hide_settings_for_debug_overlay()
-	_set_debug_panel_state()
-
-
-func _start_g1_debug_overlay_when_xr_tracking_ready(_reason: String) -> void:
-	if _g1_debug_overlay != null:
-		return
-	_start_g1_debug_overlay()
-
-
-func _start_g1_debug_overlay() -> void:
-	if _g1_debug_overlay != null:
-		return
-	# Stand up a body-pose source so the overlay is driven by live VR body pose
-	# (same source the body-pose debug overlay uses); retargeting maps it to G1.
-	_prepare_body_pose_debug_sources()
-	var tracking_provider: Node = TrackingProviderScript.new()
-	tracking_provider.name = "G1BodyPoseTrackingProvider"
-	add_child(tracking_provider)
-
-	var provider: Node = BodyPoseProviderScript.new()
-	provider.name = "G1BodyPoseProvider"
-	provider.call("configure", tracking_provider, pico_openxr_bridge)
-	provider.set("source_mode", _body_pose_debug_source_mode())
-	provider.set("sample_rate_hz", 60.0)
-	add_child(provider)
-	provider.call("set_enabled", true)
-
-	var overlay: Node3D = UnitreeG1OverlayScript.new()
-	overlay.name = "DebugUnitreeG1RetargetOverlay"
-	overlay.set("debug_place_in_front_of_view", true)
-	if G1_DEBUG_DUMP_FRAMES > 0:
-		overlay.set("debug_dump_frames", G1_DEBUG_DUMP_FRAMES)
-	if G1_DEBUG_REPLAY_QPOS:
-		overlay.set("debug_replay_qpos", true)
-	if G1_DEBUG_DUMP_GLB_REST:
-		overlay.set("debug_dump_glb_rest", true)
-	if G1_DEBUG_FIXED_REST:
-		overlay.set("debug_fixed_rest_pose", true)
-	overlay.call("set_head_camera", hmd_camera)
-	add_child(overlay)
-	overlay.call("set_body_pose_provider", provider)
-
-	_g1_debug_tracking_provider = tracking_provider
-	_g1_debug_provider = provider
-	_g1_debug_overlay = overlay
-	print("[CaptureApp] Unitree G1 retarget overlay on")
-
-
-func _stop_g1_debug_overlay(immediate: bool = false) -> void:
-	# Same ordered teardown as galbot: the Unitree G1 overlay also owns a native
-	# GMRRetargeter (MuJoCo) + OpenXR providers, so disable sampling first, then
-	# free overlay, then providers — synchronously on shutdown (see
-	# _shutdown_debug_overlays_sync).
-	var had_overlay := _g1_debug_overlay != null or _g1_debug_provider != null
-	if _g1_debug_provider != null:
-		_g1_debug_provider.call("set_enabled", false)
-	_free_node(_g1_debug_overlay, immediate)
-	_g1_debug_overlay = null
-	_free_node(_g1_debug_provider, immediate)
-	_g1_debug_provider = null
-	_free_node(_g1_debug_tracking_provider, immediate)
-	_g1_debug_tracking_provider = null
-	if had_overlay:
-		print("[CaptureApp] Unitree G1 retarget overlay off")
-	_set_debug_panel_state()
-
-
-func _on_galbot_g1_debug_toggled() -> void:
-	if _galbot_g1_debug_overlay != null:
-		_stop_galbot_g1_debug_overlay()
-	else:
-		_start_galbot_g1_debug_overlay_when_xr_tracking_ready("galbot g1 debug toggle")
-		_hide_settings_for_debug_overlay()
-	_set_debug_panel_state()
-
-
-func _start_galbot_g1_debug_overlay_when_xr_tracking_ready(_reason: String) -> void:
-	if _galbot_g1_debug_overlay != null:
-		return
-	_start_galbot_g1_debug_overlay()
-
-
-func _start_galbot_g1_debug_overlay() -> void:
-	if _galbot_g1_debug_overlay != null:
-		return
-	# Stand up a body-pose source so the overlay is driven by live VR pose (head +
-	# both wrists); the overlay maps wrist EE-pose deltas to the Galbot arms and
-	# renders the head/wrist targets as a debug skeleton.
-	_prepare_body_pose_debug_sources()
-	var tracking_provider: Node = TrackingProviderScript.new()
-	tracking_provider.name = "GalbotG1BodyPoseTrackingProvider"
-	add_child(tracking_provider)
-
-	var provider: Node = BodyPoseProviderScript.new()
-	provider.name = "GalbotG1BodyPoseProvider"
-	provider.call("configure", tracking_provider, pico_openxr_bridge)
-	provider.set("source_mode", _body_pose_debug_source_mode())
-	provider.set("sample_rate_hz", 60.0)
-	add_child(provider)
-	provider.call("set_enabled", true)
-
-	var overlay: Node3D = GalbotG1OverlayScript.new()
-	overlay.name = "DebugGalbotG1RetargetOverlay"
-	overlay.set("debug_place_in_front_of_view", true)
-	overlay.call("set_head_camera", hmd_camera)
-	add_child(overlay)
-	overlay.call("set_body_pose_provider", provider)
-
-	_galbot_g1_debug_tracking_provider = tracking_provider
-	_galbot_g1_debug_provider = provider
-	_galbot_g1_debug_overlay = overlay
-	print("[CaptureApp] Galbot G1 retarget overlay on")
-
-
-func _stop_galbot_g1_debug_overlay(immediate: bool = false) -> void:
-	var had_overlay := _galbot_g1_debug_overlay != null or _galbot_g1_debug_provider != null
-	# Ordered teardown. Stop the OpenXR body/hand sampling FIRST so no
-	# canonical_frame_ready callback fires into a half-freed overlay, THEN release
-	# the overlay (its _exit_tree drops the MuJoCo GMRRetargeter), THEN the
-	# providers. On app quit / scene swap we must release the native retargeter and
-	# OpenXR trackers deterministically here — leaving them to the abrupt process
-	# teardown left the Meta compositor churning for ~14s before returning to the
-	# launcher (and wedged the next galbot session). `immediate` uses free() instead
-	# of queue_free() so everything is gone before quit()/scene change proceeds.
-	if _galbot_g1_debug_provider != null:
-		_galbot_g1_debug_provider.call("set_enabled", false)
-	_free_node(_galbot_g1_debug_overlay, immediate)
-	_galbot_g1_debug_overlay = null
-	_free_node(_galbot_g1_debug_provider, immediate)
-	_galbot_g1_debug_provider = null
-	_free_node(_galbot_g1_debug_tracking_provider, immediate)
-	_galbot_g1_debug_tracking_provider = null
-	if had_overlay:
-		print("[CaptureApp] Galbot G1 retarget overlay off")
-	_set_debug_panel_state()
-
-
-# Release a node now (immediate) or at end of frame. Immediate free detaches from
-# the tree first and is used on shutdown so native GDExtension resources (MuJoCo
-# retargeter, OpenXR trackers) are freed synchronously before the process exits.
-func _free_node(node: Node, immediate: bool) -> void:
-	if node == null or not is_instance_valid(node):
-		return
-	if immediate:
-		var parent := node.get_parent()
-		if parent != null:
-			parent.remove_child(node)
-		node.free()
-	else:
-		node.queue_free()
-
-
-# Deterministic, synchronous teardown of any active in-headset debug overlay that
-# owns native GDExtension resources (galbot + G1 both hold a MuJoCo GMRRetargeter
-# and OpenXR providers). Called on scene exit and on the OS close/quit request so
-# those natives are released while the engine and OpenXR session are still fully
-# alive — otherwise the abrupt process teardown leaves the compositor churning
-# for ~14s before the launcher returns.
-func _shutdown_debug_overlays_sync() -> void:
-	if _galbot_g1_debug_overlay != null or _galbot_g1_debug_provider != null \
-			or _galbot_g1_debug_tracking_provider != null:
-		_stop_galbot_g1_debug_overlay(true)
-	if _g1_debug_overlay != null or _g1_debug_provider != null \
-			or _g1_debug_tracking_provider != null:
-		_stop_g1_debug_overlay(true)
-
-
-func _any_debug_overlay_visible() -> bool:
-	return _body_pose_debug_overlay != null or _h2_debug_overlay != null or _g1_debug_overlay != null or _galbot_g1_debug_overlay != null
-
-
-func _hide_settings_for_debug_overlay() -> void:
-	_release_ui_pointer()
-	if settings_panel != null:
-		if settings_panel.has_method("close"):
-			settings_panel.close()
-		else:
-			settings_panel.visible = false
-	if record_control != null:
-		record_control.hide_control()
-	_show_debug_settings_button()
-
-
-func _show_debug_settings_button() -> void:
-	if settings_button == null:
-		return
-	if settings_button.has_method("clear_pointer"):
-		settings_button.clear_pointer()
-	var mode := str(capture_options.get("interaction_mode", "controllers"))
-	if settings_button.has_method("set_feedback_input_mode"):
-		settings_button.set_feedback_input_mode(mode, right_pointer if mode == "controllers" else null)
-	settings_button.visible = true
-
-
-func _hide_debug_settings_button() -> void:
-	if settings_button == null:
-		return
-	if settings_button.has_method("clear_pointer"):
-		settings_button.clear_pointer()
-	settings_button.visible = false
-
-
-func _on_debug_settings_button_pressed() -> void:
-	_stop_body_pose_debug_overlay()
-	_stop_h2_debug_overlay()
-	_stop_g1_debug_overlay()
-	_stop_galbot_g1_debug_overlay()
-	_hide_debug_settings_button()
-	_on_settings_requested()
-
-
-func _set_debug_panel_state() -> void:
-	if settings_panel != null and settings_panel.has_method("set_body_pose_debug_visible"):
-		settings_panel.call("set_body_pose_debug_visible", _body_pose_debug_overlay != null)
-	if settings_panel != null and settings_panel.has_method("set_h2_debug_visible"):
-		settings_panel.call("set_h2_debug_visible", _h2_debug_overlay != null)
-	if settings_panel != null and settings_panel.has_method("set_g1_debug_visible"):
-		settings_panel.call("set_g1_debug_visible", _g1_debug_overlay != null)
-	if settings_panel != null and settings_panel.has_method("set_galbot_g1_debug_visible"):
-		settings_panel.call("set_galbot_g1_debug_visible", _galbot_g1_debug_overlay != null)
 
 
 func _platform_registry() -> PlatformRegistry:
@@ -2502,7 +2020,6 @@ func _apply_capture_interaction_mode(mode: String) -> void:
 func _on_settings_requested() -> void:
 	if _recording:
 		return
-	_hide_debug_settings_button()
 	_release_ui_pointer()
 	record_control.hide_control()
 	var mode := _current_ui_interaction_mode()

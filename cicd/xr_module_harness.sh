@@ -73,7 +73,10 @@ fi
 
 if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   echo "== installing $APK"
-  "${ADB[@]}" install -r -d "$APK"
+  # --no-incremental: the APK's native libs are Stored (extractNativeLibs=false)
+  # and mmap'd from the APK; adb's default incremental install can leave them at
+  # a stale offset on reinstall, so MuJoCo fails to load with "bad ELF magic".
+  "${ADB[@]}" install -r -d --no-incremental "$APK"
 fi
 
 echo "== launching test runner"

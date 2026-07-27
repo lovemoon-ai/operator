@@ -18,6 +18,7 @@ from .session import BridgeConfig, XrSession
 from .robot import EndEffectorTarget, JointTarget, Robot, RobotState
 from .retargeting import PoseDeltaRetargeter, Retargeter
 from .ik import CallableIK, DampedLeastSquaresIK, IKSolver
+from .protocol.retargeting import RetargetingRequest, RetargetingResult
 
 __all__ = [
     "xr_bridge",
@@ -43,4 +44,6 @@ __all__ = [
     "IKSolver",
     "CallableIK",
     "DampedLeastSquaresIK",
+    "RetargetingRequest",
+    "RetargetingResult",
 ]

@@ -11,12 +11,16 @@ OPERATOR_DEPS_CACHE_ROOT="${OPERATOR_DEPS_CACHE_ROOT:-$HOME/.cache/operator/deps
 Source checkouts are placed under `$OPERATOR_DEPS_CACHE_ROOT/src`, and Python
 build tooling is placed under `$OPERATOR_DEPS_CACHE_ROOT/build`.
 
-## H2 + Sharpa
+Each script is named for the robot it produces (`make_<robot>.sh`), and the
+Inside Robot picker only offers a robot once its assets exist — see
+`xr/assets/robot_profiles/`.
+
+## Unitree H2 + Sharpa
 
 Generate Unitree H2 Plus with integrated Sharpa Wave hands:
 
 ```bash
-bash scripts/make-robot/make_h2_sharpa.sh
+bash scripts/make-robot/make_unitree_h2_sharpa.sh
 ```
 
 Outputs:
@@ -91,6 +95,33 @@ Supporting retargeting assets:
 Reach it in-app via the capture Settings panel → "Robot Constraint" group →
 "Show Galbot G1 model", or the `--operator-galbot-debug` launch flag.
 
+## SO-101 Arm
+
+Generate the SO-101 (SO-ARM101 follower) 5-DoF arm:
+
+```bash
+bash scripts/make-robot/make_so101.sh
+```
+
+Outputs:
+
+- `xr/assets/robots/so101/so101.glb` - mesh the Inside Robot page renders,
+  driven by MuJoCo body transforms (`visual_model` in the SO-101 profile).
+- `xr/assets/robots/so101/so101.urdf` - URDF metadata copy with STL mesh references.
+- `xr/assets/robots/so101/meshes/` - URDF mesh files, colocated for `meshes/...` references.
+- `$OPERATOR_DEPS_CACHE_ROOT/build/make-robot/so101_visual.xml` - MuJoCo proxy
+  with the same body/joint names, for inspection only.
+
+Unlike the humanoids, SO-101's proxy is **not** written into `xr/assets/mujoco/`:
+`so101_kinematic.xml` is the mesh-free model the Inside Robot profile simulates
+and the IK solver is calibrated against, so a second model would only ship dead
+weight in every APK. Override the path with `SO101_MJCF_OUT` if you want it
+somewhere else.
+
+The source model is pinned to `TheRobotStudio/SO-ARM100` at
+`fda892cba81032c46c40976a48c9ceadbf40a9ca`, path `Simulation/SO101`
+(`so101_new_calib.urdf`, all-STL meshes).
+
 ## Dexmate Vega U
 
 Generate Dexmate Vega U upper-body robot with F5D6 dexterous hands:
@@ -105,6 +136,9 @@ Outputs:
 - `xr/assets/robots/dexmate-vega-u/dexmate_vega_u.urdf` - URDF metadata copy with STL mesh references.
 - `xr/assets/robots/dexmate-vega-u/meshes/` - URDF mesh files, colocated for `meshes/...` references.
 - `xr/assets/mujoco/dexmate_vega_u.xml` - MuJoCo-loadable proxy XML with the same body/joint names.
+
+Vega U has no Inside Robot profile yet, so none of these are committed or
+shipped; run the script when you start wiring one up.
 
 URDF outputs keep visual mesh references in STL/DAE-compatible formats.
 Generated `.glb` files are only for Godot visual overlays.

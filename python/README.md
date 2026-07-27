@@ -85,6 +85,34 @@ Raw controller poses and robot EE targets are deliberately different types:
 `frame.controllers.right.pose` is measured XR state;
 `EndEffectorTarget.ee_pose` is retargeted robot-space state.
 
+## Robot-specific retargeting and the retargeting service
+
+Robot-specific retargeting (Unitree G1/H2, Galbot G1, SO-101) is computed by
+the separate `retargeting` library. pyoperator owns the wire protocol and calls
+it; the library never learns about Operator or opens a socket.
+
+```bash
+pip install 'pyoperator[retargeting]'
+pip install ./python                     # from the retargeting repository
+pyoperator serve --service retargeting --host 0.0.0.0 --port 8000
+```
+
+`GET /healthz` and `GET /v1/profiles` report the profiles this host can serve
+and why any are unavailable; `WS /v1/retarget` runs one warm-started, latest-only
+solver session for an Inside Robot in the headset. `retargeting-service` remains
+as an alias of the same command.
+
+The same profiles drive a host-side control loop, so an Outside Robot solves
+exactly what the headset would have:
+
+```python
+from pyoperator.integrations.retargeting import PyOperatorRetargeter
+
+retargeter = PyOperatorRetargeter("unitree_g1", source="body")
+# or source="controller" for end-effector profiles such as SO-101
+pyoperator.control_loop.run(session, robot, retargeter)
+```
+
 ## Debugging
 
 `xr_bridge.stats()` exposes connection state, frame/parse counts, last frame and

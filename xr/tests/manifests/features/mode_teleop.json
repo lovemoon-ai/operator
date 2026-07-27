@@ -56,6 +56,60 @@
       "module": "python/pyoperator",
       "required_device": "quest_or_pico",
       "host_test": "python/tests/test_real_headset.py::test_pyoperator_receives_real_headset_frames"
+    },
+    {
+      "id": "teleop.robot_profile_registry",
+      "level": "unit",
+      "suite": "teleop.targets",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/robot_profile_registry_test.gd"
+    },
+    {
+      "id": "teleop.so101_native_retargeter",
+      "level": "unit",
+      "suite": "teleop.targets",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/so101_native_retargeter_test.gd"
+    },
+    {
+      "id": "teleop.settings_scope",
+      "level": "device",
+      "suite": "teleop.settings",
+      "module": "app/modes",
+      "required_device": "quest_or_pico",
+      "script": "res://tests/device/teleop/teleop_settings_scope_test.gd"
+    },
+    {
+      "id": "teleop.inside_robot_start",
+      "level": "device",
+      "suite": "teleop.inside",
+      "module": "core/teleop",
+      "required_device": "quest_or_pico",
+      "script": "res://tests/device/teleop/inside_robot_start_test.gd"
+    },
+    {
+      "id": "teleop.inside_settings_roundtrip",
+      "level": "device",
+      "suite": "teleop.inside",
+      "module": "app/modes",
+      "required_device": "quest_or_pico",
+      "script": "res://tests/device/teleop/inside_settings_roundtrip_test.gd"
+    },
+    {
+      "id": "teleop.remote_retargeting_service",
+      "level": "device",
+      "suite": "teleop.remote",
+      "module": "core/teleop",
+      "required_device": "quest_or_pico",
+      "script": "res://tests/device/teleop/remote_retargeting_service_test.gd"
+    },
+    {
+      "id": "teleop.remote_retargeting_humanoid",
+      "level": "device",
+      "suite": "teleop.remote",
+      "module": "core/teleop",
+      "required_device": "quest_or_pico",
+      "script": "res://tests/device/teleop/remote_retargeting_humanoid_test.gd"
     }
   ]
 }

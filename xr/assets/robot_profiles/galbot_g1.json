@@ -1,0 +1,17 @@
+{
+  "profile_id": "galbot_g1",
+  "display_name": "Galbot G1",
+  "input_type": "skeleton_frame_v1",
+  "output_type": "joint_positions_v1",
+  "expected_q_size": 84,
+  "simulation_backend": "mujoco_kinematic",
+  "simulation_model": "res://assets/mujoco/galbot_g1.xml",
+  "overlay_script": "res://scripts/robot_constraint/robot/galbot_g1_overlay.gd",
+  "native_supported": true,
+  "remote_supported": true,
+  "requires_body_tracking": true,
+  "required_assets": [
+    "res://assets/mujoco/galbot_g1.xml",
+    "res://assets/robots/galbot-g1/galbot_g1.glb"
+  ]
+}
