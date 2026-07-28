@@ -13,6 +13,10 @@ signal tracker_connect_requested
 signal scan_live_server_requested
 signal connect_live_server_requested(options: Dictionary)
 signal manual_upload_requested(sessions: Array, options: Dictionary)
+signal body_pose_debug_toggled
+signal h2_debug_toggled
+signal g1_debug_toggled
+signal galbot_g1_debug_toggled
 
 # 840 wide gives ~430px of detail column after sidebar + margins. The 1180-tall
 # legacy viewport went away once the form was split into groups — every group
@@ -75,6 +79,10 @@ const DEFAULT_EXPORT_COORDINATE_SPACE := OpenXRExportSpace.DEFAULT
 # by capture_app.gd so the panel never persists a transient detection flip.
 var _indicator_mode := ""
 var _motion_tracker_toggle: CheckButton
+var _body_pose_debug_button: Button
+var _h2_debug_button: Button
+var _g1_debug_button: Button
+var _galbot_g1_debug_button: Button
 var _motion_tracker_supported := false
 var _depth_toggle: CheckButton
 var _depth_supported := false
@@ -662,6 +670,46 @@ func _add_status_label_to(parent: Container, initial_text: String) -> Label:
 	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	parent.add_child(lbl)
 	return lbl
+
+
+func _on_body_pose_debug_pressed() -> void:
+	emit_signal("body_pose_debug_toggled")
+
+
+func _on_h2_debug_pressed() -> void:
+	emit_signal("h2_debug_toggled")
+
+
+func _on_g1_debug_pressed() -> void:
+	emit_signal("g1_debug_toggled")
+
+
+func _on_galbot_g1_debug_pressed() -> void:
+	emit_signal("galbot_g1_debug_toggled")
+
+
+func set_body_pose_debug_visible(visible_for_debug: bool) -> void:
+	if _body_pose_debug_button == null:
+		return
+	_body_pose_debug_button.text = tr("UI_HIDE_BODY_POSE_DEBUG") if visible_for_debug else tr("UI_SHOW_BODY_POSE_DEBUG")
+
+
+func set_h2_debug_visible(visible_for_debug: bool) -> void:
+	if _h2_debug_button == null:
+		return
+	_h2_debug_button.text = tr("UI_HIDE_UNITREE_H2_DEBUG") if visible_for_debug else tr("UI_SHOW_UNITREE_H2_DEBUG")
+
+
+func set_g1_debug_visible(visible_for_debug: bool) -> void:
+	if _g1_debug_button == null:
+		return
+	_g1_debug_button.text = tr("UI_HIDE_UNITREE_G1_DEBUG") if visible_for_debug else tr("UI_SHOW_UNITREE_G1_DEBUG")
+
+
+func set_galbot_g1_debug_visible(visible_for_debug: bool) -> void:
+	if _galbot_g1_debug_button == null:
+		return
+	_galbot_g1_debug_button.text = tr("UI_HIDE_GALBOT_G1_DEBUG") if visible_for_debug else tr("UI_SHOW_GALBOT_G1_DEBUG")
 
 
 func set_pico_tracker_status(
