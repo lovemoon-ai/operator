@@ -1,9 +1,13 @@
 extends Node3D
 
-## Launcher / mode-select scene. Renders the four operator modes (plus an
-## Exit card that quits the app) as individual Viewport2DIn3D quads
-## floating in front of the user. Each card is a distinct 3D entity that
-## can be hovered and clicked with the XR ray pointer.
+## Launcher / mode-select scene. Renders the operator mode cards enabled
+## for this build as individual Viewport2DIn3D quads floating in front of
+## the user. Each card is a distinct 3D entity that can be hovered and
+## clicked with the XR ray pointer.
+##
+## Which cards appear is decided entirely by the `operator_feature_mode_*`
+## flags (see FeatureSet); the Exit card is one of them and quits the app
+## instead of opening a scene.
 
 const LIVE_FEED_SCENE := "res://scenes/live_feed_app.tscn"
 const VR_SCENE := "res://scenes/vr_mode.tscn"
@@ -20,9 +24,6 @@ const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
 const HEAD_TRACKING_WAIT_FRAMES := 30
 const FALLBACK_EYE_HEIGHT := 1.5
-const LAUNCHER_CARDS_CONFIGURED_FEATURE := "operator_launcher_cards_configured"
-const EXIT_CARD_FEATURE := "operator_launcher_card_exit"
-const DEFAULT_LAUNCHER_CARD_MODES := [MODE_EGO_CAPTURE, MODE_EXIT]
 
 const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
 const CardSceneTemplate := preload("res://scenes/ui/mode_select_ui.tscn")
@@ -65,8 +66,8 @@ class CardEntry:
 var _cards: Array = []
 var _xr_started := false
 var _changing_scene := false
-# Typed runtime feature lookup (handles operator_feature_* tags, legacy
-# operator_launcher_card_* aliases, and editor defaults).
+# Typed runtime feature lookup (operator_feature_* tags in exported APKs,
+# registry defaults in editor/dev runs).
 var _features: FeatureSet = FeatureSet.from_export_tags()
 
 
@@ -136,8 +137,6 @@ func _configured_launcher_card_modes() -> Array:
 	for mode in _all_launcher_card_modes():
 		if _launcher_card_feature_enabled(String(mode)):
 			modes.append(mode)
-	if modes.is_empty() and not _launcher_cards_configured():
-		return DEFAULT_LAUNCHER_CARD_MODES.duplicate()
 	return modes
 
 
@@ -145,16 +144,9 @@ func _all_launcher_card_modes() -> Array:
 	return [MODE_TELEOP, MODE_EGO_CAPTURE, MODE_LIVE_FEED, MODE_VR, MODE_EXIT]
 
 
-func _launcher_cards_configured() -> bool:
-	return OS.has_feature(LAUNCHER_CARDS_CONFIGURED_FEATURE) \
-		or OS.has_feature(FeatureSet.FEATURES_CONFIGURED_TAG)
-
-
-## Mode cards are driven by the typed FeatureSet (operator_feature_* in
-## new APKs; legacy operator_launcher_card_* aliases handled inside
-## FeatureSet). The Exit card is not a product feature: it follows its
-## legacy launcher-card tag, defaulting to visible when no launcher
-## configuration was exported (editor/dev runs).
+## Every card, Exit included, is gated by its `operator_feature_mode_*`
+## flag. In editor/dev runs FeatureSet falls back to registry defaults
+## (ego_capture and exit are on), so the launcher is never empty.
 func _launcher_card_feature_enabled(mode: String) -> bool:
 	match mode:
 		MODE_TELEOP:
@@ -166,9 +158,7 @@ func _launcher_card_feature_enabled(mode: String) -> bool:
 		MODE_VR:
 			return _features.enabled(OperatorFeature.MODE_VR)
 		MODE_EXIT:
-			if OS.has_feature(EXIT_CARD_FEATURE):
-				return true
-			return not _launcher_cards_configured()
+			return _features.enabled(OperatorFeature.MODE_EXIT)
 		_:
 			return false
 

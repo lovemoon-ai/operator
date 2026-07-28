@@ -3,7 +3,7 @@
 #
 # Components:
 #
-#   examples/live-feed-demo/operator_live_feed_server.py
+#   python -m pyoperator.live_feed
 #       - listens for live-push on 127.0.0.1:63910
 #       - listens for live-pull on 127.0.0.1:63912
 #       - reconstructs a simple global point cloud from depth + head pose
@@ -44,7 +44,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 XR_DIR="$ROOT/xr"
-SERVER_SCRIPT="$ROOT/examples/live-feed-demo/operator_live_feed_server.py"
+SERVER_ENTRY="$ROOT/python/pyoperator/live_feed/__main__.py"
+OPERATOR_PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}"
 PKG="com.lovemoon.operator"
 ACT="com.godot.game.GodotApp"
 
@@ -328,8 +329,8 @@ wait_for_port() {
 start_server() {
   step "Start Live Feed example server"
   mkdir -p "$SERVER_OUT"
-  pkill -f "operator_live_feed_server.py.*--push-port ${PUSH_PORT}" >/dev/null 2>&1 || true
-  "$PYTHON" "$SERVER_SCRIPT" \
+  pkill -f "pyoperator.live_feed.*--push-port ${PUSH_PORT}" >/dev/null 2>&1 || true
+  PYTHONPATH="$OPERATOR_PYTHONPATH" "$PYTHON" -m pyoperator.live_feed \
     --host 127.0.0.1 \
     --push-port "$PUSH_PORT" \
     --pull-host 127.0.0.1 \
@@ -706,11 +707,11 @@ mkdir -p "$OUTPUT_DIR"
 for tool in "$ADB" "$PYTHON" "$MAKE" nc; do
   require_tool "$tool"
 done
-if [ ! -f "$SERVER_SCRIPT" ]; then
-  err "server script not found: $SERVER_SCRIPT"
+if [ ! -f "$SERVER_ENTRY" ]; then
+  err "server package entry not found: $SERVER_ENTRY"
   exit 2
 fi
-"$PYTHON" "$SERVER_SCRIPT" --self-test > "$OUTPUT_DIR/server-self-test.log"
+PYTHONPATH="$OPERATOR_PYTHONPATH" "$PYTHON" -m pyoperator.live_feed --self-test > "$OUTPUT_DIR/server-self-test.log"
 ok "server self-test passed"
 if [ "$EXPECT_RGB_COLOR" = "auto" ]; then
   if command -v ffmpeg >/dev/null 2>&1; then

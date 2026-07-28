@@ -11,6 +11,9 @@ signal dense_chunk_ready(metadata: Dictionary, payload: PackedByteArray)
 signal dense_commit_received(commit: Dictionary)
 signal trajectory_received(trajectory: Dictionary)
 signal map_transform_received(transform: Dictionary)
+## Server tells us which streams its algorithm wants. Arrives right after the
+## settings page connects, i.e. before any capture has started.
+signal capture_request_received(request: Dictionary)
 
 const MAGIC_0 := 79
 const MAGIC_1 := 76
@@ -24,6 +27,9 @@ const DEFAULT_MAX_RECV_BUFFER := 64 * 1024 * 1024
 
 const FLAG_COMPOSITE_JSON := 2
 
+const TYPE_RESULT_HELLO := 100
+const TYPE_CAPTURE_REQUEST := 101
+const TYPE_RESULT_WELCOME := 102
 const TYPE_ALGORITHM_STATUS := 110
 const TYPE_MAP_RESET := 111
 const TYPE_DENSE_MAP_MANIFEST := 112
@@ -35,11 +41,13 @@ const TYPE_MAP_TRANSFORM := 116
 enum State {
 	DISCONNECTED,
 	CONNECTING,
+	AUTHENTICATING,
 	CONNECTED,
 }
 
 @export var host := "127.0.0.1"
 @export var port := 63912
+@export var auth_token := ""
 @export var connect_timeout_s := 5.0
 @export var max_recv_buffer := DEFAULT_MAX_RECV_BUFFER
 
@@ -48,35 +56,59 @@ var _state: State = State.DISCONNECTED
 var _recv_buffer := PackedByteArray()
 var _connect_elapsed := 0.0
 var _bad_status_ticks := 0
+var _server_instance_id := ""
 var _latest_map_version := -1
 var _manifests: Dictionary = {}
 var _fragment_sets: Dictionary = {}
 var _complete_chunks: Dictionary = {}
 
 
-func connect_result(result_host: String = host, result_port: int = port) -> void:
+func connect_result(
+	result_host: String = host,
+	result_port: int = port,
+	result_auth_token: String = auth_token
+) -> void:
 	disconnect_result()
 	host = result_host.strip_edges()
 	if host.is_empty():
 		host = "127.0.0.1"
 	port = clampi(result_port, 1, 65535)
+	auth_token = result_auth_token
 	_recv_buffer.clear()
 	_fragment_sets.clear()
 	_complete_chunks.clear()
 	_connect_elapsed = 0.0
 	var err := _tcp.connect_to_host(host, port)
 	if err != OK:
-		_state = State.DISCONNECTED
-		connection_failed.emit("connect_to_host failed: %d" % err)
+		_fail_connection("connect_to_host failed: %d" % err)
 		return
 	_state = State.CONNECTING
 
 
 func disconnect_result() -> void:
-	if _state != State.DISCONNECTED:
-		_tcp.disconnect_from_host()
+	# StreamPeerTCP can remain in STATUS_ERROR after our logical state has
+	# already moved to DISCONNECTED. Always replace the transport so a later
+	# connect_to_host() starts from STATUS_NONE instead of ERR_ALREADY_IN_USE.
+	_reset_transport()
+
+
+func _reset_transport() -> void:
+	_tcp.disconnect_from_host()
+	_tcp = StreamPeerTCP.new()
 	_state = State.DISCONNECTED
 	_recv_buffer.clear()
+	_connect_elapsed = 0.0
+	_bad_status_ticks = 0
+
+
+func _fail_connection(reason: String) -> void:
+	_reset_transport()
+	connection_failed.emit(reason)
+
+
+func _drop_connection() -> void:
+	_reset_transport()
+	disconnected_from_server.emit()
 
 
 func is_result_connected() -> bool:
@@ -84,13 +116,19 @@ func is_result_connected() -> bool:
 
 
 func is_result_active() -> bool:
-	return _state == State.CONNECTING or _state == State.CONNECTED
+	return (
+		_state == State.CONNECTING
+		or _state == State.AUTHENTICATING
+		or _state == State.CONNECTED
+	)
 
 
 func get_connection_state() -> String:
 	match _state:
 		State.CONNECTING:
 			return "connecting"
+		State.AUTHENTICATING:
+			return "authenticating"
 		State.CONNECTED:
 			return "connected"
 	return "disconnected"
@@ -100,6 +138,8 @@ func _process(delta: float) -> void:
 	match _state:
 		State.CONNECTING:
 			_process_connecting(delta)
+		State.AUTHENTICATING:
+			_process_authenticating(delta)
 		State.CONNECTED:
 			_process_connected()
 		State.DISCONNECTED:
@@ -110,21 +150,35 @@ func _process_connecting(delta: float) -> void:
 	_tcp.poll()
 	var status := _tcp.get_status()
 	if status == StreamPeerTCP.STATUS_CONNECTED:
-		_state = State.CONNECTED
 		_tcp.set_no_delay(true)
-		connected_to_server.emit()
+		var auth_err := _send_result_hello()
+		if auth_err != OK:
+			_fail_connection("result authentication write failed: %d" % auth_err)
+			return
+		_state = State.AUTHENTICATING
+		_connect_elapsed = 0.0
+		_process_authenticating(0.0)
 	elif status == StreamPeerTCP.STATUS_CONNECTING:
 		_connect_elapsed += delta
 		if _connect_elapsed >= connect_timeout_s:
-			_tcp.disconnect_from_host()
-			_state = State.DISCONNECTED
-			connection_failed.emit("connection timed out")
+			_fail_connection("connection timed out")
 	elif status == StreamPeerTCP.STATUS_ERROR:
-		_state = State.DISCONNECTED
-		connection_failed.emit("connection error")
+		_fail_connection("connection error")
 	elif status == StreamPeerTCP.STATUS_NONE:
-		_state = State.DISCONNECTED
-		connection_failed.emit("connection reset")
+		_fail_connection("connection reset")
+
+
+func _process_authenticating(delta: float) -> void:
+	_tcp.poll()
+	var status := _tcp.get_status()
+	if status != StreamPeerTCP.STATUS_CONNECTED:
+		_fail_connection("result authentication connection closed")
+		return
+	_connect_elapsed += delta
+	if _connect_elapsed >= connect_timeout_s:
+		_fail_connection("result authentication timed out")
+		return
+	_drain_available()
 
 
 func _process_connected() -> void:
@@ -134,13 +188,13 @@ func _process_connected() -> void:
 		_bad_status_ticks += 1
 		if _bad_status_ticks <= 5:
 			return
-		_state = State.DISCONNECTED
-		_bad_status_ticks = 0
-		_recv_buffer.clear()
-		disconnected_from_server.emit()
+		_drop_connection()
 		return
 	_bad_status_ticks = 0
+	_drain_available()
 
+
+func _drain_available() -> void:
 	var drained := 0
 	while drained < MAX_DRAIN_PER_TICK:
 		drained += 1
@@ -151,15 +205,11 @@ func _process_connected() -> void:
 		var err: int = result[0]
 		var data: PackedByteArray = result[1]
 		if err != OK:
-			_state = State.DISCONNECTED
-			_recv_buffer.clear()
-			disconnected_from_server.emit()
+			_drop_connection()
 			return
 		_recv_buffer.append_array(data)
 		if _recv_buffer.size() > max_recv_buffer:
-			_state = State.DISCONNECTED
-			_recv_buffer.clear()
-			connection_failed.emit("receive buffer overflow")
+			_fail_connection("receive buffer overflow")
 			return
 	_parse_frames()
 
@@ -169,13 +219,11 @@ func _parse_frames() -> void:
 	while _recv_buffer.size() >= HEADER_SIZE and safety < 128:
 		safety += 1
 		if _recv_buffer[0] != MAGIC_0 or _recv_buffer[1] != MAGIC_1 or _recv_buffer[2] != MAGIC_2 or _recv_buffer[3] != MAGIC_3:
-			_recv_buffer.clear()
-			connection_failed.emit("invalid OLCP magic")
+			_fail_connection("invalid OLCP magic")
 			return
 		var version := _recv_buffer[4]
 		if version != PROTOCOL_VERSION:
-			_recv_buffer.clear()
-			connection_failed.emit("unsupported OLCP version: %d" % version)
+			_fail_connection("unsupported OLCP version: %d" % version)
 			return
 		var frame_type := _recv_buffer[5]
 		var flags := _be_u16(_recv_buffer, 6)
@@ -187,11 +235,41 @@ func _parse_frames() -> void:
 			break
 		var payload := _recv_buffer.slice(HEADER_SIZE, frame_size)
 		_recv_buffer = _recv_buffer.slice(frame_size)
+		if _state == State.AUTHENTICATING and frame_type != TYPE_RESULT_WELCOME:
+			_fail_connection("expected result_welcome, got frame type %d" % frame_type)
+			return
 		_dispatch_frame(frame_type, flags, pts_ns, duration_ns, payload)
+		if _state == State.DISCONNECTED:
+			return
+
+
+func _send_result_hello() -> int:
+	# Client-first authentication protects the result stream before the Python
+	# server replaces an existing headset connection or publishes any data.
+	# Empty-token deployments use the same explicit hello/welcome handshake so
+	# a successful TCP connect cannot be mistaken for accepted authentication.
+	var payload := JSON.stringify({
+		"schema": "operator.result_hello.v1",
+		"auth_token": auth_token,
+	}).to_utf8_buffer()
+	var frame := PackedByteArray([
+		MAGIC_0, MAGIC_1, MAGIC_2, MAGIC_3,
+		PROTOCOL_VERSION, TYPE_RESULT_HELLO, 0, 0,
+	])
+	# pts_ns and duration_ns are both zero for a connection handshake.
+	for _index in range(16):
+		frame.append(0)
+	_append_be_u32(frame, payload.size())
+	frame.append_array(payload)
+	return _tcp.put_data(frame)
 
 
 func _dispatch_frame(frame_type: int, flags: int, _pts_ns: int, _duration_ns: int, payload: PackedByteArray) -> void:
 	match frame_type:
+		TYPE_RESULT_WELCOME:
+			_handle_result_welcome(_json_payload(payload))
+		TYPE_CAPTURE_REQUEST:
+			capture_request_received.emit(_json_payload(payload))
 		TYPE_ALGORITHM_STATUS:
 			status_received.emit(_json_payload(payload))
 		TYPE_MAP_RESET:
@@ -211,6 +289,29 @@ func _dispatch_frame(frame_type: int, flags: int, _pts_ns: int, _duration_ns: in
 			map_transform_received.emit(_json_payload(payload))
 		_:
 			pass
+
+
+func _handle_result_welcome(welcome: Dictionary) -> void:
+	if _state != State.AUTHENTICATING:
+		return
+	if str(welcome.get("schema", "")) != "operator.result_welcome.v1":
+		_fail_connection("invalid result_welcome schema")
+		return
+	var next_server_instance_id := str(welcome.get("server_instance_id", ""))
+	if next_server_instance_id.is_empty():
+		_fail_connection("result_welcome missing server_instance_id")
+		return
+	if not _server_instance_id.is_empty() and _server_instance_id != next_server_instance_id:
+		_handle_map_reset({
+			"schema": "operator.map_reset.v1",
+			"map_id": "",
+			"map_version": -1,
+			"reason": "result server changed",
+		})
+	_server_instance_id = next_server_instance_id
+	_state = State.CONNECTED
+	_connect_elapsed = 0.0
+	connected_to_server.emit()
 
 
 func _handle_map_reset(reset: Dictionary) -> void:
@@ -349,3 +450,10 @@ func _be_u64(bytes: PackedByteArray, offset: int) -> int:
 	for i in range(8):
 		value = (value << 8) | bytes[offset + i]
 	return value
+
+
+func _append_be_u32(bytes: PackedByteArray, value: int) -> void:
+	bytes.append((value >> 24) & 0xff)
+	bytes.append((value >> 16) & 0xff)
+	bytes.append((value >> 8) & 0xff)
+	bytes.append(value & 0xff)

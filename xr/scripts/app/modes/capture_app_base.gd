@@ -21,6 +21,10 @@ const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
 const DEFAULT_RGB_FPS := 30
 const DEFAULT_RGB_CODEC := "hevc"
+const LIVE_FEED_MIN_RGB_BITRATE := 500000
+const LIVE_FEED_MAX_RGB_BITRATE := DEFAULT_RGB_BITRATE
+const LIVE_FEED_MIN_RGB_FPS := 1
+const LIVE_FEED_MAX_RGB_FPS := 60
 const OPENXR_HAND_CAPTURE_SINGLETON := &"NativeOpenXRHandCapture"
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
@@ -116,6 +120,12 @@ var muxer_plugin: Object
 var pico_openxr_bridge: Object
 var live_server_plugin: Object
 var live_pull_view: Node3D
+## Streams the Live Feed server last asked for (OLCP stream names). Empty
+## until the settings page connects and the server answers.
+var _server_requested_streams: Array = []
+## Currently displayed input-source mismatch text ("" when there is none).
+## Kept so the notice is only re-emitted when it actually changes.
+var _input_source_notice := ""
 var capture_options := {
 	"interaction_mode": "controllers",
 	"stereo_rgb": true,
@@ -1273,6 +1283,8 @@ func _setup_xr_scene() -> void:
 			live_pull_view.disconnected_from_server.connect(_on_live_pull_disconnected)
 		if live_pull_view.has_signal("connection_failed"):
 			live_pull_view.connection_failed.connect(_on_live_pull_connection_failed)
+		if live_pull_view.has_signal("capture_request_received"):
+			live_pull_view.capture_request_received.connect(_on_capture_request_received)
 		origin.add_child(live_pull_view)
 
 	settings_panel = ViewLockedCapturePanelScript.new(_is_live_feed_mode())
@@ -1322,6 +1334,7 @@ func _setup_xr_scene() -> void:
 
 	record_control = ViewLockedRecordControlScript.new()
 	record_control.name = "ViewLockedRecordControl"
+	record_control.set_live_feed_mode(_is_live_feed_mode())
 	record_control.start_requested.connect(start_capture)
 	record_control.stop_requested.connect(stop_capture)
 	record_control.settings_requested.connect(_on_settings_requested)
@@ -1841,14 +1854,208 @@ func _start_live_pull() -> void:
 		return
 	var host := str(capture_options.get("server_host", default_live_server_host))
 	var port := int(capture_options.get("server_result_port", default_live_result_port))
+	var token := str(capture_options.get("server_auth_token", default_live_server_auth_token))
 	print("Live feed pull connecting: %s:%d" % [host, port])
-	live_pull_view.call("connect_to_server", host, port)
+	live_pull_view.call("connect_to_server", host, port, token)
 
 
 func _stop_live_pull() -> void:
 	if live_pull_view != null and live_pull_view.has_method("disconnect_from_server"):
 		print("Live feed pull disconnecting")
 		live_pull_view.call("disconnect_from_server")
+
+
+## OLCP stream name -> the capture_options flag that produces it.
+## Note controller_input has no independent flag: it is derived from
+## record_controller_pose (see the provider config below), so both OLCP
+## streams map onto the same switch.
+const SERVER_STREAM_TO_OPTION := {
+	"depth.u16": "record_depth",
+	"head_pose.json": "record_head_pose",
+	"controller_pose.json": "record_controller_pose",
+	"controller_input.json": "record_controller_pose",
+	"hand_joints.json": "record_hand_data",
+}
+
+## Streams the server can ask for that this client cannot switch off per-stream
+## (RGB is produced by the camera provider itself). Listed so the read-out in
+## settings does not claim we send something we do not, and vice versa.
+const SERVER_STREAM_UNMAPPED := ["rgb.hevc", "session.json"]
+
+
+## The server owns the stream selection in Live Feed mode: it tells us what its
+## algorithm needs and we capture exactly that, instead of the operator picking
+## streams the algorithm will silently ignore. Arrives on the live-pull channel
+## when the settings page connects, i.e. before any capture has started.
+func _positive_live_feed_limit(limits: Dictionary, key: String) -> int:
+	if not limits.has(key):
+		return -1
+	var raw_value: Variant = limits.get(key)
+	var parsed_value := -1
+	if raw_value is int or raw_value is float:
+		parsed_value = int(raw_value)
+	elif raw_value is String and str(raw_value).is_valid_int():
+		parsed_value = str(raw_value).to_int()
+	if parsed_value <= 0:
+		push_warning("Ignoring invalid capture limit %s=%s" % [key, raw_value])
+		return -1
+	return parsed_value
+
+
+func _on_capture_request_received(request: Dictionary) -> void:
+	if not _is_live_feed_mode():
+		return
+	var selected: Array = []
+	var raw_selected: Variant = request.get("selected_streams", [])
+	if raw_selected is Array:
+		selected = raw_selected
+
+	_server_requested_streams = selected.duplicate()
+
+	# Enable exactly what was asked for, nothing more.
+	var requested := _server_requested_options()
+	var updates: Dictionary = {}
+	for option_v in SERVER_STREAM_TO_OPTION.values():
+		var option := str(option_v)
+		updates[option] = bool(requested.get(option, false))
+	# RGB is a single OLCP stream, but the camera provider can encode either
+	# left-only mono or side-by-side stereo. The server selects that shape via
+	# limits.rgb_eye; absent/unknown values preserve the protocol's stereo
+	# default for existing algorithms.
+	var limits: Dictionary = {}
+	var raw_limits: Variant = request.get("limits", {})
+	if raw_limits is Dictionary:
+		limits = raw_limits
+	var rgb_eye := str(limits.get("rgb_eye", "stereo")).strip_edges().to_lower()
+	updates["stereo_rgb"] = rgb_eye != "left" and rgb_eye != "mono"
+	# Recording-quality defaults are intentionally high. Live algorithms can
+	# cap their HEVC budget independently without reducing Ego Record quality.
+	# Reset on every request so limits from a previous server do not leak into
+	# a reconnect or a later algorithm that omits them.
+	updates["rgb_fps"] = DEFAULT_RGB_FPS
+	updates["rgb_bitrate"] = DEFAULT_RGB_BITRATE
+	if limits.has("rgb_max_hz"):
+		var requested_rgb_fps := _positive_live_feed_limit(limits, "rgb_max_hz")
+		if requested_rgb_fps > 0:
+			updates["rgb_fps"] = clampi(
+				requested_rgb_fps,
+				LIVE_FEED_MIN_RGB_FPS,
+				LIVE_FEED_MAX_RGB_FPS,
+			)
+	if limits.has("rgb_bitrate_bps"):
+		var requested_rgb_bitrate := _positive_live_feed_limit(limits, "rgb_bitrate_bps")
+		if requested_rgb_bitrate > 0:
+			updates["rgb_bitrate"] = clampi(
+				requested_rgb_bitrate,
+				LIVE_FEED_MIN_RGB_BITRATE,
+				LIVE_FEED_MAX_RGB_BITRATE,
+			)
+
+	# These capture paths have no OLCP stream in Live Feed. Disable their
+	# producers so a narrow server request does not spend device CPU on audio,
+	# body, or motion data that can never be transmitted.
+	updates["record_audio"] = false
+	updates["record_body_tracking"] = false
+	updates["record_motion_trackers"] = false
+	# Hands and controllers are mutually exclusive and the live one is a
+	# physical fact, so the request cannot switch it on by itself. Drop the
+	# source that is not in use; _update_input_source_mismatch_notice() then
+	# asks the operator to switch if the algorithm needed the other one.
+	if _last_capture_interaction_mode == "hands":
+		updates["record_controller_pose"] = false
+	elif _last_capture_interaction_mode == "controllers":
+		updates["record_hand_data"] = false
+	_merge_capture_options(updates)
+
+	print("[Operator] Capture streams set by server: %s" % JSON.stringify(selected))
+	if settings_panel != null and settings_panel.has_method("set_server_requested_streams"):
+		settings_panel.set_server_requested_streams(
+			selected, str(request.get("algorithm", ""))
+		)
+	_update_input_source_mismatch_notice()
+
+
+## capture_options keys the server's current request maps to.
+func _server_requested_options() -> Dictionary:
+	var requested: Dictionary = {}
+	for stream_v in _server_requested_streams:
+		var option := str(SERVER_STREAM_TO_OPTION.get(str(stream_v), ""))
+		if not option.is_empty():
+			requested[option] = true
+	return requested
+
+
+## In Live Feed the server owns the stream selection, but the runtime input
+## mode (hands vs controllers) writes the same flags. Re-applying the server's
+## choice afterwards lets auto-detection *narrow* the set — there genuinely is
+## no controller data while the user is bare-handed — without ever widening it
+## past what the algorithm asked for.
+func _enforce_server_stream_selection() -> void:
+	if not _is_live_feed_mode() or _server_requested_streams.is_empty():
+		return
+	var requested := _server_requested_options()
+	for option_v in SERVER_STREAM_TO_OPTION.values():
+		var option := str(option_v)
+		if not bool(requested.get(option, false)):
+			capture_options[option] = false
+	_update_input_source_mismatch_notice()
+
+
+## Hand tracking and controller tracking are mutually exclusive at the
+## provider level, and which one is live is a physical fact we cannot change
+## from software. So when the algorithm wants the source the operator is not
+## currently holding, ask them to switch rather than silently sending nothing.
+func _update_input_source_mismatch_notice() -> void:
+	if not _is_live_feed_mode() or _server_requested_streams.is_empty():
+		_clear_input_source_mismatch_notice()
+		return
+	var requested := _server_requested_options()
+	var wants_hands := bool(requested.get("record_hand_data", false))
+	var wants_controllers := bool(requested.get("record_controller_pose", false))
+	var mode := _last_capture_interaction_mode
+
+	var message := ""
+	if wants_hands and not wants_controllers and mode == "controllers":
+		message = tr("UI_SERVER_WANTS_HANDS")
+	elif wants_controllers and not wants_hands and mode == "hands":
+		message = tr("UI_SERVER_WANTS_CONTROLLERS")
+
+	# De-duplicate so a flapping input-mode detector does not replay the
+	# fade-in on every frame. _resync_capture_notice() clears this cache when
+	# the panel reopens, because the panel's callout auto-hides on a timer and
+	# would otherwise never come back while the mismatch persists.
+	if message == _input_source_notice:
+		return
+	_input_source_notice = message
+	if message.is_empty():
+		_clear_input_source_mismatch_notice()
+		return
+
+	print("[Operator] Input source mismatch: %s" % message)
+	# Surface in both places: the settings panel may be open (before capture)
+	# or closed (during capture), and the operator needs to see it either way.
+	if record_control != null and record_control.has_method("set_status_notice"):
+		record_control.call("set_status_notice", message, "warning")
+	if settings_panel != null and settings_panel.has_method("show_capture_notice"):
+		settings_panel.call("show_capture_notice", message)
+
+
+## Re-show the mismatch notice after the panel was reopened: its callout hides
+## itself on a timer (and on host edits / successful connect), so the cached
+## "already shown" state has to be dropped or the warning is lost for good.
+func _resync_capture_notice() -> void:
+	if not _is_live_feed_mode():
+		return
+	_input_source_notice = ""
+	_update_input_source_mismatch_notice()
+
+
+func _clear_input_source_mismatch_notice() -> void:
+	_input_source_notice = ""
+	if record_control != null and record_control.has_method("clear_status_notice"):
+		record_control.call("clear_status_notice")
+	if settings_panel != null and settings_panel.has_method("hide_capture_notice"):
+		settings_panel.call("hide_capture_notice")
 
 
 func _on_live_pull_connected(host: String, port: int) -> void:
@@ -2010,6 +2217,8 @@ func _apply_capture_interaction_mode(mode: String) -> void:
 	elif mode == "controllers":
 		capture_options["record_controller_pose"] = true
 		capture_options["record_hand_data"] = false
+	# Live Feed: the algorithm's request wins over auto-detection.
+	_enforce_server_stream_selection()
 	if settings_panel != null and settings_panel.has_method("set_interaction_mode"):
 		settings_panel.call("set_interaction_mode", mode)
 	if record_control != null and record_control.visible and not _recording:
@@ -2026,6 +2235,7 @@ func _on_settings_requested() -> void:
 	if settings_panel != null and settings_panel.has_method("set_feedback_input_mode"):
 		settings_panel.set_feedback_input_mode(mode, right_pointer if mode == "controllers" else null)
 	settings_panel.open()
+	_resync_capture_notice()
 	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_update_pico_tracker_setup_status(0.0)
 
@@ -2040,6 +2250,7 @@ func _open_live_feed_settings() -> void:
 		settings_panel.show_live_server_settings()
 	else:
 		settings_panel.open()
+	_resync_capture_notice()
 
 
 func _is_live_feed_mode() -> bool:
@@ -2343,6 +2554,11 @@ func _on_depth_sampler_start_failed(reason: String) -> void:
 func _merge_capture_options(options: Dictionary) -> void:
 	for key in options.keys():
 		capture_options[key] = options[key]
+	# In Live Feed the server owns the stream selection, but panel Save,
+	# scene setup and the RGB-provider probe all merge panel options in here.
+	# Re-assert the server's choice at the single point they converge on,
+	# rather than trusting every caller to remember.
+	_enforce_server_stream_selection()
 
 
 func _upload_config_available() -> bool:

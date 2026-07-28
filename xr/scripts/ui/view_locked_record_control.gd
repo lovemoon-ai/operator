@@ -44,16 +44,68 @@ class HoldRing:
 				true
 			)
 
+
+class BreathingIndicator:
+	extends Control
+
+	const CYCLE_SECONDS := 1.8
+	const COLOR := Color(0.30, 0.88, 0.72, 1.0)
+
+	var _phase := 0.0
+	var _active := false
+
+	func _ready() -> void:
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		visible = _active
+		set_process(_active)
+
+	func set_active(value: bool) -> void:
+		if _active == value:
+			return
+		_active = value
+		visible = value
+		if value:
+			_phase = 0.0
+		set_process(value)
+		queue_redraw()
+
+	func _process(delta: float) -> void:
+		_phase = fposmod(_phase + delta * TAU / CYCLE_SECONDS, TAU)
+		queue_redraw()
+
+	func _draw() -> void:
+		if not _active:
+			return
+		var breath := 0.5 + 0.5 * sin(_phase - PI * 0.5)
+		var center := size * 0.5
+		var glow_radius := 9.0 + 7.0 * breath
+		var glow_alpha := 0.18 - 0.09 * breath
+		var core_radius := 5.5 + 1.5 * breath
+		var core_alpha := 0.72 + 0.26 * breath
+		draw_circle(
+			center,
+			glow_radius,
+			Color(COLOR.r, COLOR.g, COLOR.b, glow_alpha)
+		)
+		draw_circle(
+			center,
+			core_radius,
+			Color(COLOR.r, COLOR.g, COLOR.b, core_alpha)
+		)
+
+
 var _viewport: SubViewport
 var _primary_button: Button
 var _settings_button: Button
 var _timer_label: Label
+var _breathing_indicator: BreathingIndicator
 var _upload_status_label: Label
 var _primary_ring: HoldRing
 var _settings_ring: HoldRing
 var _cursor: Panel
 var _mode := "controllers"
 var _recording := false
+var _live_feed_mode := false
 var _hold_action := ""
 var _hold_seconds := 0.0
 var _suppress_primary_pressed := false
@@ -103,6 +155,12 @@ func show_for_mode(mode: String) -> void:
 	visible = true
 	_update_controls()
 
+
+func set_live_feed_mode(enabled: bool) -> void:
+	_live_feed_mode = enabled
+	_update_controls()
+
+
 func hide_control() -> void:
 	_cancel_hold()
 	clear_pointer()
@@ -116,7 +174,7 @@ func set_recording(recording: bool) -> void:
 	_update_controls()
 
 func update_elapsed_seconds(seconds: float) -> void:
-	if not _recording:
+	if not _recording or _live_feed_mode:
 		return
 	var total_seconds := int(seconds)
 	_timer_label.text = "%02d:%02d" % [total_seconds / 60, total_seconds % 60]
@@ -150,6 +208,40 @@ func set_upload_status(text: String, level: String = "normal", _progress: float 
 
 func clear_upload_status() -> void:
 	set_upload_status("", "normal")
+
+
+# Generic status line under the timer, same slot as the upload status. Ego
+# Record uses it for upload progress; Live Feed uses it for capture notices
+# (e.g. the server needs hand tracking but controllers are in use). The two
+# never coexist -- Live Feed has no upload -- so sharing the slot is safe.
+#
+# Unlike set_upload_status this never forces the control visible: a capture
+# notice typically arrives while the settings panel is open (the operator just
+# pressed Connect), and popping the record control up would put a second
+# view-locked panel in front of it.
+func set_status_notice(text: String, level: String = "warning") -> void:
+	if _upload_status_label == null:
+		return
+	if text.is_empty():
+		clear_status_notice()
+		return
+	_upload_status_label.text = text
+	_upload_status_label.visible = true
+	var color := Color(1.00, 0.78, 0.36, 0.96)
+	if level == "error":
+		color = Color(1.00, 0.46, 0.42, 0.98)
+	elif level == "success":
+		color = Color(0.30, 0.88, 0.64, 0.96)
+	elif level == "normal":
+		color = Color(0.55, 0.80, 0.98, 0.94)
+	_upload_status_label.add_theme_color_override("font_color", color)
+
+
+func clear_status_notice() -> void:
+	if _upload_status_label == null:
+		return
+	_upload_status_label.visible = false
+	_upload_status_label.text = ""
 
 func update_pointer_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> bool:
 	var uv: Vector2 = intersects_ray(ray_origin, ray_direction)
@@ -237,6 +329,13 @@ func _build_viewport() -> void:
 	_timer_label.add_theme_color_override("font_color", COL_ACCENT)
 	content.add_child(_timer_label)
 
+	# Live Feed transmits data but does not create a local recording, so its
+	# active state is a quiet breathing dot instead of an elapsed-time clock.
+	_breathing_indicator = BreathingIndicator.new()
+	_breathing_indicator.visible = false
+	_breathing_indicator.custom_minimum_size = Vector2(VIEWPORT_SIZE.x, 38.0)
+	content.add_child(_breathing_indicator)
+
 	# Upload status line — hidden until EgoUploader emits its first signal.
 	# Driven from capture_app.gd via set_upload_status() / clear_upload_status().
 	_upload_status_label = Label.new()
@@ -319,7 +418,9 @@ func _make_ring(slot: Control, diameter: float) -> HoldRing:
 	return ring
 
 func _update_controls() -> void:
-	_timer_label.visible = _recording
+	_timer_label.visible = _recording and not _live_feed_mode
+	if _breathing_indicator != null:
+		_breathing_indicator.set_active(_recording and _live_feed_mode)
 	_settings_button.get_parent().visible = not _recording
 	_primary_button.get_parent().visible = _mode != "head"
 	_primary_button.text = tr("UI_STOP") if _recording else tr("UI_START")
