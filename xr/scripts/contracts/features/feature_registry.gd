@@ -12,17 +12,17 @@ static func definitions() -> Array[FeatureDefinition]:
 	var defs: Array[FeatureDefinition] = []
 	var robot_constraint_requires: Array[int] = [OperatorFeature.ROBOT_CONTROL]
 	defs.append(FeatureDefinition.create(
-		OperatorFeature.MODE_TELEOP, false, "app/modes",
-		"operator_launcher_card_teleop"))
+		OperatorFeature.MODE_TELEOP, false, "app/modes"))
 	defs.append(FeatureDefinition.create(
-		OperatorFeature.MODE_EGO_CAPTURE, true, "app/modes",
-		"operator_launcher_card_ego"))
+		OperatorFeature.MODE_EGO_CAPTURE, true, "app/modes"))
 	defs.append(FeatureDefinition.create(
-		OperatorFeature.MODE_LIVE_FEED, false, "app/modes",
-		"operator_launcher_card_live"))
+		OperatorFeature.MODE_LIVE_FEED, false, "app/modes"))
 	defs.append(FeatureDefinition.create(
-		OperatorFeature.MODE_VR, false, "app/modes",
-		"operator_launcher_card_vr"))
+		OperatorFeature.MODE_VR, false, "app/modes"))
+	# The Exit card quits the app rather than opening a scene, but it is
+	# still a launcher card and follows the same on/off contract.
+	defs.append(FeatureDefinition.create(
+		OperatorFeature.MODE_EXIT, true, "app/modes"))
 	defs.append(FeatureDefinition.create(
 		OperatorFeature.SINK_SPATIALMP4, true, "sinks/spatialmp4"))
 	defs.append(FeatureDefinition.create(
@@ -33,7 +33,7 @@ static func definitions() -> Array[FeatureDefinition]:
 		OperatorFeature.ROBOT_CONTROL, false, "core/teleop"))
 	defs.append(FeatureDefinition.create(
 		OperatorFeature.ROBOT_CONSTRAINT, false, "core/teleop",
-		"", robot_constraint_requires, [], ["ROBOT_CONTROL"]))
+		robot_constraint_requires, [], ["ROBOT_CONTROL"]))
 	defs.append(FeatureDefinition.create(
 		OperatorFeature.DEBUG_METRICS, false, "app/debug"))
 	defs.append(FeatureDefinition.create(

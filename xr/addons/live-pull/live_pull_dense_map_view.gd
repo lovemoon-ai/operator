@@ -6,11 +6,14 @@ signal connected_to_server(host: String, port: int)
 signal disconnected_from_server(host: String, port: int)
 signal connection_failed(host: String, port: int, reason: String)
 signal connection_status_changed(status: String, detail: String)
+## Forwarded from LivePullClient: the streams the server's algorithm wants.
+signal capture_request_received(request: Dictionary)
 
 const LivePullClientScript := preload("res://addons/live-pull/live_pull_client.gd")
 
 @export var result_host := "127.0.0.1"
 @export var result_port := 63912
+@export var result_auth_token := ""
 @export var connect_on_ready := false
 @export var max_points_per_chunk := 120000
 @export var max_rendered_chunks := 64
@@ -103,14 +106,36 @@ func _process(delta: float) -> void:
 		_connect_client("retry")
 
 
-func connect_to_server(host: String = result_host, port: int = result_port) -> void:
-	result_host = host
-	result_port = port
+func connect_to_server(
+	host: String = result_host,
+	port: int = result_port,
+	auth_token: String = result_auth_token
+) -> void:
+	var next_host := host.strip_edges()
+	if next_host.is_empty():
+		next_host = "127.0.0.1"
+	var next_port := clampi(port, 1, 65535)
 	_ensure_client()
 	_want_connection = true
 	_retry_pending = false
-	if client.is_result_active() and client.host == result_host and client.port == result_port:
+	var same_endpoint := (
+		client.host == next_host
+		and client.port == next_port
+		and client.auth_token == auth_token
+	)
+	result_host = next_host
+	result_port = next_port
+	result_auth_token = auth_token
+	if same_endpoint and client.is_result_connected():
 		print("Live-pull already %s: %s:%d" % [client.get_connection_state(), result_host, result_port])
+		# The settings panel marks itself "connecting" before asking us to
+		# connect. Re-emit success for an already-live socket so Save is not
+		# permanently gated waiting for an event that would never recur.
+		_on_connected_to_server()
+		return
+	if same_endpoint and client.is_result_active():
+		print("Live-pull already %s: %s:%d" % [client.get_connection_state(), result_host, result_port])
+		connection_status_changed.emit("connecting", "%s:%d" % [result_host, result_port])
 		return
 	_connect_client("start")
 
@@ -132,6 +157,7 @@ func _ensure_client() -> void:
 	client.disconnected_from_server.connect(_on_disconnected_from_server)
 	client.connection_failed.connect(_on_connection_failed)
 	client.status_received.connect(_on_status_received)
+	client.capture_request_received.connect(_on_capture_request_received)
 	client.manifest_received.connect(_on_manifest_received)
 	client.dense_chunk_ready.connect(_on_dense_chunk_ready)
 	client.dense_commit_received.connect(_on_dense_commit_received)
@@ -165,6 +191,14 @@ func _on_connection_failed(reason: String) -> void:
 
 func _on_status_received(status: Dictionary) -> void:
 	print("Live-pull status: %s" % JSON.stringify(status))
+
+
+func _on_capture_request_received(request: Dictionary) -> void:
+	print("Live-pull capture request: algorithm=%s streams=%s" % [
+		str(request.get("algorithm", "")),
+		JSON.stringify(request.get("selected_streams", []))
+	])
+	capture_request_received.emit(request)
 
 
 func _on_manifest_received(manifest: Dictionary) -> void:
@@ -425,7 +459,7 @@ func _connect_client(reason: String) -> void:
 		return
 	print("Live-pull connecting to %s:%d (%s)" % [result_host, result_port, reason])
 	connection_status_changed.emit("connecting", "%s:%d" % [result_host, result_port])
-	client.connect_result(result_host, result_port)
+	client.connect_result(result_host, result_port, result_auth_token)
 
 
 func _schedule_reconnect(reason: String) -> void:

@@ -110,6 +110,8 @@ var _local_upload_upload_button: Button
 var _local_upload_sessions: Array = []
 var _local_upload_selection: Dictionary = {}
 var _live_server_status_label: Label
+## Read-only readout of the streams the server asked for. Live Feed only.
+var _server_streams_label: Label
 var _storage_view_button: Button
 # Dedicated HTTPRequest for the open()-time upload-URL health probe.
 # Separate from capture_app.gd's upload_ack_request so the two flows
@@ -153,6 +155,12 @@ var _runtime_rgb_stereo_available := false
 # set_live_server_connectivity_status(). Used by _on_confirm_requested to
 # gate the Save button in live-feed mode.
 var _live_server_connected := false
+# Exact host/ports/token tuple that produced the last successful connection.
+# The boolean alone is not enough: SpinBox text can be committed on focus loss,
+# after the user has already pressed Save, so the value_changed callback is not
+# guaranteed to have run before validation. Comparing the tuple at validation
+# time makes the gate correct even in that ordering.
+var _verified_live_server_endpoint := ""
 # Inline "popup-style" callout that appears under the server-host row when
 # the user tries to save without a configured + connected server. See
 # _build_live_server_required_callout().
@@ -221,7 +229,7 @@ func get_options() -> Dictionary:
 	# persisted/automation override lives in capture_app.gd::capture_options;
 	# runtime hand/controller detection is kept out of saved settings.
 	var options := {
-		"stereo_rgb": _toggle_enabled("stereo_rgb"),
+		"stereo_rgb": _toggle_enabled_or_default("stereo_rgb"),
 		"export_coordinate_space": OpenXRExportSpace.normalize(_requested_export_coordinate_space),
 		# NOTE: deliberately NOT gated on _depth_supported. capture_app.gd owns
 		# depth gating for unsupported providers (Pico) via its
@@ -230,23 +238,23 @@ func get_options() -> Dictionary:
 		# the provider probe: at _setup_ui the panel options are merged into
 		# capture_options while _depth_supported is still false, latching depth
 		# off even on Quest where it IS supported.
-		"record_depth": _toggle_enabled("record_depth"),
-		"record_head_pose": _toggle_enabled("record_head_pose"),
-		"record_controller_pose": _toggle_enabled("record_controller_pose"),
-		"record_hand_data": _toggle_enabled("record_hand_data"),
-		"record_body_tracking": _toggle_enabled("record_body_tracking"),
+		"record_depth": _toggle_enabled_or_default("record_depth"),
+		"record_head_pose": _toggle_enabled_or_default("record_head_pose"),
+		"record_controller_pose": _toggle_enabled_or_default("record_controller_pose"),
+		"record_hand_data": _toggle_enabled_or_default("record_hand_data"),
+		"record_body_tracking": _toggle_enabled_or_default("record_body_tracking"),
 		# Same rationale as record_depth above: NOT gated on
 		# _motion_tracker_supported. capture_app.gd force-offs trackers for
 		# non-Pico providers via _update_motion_tracker_support_flag() and
 		# _effective_capture_options(); gating here too races the provider
 		# probe and latches trackers off on Pico (where they ARE supported)
 		# when the panel options are merged at _setup_ui.
-		"record_motion_trackers": _toggle_enabled("record_motion_trackers"),
+		"record_motion_trackers": _toggle_enabled_or_default("record_motion_trackers"),
 		"max_motion_trackers": 2,
 		# v3 spatial audio: opt-in for privacy. The toggle defaults off below
 		# (default_on=false in _add_stream_toggle) so a recording never opens
 		# the mic without the operator explicitly enabling it.
-		"record_audio": _toggle_enabled("record_audio")
+		"record_audio": _toggle_enabled_or_default("record_audio")
 	}
 	var rgb_resolution := _selected_rgb_resolution()
 	options["rgb_width"] = rgb_resolution.x
@@ -361,7 +369,13 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	build_two_column(parent)
 
 	if _live_server_mode:
+		# Live Feed shows only the server connection settings. Which streams
+		# are captured is negotiated with the server (see the capture_request
+		# frame) rather than picked here, and the robot-constraint debug
+		# views belong to teleop, so both groups are omitted along with the
+		# local recording groups (outputs / storage / upload).
 		_build_live_server_group()
+		return
 
 	# Control-mode picker used to live here as an OptionButton (controllers /
 	# hands / head). It moved out of the UI per the auto-detect redesign --
@@ -413,9 +427,8 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_add_stream_toggle(streams, "record_audio", tr("UI_RECORD_AUDIO"), true)
 
 	# --- Display group -----------------------------------------------------
-	if not _live_server_mode:
-		var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
-		_add_stream_toggle(display, "show_hand_skeleton_overlay", tr("UI_SHOW_HAND_SKELETON_OVERLAY"), true)
+	var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
+	_add_stream_toggle(display, "show_hand_skeleton_overlay", tr("UI_SHOW_HAND_SKELETON_OVERLAY"), true)
 
 	# --- Robot constraint group -------------------------------------------
 	var robot_constraint := register_group("robot_constraint", "UI_ROBOT_CONSTRAINT_GROUP", "robot-arm")
@@ -446,9 +459,6 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_galbot_g1_debug_button.add_theme_font_size_override("font_size", 21)
 	_galbot_g1_debug_button.pressed.connect(_on_galbot_g1_debug_pressed)
 	add_interactive(robot_constraint, _galbot_g1_debug_button)
-
-	if _live_server_mode:
-		return
 
 	# --- Outputs group -----------------------------------------------------
 	var outputs := register_group("outputs", "UI_OUTPUTS", "check")
@@ -560,9 +570,9 @@ func _build_live_server_group() -> void:
 	_server_host.custom_minimum_size.y = 55
 	_server_host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_server_host.add_theme_font_size_override("font_size", 19)
-	# Any keystroke invalidates a prior successful connection (it was bound
-	# to the old host) and dismisses a stale "must connect" callout.
-	_server_host.text_changed.connect(_on_server_host_text_changed)
+	# Any endpoint edit invalidates a prior successful connection and dismisses
+	# a stale "must connect" callout.
+	_server_host.text_changed.connect(_on_live_server_endpoint_changed)
 	add_interactive(server_host_row, _server_host)
 
 	if _qr_scan_supported():
@@ -588,6 +598,7 @@ func _build_live_server_group() -> void:
 	_server_port.prefix = "%s " % tr("UI_LIVE_SERVER_PORT")
 	_server_port.custom_minimum_size.y = 55
 	_server_port.add_theme_font_size_override("font_size", 19)
+	_server_port.value_changed.connect(_on_live_server_endpoint_changed)
 	add_interactive(live, _server_port)
 
 	_add_field_label(live, tr("UI_LIVE_RESULT_PORT"))
@@ -599,6 +610,7 @@ func _build_live_server_group() -> void:
 	_result_port.prefix = "%s " % tr("UI_LIVE_RESULT_PORT")
 	_result_port.custom_minimum_size.y = 55
 	_result_port.add_theme_font_size_override("font_size", 19)
+	_result_port.value_changed.connect(_on_live_server_endpoint_changed)
 	add_interactive(live, _result_port)
 
 	_add_field_label(live, tr("UI_LIVE_SERVER_TOKEN"))
@@ -607,7 +619,14 @@ func _build_live_server_group() -> void:
 	_server_token.secret = true
 	_server_token.custom_minimum_size.y = 55
 	_server_token.add_theme_font_size_override("font_size", 19)
+	_server_token.text_changed.connect(_on_live_server_endpoint_changed)
 	add_interactive(live, _server_token)
+
+	# Read-only: the server decides which streams to capture, so this only
+	# reports the outcome. It fills in once the connection is established and
+	# the server answers with a capture_request.
+	_add_section_label_to(live, "UI_SERVER_REQUESTED_STREAMS")
+	_server_streams_label = _add_status_label_to(live, tr("UI_SERVER_STREAMS_PENDING"))
 
 
 func _on_confirm_requested() -> void:
@@ -855,7 +874,7 @@ func _rgb_provider_key() -> String:
 func _rgb_resolution_choices() -> Array:
 	if _rgb_provider_key() != "pico":
 		return RGB_RESOLUTIONS.get(_rgb_provider_key(), RGB_RESOLUTIONS[RGB_PROVIDER_DEFAULT])
-	if _toggle_enabled("stereo_rgb"):
+	if _toggle_enabled_or_default("stereo_rgb"):
 		return _runtime_rgb_stereo_resolutions
 	return _runtime_rgb_mono_resolutions
 
@@ -1277,9 +1296,12 @@ func _add_field_label(parent: Container, text: String) -> Label:
 	return lbl
 
 
+## Reads a stream toggle, falling back to the mode's default when the control
+## was never built. Live Feed skips whole groups (see _build_settings_content),
+## so a bare `_stream_toggles[key]` would raise "Invalid access to key" and
+## abort get_options() -- which every Save / Connect / setup path goes through.
 func _toggle_enabled(key: String) -> bool:
-	var toggle: CheckButton = _stream_toggles[key]
-	return toggle.button_pressed
+	return _toggle_enabled_or_default(key)
 
 
 func _toggle_enabled_or_default(key: String) -> bool:
@@ -2164,13 +2186,61 @@ func set_upload_connectivity_status(text: String, level: String = "normal") -> v
 	_upload_status_label.add_theme_color_override("font_color", color)
 
 
+## OLCP stream name -> the i18n key already used for that stream elsewhere,
+## so the readout matches the wording operators see in Ego Record.
+const SERVER_STREAM_LABEL_KEYS := {
+	"rgb.hevc": "UI_STEREO_RGB",
+	"depth.u16": "UI_DEPTH",
+	"head_pose.json": "UI_HEAD_POSE",
+	"controller_pose.json": "UI_CONTROLLER_POSES",
+	"hand_joints.json": "UI_HAND_JOINTS",
+	"controller_input.json": "UI_CONTROLLER_INPUT",
+}
+
+
+## Warn that the algorithm needs an input source the operator is not using.
+## Reuses the live-server callout: same panel, same "you must act" meaning.
+func show_capture_notice(message: String) -> void:
+	_show_live_server_required_callout(message)
+
+
+func hide_capture_notice() -> void:
+	_hide_live_server_required_callout()
+
+
+## Show which streams the server asked for. Purely informational: the operator
+## cannot change them, because the algorithm on the server decides.
+func set_server_requested_streams(streams: Array, algorithm: String = "") -> void:
+	if _server_streams_label == null:
+		return
+	var names: Array[String] = []
+	for stream_v in streams:
+		var stream := str(stream_v)
+		# session.json is protocol bookkeeping, not a capture stream.
+		if stream == "session.json":
+			continue
+		var key := str(SERVER_STREAM_LABEL_KEYS.get(stream, ""))
+		names.append(tr(key) if not key.is_empty() else stream)
+
+	if names.is_empty():
+		_server_streams_label.text = tr("UI_SERVER_STREAMS_NONE")
+	elif algorithm.is_empty():
+		_server_streams_label.text = ", ".join(names)
+	else:
+		_server_streams_label.text = tr("UI_SERVER_STREAMS_VALUE") % [", ".join(names), algorithm]
+	_server_streams_label.visible = true
+
+
 func set_live_server_connectivity_status(text: String, level: String = "normal") -> void:
 	# Mirror connection state so _on_confirm_requested can gate Save without
 	# polling capture_app. capture_app drives this with "success" on connect,
 	# "warning" on disconnect, "error" on failure — only "success" unblocks.
 	_live_server_connected = (level == "success")
 	if _live_server_connected:
+		_verified_live_server_endpoint = _live_server_endpoint_key()
 		_hide_live_server_required_callout()
+	else:
+		_verified_live_server_endpoint = ""
 	if _live_server_status_label == null:
 		return
 	_live_server_status_label.text = text
@@ -2194,9 +2264,23 @@ func _live_server_save_blocker() -> String:
 		return ""
 	if _server_host.text.strip_edges().is_empty():
 		return tr("UI_LIVE_SERVER_HOST_REQUIRED")
-	if not _live_server_connected:
+	if (
+		not _live_server_connected
+		or _verified_live_server_endpoint != _live_server_endpoint_key()
+	):
+		_live_server_connected = false
+		_verified_live_server_endpoint = ""
 		return tr("UI_LIVE_SERVER_CONNECT_REQUIRED")
 	return ""
+
+
+func _live_server_endpoint_key() -> String:
+	return JSON.stringify([
+		_configured_server_host(),
+		_configured_server_port(),
+		_configured_result_port(),
+		_server_token.text.strip_edges() if _server_token != null else "",
+	])
 
 
 # Construct the inline "popup" callout that surfaces under the server-host
@@ -2284,12 +2368,11 @@ func _hide_live_server_required_callout() -> void:
 	)
 
 
-func _on_server_host_text_changed(_new_text: String) -> void:
-	# Any edit invalidates a prior successful connection (the connection was
-	# bound to the previous host string); the user must reconnect before
-	# saving. Also dismiss any stale "must connect" callout so it doesn't
-	# linger over the field they are actively editing.
+func _on_live_server_endpoint_changed(_value: Variant = null) -> void:
+	# Host, either port, and token are all part of the verified endpoint. A
+	# successful check for one tuple must never authorize saving another.
 	_live_server_connected = false
+	_verified_live_server_endpoint = ""
 	_hide_live_server_required_callout()
 
 

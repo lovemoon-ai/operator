@@ -10,8 +10,7 @@ Runs on the host, no Godot required. Checks:
       operator_feature_test_harness=false;
   (e) the export-plugin FEATURE_OPTIONS table matches the runtime
       feature registry table (name + default);
-  (f) launcher card option value equals its mode-feature value per preset
-      (compat alias consistency).
+  (f) no retired operator_launcher_card_* option lingers in a preset.
 
 Exits non-zero with itemized errors.
 """
@@ -26,13 +25,10 @@ EXPORT_PLUGIN = ROOT / "xr" / "addons" / "operator_features" / "export_plugin.gd
 REGISTRY = ROOT / "xr" / "scripts" / "contracts" / "features" / "feature_registry.gd"
 OPERATOR_FEATURE = ROOT / "xr" / "scripts" / "contracts" / "features" / "operator_feature.gd"
 
-# launcher card option -> mode feature option (alias consistency rule (f))
-CARD_ALIASES = {
-    "operator_launcher_card_teleop": "operator_feature_mode_teleop",
-    "operator_launcher_card_ego": "operator_feature_mode_ego_capture",
-    "operator_launcher_card_live": "operator_feature_mode_live_feed",
-    "operator_launcher_card_vr": "operator_feature_mode_vr",
-}
+# The operator_launcher plugin and its operator_launcher_card_* options were
+# retired: launcher cards are plain operator_feature_mode_* features now.
+# Rule (f) keeps the old options from creeping back in.
+RETIRED_OPTION_PREFIX = "operator_launcher_card_"
 
 
 def parse_presets(text):
@@ -199,14 +195,13 @@ def main():
                     "(d) production preset '%s' enables operator_feature_test_harness" % pname
                 )
 
-        # (f) launcher card alias consistency
-        for card, feature in CARD_ALIASES.items():
-            if card in options and feature in options:
-                if parse_bool(options[card]) != parse_bool(options[feature]):
-                    errors.append(
-                        "(f) preset '%s': %s=%s but %s=%s"
-                        % (pname, card, options[card], feature, options[feature])
-                    )
+        # (f) retired launcher-card options must not reappear
+        for name in sorted(options):
+            if name.startswith(RETIRED_OPTION_PREFIX):
+                errors.append(
+                    "(f) preset '%s' has retired option %s (use operator_feature_mode_* instead)"
+                    % (pname, name)
+                )
 
     if errors:
         print("validate_xr_features: FAILED (%d errors)" % len(errors), file=sys.stderr)

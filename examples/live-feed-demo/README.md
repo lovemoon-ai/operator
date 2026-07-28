@@ -1,6 +1,8 @@
-# Live Feed Depth-Fusion Server Prototype
+# Live Feed Depth-Fusion Server Example
 
-This example is the server-side prototype for Operator live feed.
+The server implementation now lives in `pyoperator.live_feed`. This directory
+keeps the example documentation and a compatibility script for older checkout
+commands.
 
 It accepts the current Quest OLCP v1 stream, validates a depth-fusion data
 demand against a Quest capability profile, demuxes incoming frames into bounded
@@ -11,13 +13,21 @@ published to the XR return channel once per second as dense-map deltas.
 
 ## Run With Quest
 
-From this directory:
+From the repository root:
 
 ```bash
 adb -s 2G0YC1ZF7S0C2D reverse tcp:63910 tcp:63910
 adb -s 2G0YC1ZF7S0C2D reverse tcp:63912 tcp:63912
-python3 operator_live_feed_server.py --algorithm depth_fusion_pointcloud --push-port 63910 --pull-port 63912
+PYTHONPATH=python python3 -m pyoperator.live_feed \
+  --algorithm depth_fusion_pointcloud \
+  --push-port 63910 \
+  --pull-port 63912
 ```
+
+After installing `pyoperator`, the equivalent command is
+`pyoperator-live-feed`. The historical
+`examples/live-feed-demo/operator_live_feed_server.py` path remains a thin
+compatibility entry point.
 
 Then start the XR app's Live Feed mode on the Quest.
 
@@ -36,7 +46,7 @@ See `../../claw/architecture/live-feed-cloud.md` for the protocol contract.
 ## Inspect The Capture Plan
 
 ```bash
-python3 operator_live_feed_server.py --print-plan
+PYTHONPATH=python python3 -m pyoperator.live_feed --print-plan
 ```
 
 This prints the validated server request. Required streams must be supported by
@@ -89,7 +99,7 @@ decode/coloring:
 Useful tuning flags:
 
 ```bash
-python3 operator_live_feed_server.py \
+PYTHONPATH=python python3 -m pyoperator.live_feed \
   --point-stride 4 \
   --publish-interval-s 1.0 \
   --max-points-per-update 80000 \
@@ -148,6 +158,9 @@ the next window.
 Server result frames use OLCP headers with server-reserved types:
 
 ```text
+100 result_hello           JSON (XR -> server, optional token authentication)
+101 capture_request        JSON
+102 result_welcome         JSON (server -> XR authentication acknowledgement)
 110 algorithm_status       JSON
 111 map_reset              JSON
 112 dense_map_manifest     JSON
@@ -159,11 +172,16 @@ Server result frames use OLCP headers with server-reserved types:
 
 By default this prototype opens `--pull-port` and sends result frames to the
 current APK's `live-pull` client. Use `--no-send-results-to-xr` when only
-testing inbound capture parsing.
+testing inbound capture parsing. The pull listener stays active for
+`capture_request`; add `--no-send-capture-request-to-xr` as well to disable the
+reverse connection completely.
+
+After authentication the server sends `result_welcome`; the headset does not
+show Connected before receiving it. A reconnect is followed by `map_reset` and
+a replay of the current bounded map snapshot before new deltas continue.
 
 `--send-capture-request-to-xr` sends the target v2 `capture_request` control
-frame at connection time. It is disabled by default because the current APK is a
-v1 sender and does not yet consume server-to-XR frames.
+frame at connection time and is enabled by default.
 
 For VGGT-SLAM2 rendering, XR should keep a chunk registry keyed by `chunk_id`,
 apply `T_openxr_map`, and render dense-map point chunks as a non-authoritative

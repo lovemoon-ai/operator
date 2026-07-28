@@ -58,115 +58,7 @@ flowchart LR
 
   Client --> Ego["Ego data<br/>SpatialMP4 + manifest"]
   Client --> Teleop["Teleop<br/>commands + video"]
-  Client --> Live["Live algorithms<br/>RGB/depth/pose in, results out"]
-  Client --> Sim["Simulation<br/>MuJoCo SO-101"]
-```
-
-## Platform Coverage
-
-| XR family | Runtime path | Main use |
-| --- | --- | --- |
-| Meta Quest | `make build-quest`, Meta/OpenXR vendor integrations | Teleop, ego capture, live feed, depth/body-capable device tests. |
-| PICO | `make build-pico`, PICO OpenXR loader and capture path | Teleop, ego capture, live feed, PICO body/motion/camera paths. |
-| Android XR / Glass XR | `Glass XR` export preset plus generic OpenXR adapter | Android XR-class packaging and baseline headset runtime. |
-
-```mermaid
-flowchart TB
-  Launcher["In-headset launcher"]
-
-  Launcher --> Teleop["Teleop mode"]
-  Launcher --> Ego["Ego capture mode"]
-  Launcher --> LiveFeed["Live Feed mode"]
-  Launcher --> VR["VR mode"]
-  Launcher --> Mujoco["MuJoCo smoke mode"]
-  Launcher --> Harness["Module test harness"]
-
-  Teleop --> RobotSide["robot-service"]
-  Ego --> WebSide["web ingest + review"]
-  LiveFeed --> AlgoSide["algorithm server"]
-  Mujoco --> SimSide["SO-101 simulation"]
-  Harness --> DeviceCI["real-device validation"]
-```
-
-## What It Does
-
-### 1. Record Ego Data
-
-Capture sessions write SpatialMP4 artifacts with timed metadata plus a
-`manifest.json` for file inventory and hashes. Debug sidecars can still be
-exported, but the raw MP4 is the canonical replay artifact.
-
-```mermaid
-flowchart LR
-  Sensors["Headset sensors<br/>RGB, depth, pose, hands, controllers"]
-  Session["Capture session"]
-  Artifact["SpatialMP4<br/>+ manifest"]
-  Upload["TUS upload"]
-  Review["Web review<br/>preview + Rerun"]
-
-  Sensors --> Session --> Artifact --> Upload --> Review
-```
-
-### 2. Teleoperate Robots
-
-The headset sends tracking and controller state through the teleop protocol.
-Robot video and telemetry come back to the in-headset panel so operation stays
-inside the XR view.
-
-```mermaid
-sequenceDiagram
-  participant XR as XR headset
-  participant Service as robot-service
-  participant Bridge as xr-bridge component
-  participant Adapter as robot-adapter
-  participant Robot as Robot or sim
-
-  XR->>Service: tracking and controller commands
-  Service->>Bridge: XR-facing network handling
-  Bridge->>Adapter: normalized teleop frames
-  Adapter->>Robot: device-specific control
-  Robot-->>Adapter: telemetry and video source
-  Adapter-->>Bridge: state, safety, video
-  Bridge-->>Service: low-latency video and feedback
-  Service-->>XR: low-latency video and feedback
-```
-
-### 3. Run Real-Time Algorithm Demos
-
-Live Feed is the online path: the headset streams RGB/depth/pose samples to a
-server, the server runs perception or policy code, and the headset renders the
-result stream as an overlay.
-
-```mermaid
-flowchart LR
-  Capture["XR capture<br/>RGB / depth / pose / input"]
-  Push["OLCP live-push"]
-  Server["Algorithm server"]
-  Worker["Depth fusion<br/>SLAM<br/>policy demo"]
-  Pull["OLCP live-pull"]
-  Overlay["In-headset result overlay"]
-
-  Capture --> Push --> Server --> Worker --> Pull --> Overlay
-```
-
-### 4. Prototype Before Hardware
-
-The examples include a MuJoCo SO-101 arm path and a live-feed depth-fusion
-server prototype, so new robot mappings and perception loops can be exercised
-before moving to a physical robot.
-
-```mermaid
-flowchart LR
-  Sim["MuJoCo SO-101"]
-  Service["robot-service"]
-  Adapter["robot-adapter driver"]
-  Protocol["teleop-protocol"]
-  XR["XR teleop panel"]
-  Dataset["episode data"]
-
-  XR --> Protocol --> Service --> Adapter --> Sim
-  Sim --> Adapter --> Service --> XR
-  Sim --> Dataset
+  Client --> Live["Live feed<br/>RGB/depth/pose in, results out"]
 ```
 
 ## Quick Start
@@ -242,17 +134,6 @@ cd examples/mujuco-arm-so101
 make env
 make run-sim
 ```
-
-## Documentation
-
-Deeper docs live under `claw/`:
-
-- [Build & install the XR app](claw/develop/build-app.md) — APK build, install, and the patched-vendor step required for ego depth capture.
-- [Architecture overview](claw/architecture/overview.md) — current system architecture.
-- Development guides (`claw/develop/`):
-  - [Add a new teleop video source](claw/develop/add-new-video-source.md)
-  - [Add a new VR device or brand](claw/develop/add-new-vr-device-or-brand.md)
-  - [Make a new robot](claw/develop/make-new-robot.md)
 
 ## Join group
 
