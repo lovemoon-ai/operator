@@ -58,14 +58,23 @@ AHB/YUV/RGBA presentation, and latency HUD behavior belong to the addon.
 feature tags through `FeatureSet`, renders launcher cards, handles automation
 mode intent extras, and routes to mode scenes.
 
+Every launcher card is gated by one `operator_feature_mode_*` flag, Exit
+included; there is no separate launcher-card mechanism. A card is visible
+only when its flag is set in the preset that produced the APK, so the
+shipped card set is a build-time decision. Automation intent extras
+(`--es operator.mode <id>`) bypass the cards entirely and are not gated by
+these flags, which is how the Live Feed E2E enters a mode whose card is off.
+
 `scripts/app/modes/` contains scene lifecycle entry points:
 
 - `teleop_mode.gd` extends `teleop_controller.gd`.
 - `ego_capture_mode.gd` extends `capture_app_base.gd`.
-- `live_feed_mode.gd` extends `capture_app_base.gd` and sets
-  `capture_sink = "server"`.
 - `vr_mode.gd` owns the standalone VR scene.
 - `mujoco/mujoco_device_test.gd` owns the MuJoCo device smoke flow.
+
+`live_feed_app.tscn` attaches `capture_app_base.gd` directly with
+`capture_sink = "server"`; `live_feed_mode.gd` is a thin wrapper that no
+scene currently references.
 
 `scripts/app/composition/` builds feature-specific dependency graphs:
 

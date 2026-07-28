@@ -29,7 +29,9 @@ XR 端启动 Live Feed 后：
 
 1. `QuestCapturePlugin` 采集 RGB、depth、pose、hand、controller input。
 2. `live-push` 的 `LivePushPlugin` 连接 `server_host:server_port`，发送 OLCP v1 frame。
-3. `live-pull` 的 `LivePullClient` 连接 `server_host:server_result_port`，等待服务器推送结果 frame。
+3. `live-pull` 的 `LivePullClient` 连接 `server_host:server_result_port`，先发送
+   `result_hello`（type 100）完成可选 token 鉴权；收到服务器的
+   `result_welcome`（type 102）后才进入 connected，再等待结果 frame。
 
 ## live-push 入站协议
 
@@ -71,6 +73,12 @@ magic, version, frame_type, flags, pts_ns, duration_ns, size = FRAME_HEADER.unpa
 `rgb_csd` 描述后续 RGB packet 的 codec 和 packetization。当前 Quest live-push
 发送 HEVC Annex-B elementary stream；每个 `rgb_packet` payload 是一个完整
 MediaCodec 输出 access unit，keyframe 会设置 `flags & 1`。
+
+`flags & 2` 表示 composite payload：先读取 `u32_be` JSON 长度和 JSON，
+剩余部分才是二进制数据。`flags & 4` 表示该二进制部分经过 zlib 压缩。
+RGB 已经是 HEVC/H.264，不再套一层压缩；Depth 解压后的规范格式始终是
+little-endian `u16` 毫米。服务端必须限制解压后的最大大小，并按
+`width * height * 2` 校验；没有 `flags & 4` 的旧版 raw depth 继续兼容。
 
 ```json
 {
@@ -225,10 +233,18 @@ def serve_pull(host="0.0.0.0", port=63912):
         return conn
 ```
 
-回传也使用同一个 OLCP header。当前 `live-pull` 支持的 server -> XR frame type：
+回传也使用同一个 OLCP header。连接建立后 XR 先发送一次：
 
 | Type | 名称 | Payload |
 | --- | --- | --- |
+| 100 | `result_hello` | `operator.result_hello.v1` JSON，包含可选 `auth_token` |
+
+服务器必须先验证 type 100，再返回确认：
+
+| Type | 名称 | Payload |
+| --- | --- | --- |
+| 102 | `result_welcome` | `operator.result_welcome.v1` JSON，包含 `server_instance_id` |
+| 101 | `capture_request` | `operator.capture_request.v1` JSON |
 | 110 | `algorithm_status` | JSON |
 | 111 | `map_reset` | JSON |
 | 112 | `dense_map_manifest` | JSON |
@@ -236,6 +252,10 @@ def serve_pull(host="0.0.0.0", port=63912):
 | 114 | `dense_map_commit` | JSON |
 | 115 | `camera_trajectory` | JSON |
 | 116 | `map_transform` | JSON |
+
+XR 只有收到 type 102 才显示连接成功。断链重连后，服务器应先发送
+`map_reset`，再重放当前地图 snapshot，最后恢复增量结果，不能直接丢弃断链期间
+的结果 frame。
 
 发送 JSON result：
 
@@ -393,6 +413,7 @@ push reader -> durable log -> bounded queues -> algorithm worker -> result queue
   ],
   "limits": {
     "rgb_max_hz": 15,
+    "rgb_bitrate_bps": 4000000,
     "head_pose_max_hz": 30,
     "submap_size": 16,
     "overlap": 1
@@ -419,7 +440,7 @@ python your_live_feed_server.py \
 如果只想先验证 OLCP v1 入站解析和真实 depth-fusion 回传，可以运行当前 prototype：
 
 ```bash
-python examples/live-feed-demo/operator_live_feed_server.py \
+PYTHONPATH=python python -m pyoperator.live_feed \
   --host 127.0.0.1 \
   --push-port 63910 \
   --pull-port 63912 \
@@ -442,7 +463,7 @@ server port: 63910
 result port: 63912
 ```
 
-`examples/live-feed-demo/operator_live_feed_server.py` 是 prototype。它展示 OLCP v1 parse、queue、depth/head-pose 点云 worker、独立 result port 和与当前 `live-pull` 对齐的 110-116 result frame type。生产 VGGT-SLAM2 服务器可以复用这个边界，但应替换 worker、持久化策略和 result client 重连策略。
+`python/pyoperator/live_feed/server.py` 是 `pyoperator` 中的 reference server。它展示 OLCP v1 parse、queue、depth/head-pose 点云 worker、独立 result port 和与当前 `live-pull` 对齐的 110-116 result frame type。`examples/live-feed-demo/operator_live_feed_server.py` 只保留兼容入口。生产 VGGT-SLAM2 服务器可以复用这个边界，但应替换 worker、持久化策略和 result client 重连策略。
 
 ## 接入检查清单
 
@@ -464,6 +485,7 @@ result port: 63912
 - `xr/android_plugin/live_feed_server/src/main/java/com/spatialmp4/livefeed/LiveFeedServerPlugin.kt`
 - `xr/addons/live-pull/live_pull_client.gd`
 - `xr/addons/live-pull/live_pull_dense_map_view.gd`
-- `examples/live-feed-demo/operator_live_feed_server.py`
+- `python/pyoperator/live_feed/server.py`
+- `examples/live-feed-demo/operator_live_feed_server.py`（兼容入口）
 - `claw/architecture/live-feed-cloud.md`
 - `claw/architecture/wire-protocol.md`

@@ -21,6 +21,13 @@
       "module": "app/modes",
       "script": "res://tests/integration/modes/feature_composition_test.gd",
       "fixture": "fake_platform_without_depth"
+    },
+    {
+      "id": "live_feed.live_pull_reconnect",
+      "level": "unit",
+      "suite": "live_feed.lifecycle",
+      "module": "app/modes",
+      "script": "res://tests/unit/live_feed/live_pull_reconnect_test.gd"
     }
   ]
 }
