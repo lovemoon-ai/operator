@@ -295,16 +295,43 @@ payload_size  u32_be
 payload       bytes
 ```
 
+Flag registry:
+
+- `0x0001` - keyframe (RGB packet).
+- `0x0002` - composite payload: `u32_be JSON size`, UTF-8 JSON, then binary.
+- `0x0004` - the binary portion is zlib-compressed.
+
+RGB packets are already HEVC/H.264 encoded access units and receive no extra
+transport compression. Depth's canonical decoded representation remains
+little-endian `u16` millimetres. A depth producer may set `0x0004` per frame
+when zlib reduces its size; receivers parse the optional composite prefix
+first, then decompress the binary portion. Raw legacy depth frames remain
+valid. Receivers must bound decompression (the Python implementation uses
+64 MiB) and validate decoded size against `width * height * 2`.
+
 XR push path:
 
-- `xr/scripts/app/modes/live_feed_mode.gd`
+- `xr/scripts/app/modes/capture_app_base.gd`
 - `xr/scripts/app/composition/live_feed_composition.gd`
 - `xr/addons/live-push/`
 
 XR pull path:
 
 - `xr/addons/live-pull/`
-- `examples/live-feed-demo/operator_live_feed_server.py`
+- `python/pyoperator/live_feed/server.py`
+
+The pull connection starts with client-first `result_hello` (type 100). Its
+`operator.result_hello.v1` JSON carries the same optional auth token as the
+push-side `session_start`; a token-configured server authenticates it before
+exposing result data or replacing the active XR client. The server then sends
+`result_welcome` (type 102, `operator.result_welcome.v1`); only receipt of this
+frame transitions XR from authenticating to connected.
+
+The pull channel then carries `capture_request` (type 101): the server tells
+the headset which streams to capture. Reconnecting also triggers a
+`map_reset` plus a bounded current-state snapshot before live deltas resume. See
+`claw/architecture/live-feed-cloud.md` for the negotiation flow and frame
+type registry.
 
 ## Ego Upload TUS
 

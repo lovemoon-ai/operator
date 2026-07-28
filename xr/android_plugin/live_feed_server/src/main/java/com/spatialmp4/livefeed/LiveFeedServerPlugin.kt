@@ -57,6 +57,9 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
     private val metricBytesSent = AtomicLong(0L)
     private val metricFramesDropped = AtomicLong(0L)
     private val metricBytesDropped = AtomicLong(0L)
+    private val metricDepthFramesCompressed = AtomicLong(0L)
+    private val metricDepthBytesRaw = AtomicLong(0L)
+    private val metricDepthBytesWire = AtomicLong(0L)
 
     @UsedByGodot
     fun configureServer(
@@ -108,6 +111,9 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
             .put("bytes_sent", metricBytesSent.getAndSet(0L))
             .put("frames_dropped", metricFramesDropped.getAndSet(0L))
             .put("bytes_dropped", metricBytesDropped.getAndSet(0L))
+            .put("depth_frames_compressed", metricDepthFramesCompressed.getAndSet(0L))
+            .put("depth_bytes_raw", metricDepthBytesRaw.getAndSet(0L))
+            .put("depth_bytes_wire", metricDepthBytesWire.getAndSet(0L))
             .put("queue_depth", queue.size)
             .put("connected", isConnected())
             .toString()
@@ -199,13 +205,19 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
             .put("width", width)
             .put("height", height)
             .put("intrinsics", intrinsics.toJson())
+            .put("wire_compression", "zlib_optional")
             .toString()
             .toByteArray(Charsets.UTF_8)
         enqueue(Frame(TYPE_DEPTH_METADATA, 0, 0L, 0L, payload), droppable = false)
     }
 
     override fun onDepthFrame(payload: ByteArray, ptsNs: Long, durationNs: Long) {
-        enqueue(Frame(TYPE_DEPTH_FRAME, 0, ptsNs, durationNs, payload), droppable = true)
+        if (!running.get()) {
+            return
+        }
+        val encoded = encodeDepth(payload)
+        val flags = if (encoded.compressed) FLAG_COMPRESSED_ZLIB else 0
+        enqueue(Frame(TYPE_DEPTH_FRAME, flags, ptsNs, durationNs, encoded.payload), droppable = true)
     }
 
     override fun onError(message: String) {
@@ -224,6 +236,9 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         fovBottom: Double,
         metadataJson: String
     ): Boolean {
+        if (!running.get()) {
+            return false
+        }
         val json = JSONObject()
             .put("width", width)
             .put("height", height)
@@ -234,8 +249,23 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         if (metadataJson.isNotBlank()) {
             json.put("metadata_json", metadataJson)
         }
+        val encoded = encodeDepth(payloadU16Mm)
+        if (encoded.compressed) {
+            json
+                .put("wire_compression", "zlib")
+                .put("uncompressed_size_bytes", encoded.uncompressedSize)
+        }
+        val flags = FLAG_COMPOSITE_JSON or (
+            if (encoded.compressed) FLAG_COMPRESSED_ZLIB else 0
+        )
         return enqueue(
-            Frame(TYPE_DEPTH_FRAME, FLAG_COMPOSITE_JSON, timestampNs, DEFAULT_DEPTH_DURATION_NS, jsonPayload(json, payloadU16Mm)),
+            Frame(
+                TYPE_DEPTH_FRAME,
+                flags,
+                timestampNs,
+                DEFAULT_DEPTH_DURATION_NS,
+                jsonPayload(json, encoded.payload),
+            ),
             droppable = true
         )
     }
@@ -375,7 +405,7 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
             return true
         }
         if (droppable) {
-            val dropped = removeOldestDroppable()
+            val dropped = removeDropCandidate(frame.type)
             if (dropped != null) {
                 recordDroppedFrame(dropped.frame)
             }
@@ -386,7 +416,7 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
             return false
         }
 
-        val dropped = removeOldestDroppable()
+        val dropped = removeDropCandidate(null)
         if (dropped != null) {
             recordDroppedFrame(dropped.frame)
             if (queue.offer(queued)) {
@@ -405,15 +435,69 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         return false
     }
 
-    private fun removeOldestDroppable(): QueuedFrame? {
-        val iterator = queue.iterator()
-        while (iterator.hasNext()) {
-            val candidate = iterator.next()
-            if (candidate.droppable && queue.remove(candidate)) {
-                return candidate
+    /**
+     * Preserve tracking and depth under RGB congestion.
+     *
+     * A new droppable frame first evicts an older lower-priority frame, then an
+     * older frame of its own type. It never evicts a different stream at the
+     * same or higher priority. Important control/config frames may evict the
+     * globally lowest-priority droppable frame.
+     */
+    private fun removeDropCandidate(incomingType: Int?): QueuedFrame? {
+        val incomingPriority = incomingType?.let(::framePriority)
+        var lowerPriorityCandidate: QueuedFrame? = null
+        var lowerPriority = Int.MAX_VALUE
+        var sameTypeCandidate: QueuedFrame? = null
+
+        for (candidate in queue) {
+            if (!candidate.droppable) {
+                continue
+            }
+            val candidatePriority = framePriority(candidate.frame.type)
+            if (incomingType == null) {
+                if (candidatePriority < lowerPriority) {
+                    lowerPriority = candidatePriority
+                    lowerPriorityCandidate = candidate
+                }
+                continue
+            }
+            if (
+                incomingPriority != null
+                && candidatePriority < incomingPriority
+                && candidatePriority < lowerPriority
+            ) {
+                lowerPriority = candidatePriority
+                lowerPriorityCandidate = candidate
+            } else if (
+                sameTypeCandidate == null
+                && candidate.frame.type == incomingType
+            ) {
+                sameTypeCandidate = candidate
             }
         }
-        return null
+
+        val selected = lowerPriorityCandidate ?: sameTypeCandidate ?: return null
+        return if (queue.remove(selected)) selected else null
+    }
+
+    private fun framePriority(type: Int): Int = when (type) {
+        TYPE_RGB_PACKET -> PRIORITY_RGB
+        TYPE_DEPTH_FRAME -> PRIORITY_DEPTH
+        TYPE_HEAD_POSE,
+        TYPE_CONTROLLER_POSE,
+        TYPE_HAND_JOINTS,
+        TYPE_CONTROLLER_INPUT -> PRIORITY_TRACKING
+        else -> PRIORITY_CONTROL
+    }
+
+    private fun encodeDepth(payload: ByteArray): DepthTransportCodec.Encoded {
+        val encoded = DepthTransportCodec.encode(payload)
+        metricDepthBytesRaw.addAndGet(encoded.uncompressedSize.toLong())
+        metricDepthBytesWire.addAndGet(encoded.payload.size.toLong())
+        if (encoded.compressed) {
+            metricDepthFramesCompressed.incrementAndGet()
+        }
+        return encoded
     }
 
     private fun recordDroppedFrame(frame: Frame) {
@@ -543,6 +627,12 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
 
         private const val FLAG_KEYFRAME = 1
         private const val FLAG_COMPOSITE_JSON = 2
+        private const val FLAG_COMPRESSED_ZLIB = 4
+
+        private const val PRIORITY_RGB = 0
+        private const val PRIORITY_DEPTH = 1
+        private const val PRIORITY_TRACKING = 2
+        private const val PRIORITY_CONTROL = 3
 
         private const val DEFAULT_DEPTH_DURATION_NS = 200_000_000L
         private const val DEFAULT_POSE_DURATION_NS = 11_111_000L

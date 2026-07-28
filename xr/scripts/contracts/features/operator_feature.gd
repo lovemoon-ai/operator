@@ -6,6 +6,8 @@ class_name OperatorFeature
 ## `xr/export_presets.cfg` and to a runtime feature tag with the same
 ## name emitted by the `operator_features` export plugin.
 
+# Ids are process-local (never serialized), so gaps are harmless: 5 is a
+# retired feature and stays unused to keep git history readable.
 const MODE_TELEOP := 0
 const MODE_EGO_CAPTURE := 1
 const MODE_LIVE_FEED := 2
@@ -17,12 +19,14 @@ const ROBOT_CONTROL := 8
 const ROBOT_CONSTRAINT := 9
 const DEBUG_METRICS := 10
 const TEST_HARNESS := 11
+const MODE_EXIT := 12
 
 const _ID_TO_STRING := {
 	MODE_TELEOP: "mode_teleop",
 	MODE_EGO_CAPTURE: "mode_ego_capture",
 	MODE_LIVE_FEED: "mode_live_feed",
 	MODE_VR: "mode_vr",
+	MODE_EXIT: "mode_exit",
 	SINK_SPATIALMP4: "sink_spatialmp4",
 	SINK_LIVE_STREAM: "sink_live_stream",
 	SINK_UPLOAD: "sink_upload",

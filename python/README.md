@@ -22,6 +22,123 @@ Install from the Operator checkout:
 python -m pip install -e ./python
 ```
 
+## Live Feed Server
+
+`pyoperator.live_feed` contains the OLCP Live Feed server, bounded stream
+queues, depth-fusion reference worker, and XR result publisher. Run it from a
+checkout with:
+
+```bash
+PYTHONPATH=python python3 -m pyoperator.live_feed --print-plan
+PYTHONPATH=python python3 -m pyoperator.live_feed --self-test
+```
+
+An installed editable package also provides the `pyoperator-live-feed`
+command. Live Feed carries RGB/depth and result streams over OLCP; it is
+separate from `pyoperator.xr_bridge`, which exposes local pose, controller,
+hand, body, and tracker snapshots.
+
+On startup the server prints its LAN address and a QR code encoding it, so the
+headset can be pointed at the right host without typing an IP on a virtual
+keyboard — scan it from Live Feed settings via the camera icon next to
+"Server host". In Ghostty, Kitty, and WezTerm it uses terminal-native graphics:
+the source is an exact square and the terminal computes its width from the
+actual cell dimensions, so font aspect ratio cannot stretch it. Other terminals
+fall back to high-contrast half-cell blocks. The complete QR remains the last
+startup output so its quiet zone is not scrolled away. Pass `--no-qr` to
+suppress the code entirely.
+
+The QR encoder is dependency-free (`pyoperator.live_feed.qr`), so no imaging
+stack is pulled in just to draw a code on a terminal.
+
+### Building your own Live Feed app
+
+The reference server above is one application of the package. For your own, use
+the runtime API directly: `LiveFeedReceiver` owns the sockets, the reader
+thread, and the bounded drop-oldest queues, and hands you typed samples.
+
+```python
+from pyoperator.live_feed import LiveFeedReceiver, ReceiverConfig
+
+with LiveFeedReceiver(ReceiverConfig()) as receiver:
+    for session in receiver.sessions():
+        for sample in session.samples():
+            if sample.kind == "head_pose":
+                print(sample.position, sample.tracking_valid)
+```
+
+To send results back, use `session.results` (a `ResultPublisher`). It handles
+the `manifest -> fragments -> commit` ordering the headset requires, and keeps
+`map_version` increasing so updates are not discarded client-side.
+
+```python
+session.results.publish_points(
+    map_id="my-map",
+    chunk_id="my-map_chunk",   # stable id + upsert = flat headset memory
+    points=[DensePoint(x, y, z, r=255, g=140, b=0)],
+    operation="upsert",
+)
+```
+
+| Module | Responsibility |
+| --- | --- |
+| `protocol.py` | OLCP framing, capability negotiation, capture planning |
+| `models.py` | Typed samples, camera models, rigid transforms (no I/O) |
+| `decoders.py` | Optional RGB decoding via `ffmpeg` |
+| `runtime.py` | Receiver, session, bounded queues, recording |
+| `results.py` | Result channel, `ResultPublisher`, `DensePoint` |
+| `server.py` | The depth-fusion reference server built from the above |
+
+### Examples
+
+Two runnable examples in `python/examples/`:
+
+```bash
+# One-way: headset -> pyoperator, visualised live.
+# Terminal dashboard by default; --viewer rerun needs `pip install rerun-sdk`.
+python python/examples/live_feed_viewer.py
+python python/examples/live_feed_viewer.py --viewer rerun
+
+# Bidirectional: headset -> pyoperator -> headset.
+# Turns the head-pose trail into a point cloud and streams it back for the
+# headset to render. Confirm with:
+#   adb logcat -s godot | grep "Live-pull rendered chunk"
+python python/examples/live_feed_roundtrip.py
+```
+
+Both accept `--host` / `--push-port` / `--result-port`; start Live Feed mode on
+the headset afterwards. The viewer sends one `capture_request` control message
+so the XR settings panel can show its input data types, but publishes no
+algorithm results, so the capture data path stays one-way.
+
+### Testing the examples without a headset
+
+`pyoperator.live_feed.simulator` is a synthetic headset: it speaks live-push
+with the same payload shapes as the real device (walking head pose, controllers,
+hands, depth, RGB packets). Run an example in one terminal and the simulator in
+another:
+
+```bash
+# terminal 1
+python python/examples/live_feed_viewer.py
+
+# terminal 2
+python -m pyoperator.live_feed.simulator --duration 20
+```
+
+It is a development aid, not a headset substitute: RGB packets carry dummy bytes
+rather than a real HEVC bitstream, and depth is a flat synthetic plane. Anything
+depending on real codec or sensor data still needs `cicd/04_live_feed_e2e.sh` on
+a device.
+
+The automated equivalents run in the normal suite:
+
+```bash
+cd python
+python -m pytest -k "Viewer or HeadTrail or Roundtrip"   # example logic
+python -m pytest -m loopback                             # socket round trips
+```
+
 For development, install the test extra and run the coverage-gated suite:
 
 ```bash

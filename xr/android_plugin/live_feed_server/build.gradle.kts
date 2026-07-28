@@ -28,4 +28,5 @@ kotlin {
 dependencies {
     compileOnly("org.godotengine:godot:4.5.1.stable")
     implementation(project(":contract"))
+    testImplementation("junit:junit:4.13.2")
 }
