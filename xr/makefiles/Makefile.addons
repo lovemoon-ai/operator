@@ -8,6 +8,7 @@
 # Targets exposed here:
 #   deps                   — sync pinned third-party repos into ../.deps
 #   setup-vendors          — godot-xr-tools symlink + godotopenxrvendors prepare.sh
+#   setup-vendors-patched  — require patched OpenXR Vendors Android binaries
 #   prepare-android-libs   — extract Godot's android template AARs from export_templates
 #   build-ahb              — build the AHardwareBuffer GDExtension and install both copies of the .so
 #   build-pico-openxr      — build the PICO OpenXR GDExtension used by the Pico export
@@ -158,6 +159,19 @@ setup-vendors:
 	@echo "[setup-vendors] godot-xr-tools $$(cat addons/godot-xr-tools/plugin.cfg | awk -F'\"' '/^version/{print $$2}') ready"
 	./addons/godotopenxrvendors/prepare.sh
 
+# Quest environment-depth recording requires the locally patched vendor
+# binaries. Generated .bin/ files are intentionally git-ignored, so a fresh
+# checkout must build them automatically instead of silently exporting an APK
+# with the official binaries fetched by setup-vendors.
+setup-vendors-patched: setup-vendors
+	@if ./addons/godotopenxrvendors/prepare.sh --check-patched >/dev/null 2>&1; then \
+		echo "[setup-vendors] patched Android binaries ready"; \
+	else \
+		echo "[setup-vendors] patched Android binaries missing; building them"; \
+		./addons/godotopenxrvendors/prepare.sh --build-patched; \
+	fi
+	./addons/godotopenxrvendors/prepare.sh --check-patched
+
 # ---------------------------------------------------------------------------
 # Godot Android template AARs
 # ---------------------------------------------------------------------------
@@ -218,7 +232,7 @@ build-hand-capture: $(HAND_CAPTURE_ADDON_SO)
 # ---------------------------------------------------------------------------
 # Godot MuJoCo GDExtension (native/godot_mujoco)
 # ---------------------------------------------------------------------------
-$(GODOT_MUJOCO_ADDON_SO): $(GODOT_MUJOCO_SRC)
+$(GODOT_MUJOCO_ADDON_SO): $(GODOT_MUJOCO_SRC) | $(MUJOCO_ANDROID_LIB)
 	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
 	    if [ -f "$@" ]; then \
 	        echo "[godot-mujoco] sources newer than $@ but ANDROID_NDK not set — keeping stale .so. 'export ANDROID_NDK=…' to rebuild."; \

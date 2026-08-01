@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: verify-ndk log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: verify-ndk setup-vendors-patched log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 ADB?=adb
 ADB_BASE:=$(ADB)
@@ -28,7 +28,12 @@ GRADLE_USER_HOME?=$(HOME)/.gradle
 # gradle-pinned NDK and fail loudly if it is not installed.
 # Prefer an explicit ANDROID_SDK_ROOT/ANDROID_HOME from the env, else fall back
 # to the first SDK dir that actually exists (macOS then Linux default).
-ANDROID_SDK_ROOT ?= $(firstword $(ANDROID_HOME) $(wildcard $(HOME)/Library/Android/sdk) $(wildcard $(HOME)/Android/Sdk) $(HOME)/Library/Android/sdk)
+ifeq ($(origin ANDROID_SDK_ROOT), undefined)
+ANDROID_SDK_ROOT := $(if $(ANDROID_HOME),$(ANDROID_HOME),$(firstword $(wildcard $(HOME)/Library/Android/sdk) $(wildcard $(HOME)/Android/Sdk) $(HOME)/Library/Android/sdk))
+endif
+ANDROID_HOME ?= $(ANDROID_SDK_ROOT)
+export ANDROID_SDK_ROOT
+export ANDROID_HOME
 NDK_VERSION := $(shell sed -n "s/.*ndkVersion[^']*'\([^']*\)'.*/\1/p" android/build/config.gradle)
 PINNED_ANDROID_NDK := $(ANDROID_SDK_ROOT)/ndk/$(NDK_VERSION)
 export ANDROID_NDK := $(PINNED_ANDROID_NDK)
@@ -77,16 +82,18 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest: deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
+	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest)
 
 # Test-harness APK (export preset "Meta Quest Test"):
 # operator_feature_test_harness=true, includes res://tests/** and
 # res://scripts/test_support/**. Consumed by tests/xr_module_harness.sh.
-build-quest-test: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest-test: deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest_test)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest Test,$(apk_quest_test))
+	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest_test)
 
 build-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
@@ -96,9 +103,10 @@ build-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-c
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
 # 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
-build-mujoco-quest: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
+build-mujoco-quest: deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
+	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest)
 
 build-mujoco-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)

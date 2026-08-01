@@ -37,15 +37,16 @@ make install-pico
 make ship-pico
 ```
 
-`build-*` runs `setup-vendors`, which calls
-`addons/godotopenxrvendors/prepare.sh` in its **default (fetch) mode**. That mode
-downloads the *official, unpatched* GodotVR OpenXR Vendors release binaries.
+PICO and other standard builds run `setup-vendors`, which calls
+`addons/godotopenxrvendors/prepare.sh` in its default fetch mode. Quest builds
+run `setup-vendors-patched`: it reuses locally verified patched binaries, or
+builds them automatically on the first build in a fresh checkout.
 
 > [!IMPORTANT]
-> The official binaries **cannot deliver environment depth to the CPU**. If you
-> only run `make build-quest`, ego recordings with `record_depth: true` will
-> capture RGB, pose, hands, body, and audio — but **no depth** — and the app will
-> not surface a hard error. See the next section.
+> The official binaries **cannot deliver environment depth to the CPU**. Quest
+> exports fail closed: `make build-quest` does not export until the patched
+> Android binaries pass marker verification, and the completed APK is checked
+> again to ensure its packaged vendor library contains the same markers.
 
 ## Ego depth capture requires the patched vendor plugin
 
@@ -64,31 +65,20 @@ patches to the OpenXR Vendors plugin, tracked in
   Godot can read the pixels. **Without this the depth `Image` comes back null on
   every frame.**
 
-The default `prepare.sh` (and therefore plain `make build-quest`) does **not**
-apply these patches. You must build the patched vendor binaries once, then build
-the APK:
+`make build-quest`, `make build-quest-test`, and `make build-mujoco-quest`
+sync their pinned source dependencies and automatically apply and verify these
+patches when needed:
 
 ```bash
 cd xr
 
-# 1. Build the patched OpenXR Vendors plugin (clones the pinned upstream tag,
-#    applies patches/*.patch, runs ./gradlew buildPlugin, syncs .bin/).
-./addons/godotopenxrvendors/prepare.sh --build-patched
-
-# 2. Confirm the patched markers are present in the Android binaries.
-./addons/godotopenxrvendors/prepare.sh --check-patched
-
-# 3. Build and install the APK as usual. setup-vendors is a no-op now that
-#    .bin/ already holds the patched binaries. Both builds use the same patched
-#    runtime capability probe and depth-frame contract.
 make build-install-quest
-make build-pico
 make ship-quest
 ```
 
 Notes:
 
-- `--build-patched` verifies the checkout matches `UPSTREAM_COMMIT` in
+- The automatic `--build-patched` step verifies the checkout matches `UPSTREAM_COMMIT` in
   `addons/godotopenxrvendors/VERSION`, applies all `patches/*.patch`, then builds.
 - Pass `--source /path/to/godot_openxr_vendors` to build from a local checkout
   instead of cloning, and `--keep-source` to keep the temporary build tree.
@@ -136,8 +126,7 @@ If you see the failure signals, the installed APK was built against the official
 
 ## Do Not
 
-- Do not ship an ego-depth build made with plain `make build-quest`; always run
-  `--build-patched` (and `--check-patched`) first.
+- Do not bypass `setup-vendors-patched` when adding another Quest export target.
 - Do not commit the generated `.bin/` binaries; only `VERSION` + `patches/` are
   tracked.
 - Do not use desktop/headless Godot to validate depth capture — depth readback

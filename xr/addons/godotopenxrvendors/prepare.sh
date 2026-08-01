@@ -13,6 +13,7 @@
 #     ./prepare.sh --build-patched         # clone pinned source, patch, build, sync
 #     ./prepare.sh --build-patched --source /path/to/godot_openxr_vendors
 #     ./prepare.sh --check-patched         # verify patched markers in Android libs
+#     ./prepare.sh --check-apk path/to.apk # verify markers in the packaged Android lib
 
 set -euo pipefail
 
@@ -110,6 +111,7 @@ usage() {
 mode="fetch"
 source_ref=""
 keep_source=false
+apk_path=""
 
 while (( $# > 0 )); do
   case "$1" in
@@ -121,6 +123,12 @@ while (( $# > 0 )); do
       ;;
     --check-patched)
       mode="check_patched"
+      ;;
+    --check-apk)
+      [[ $# -ge 2 ]] || die "--check-apk requires an APK path"
+      mode="check_apk"
+      apk_path="$2"
+      shift
       ;;
     --build-patched)
       mode="build_patched"
@@ -274,6 +282,20 @@ check_patched() {
   echo "[prepare-godotopenxrvendors] patched Android binaries verified"
 }
 
+check_apk() {
+  [[ -f "$apk_path" ]] || die "APK not found: $apk_path"
+
+  local tmp_so
+  tmp_so="$(mktemp)"
+  if ! unzip -p "$apk_path" lib/arm64-v8a/libgodotopenxrvendors.so > "$tmp_so"; then
+    rm -f "$tmp_so"
+    die "$apk_path does not contain lib/arm64-v8a/libgodotopenxrvendors.so"
+  fi
+  check_markers_in_file "$tmp_so" "$apk_path:lib/arm64-v8a/libgodotopenxrvendors.so"
+  rm -f "$tmp_so"
+  echo "[prepare-godotopenxrvendors] patched vendor binary verified in $apk_path"
+}
+
 prepare_source_tree() {
   local build_tmp="$1"
   local src="$build_tmp/godot_openxr_vendors"
@@ -359,6 +381,9 @@ case "$mode" in
     ;;
   check_patched)
     check_patched
+    ;;
+  check_apk)
+    check_apk
     ;;
   force)
     fetch_release force
