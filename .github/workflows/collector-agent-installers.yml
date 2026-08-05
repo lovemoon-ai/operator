@@ -1,0 +1,79 @@
+name: Collector Agent installers
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "collector-agent/**"
+      - ".github/workflows/collector-agent-installers.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Agent
+        working-directory: collector-agent
+        run: python -m pip install .
+      - name: Test
+        working-directory: collector-agent
+        run: python -m unittest discover -s tests -v
+      - name: Build Debian package
+        working-directory: collector-agent
+        run: bash packaging/linux/build_deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-collector-linux-amd64
+          path: collector-agent/dist/installers/*.deb
+
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Agent
+        working-directory: collector-agent
+        run: python -m pip install .
+      - name: Test
+        working-directory: collector-agent
+        run: python -m unittest discover -s tests -v
+      - name: Build macOS package
+        working-directory: collector-agent
+        run: bash packaging/macos/build_pkg.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-collector-macos-arm64
+          path: collector-agent/dist/installers/*.pkg
+
+  windows-amd64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Agent
+        working-directory: collector-agent
+        run: python -m pip install .
+      - name: Test
+        working-directory: collector-agent
+        run: python -m unittest discover -s tests -v
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --yes --no-progress
+      - name: Build Windows installer
+        working-directory: collector-agent
+        shell: powershell
+        run: .\packaging\windows\build_installer.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: operator-collector-windows-amd64
+          path: collector-agent/dist/installers/*.exe

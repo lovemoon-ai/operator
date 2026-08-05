@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "operator-collector"
+version = "0.1.2"
+description = "Cross-platform local workstation agent for Operator Quest data collection"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "LoveMoon" }]
+dependencies = []
+
+[project.scripts]
+operator-collector = "operator_collector.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

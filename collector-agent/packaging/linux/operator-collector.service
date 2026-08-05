@@ -1,0 +1,14 @@
+[Unit]
+Description=Operator Collector workstation agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/operator-collector run
+Restart=on-failure
+RestartSec=5
+Environment=OPERATOR_SERVER_URL=http://127.0.0.1:6153
+
+[Install]
+WantedBy=default.target
