@@ -68,30 +68,47 @@ launchctl bootstrap "gui/$(id -u)" \
 http://10.10.99.89:6153/collectors
 ```
 
-首次使用需要把 Agent 指向该地址。只执行自己系统对应的命令：
+每台电脑第一次使用时，只需执行一次下面的设置。只看自己电脑系统对应的小节。
+
+#### Windows
+
+打开 **PowerShell**，执行：
 
 ```powershell
-# Windows PowerShell
 & "$env:LOCALAPPDATA\OperatorCollector\operator-collector.cmd" configure `
   http://10.10.99.89:6153
 ```
 
+执行成功后，结束任务管理器中安装目录
+`%LOCALAPPDATA%\OperatorCollector` 下运行的 `python.exe`，再从开始菜单点击
+“启动 Operator Collector”。
+
+#### Ubuntu/Linux
+
+打开终端，执行：
+
 ```bash
-# Ubuntu/Linux
 operator-collector configure http://10.10.99.89:6153
+systemctl --user restart operator-collector
 ```
+
+#### macOS
+
+打开“终端”，执行：
 
 ```bash
-# macOS
 /usr/local/bin/operator-collector configure http://10.10.99.89:6153
+launchctl kickstart -k "gui/$(id -u)/com.lovemoon.operator-collector"
 ```
 
-然后重启 Agent：
+设置成功时会看到：
 
-- Windows：结束安装目录中的 `python.exe`，再从开始菜单点击
-  “启动 Operator Collector”。
-- Linux：`systemctl --user restart operator-collector`
-- macOS：`launchctl kickstart -k "gui/$(id -u)/com.lovemoon.operator-collector"`
+```text
+Station URL saved: http://10.10.99.89:6153
+```
+
+以后只有 Station 地址变化、改用其他 Station，或切换为 SSH 隧道时，才需要重新执行
+`configure`。
 
 ### 通过公网 SSH 连接
 
