@@ -35,6 +35,8 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id            TEXT PRIMARY KEY,
     oidc_sub      TEXT UNIQUE,
+    collector_id  TEXT COLLATE NOCASE UNIQUE,
+    pin_hash      TEXT,
     email         TEXT,
     name          TEXT,
     upload_token  TEXT UNIQUE NOT NULL,
@@ -86,6 +88,26 @@ db.exec(`
     notes       TEXT NOT NULL DEFAULT '',
     updated_at  TEXT NOT NULL DEFAULT ''
   );
+`);
+
+function ensureUserColumn(name: string, definition: string): void {
+  const columns = db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === name)) return;
+  try {
+    db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
+  } catch (error) {
+    // Next's production builder can initialize the same SQLite file from
+    // several workers. A sibling may have added the column after our PRAGMA.
+    if (!String((error as Error).message).includes("duplicate column name")) throw error;
+  }
+}
+
+ensureUserColumn("collector_id", "TEXT COLLATE NOCASE");
+ensureUserColumn("pin_hash", "TEXT");
+db.exec(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_collector_id
+  ON users(collector_id COLLATE NOCASE)
+  WHERE collector_id IS NOT NULL;
 `);
 
 // eslint-disable-next-line no-console

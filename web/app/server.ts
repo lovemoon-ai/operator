@@ -360,7 +360,7 @@ async function main() {
     console.log(`[ego-app] ingest at  http://localhost:${port}/api/ingest`);
     console.log(`[ego-app] files at   ${path.resolve(ingest.dataRoot)}`);
     console.log(
-      `[ego-app] auth       ${auth.mode === "bypass" ? "BYPASS (dev)" : `Conductor SSO ${auth.conductor}`}`,
+      `[ego-app] auth       ${auth.mode === "local" ? "collector ID + PIN" : `Conductor SSO ${auth.conductor}`}`,
     );
   });
 }

@@ -12,10 +12,8 @@
  *   - AUTH_BASE_URL            full origin we'll receive callbacks on,
  *                              e.g. https://operator.conductor-ai.top
  *                              (default http://localhost:<PORT>)
- *   - AUTH_BYPASS=1            skip SSO entirely, use a fixed dev user
- *                              (default in local dev when SSO is unset)
- *   - DEV_USER_SUB             override the fixed dev user's sub
- *                              (default "dev@localhost")
+ *   - AUTH_BYPASS=1            use local collector ID + PIN authentication
+ *                              instead of Conductor SSO
  *
  * In bypass mode every env var above except SESSION_SECRET is optional.
  *
@@ -31,11 +29,6 @@ export interface AuthConfig {
     clientId: string;
     clientSecret: string;
   } | null;
-  devUser: {
-    sub: string;
-    email: string;
-    name: string;
-  };
 }
 
 export function loadAuthConfig(): AuthConfig {
@@ -72,14 +65,8 @@ export function loadAuthConfig(): AuthConfig {
     }
   }
 
-  const devUser = {
-    sub: process.env.DEV_USER_SUB ?? "dev@localhost",
-    email: "dev@localhost",
-    name: "Dev User",
-  };
-
   if (bypass) {
-    return { bypass, sessionSecret, baseUrl, conductor: null, devUser };
+    return { bypass, sessionSecret, baseUrl, conductor: null };
   }
 
   if (!conductorBase || !clientId || !clientSecret) {
@@ -99,6 +86,5 @@ export function loadAuthConfig(): AuthConfig {
       clientId,
       clientSecret,
     },
-    devUser,
   };
 }

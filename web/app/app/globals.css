@@ -122,8 +122,18 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   align-items: center;
   gap: 20px;
   width: 100%;
-  max-width: 360px;
+  max-width: 420px;
   text-align: center;
+}
+.login-card {
+  width: 100%;
+  padding: 30px;
+  border: 1px solid rgba(139, 168, 199, 0.2);
+  border-radius: 20px;
+  background: rgba(13, 20, 29, 0.88);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
 }
 .login-title {
   margin: 0;
@@ -134,6 +144,7 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   color: #f0f6fc;
 }
 .login-title img {
+  margin: 0 auto;
   display: block;
   /* Same 22% squircle as the header brand — softer look on the big
      96 px landing logo, square-edge would feel out of place against
@@ -141,6 +152,20 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   border-radius: 22%;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.32);
 }
+.login-heading { margin: 20px 0 22px; }
+.login-heading h2 { margin: 0 0 7px; color: #f0f6fc; font-size: 22px; }
+.login-heading p, .login-help { margin: 0; color: #8b9caf; font-size: 12px; line-height: 1.6; }
+.login-form { display: grid; gap: 14px; text-align: left; }
+.login-form label > span { display: block; margin-bottom: 6px; color: #a9b8c8; font-size: 12px; font-weight: 600; }
+.login-form input {
+  width: 100%;
+  min-height: 44px;
+  border-color: rgba(139, 168, 199, 0.24);
+  background: rgba(5, 10, 16, 0.72);
+  color: #f0f6fc;
+}
+.login-form input:focus { border-color: #69e6d4; box-shadow: 0 0 0 3px rgba(105, 230, 212, 0.12); outline: none; }
+.login-error { margin-bottom: 14px; padding: 9px 11px; border: 1px solid rgba(248, 81, 73, 0.4); border-radius: 8px; background: rgba(248, 81, 73, 0.1); color: #ffb4ae; font-size: 12px; text-align: left; }
 .login-cta {
   display: inline-flex;
   align-items: center;
@@ -168,6 +193,9 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
   outline: none;
 }
 .login-cta svg { display: block; }
+.login-submit { width: 100%; margin-top: 2px; border-color: rgba(105, 230, 212, 0.45); background: rgba(27, 147, 132, 0.26); color: #d9fffa; cursor: pointer; }
+.login-help { margin-top: 16px; }
+@media (max-width: 520px) { .login-card { padding: 24px 20px; } }
 .grid-2 { display: grid; gap: 16px; grid-template-columns: minmax(360px, 1fr) minmax(420px, 2fr); }
 @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
 

@@ -13,13 +13,14 @@
  *     embedded in the QR code on /connect so the device never has to
  *     type it.
  */
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 
 import { db } from "./db.js";
 
 export interface User {
   id: string;
   oidcSub: string | null;
+  collectorId: string | null;
   email: string | null;
   name: string | null;
   uploadToken: string;
@@ -30,6 +31,8 @@ export interface User {
 interface UserRow {
   id: string;
   oidc_sub: string | null;
+  collector_id: string | null;
+  pin_hash: string | null;
   email: string | null;
   name: string | null;
   upload_token: string;
@@ -41,6 +44,7 @@ function rowToUser(row: UserRow): User {
   return {
     id: row.id,
     oidcSub: row.oidc_sub,
+    collectorId: row.collector_id,
     email: row.email,
     name: row.name,
     uploadToken: row.upload_token,
@@ -51,10 +55,18 @@ function rowToUser(row: UserRow): User {
 
 const stmts = {
   bySub: db.prepare<[string], UserRow>(`SELECT * FROM users WHERE oidc_sub = ?`),
+  byCollectorId: db.prepare<[string], UserRow>(
+    `SELECT * FROM users WHERE collector_id = ? COLLATE NOCASE`,
+  ),
   byId: db.prepare<[string], UserRow>(`SELECT * FROM users WHERE id = ?`),
   byToken: db.prepare<[string], UserRow>(`SELECT * FROM users WHERE upload_token = ?`),
   insert: db.prepare<[string, string | null, string | null, string | null, string, string]>(`
     INSERT INTO users (id, oidc_sub, email, name, upload_token, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `),
+  insertCollector: db.prepare<[string, string, string, string, string, string]>(`
+    INSERT INTO users
+      (id, collector_id, pin_hash, name, upload_token, created_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `),
   setProfile: db.prepare<[string | null, string | null, string]>(`
@@ -65,6 +77,83 @@ const stmts = {
   `),
   markSeeded: db.prepare<[string]>(`UPDATE users SET seeded = 1 WHERE id = ?`),
 };
+
+const COLLECTOR_ID_RE = /^[a-z0-9][a-z0-9_-]{2,31}$/;
+const PIN_RE = /^\d{6}$/;
+const PIN_KEY_BYTES = 32;
+
+export type CollectorAuthErrorCode =
+  | "invalid_id"
+  | "invalid_pin"
+  | "invalid_credentials";
+
+export class CollectorAuthError extends Error {
+  constructor(public readonly code: CollectorAuthErrorCode) {
+    super(code);
+    this.name = "CollectorAuthError";
+  }
+}
+
+function normalizeCollectorId(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function hashPin(pin: string, salt = randomBytes(16)): string {
+  const derived = scryptSync(pin, salt, PIN_KEY_BYTES, { maxmem: 64 * 1024 * 1024 });
+  return `scrypt-v1$${salt.toString("base64url")}$${derived.toString("base64url")}`;
+}
+
+function verifyPin(pin: string, encoded: string): boolean {
+  const [scheme, saltText, hashText] = encoded.split("$");
+  if (scheme !== "scrypt-v1" || !saltText || !hashText) return false;
+  try {
+    const salt = Buffer.from(saltText, "base64url");
+    const expected = Buffer.from(hashText, "base64url");
+    const actual = scryptSync(pin, salt, expected.length, { maxmem: 64 * 1024 * 1024 });
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
+}
+
+export function authenticateOrCreateCollector(
+  rawCollectorId: string,
+  pin: string,
+): { user: User; created: boolean } {
+  const collectorId = normalizeCollectorId(rawCollectorId);
+  if (!COLLECTOR_ID_RE.test(collectorId)) throw new CollectorAuthError("invalid_id");
+  if (!PIN_RE.test(pin)) throw new CollectorAuthError("invalid_pin");
+
+  const existing = stmts.byCollectorId.get(collectorId);
+  if (existing) {
+    if (!existing.pin_hash || !verifyPin(pin, existing.pin_hash)) {
+      throw new CollectorAuthError("invalid_credentials");
+    }
+    return { user: rowToUser(existing), created: false };
+  }
+
+  const id = randomUUID();
+  try {
+    stmts.insertCollector.run(
+      id,
+      collectorId,
+      hashPin(pin),
+      collectorId,
+      newUploadToken(),
+      new Date().toISOString(),
+    );
+  } catch (error) {
+    // Resolve a simultaneous first login for the same ID without ever
+    // accepting the other request's PIN.
+    if ((error as { code?: string }).code !== "SQLITE_CONSTRAINT_UNIQUE") throw error;
+    const raced = stmts.byCollectorId.get(collectorId);
+    if (!raced?.pin_hash || !verifyPin(pin, raced.pin_hash)) {
+      throw new CollectorAuthError("invalid_credentials");
+    }
+    return { user: rowToUser(raced), created: false };
+  }
+  return { user: rowToUser(stmts.byId.get(id)!), created: true };
+}
 
 export function newUploadToken(): string {
   // 32 random bytes → 43-char base64url. Long enough that brute-force is
