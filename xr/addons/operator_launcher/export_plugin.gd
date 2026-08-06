@@ -23,6 +23,8 @@ class OperatorLauncherExportPlugin:
 		{"name": "operator_launcher_card_teleop", "default": false},
 		{"name": "operator_launcher_card_ego", "default": true},
 		{"name": "operator_launcher_card_live", "default": false},
+		{"name": "operator_launcher_card_pose_inference", "default": true},
+		{"name": "operator_launcher_card_memworld", "default": true},
 		{"name": "operator_launcher_card_vr", "default": false},
 		{"name": "operator_launcher_card_exit", "default": true},
 	]

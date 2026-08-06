@@ -7,11 +7,12 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: log build-quest build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: log check-quest-signing build-quest build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 # ADB=adb -s PB321XKGL4210070B
 ADB=adb
 GRADLE_USER_HOME?=$(HOME)/.gradle
+QUEST_SIGNING_ENV?=$(HOME)/.config/operator-xr/quest-signing.env
 
 apk_quest=build/quest/Operator.apk
 apk_pico=build/pico/Operator.apk
@@ -24,6 +25,7 @@ release_manifest=android/build/src/release/AndroidManifest.xml
 define godot_export_release
 	@tmp_manifest=$$(mktemp); \
 	cp $(release_manifest) $$tmp_manifest; \
+	set -a; . "$(QUEST_SIGNING_ENV)"; set +a; \
 	set +e; \
 	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3); \
 	status=$$?; \
@@ -40,7 +42,15 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
+check-quest-signing:
+	@test -r "$(QUEST_SIGNING_ENV)" || { echo "Missing Quest signing environment: $(QUEST_SIGNING_ENV)" >&2; exit 1; }
+	@set -a; . "$(QUEST_SIGNING_ENV)"; set +a; \
+		test -n "$$GODOT_ANDROID_KEYSTORE_RELEASE_PATH" || { echo "Missing GODOT_ANDROID_KEYSTORE_RELEASE_PATH in $(QUEST_SIGNING_ENV)" >&2; exit 1; }; \
+		test -n "$$GODOT_ANDROID_KEYSTORE_RELEASE_USER" || { echo "Missing GODOT_ANDROID_KEYSTORE_RELEASE_USER in $(QUEST_SIGNING_ENV)" >&2; exit 1; }; \
+		test -n "$$GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD" || { echo "Missing GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD in $(QUEST_SIGNING_ENV)" >&2; exit 1; }; \
+		test -r "$$GODOT_ANDROID_KEYSTORE_RELEASE_PATH" || { echo "Quest release keystore is not readable: $$GODOT_ANDROID_KEYSTORE_RELEASE_PATH" >&2; exit 1; }
+
+build-quest: check-quest-signing setup-vendors prepare-android-libs build-ahb clean-pico-openxr-loader-stage prepare-capture-plugins
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
@@ -52,7 +62,7 @@ build-quest: setup-vendors prepare-android-libs build-ahb clean-pico-openxr-load
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
 # 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
-build-mujoco-quest: setup-vendors prepare-android-libs build-ahb build-godot-mujoco clean-pico-openxr-loader-stage
+build-mujoco-quest: check-quest-signing setup-vendors prepare-android-libs build-ahb build-godot-mujoco clean-pico-openxr-loader-stage
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
