@@ -762,6 +762,45 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     // SpatialMp4MuxerPlugin as part of Stage 2b. GDScript callers now resolve
     // the muxer singleton via Engine.get_singleton("SpatialMp4MuxerPlugin").
 
+    /**
+     * Returns passthrough Camera2 characteristics without opening the camera.
+     *
+     * This is intentionally separate from startCameras(): live pose consumers
+     * need calibration for projection but must not allocate an ImageReader,
+     * encoder, or repeating capture request.
+     */
+    @UsedByGodot
+    fun queryPassthroughCameraMetadataJson(eye: String): String {
+        val activity = mainActivity ?: return JSONObject()
+            .put("ok", false)
+            .put("metadata_only", true)
+            .put("error", "Godot activity is unavailable")
+            .toString()
+        return try {
+            val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val normalizedEye = eye.trim().lowercase()
+            val config = findPassthroughCameras(manager)[normalizedEye]
+                ?: return JSONObject()
+                    .put("ok", false)
+                    .put("metadata_only", true)
+                    .put("error", "Quest passthrough camera '$normalizedEye' was not found")
+                    .toString()
+            JSONObject(config.metadata.toString())
+                .put("ok", true)
+                .put("metadata_only", true)
+                .put("calibration_id", "${config.cameraId}:${config.size.width}x${config.size.height}")
+                .putSize("selected_yuv_size", config.size)
+                .toString()
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to query passthrough camera metadata", error)
+            JSONObject()
+                .put("ok", false)
+                .put("metadata_only", true)
+                .put("error", error.message ?: error.javaClass.simpleName)
+                .toString()
+        }
+    }
+
     @UsedByGodot
     fun getLeftCameraMetadataJson(): String = leftMetadata
 

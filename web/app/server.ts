@@ -24,7 +24,10 @@
 // `ps`, `pgrep`, and `pkill -f operator-web` in local ops.
 process.title = "operator-web";
 
-import { createServer as createHttpServer } from "node:http";
+import {
+  createServer as createHttpServer,
+  request as createHttpRequest,
+} from "node:http";
 import { createServer as createNetServer } from "node:net";
 import path from "node:path";
 
@@ -45,6 +48,10 @@ import {
 } from "./lib/auth/index.js";
 import { runAsSystem, runAsUser } from "./lib/auth-context.js";
 import { verifyConnectTicket } from "./lib/connect-ticket.js";
+import {
+  collectorAgentRouter,
+  collectorBrowserRouter,
+} from "./lib/collector-agents.js";
 import { ingest } from "./lib/ingest.js";
 import { deleteReview, reviewsRouter } from "./lib/reviews.js";
 import { getUserById, getUserByUploadToken } from "./lib/users.js";
@@ -53,6 +60,19 @@ import { runPostIngestWorkers } from "./lib/workers/index.js";
 const DEFAULT_PORT = Number(process.env.PORT ?? 3000);
 const PORT_EXPLICITLY_SET = Boolean(process.env.PORT);
 const dev = process.env.NODE_ENV !== "production";
+const MEMWORLD_GATEWAY_HOST = process.env.MEMWORLD_GATEWAY_HOST ?? "127.0.0.1";
+const MEMWORLD_WEBSOCKET_PORT = Number(
+  process.env.MEMWORLD_GATEWAY_PORT ?? 63920,
+);
+const MEMWORLD_DASHBOARD_PORT = Number(
+  process.env.MEMWORLD_DASHBOARD_PORT ?? 63921,
+);
+
+const MEMWORLD_HTTP_ROUTES = new Map<string, string>([
+  ["/api/memworld/status", "/status.json"],
+  ["/api/memworld/model.jpg", "/model.jpg"],
+  ["/api/memworld/skeleton.jpg", "/skeleton.jpg"],
+]);
 
 async function main() {
   const port = await resolveListenPort(DEFAULT_PORT);
@@ -61,12 +81,79 @@ async function main() {
   const nextApp = next({ dev, hostname: "0.0.0.0", port });
   await nextApp.prepare();
   const handleNext = nextApp.getRequestHandler();
+  const handleNextUpgrade = nextApp.getUpgradeHandler();
 
   const app = express();
   app.disable("x-powered-by");
 
+  // Public, intentionally minimal liveness endpoint for the local systemd
+  // watchdog. Reaching this handler proves that the Node event loop and
+  // Express router are responsive without exposing collector state.
+  app.get("/healthz", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).json({ ok: true, service: "operator-station" });
+  });
+
   // --- auth flow (no auth required to hit these) ------------------------- //
   app.use(authRoutes());
+
+  // The Station deployment exposes a single operator-facing workspace.
+  // Keep legacy data-review pages available in source, but remove their web
+  // entry points so old bookmarks land on the collector workflow.
+  app.get(
+    ["/connect", "/memworld", "/sessions", "/sessions/:id"],
+    browserAuthMiddleware(),
+    (_req, res) => res.redirect(302, "/collectors"),
+  );
+
+  // --- collector workstation agents ------------------------------------- //
+  // Native agents authenticate with their own bearer token. Bootstrap is
+  // intentionally public but produces only a short-lived enrollment that a
+  // signed-in browser user must approve before any workstation can run jobs.
+  app.use("/api/collector-agent", collectorAgentRouter);
+
+  // --- /api/memworld/* — same-origin view of the live gateway ----------- //
+  // The model worker protocol stays behind the Python gateway. The web app
+  // only forwards the gateway's read-only dashboard resources so the new
+  // dashboard can render live output without exposing a second web origin.
+  for (const [route, upstreamPath] of MEMWORLD_HTTP_ROUTES) {
+    app.get(route, browserAuthMiddleware(), (req, res) => {
+      const upstream = createHttpRequest(
+        {
+          hostname: MEMWORLD_GATEWAY_HOST,
+          port: MEMWORLD_DASHBOARD_PORT,
+          method: "GET",
+          path: upstreamPath,
+          headers: {
+            accept: req.header("accept") ?? "*/*",
+          },
+        },
+        (upstreamResponse) => {
+          res.status(upstreamResponse.statusCode ?? 502);
+          for (const name of ["content-type", "content-length", "cache-control"]) {
+            const value = upstreamResponse.headers[name];
+            if (value !== undefined) res.setHeader(name, value);
+          }
+          upstreamResponse.pipe(res);
+        },
+      );
+      upstream.setTimeout(5_000, () => {
+        upstream.destroy(new Error("MemWorld dashboard timeout"));
+      });
+      upstream.on("error", (error) => {
+        if (!res.headersSent) {
+          res.status(502).json({
+            ok: false,
+            error: "memworld_gateway_unavailable",
+            detail: error.message,
+          });
+        } else {
+          res.destroy(error);
+        }
+      });
+      upstream.end();
+    });
+  }
 
   // --- /api/ingest/ack — QR handshake ------------------------------------ //
   // Verifies the short-lived HMAC ticket, looks up the user named by the
@@ -198,6 +285,13 @@ async function main() {
   // --- /api/reviews — per-session review state --------------------------- //
   app.use("/api/reviews", browserAuthMiddleware(), reviewsRouter);
 
+  // --- /api/collectors — browser control plane for workstation agents ---- //
+  app.use(
+    "/api/collectors",
+    browserAuthMiddleware(),
+    collectorBrowserRouter,
+  );
+
   // --- Next.js pages: cookie auth except the public ones ----------------- //
   // /login is the unauthenticated entry point. Everything else is gated.
   // Top-level static assets under `public/` (logo, favicon, robots.txt, …)
@@ -218,13 +312,61 @@ async function main() {
     browserAuthMiddleware()(req, res, () => handleNext(req, res));
   });
 
-  createHttpServer(app).listen(port, () => {
+  const httpServer = createHttpServer(app);
+
+  // Keep the existing operator.memworld.v1 WebSocket unchanged. This is a
+  // byte-for-byte upgrade proxy that only gives it the web app's public
+  // origin; authentication remains the MemWorld hello token downstream.
+  httpServer.on("upgrade", (req, clientSocket, clientHead) => {
+    const pathname = new URL(
+      req.url ?? "/",
+      "http://operator.local",
+    ).pathname;
+    if (pathname !== "/memworld") {
+      void handleNextUpgrade(req, clientSocket, clientHead);
+      return;
+    }
+
+    const proxyRequest = createHttpRequest({
+      hostname: MEMWORLD_GATEWAY_HOST,
+      port: MEMWORLD_WEBSOCKET_PORT,
+      method: req.method ?? "GET",
+      path: req.url ?? "/memworld",
+      headers: req.headers,
+    });
+
+    proxyRequest.on("upgrade", (upstreamResponse, upstreamSocket, upstreamHead) => {
+      const statusCode = upstreamResponse.statusCode ?? 101;
+      const statusMessage = upstreamResponse.statusMessage ?? "Switching Protocols";
+      clientSocket.write(`HTTP/1.1 ${statusCode} ${statusMessage}\r\n`);
+      for (let index = 0; index < upstreamResponse.rawHeaders.length; index += 2) {
+        clientSocket.write(
+          `${upstreamResponse.rawHeaders[index]}: ${upstreamResponse.rawHeaders[index + 1]}\r\n`,
+        );
+      }
+      clientSocket.write("\r\n");
+      if (upstreamHead.length > 0) clientSocket.write(upstreamHead);
+      if (clientHead.length > 0) upstreamSocket.write(clientHead);
+      upstreamSocket.pipe(clientSocket);
+      clientSocket.pipe(upstreamSocket);
+    });
+    proxyRequest.on("response", (upstreamResponse) => {
+      upstreamResponse.resume();
+      clientSocket.destroy(
+        new Error(`MemWorld upgrade rejected: ${upstreamResponse.statusCode}`),
+      );
+    });
+    proxyRequest.on("error", (error) => clientSocket.destroy(error));
+    proxyRequest.end();
+  });
+
+  httpServer.listen(port, () => {
     const auth = describeAuth();
     // eslint-disable-next-line no-console
     console.log(`[ego-app] http://localhost:${port}/`);
     console.log(`[ego-app] ingest at  http://localhost:${port}/api/ingest`);
     console.log(`[ego-app] files at   ${path.resolve(ingest.dataRoot)}`);
-    console.log(`[ego-app] auth       BYPASS (dev) at ${auth.baseUrl}`);
+    console.log(`[ego-app] auth       collector ID + PIN at ${auth.baseUrl}`);
   });
 }
 

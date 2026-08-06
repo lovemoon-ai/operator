@@ -10,6 +10,8 @@ extends Node3D
 ## instead of opening a scene.
 
 const LIVE_FEED_SCENE := "res://scenes/live_feed_app.tscn"
+const POSE_INFERENCE_SCENE := "res://scenes/pose_inference_app.tscn"
+const MEMWORLD_SCENE := "res://scenes/memworld_app.tscn"
 const VR_SCENE := "res://scenes/vr_mode.tscn"
 const TELEOP_SCENE := "res://scenes/teleop_main.tscn"
 const EGO_CAPTURE_SCENE := "res://scenes/capture_app.tscn"
@@ -18,6 +20,8 @@ const TEST_RUNNER_SCENE := "res://scenes/test_runner.tscn"
 const MODE_TELEOP := "teleop"
 const MODE_EGO_CAPTURE := "ego_capture"
 const MODE_LIVE_FEED := "live_feed"
+const MODE_POSE_INFERENCE := "pose_inference"
+const MODE_MEMWORLD := "memworld"
 const MODE_VR := "vr"
 const MODE_MUJOCO := "mujoco"
 const MODE_EXIT := "exit"
@@ -141,7 +145,7 @@ func _configured_launcher_card_modes() -> Array:
 
 
 func _all_launcher_card_modes() -> Array:
-	return [MODE_TELEOP, MODE_EGO_CAPTURE, MODE_LIVE_FEED, MODE_VR, MODE_EXIT]
+	return [MODE_TELEOP, MODE_EGO_CAPTURE, MODE_LIVE_FEED, MODE_POSE_INFERENCE, MODE_MEMWORLD, MODE_VR, MODE_EXIT]
 
 
 ## Every card, Exit included, is gated by its `operator_feature_mode_*`
@@ -155,6 +159,10 @@ func _launcher_card_feature_enabled(mode: String) -> bool:
 			return _features.enabled(OperatorFeature.MODE_EGO_CAPTURE)
 		MODE_LIVE_FEED:
 			return _features.enabled(OperatorFeature.MODE_LIVE_FEED)
+		MODE_POSE_INFERENCE:
+			return _features.enabled(OperatorFeature.MODE_POSE_INFERENCE)
+		MODE_MEMWORLD:
+			return _features.enabled(OperatorFeature.MODE_MEMWORLD)
 		MODE_VR:
 			return _features.enabled(OperatorFeature.MODE_VR)
 		MODE_EXIT:
@@ -178,6 +186,16 @@ func _all_card_data() -> Array:
 		{
 			"mode": MODE_LIVE_FEED,
 			"title_key": "UI_LIVE_FEED_MODE",
+			"kind": CardUIScript.Kind.LIVE_FEED,
+		},
+		{
+			"mode": MODE_POSE_INFERENCE,
+			"title_key": "UI_POSE_INFERENCE_MODE",
+			"kind": CardUIScript.Kind.LIVE_FEED,
+		},
+		{
+			"mode": MODE_MEMWORLD,
+			"title_key": "UI_MEMWORLD_MODE",
 			"kind": CardUIScript.Kind.LIVE_FEED,
 		},
 		{
@@ -402,6 +420,10 @@ func _card_metadata(mode: String) -> Dictionary:
 			return {"kind": CardUIScript.Kind.EGO_CAPTURE, "title_key": "UI_EGO_MODE"}
 		MODE_LIVE_FEED:
 			return {"kind": CardUIScript.Kind.LIVE_FEED, "title_key": "UI_LIVE_FEED_MODE"}
+		MODE_POSE_INFERENCE:
+			return {"kind": CardUIScript.Kind.LIVE_FEED, "title_key": "UI_POSE_INFERENCE_MODE"}
+		MODE_MEMWORLD:
+			return {"kind": CardUIScript.Kind.LIVE_FEED, "title_key": "UI_MEMWORLD_MODE"}
 		MODE_VR:
 			return {"kind": CardUIScript.Kind.VR, "title_key": "UI_VR_MODE"}
 		MODE_EXIT:
@@ -470,6 +492,10 @@ func _scene_for_mode(mode: String) -> String:
 			return EGO_CAPTURE_SCENE
 		MODE_LIVE_FEED:
 			return LIVE_FEED_SCENE
+		MODE_POSE_INFERENCE:
+			return POSE_INFERENCE_SCENE
+		MODE_MEMWORLD:
+			return MEMWORLD_SCENE
 		MODE_VR:
 			return VR_SCENE
 		MODE_MUJOCO:
@@ -539,6 +565,10 @@ func _normalize_mode(raw_mode: String) -> String:
 			return MODE_EGO_CAPTURE
 		MODE_LIVE_FEED, "live_capture", "live", "live_server", "server_capture", "cloud_capture":
 			return MODE_LIVE_FEED
+		MODE_POSE_INFERENCE, "pose", "inference", "pose_model":
+			return MODE_POSE_INFERENCE
+		MODE_MEMWORLD, "mem_world", "mem_world_live":
+			return MODE_MEMWORLD
 		MODE_VR, "pure_vr", "robot_vr":
 			return MODE_VR
 		MODE_MUJOCO, "mj", "godot_mujoco", "simulation", "sim":
@@ -548,7 +578,7 @@ func _normalize_mode(raw_mode: String) -> String:
 		"":
 			return ""
 		_:
-			push_warning("[Operator] Unknown automation mode '%s' (expected teleop, ego_capture, live_feed, live_capture, vr, mujoco, or exit)" % raw_mode)
+			push_warning("[Operator] Unknown automation mode '%s' (expected teleop, ego_capture, live_feed, pose_inference, memworld, vr, mujoco, or exit)" % raw_mode)
 			return ""
 
 

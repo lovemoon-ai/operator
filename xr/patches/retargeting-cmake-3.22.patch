@@ -1,0 +1,9 @@
+diff --git a/cmake/nlohmann_json.cmake b/cmake/nlohmann_json.cmake
+--- a/cmake/nlohmann_json.cmake
++++ b/cmake/nlohmann_json.cmake
+@@ -14,5 +14,4 @@ if(NOT nlohmann_json_FOUND)
+         json
+         URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+-        DOWNLOAD_EXTRACT_TIMESTAMP true
+     )
+     FetchContent_MakeAvailable(json)

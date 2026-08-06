@@ -36,6 +36,8 @@ class OperatorFeaturesExportPlugin:
 		{"name": "operator_feature_mode_teleop", "default": false},
 		{"name": "operator_feature_mode_ego_capture", "default": true},
 		{"name": "operator_feature_mode_live_feed", "default": false},
+		{"name": "operator_feature_mode_pose_inference", "default": false},
+		{"name": "operator_feature_mode_memworld", "default": false},
 		{"name": "operator_feature_mode_vr", "default": false},
 		{"name": "operator_feature_mode_exit", "default": true},
 		{"name": "operator_feature_sink_spatialmp4", "default": true},

@@ -88,6 +88,15 @@ fi
 if [[ ! -f "$RETARGETING_SOURCE/app/CMakeLists.txt" ]]; then
     OPERATOR_DEPS_CACHE_ROOT="$OPERATOR_DEPS_CACHE_ROOT" "$DEPS_SCRIPT" retargeting
 fi
+RETARGETING_CMAKE_PATCH="$SCRIPT_DIR/../../patches/retargeting-cmake-3.22.patch"
+if git -C "$RETARGETING_SOURCE" apply --reverse --check "$RETARGETING_CMAKE_PATCH" >/dev/null 2>&1; then
+    :
+elif git -C "$RETARGETING_SOURCE" apply --check "$RETARGETING_CMAKE_PATCH"; then
+    git -C "$RETARGETING_SOURCE" apply "$RETARGETING_CMAKE_PATCH"
+else
+    echo "ERROR: cannot apply retargeting CMake compatibility patch: $RETARGETING_CMAKE_PATCH" >&2
+    exit 1
+fi
 # Always (re)point the symlink at the current cache root so switching
 # OPERATOR_DEPS_CACHE_ROOT never leaves a stale-but-resolvable link. Fail loudly
 # if the path is occupied by a real file/dir rather than the expected symlink.
@@ -101,6 +110,22 @@ GODOT_CPP_DIR_REAL="$(cd "$GODOT_CPP_LINK" && pwd -P)"
 [[ -n "$GODOT_CPP_DIR_REAL" ]] || { echo "ERROR: cannot resolve $GODOT_CPP_LINK" >&2; exit 1; }
 
 BUILD_DIR="build-${ANDROID_ABI}"
+NLOHMANN_JSON_DIR="${NLOHMANN_JSON_DIR:-}"
+if [[ -z "$NLOHMANN_JSON_DIR" ]]; then
+    for candidate in \
+        /usr/lib/cmake/nlohmann_json \
+        /usr/local/lib/cmake/nlohmann_json \
+        /opt/homebrew/lib/cmake/nlohmann_json; do
+        if [[ -f "$candidate/nlohmann_jsonConfig.cmake" ]]; then
+            NLOHMANN_JSON_DIR="$candidate"
+            break
+        fi
+    done
+fi
+CMAKE_PACKAGE_ARGS=()
+if [[ -n "$NLOHMANN_JSON_DIR" ]]; then
+    CMAKE_PACKAGE_ARGS+=("-Dnlohmann_json_DIR=$NLOHMANN_JSON_DIR")
+fi
 cmake -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ANDROID_ABI" \
@@ -112,7 +137,8 @@ cmake -B "$BUILD_DIR" \
     -DGODOT_CPP_BUILD_DIR="$GODOT_CPP_BUILD" \
     -DMUJOCO_ROOT="$MUJOCO_ANDROID_ROOT" \
     -DCMAKE_PREFIX_PATH="/opt/homebrew" \
-    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+    "${CMAKE_PACKAGE_ARGS[@]}"
 
 cmake --build "$BUILD_DIR" -j"$BUILD_JOBS"
 

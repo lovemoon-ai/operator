@@ -2,12 +2,11 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 import "./globals.css";
-import { LiveIndicator } from "./components/LiveIndicator";
 import { getServerComponentUser } from "@/lib/auth/server-component";
 
 export const metadata: Metadata = {
-  title: "operator",
-  description: "Teleoperate-anything data manager.",
+  title: "Operator 数据采集工作台",
+  description: "Quest 数据读取、检查、标签与上传工作台。",
   icons: { icon: "/icon.png", shortcut: "/icon.png", apple: "/icon.png" },
 };
 
@@ -21,23 +20,21 @@ export default async function RootLayout({ children }: { children: ReactNode }) 
   const user = await getServerComponentUser();
 
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <body data-chrome={user ? "app" : "bare"}>
         {user ? (
           <>
             <header className="app-header">
-              <a href="/" className="app-header__brand" aria-label="operator home">
+              <a href="/collectors" className="app-header__brand" aria-label="数据采集工作台">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src="/icon.png" alt="" width={28} height={28} />
               </a>
               <nav>
-                <a href="/">Sessions</a>
-                <a href="/connect">Connect</a>
+                <a href="/collectors">数据采集</a>
               </nav>
-              <LiveIndicator apiBase="/api/ingest-read" />
               <div className="app-header__account">
                 <span>{user.name || user.email || user.id}</span>
-                <a href="/auth/logout">Sign out</a>
+                <a href="/auth/logout">退出</a>
               </div>
             </header>
             <main className="container">{children}</main>

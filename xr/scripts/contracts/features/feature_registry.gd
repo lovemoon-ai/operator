@@ -18,6 +18,10 @@ static func definitions() -> Array[FeatureDefinition]:
 	defs.append(FeatureDefinition.create(
 		OperatorFeature.MODE_LIVE_FEED, false, "app/modes"))
 	defs.append(FeatureDefinition.create(
+		OperatorFeature.MODE_POSE_INFERENCE, false, "app/modes"))
+	defs.append(FeatureDefinition.create(
+		OperatorFeature.MODE_MEMWORLD, false, "app/modes"))
+	defs.append(FeatureDefinition.create(
 		OperatorFeature.MODE_VR, false, "app/modes"))
 	# The Exit card quits the app rather than opening a scene, but it is
 	# still a launcher card and follows the same on/off contract.

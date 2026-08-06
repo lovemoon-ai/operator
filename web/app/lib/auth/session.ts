@@ -23,6 +23,10 @@ export interface SessionData {
 }
 
 export function sessionOptions(secret: string): SessionOptions {
+  const secureCookie =
+    process.env.AUTH_COOKIE_SECURE === "1" ||
+    (process.env.AUTH_COOKIE_SECURE !== "0" &&
+      process.env.NODE_ENV === "production");
   return {
     password: secret,
     cookieName: SESSION_COOKIE,
@@ -33,7 +37,7 @@ export function sessionOptions(secret: string): SessionOptions {
       // Auto-enable Secure when the parent process knows it's behind
       // HTTPS. Local dev (http://localhost) flips this off so the
       // cookie still attaches.
-      secure: process.env.NODE_ENV === "production",
+      secure: secureCookie,
       maxAge: SESSION_TTL_SECONDS,
       path: "/",
     },

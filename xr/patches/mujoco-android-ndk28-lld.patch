@@ -1,0 +1,15 @@
+diff --git a/scripts/build-android.sh b/scripts/build-android.sh
+--- a/scripts/build-android.sh
++++ b/scripts/build-android.sh
+@@ -55,4 +55,11 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" -G Ninja \
+   -DMUJOCO_TEST_PYTHON_UTIL=OFF \
+   -DMUJOCO_BUILD_MACOS_FRAMEWORKS=OFF
+
++# MuJoCo 3.9's generic probe may append -fuse-ld=gold after lld while
++# cross-compiling. NDK r28 no longer provides the LLVMgold plugin, so the final
++# gold flag selects an incompatible host linker. Keep Android on the NDK's lld.
++if grep -q -- '-fuse-ld=gold' "$BUILD_DIR/build.ninja"; then
++  sed -i 's/ -fuse-ld=gold//g' "$BUILD_DIR/build.ninja"
++fi
++
+ cmake --build "$BUILD_DIR" --target mujoco --parallel "${MUJOCO_BUILD_JOBS:-4}"

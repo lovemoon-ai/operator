@@ -144,3 +144,19 @@ tests/results
 
 # editable install metadata from prepare_lerobot_so101.sh
 plugins/lerobot-teleop/python/*.egg-info/
+
+# Local Station runtime and exported datasets
+.runtime/
+operator-export/
+server/.venv/
+
+# Collector Agent build products
+collector-agent/.build-venv/
+collector-agent/build/
+collector-agent/dist/
+collector-agent/*.egg-info/
+
+# Local environment files may contain credentials
+.env
+.env.*
+!.env.example

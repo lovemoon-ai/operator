@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: verify-ndk log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: verify-ndk check-quest-signing log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 ADB?=adb
 ADB_BASE:=$(ADB)
@@ -16,6 +16,8 @@ PICO_SERIAL?=
 ADB_QUEST=$(if $(QUEST_SERIAL),$(ADB_BASE) -s $(QUEST_SERIAL),$(ADB_BASE))
 ADB_PICO=$(if $(PICO_SERIAL),$(ADB_BASE) -s $(PICO_SERIAL),$(ADB_BASE))
 GRADLE_USER_HOME?=$(HOME)/.gradle
+QUEST_SIGNING_ENV?=$(HOME)/.config/operator-xr/quest-signing.env
+GODOT?=$(firstword $(shell command -v godot 2>/dev/null) $(wildcard $(HOME)/.local/opt/godot-4.5.1/Godot_v4.5.1-stable_linux.x86_64) godot)
 
 # ---------------------------------------------------------------------------
 # Pinned Android NDK — single source of truth: android/build/config.gradle
@@ -28,7 +30,8 @@ GRADLE_USER_HOME?=$(HOME)/.gradle
 # gradle-pinned NDK and fail loudly if it is not installed.
 # Prefer an explicit ANDROID_SDK_ROOT/ANDROID_HOME from the env, else fall back
 # to the first SDK dir that actually exists (macOS then Linux default).
-ANDROID_SDK_ROOT ?= $(firstword $(ANDROID_HOME) $(wildcard $(HOME)/Library/Android/sdk) $(wildcard $(HOME)/Android/Sdk) $(HOME)/Library/Android/sdk)
+ANDROID_SDK_ROOT ?= $(firstword $(ANDROID_HOME) $(wildcard $(HOME)/Library/Android/sdk) $(wildcard $(HOME)/Android/Sdk) $(wildcard $(HOME)/.local/share/android-sdk) $(HOME)/Library/Android/sdk)
+export ANDROID_SDK_ROOT
 NDK_VERSION := $(shell sed -n "s/.*ndkVersion[^']*'\([^']*\)'.*/\1/p" android/build/config.gradle)
 PINNED_ANDROID_NDK := $(ANDROID_SDK_ROOT)/ndk/$(NDK_VERSION)
 export ANDROID_NDK := $(PINNED_ANDROID_NDK)
@@ -65,8 +68,9 @@ define godot_export_release
 		exit $$status; \
 	}; \
 	trap restore_manifest EXIT INT TERM; \
+	if [ -r "$(QUEST_SIGNING_ENV)" ]; then set -a; . "$(QUEST_SIGNING_ENV)"; set +a; fi; \
 	set +e; \
-	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3)
+	$(1) $(GODOT) --headless --verbose --path . --export-release "$(2)" $(3)
 endef
 
 # Plugin/library build rules (setup-vendors, prepare-android-libs, build-ahb,
@@ -77,14 +81,22 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+check-quest-signing:
+	@test -r "$(QUEST_SIGNING_ENV)" || { echo "Missing Quest signing environment: $(QUEST_SIGNING_ENV)" >&2; exit 1; }
+	@set -a; . "$(QUEST_SIGNING_ENV)"; set +a; \
+		test -n "$$GODOT_ANDROID_KEYSTORE_RELEASE_PATH" || { echo "Missing GODOT_ANDROID_KEYSTORE_RELEASE_PATH in $(QUEST_SIGNING_ENV)" >&2; exit 1; }; \
+		test -n "$$GODOT_ANDROID_KEYSTORE_RELEASE_USER" || { echo "Missing GODOT_ANDROID_KEYSTORE_RELEASE_USER in $(QUEST_SIGNING_ENV)" >&2; exit 1; }; \
+		test -n "$$GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD" || { echo "Missing GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD in $(QUEST_SIGNING_ENV)" >&2; exit 1; }; \
+		test -r "$$GODOT_ANDROID_KEYSTORE_RELEASE_PATH" || { echo "Quest release keystore is not readable: $$GODOT_ANDROID_KEYSTORE_RELEASE_PATH" >&2; exit 1; }
+
+build-quest: check-quest-signing verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
 # Test-harness APK (export preset "Meta Quest Test"):
 # operator_feature_test_harness=true, includes res://tests/** and
 # res://scripts/test_support/**. Consumed by tests/xr_module_harness.sh.
-build-quest-test: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest-test: check-quest-signing verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest_test)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest Test,$(apk_quest_test))
 
@@ -96,7 +108,7 @@ build-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-c
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
 # 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
-build-mujoco-quest: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
+build-mujoco-quest: check-quest-signing verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 
@@ -167,8 +179,13 @@ ship-fast:
 	$(ADB) shell am force-stop $(package)
 	$(ADB) logcat -c
 	$(ADB) shell am start -n $(package)/$(activity) $(mode_extra)
-	@sleep 1
-	@PID=$$($(ADB) shell "pidof $(package)" | tr -d '\r'); \
+	@PID=""; \
+	for attempt in $$(seq 1 20); do \
+		PID=$$($(ADB) shell "pidof $(package)" | tr -d '\r'); \
+		[ -n "$$PID" ] && break; \
+		sleep 0.5; \
+	done; \
+	if [ -z "$$PID" ]; then echo "App process did not start: $(package)" >&2; exit 1; fi; \
 	echo "--- tailing logcat for pid $$PID (Ctrl-C to stop) ---"; \
 	$(ADB) logcat --pid=$$PID -v brief | \
 		grep -E "godot|Operator|RobotView|TcpHandler|KotlinVideo|AhbVideo|OpenXR"
@@ -182,7 +199,7 @@ ship-quest: build-install-quest ship-fast
 # ---------------------------------------------------------------------------
 
 godot:
-	godot -e .
+	$(GODOT) -e .
 
 log:
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot"

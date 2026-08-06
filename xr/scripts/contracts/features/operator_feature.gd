@@ -20,6 +20,8 @@ const ROBOT_CONSTRAINT := 9
 const DEBUG_METRICS := 10
 const TEST_HARNESS := 11
 const MODE_EXIT := 12
+const MODE_POSE_INFERENCE := 13
+const MODE_MEMWORLD := 14
 
 const _ID_TO_STRING := {
 	MODE_TELEOP: "mode_teleop",
@@ -27,6 +29,8 @@ const _ID_TO_STRING := {
 	MODE_LIVE_FEED: "mode_live_feed",
 	MODE_VR: "mode_vr",
 	MODE_EXIT: "mode_exit",
+	MODE_POSE_INFERENCE: "mode_pose_inference",
+	MODE_MEMWORLD: "mode_memworld",
 	SINK_SPATIALMP4: "sink_spatialmp4",
 	SINK_LIVE_STREAM: "sink_live_stream",
 	SINK_UPLOAD: "sink_upload",

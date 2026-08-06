@@ -1,0 +1,19 @@
+Operator Collector bundles the following third-party runtime components.
+
+Android SDK Platform-Tools
+  Source: https://developer.android.com/tools/releases/platform-tools
+  License: Android SDK license terms included in the downloaded archive.
+
+FFmpeg
+  Source: https://ffmpeg.org/
+  Runtime binary supplied by imageio-ffmpeg: https://github.com/imageio/imageio-ffmpeg
+  License: Run `ffmpeg -L` for the exact configuration and applicable
+  LGPL/GPL terms of the bundled binary.
+
+ModelScope Hub
+  Source: https://github.com/modelscope/modelscope_hub
+  License: Apache-2.0
+
+CPython
+  Source: https://www.python.org/
+  License: Python Software Foundation License.

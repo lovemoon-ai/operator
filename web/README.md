@@ -39,6 +39,7 @@ process that:
   (this is where the XR client uploads),
 - exposes the read API at `/api/ingest-read/*` (consumed by the UI),
 - exposes per-session review state at `/api/reviews/*`,
+- coordinates paired USB collector workstations at `/collectors`,
 - delegates everything else to Next.js.
 
 Configure via env vars:
@@ -50,7 +51,6 @@ Configure via env vars:
 | `MAX_BYTES` | `100 GB` | hard cap on Upload-Length |
 | `AUTH_SESSION_SECRET` | dev fallback | iron-session cookie secret (32+ chars) |
 | `AUTH_BASE_URL` | `http://localhost:<PORT>` | origin the app advertises in cookies / redirects |
-| `DEV_USER_SUB` | `dev@localhost` | dev user's `sub` (web tier is local-only / single-user) |
 | `FFMPEG_BIN` | `ffmpeg` | binary used by the preview worker |
 | `PREVIEW_TRANSCODE` | unset | when `1`, re-encode preview to H.264 instead of stream-copy |
 | `UV_BIN` | `uv` | uv binary used to run the rerun sidecar |
@@ -59,6 +59,18 @@ Configure via env vars:
 | `RERUN_TOPK_FRAMES` | unset (unlimited) | cap on RGB+depth frames logged into the .rrd |
 | `RERUN_JPEG_QUALITY` | `85` | JPEG quality for RGB frames stored in the .rrd |
 | `RERUN_DISABLED` | unset | when `1`, skip the rerun worker entirely |
+| `OPERATOR_MODELSCOPE_TOKEN` | — | private Station-only credential for the fixed `chenghy666/test` repository |
+
+## USB collector workstations
+
+Open `/collectors` to pair and manage the cross-platform Collector Agent. The
+page can start Ego, scan Quest recordings, import with optional verified
+deletion, preview and label datasets, move local datasets to the managed trash,
+and enqueue batch ModelScope uploads. Full datasets stay on the collector
+computer; Station stores their metadata and preview images.
+
+See `docs/tutorials/collector-web-operator-guide.md` for daily operation and
+`web/deploy/station/README.md` for Station deployment and service management.
 
 ## Post-ingest workers
 
@@ -133,18 +145,11 @@ sequentially (see `app/lib/workers/`):
 
 ## Identity
 
-The web tier is **local-only**. Every install runs a single fixed dev
-user (`DEV_USER_SUB`, default `dev@localhost`); the browser flow stamps
-an iron-session cookie for that user via `/auth/start` and skips any
-remote SSO.
-
-- Headsets authenticate via a **per-user upload token**. The dev user
-  has exactly one token, displayed on `/connect`. The QR ack endpoint
-  hands the token to the device after verifying the 5-minute signed
-  ticket — the device never has to type it.
-- Reads and writes are still scoped to `req.user`, so if you ever
-  re-introduce multi-user auth the rest of the stack already respects
-  it.
+The web tier is local-only and uses a collector ID plus a six-digit PIN. The
+first successful login creates the account; later logins must use the same PIN.
+Every dataset, agent and job is scoped to that account, so collectors do not see
+one another's workstations or data. Browser sessions are signed with
+`AUTH_SESSION_SECRET`.
 
 ## Demo seeding (optional)
 
@@ -176,13 +181,12 @@ SSE stream is open — pages refresh automatically.
 
 ## Smoke test without a headset
 
-The dev user's upload token sits in the sqlite DB:
+Log in once with a test collector ID and PIN, then obtain that account's upload
+token from SQLite:
 
 ```bash
 npm run dev &
 sleep 4
-# log in once so the users row exists, then pull the token
-curl -s http://localhost:3000/auth/start >/dev/null
 TOKEN=$(sqlite3 ./data/operator.db "SELECT upload_token FROM users LIMIT 1;")
 
 META="session_id $(printf 'demo-1' | base64),artifact_kind $(printf 'manifest' | base64),filename $(printf 'manifest.json' | base64)"
@@ -199,6 +203,5 @@ printf '{"schema":"v2","note":"yo"}' | curl -X PATCH "http://localhost:3000$LOC"
   -H 'Upload-Offset: 0' -H 'Content-Length: 27' --data-binary @-
 ```
 
-Visit `http://localhost:3000/` — you'll be auto-logged-in as the dev
-user and the `demo-1` session shows up under "Sessions". Click in to
-mark it reviewed, add notes, etc.
+Visit `http://localhost:3000/collectors` while logged in as that collector to
+inspect the imported dataset.
