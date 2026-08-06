@@ -6,7 +6,7 @@ Station 只保存数据库、元数据和网页预览。
 本文适用于：
 
 - SSH 主机：`4090station`
-- 仓库：`/home/evophys/code/operator`
+- 仓库：`/home/evophys/code/operator-github`
 - 服务：`operator-web-station.service`
 - 端口：`6153`
 
@@ -14,7 +14,7 @@ Station 只保存数据库、元数据和网页预览。
 
 ```bash
 ssh 4090station
-cd /home/evophys/code/operator
+cd /home/evophys/code/operator-github
 bash web/deploy/station/install.sh
 ```
 
@@ -40,12 +40,13 @@ systemctl --user status operator-web-station --no-pager
 systemctl --user restart operator-web-station
 systemctl --user stop operator-web-station
 journalctl --user -u operator-web-station -f
+systemctl --user status operator-web-healthcheck.timer --no-pager
 ```
 
 网页代码更新后，重新运行安装脚本即可完成构建和重启：
 
 ```bash
-cd /home/evophys/code/operator
+cd /home/evophys/code/operator-github
 bash web/deploy/station/install.sh
 ```
 
@@ -122,6 +123,7 @@ http://127.0.0.1:6153
 systemctl --user is-active operator-web-station
 journalctl --user -u operator-web-station -n 100 --no-pager
 curl -I http://127.0.0.1:6153/collectors
+curl -fsS http://127.0.0.1:6153/healthz
 ss -ltn | grep ':6153'
 ```
 
@@ -129,3 +131,12 @@ ss -ltn | grep ':6153'
 - Station 本机可访问、其他电脑不可访问：检查局域网 IP、防火墙或 SSH 隧道。
 - Agent 显示离线：先确认 Agent 使用的 Station 地址与网页地址一致。
 - 磁盘空间不足：检查 `~/operator-data`，不要直接删除 SQLite 文件。
+
+生产服务直接由 systemd 运行 Node，并设置为退出后 3 秒自动重启。健康检查每分钟
+访问一次 `/healthz`，无响应时自动重启服务。计划维护时如需让网页保持停止，请先
+停止健康检查定时器：
+
+```bash
+systemctl --user stop operator-web-healthcheck.timer
+systemctl --user stop operator-web-station
+```

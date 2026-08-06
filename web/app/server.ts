@@ -86,6 +86,14 @@ async function main() {
   const app = express();
   app.disable("x-powered-by");
 
+  // Public, intentionally minimal liveness endpoint for the local systemd
+  // watchdog. Reaching this handler proves that the Node event loop and
+  // Express router are responsive without exposing collector state.
+  app.get("/healthz", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).json({ ok: true, service: "operator-station" });
+  });
+
   // --- auth flow (no auth required to hit these) ------------------------- //
   app.use(authRoutes());
 

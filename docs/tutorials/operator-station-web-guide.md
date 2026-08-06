@@ -30,6 +30,7 @@ systemctl --user status operator-web-station --no-pager
 systemctl --user restart operator-web-station
 systemctl --user stop operator-web-station
 journalctl --user -u operator-web-station -f
+systemctl --user status operator-web-healthcheck.timer --no-pager
 ```
 
 ## 打开网页
@@ -87,9 +88,18 @@ ModelScope 上传组件，无需数采员单独配置。
 systemctl --user is-active operator-web-station
 journalctl --user -u operator-web-station -n 100 --no-pager
 curl -I http://127.0.0.1:6153/collectors
+curl -fsS http://127.0.0.1:6153/healthz
 ss -ltn | grep ':6153'
 ```
 
 - 服务不是 `active`：查看日志后重新运行安装脚本。
 - Agent 离线：确认 Agent 的 Station 地址、网络或 SSH 隧道。
 - 磁盘不足：检查 `~/operator-data`，不要删除 SQLite 文件。
+
+Station 进程退出后会由 systemd 在 3 秒后自动拉起；健康检查每分钟访问一次
+`/healthz`，网页无响应时会自动重启。计划维护并希望网页保持停止时，先执行：
+
+```bash
+systemctl --user stop operator-web-healthcheck.timer
+systemctl --user stop operator-web-station
+```

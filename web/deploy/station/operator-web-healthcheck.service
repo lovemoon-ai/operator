@@ -1,0 +1,9 @@
+[Unit]
+Description=Check and recover the Operator Station web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/home/evophys/.config/operator-station/station.env
+ExecStart=/usr/bin/bash /home/evophys/code/operator-github/web/deploy/station/operator-web-healthcheck.sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_dir="${REPO_DIR:-/home/evophys/code/operator}"
+repo_dir="${REPO_DIR:-/home/evophys/code/operator-github}"
 data_dir="${DATA_DIR:-/home/evophys/operator-data}"
 port="${PORT:-6153}"
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/operator-station"
@@ -41,13 +41,21 @@ npm run build
 install -m 0644 \
   "$repo_dir/web/deploy/station/operator-web-station.service" \
   "$unit_dir/operator-web-station.service"
+install -m 0644 \
+  "$repo_dir/web/deploy/station/operator-web-healthcheck.service" \
+  "$unit_dir/operator-web-healthcheck.service"
+install -m 0644 \
+  "$repo_dir/web/deploy/station/operator-web-healthcheck.timer" \
+  "$unit_dir/operator-web-healthcheck.timer"
 systemctl --user daemon-reload
 systemctl --user enable --now operator-web-station.service
 systemctl --user restart operator-web-station.service
+systemctl --user enable --now operator-web-healthcheck.timer
 
 printf '\nOperator Station is running.\n'
 printf 'LAN:        http://%s:%s/collectors\n' "$lan_ip" "$port"
 printf 'SSH tunnel: ssh -N -L %s:127.0.0.1:%s 4090station\n' "$port" "$port"
 printf 'Then open:  http://127.0.0.1:%s/collectors\n\n' "$port"
+printf 'Health:     http://127.0.0.1:%s/healthz\n' "$port"
 printf 'For boot without an interactive login, an administrator must run once:\n'
 printf '  sudo loginctl enable-linger %s\n' "$USER"
