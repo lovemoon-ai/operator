@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from operator_collector.jobs import (
     JobContext,
+    _UploadProgressTracker,
     _create_preview_frames,
     build_dataset_name,
     delete_local_item,
@@ -229,12 +230,15 @@ class JobTests(unittest.TestCase):
             session = root / "data" / "sessions" / "demo"
             session.mkdir(parents=True)
             (session / "media.mp4").write_bytes(b"video")
+            progress: list[tuple[float, str, dict[str, object] | None]] = []
             context = JobContext(
                 {
                     "data_root": str(root / "data"),
                     "_modelscope_token": "test-secret",
                 },
-                lambda _value, _message: None,
+                lambda value, message, metrics=None: progress.append(
+                    (value, message, metrics)
+                ),
             )
             with patch("modelscope_hub.HubApi") as hub_api:
                 result = upload_item(
@@ -251,6 +255,30 @@ class JobTests(unittest.TestCase):
             self.assertEqual(call.args[0], FIXED_MODELSCOPE_REPO_ID)
             self.assertEqual(call.args[1], "dataset")
             self.assertEqual(call.kwargs["path_in_repo"], "sessions/demo")
+            self.assertTrue(call.kwargs["use_cache"])
+            self.assertEqual(call.kwargs["max_workers"], 8)
+            self.assertEqual(progress[-1][2]["phase"], "completed")
+
+    def test_upload_progress_aggregates_parallel_byte_streams(self) -> None:
+        progress: list[tuple[float, str, dict[str, object] | None]] = []
+        context = JobContext(
+            {},
+            lambda value, message, metrics=None: progress.append(
+                (value, message, metrics)
+            ),
+        )
+        tracker = _UploadProgressTracker(context, 200, 2, 8)
+        first = tracker.tqdm(total=100, unit="B", desc="first")
+        second = tracker.tqdm(total=100, unit="B", desc="second")
+        first.update(50)
+        second.update(100)
+        second.close()
+
+        metrics = progress[-1][2]
+        self.assertIsNotNone(metrics)
+        self.assertEqual(metrics["transferredBytes"], 150)
+        self.assertEqual(metrics["totalBytes"], 200)
+        self.assertGreater(progress[-1][0], 0.7)
 
     def test_bundled_tool_is_preferred_over_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

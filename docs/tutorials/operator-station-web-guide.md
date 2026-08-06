@@ -79,8 +79,12 @@ HTTPS。
 operator-collector configure http://<Station局域网IP>:6153
 ```
 
-重启 Agent，使用数采 ID 和 PIN 登录网页后批准配对。0.1.4 安装包已经包含 ADB、FFmpeg、Python 和
+重启 Agent，使用数采 ID 和 PIN 登录网页后批准配对。0.1.5 安装包已经包含 ADB、FFmpeg、Python 和
 ModelScope 上传组件，无需数采员单独配置。
+
+0.1.5 将心跳与上传任务分离，大文件上传期间 Agent 会继续保持在线；上传任务会按
+字节上报实时进度、速度和预计剩余时间，并继续使用 ModelScope 的并行上传、重试缓存
+和断点续传。Station 页面顶部会单独显示上传队列，最近任务仍只保留最新三条。
 
 ## 故障检查
 

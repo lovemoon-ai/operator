@@ -108,8 +108,12 @@ operator-collector configure http://<Station局域网IP>:6153
 ```
 
 重启 Agent 后，在浏览器打开的配对页批准该电脑。后续数据目录、Quest 路径和
-预览操作均在 `/collectors` 页面设置。0.1.3 安装包已经包含 ADB、FFmpeg、Python
+预览操作均在 `/collectors` 页面设置。0.1.5 安装包已经包含 ADB、FFmpeg、Python
 运行时和 ModelScope 上传组件；仓库固定为 `chenghy666/test`。
+
+0.1.5 的 Agent 在大文件上传期间会继续独立发送心跳，并按字节上报实时进度、速度
+和预计剩余时间。网页顶部的“上传进度”区域显示独立上传队列；上传继续使用缓存、
+并行文件传输和断点续传。
 
 远程 Agent 通过 SSH 隧道连接时保持默认地址：
 

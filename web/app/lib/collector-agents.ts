@@ -8,7 +8,8 @@ import { currentUserId } from "./auth-context.js";
 import { DATA_ROOT, db } from "./db.js";
 
 const ENROLLMENT_TTL_MS = 10 * 60 * 1000;
-const AGENT_ONLINE_MS = 20_000;
+const AGENT_ONLINE_MS = 30_000;
+const STALE_RUNNING_JOB_MS = 2 * 60 * 60 * 1000;
 const PREVIEW_ROOT = path.join(DATA_ROOT, "collector-previews");
 const MAX_BATCH_UPLOAD_ITEMS = 100;
 const FIXED_MODELSCOPE_REPO_ID = "chenghy666/test";
@@ -57,6 +58,7 @@ db.exec(`
     payload_json  TEXT NOT NULL,
     status        TEXT NOT NULL,
     progress      REAL NOT NULL DEFAULT 0,
+    progress_json TEXT,
     message       TEXT NOT NULL DEFAULT '',
     result_json   TEXT,
     error         TEXT,
@@ -88,6 +90,18 @@ db.exec(`
     ON collector_items(user_id, created_at DESC);
 `);
 
+function ensureCollectorJobColumn(name: string, definition: string): void {
+  const columns = db.prepare("PRAGMA table_info(collector_jobs)").all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === name)) return;
+  try {
+    db.exec(`ALTER TABLE collector_jobs ADD COLUMN ${name} ${definition}`);
+  } catch (error) {
+    if (!String((error as Error).message).includes("duplicate column name")) throw error;
+  }
+}
+
+ensureCollectorJobColumn("progress_json", "TEXT");
+
 fs.mkdirSync(PREVIEW_ROOT, { recursive: true });
 
 interface AgentRow {
@@ -113,6 +127,7 @@ interface JobRow {
   payload_json: string;
   status: string;
   progress: number;
+  progress_json: string | null;
   message: string;
   result_json: string | null;
   error: string | null;
@@ -190,6 +205,11 @@ const stmts = {
     WHERE agent_id = ? AND status = 'queued'
     ORDER BY created_at ASC LIMIT 1
   `),
+  requeueStaleJobs: db.prepare(`
+    UPDATE collector_jobs
+    SET status = 'queued', message = 'Agent reconnected; resuming from cache', updated_at = ?
+    WHERE agent_id = ? AND status = 'running' AND updated_at < ?
+  `),
   claimJob: db.prepare(`
     UPDATE collector_jobs
     SET status = 'running', updated_at = ?
@@ -200,7 +220,7 @@ const stmts = {
   `),
   updateJobProgress: db.prepare(`
     UPDATE collector_jobs
-    SET status = 'running', progress = ?, message = ?, updated_at = ?
+    SET status = 'running', progress = ?, progress_json = ?, message = ?, updated_at = ?
     WHERE id = ? AND agent_id = ?
   `),
   completeJob: db.prepare(`
@@ -217,6 +237,19 @@ const stmts = {
   listJobs: db.prepare<[string], JobRow>(`
     SELECT * FROM collector_jobs WHERE user_id = ?
     ORDER BY created_at DESC LIMIT 3
+  `),
+  listUploadJobs: db.prepare<[string], JobRow>(`
+    SELECT * FROM collector_jobs WHERE user_id = ? AND kind = 'upload'
+    ORDER BY
+      CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+      created_at DESC
+    LIMIT 200
+  `),
+  findActiveUploadForItem: db.prepare<[string, string], JobRow>(`
+    SELECT * FROM collector_jobs
+    WHERE user_id = ? AND kind = 'upload' AND status IN ('queued', 'running')
+      AND json_extract(payload_json, '$.item_id') = ?
+    ORDER BY created_at DESC LIMIT 1
   `),
   upsertItem: db.prepare(`
     INSERT INTO collector_items
@@ -308,6 +341,29 @@ function bodyString(value: unknown, max = 256): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
+function progressMetrics(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const metrics: Record<string, unknown> = {};
+  for (const key of [
+    "transferredBytes",
+    "totalBytes",
+    "bytesPerSecond",
+    "etaSeconds",
+    "filesTotal",
+    "workers",
+  ]) {
+    const numberValue = Number(source[key]);
+    if (Number.isFinite(numberValue)) {
+      metrics[key] = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, numberValue));
+    }
+  }
+  const phase = bodyString(source.phase, 32);
+  if (phase) metrics.phase = phase;
+  if (typeof source.resumable === "boolean") metrics.resumable = source.resumable;
+  return Object.keys(metrics).length > 0 ? metrics : null;
+}
+
 function requireBrowserUser(res: Response): string | null {
   const userId = currentUserId();
   if (!userId) {
@@ -359,6 +415,7 @@ function publicJob(row: JobRow) {
     payload: safeJson(row.payload_json) ?? {},
     status: row.status,
     progress: row.progress,
+    metrics: safeJson(row.progress_json) ?? {},
     message: row.message,
     result: safeJson(row.result_json),
     error: row.error,
@@ -426,6 +483,7 @@ function createJob(agent: AgentRow, kind: string, payload: unknown): JobRow {
     payload_json: JSON.stringify(payload ?? {}),
     status: "queued",
     progress: 0,
+    progress_json: null,
     message: "",
     result_json: null,
     error: null,
@@ -600,6 +658,12 @@ collectorAgentRouter.post(
 );
 
 collectorAgentRouter.post("/jobs/next", agentAuth, (req: AgentRequest, res) => {
+  const now = new Date();
+  stmts.requeueStaleJobs.run(
+    now.toISOString(),
+    req.collectorAgent!.id,
+    new Date(now.getTime() - STALE_RUNNING_JOB_MS).toISOString(),
+  );
   const row = claimNextJob(req.collectorAgent!.id);
   if (!row) return res.status(204).end();
   res.json(publicJob(row));
@@ -615,7 +679,15 @@ collectorAgentRouter.post(
     if (!job) return res.status(404).json({ error: "job not found" });
     const progress = Math.max(0, Math.min(1, Number(req.body?.progress ?? 0)));
     const message = bodyString(req.body?.message, 512);
-    stmts.updateJobProgress.run(progress, message, new Date().toISOString(), job.id, agent.id);
+    const metrics = progressMetrics(req.body?.metrics);
+    stmts.updateJobProgress.run(
+      progress,
+      metrics ? JSON.stringify(metrics) : null,
+      message,
+      new Date().toISOString(),
+      job.id,
+      agent.id,
+    );
     res.json({ ok: true });
   },
 );
@@ -718,6 +790,7 @@ collectorBrowserRouter.get("/overview", (_req, res) => {
   res.json({
     agents: stmts.listAgents.all(userId).map(publicAgent),
     jobs: stmts.listJobs.all(userId).map(publicJob),
+    uploads: stmts.listUploadJobs.all(userId).map(publicJob),
     items: stmts.listItems.all(userId).map(publicItem),
   });
 });
@@ -865,6 +938,8 @@ collectorBrowserRouter.post("/items/:id/upload", (req, res) => {
   const item = stmts.getItemScoped.get(req.params.id!, userId);
   if (!item) return res.status(404).json({ error: "item not found" });
   if (!item.label) return res.status(409).json({ error: "label item before upload" });
+  const active = stmts.findActiveUploadForItem.get(userId, item.id);
+  if (active) return res.status(409).json({ error: "该数据已在上传队列中" });
   const agent = stmts.getAgentScoped.get(item.agent_id, userId);
   if (!agent) return res.status(409).json({ error: "agent unavailable" });
   const config = (safeJson(agent.config_json) ?? {}) as Record<string, unknown>;
@@ -907,6 +982,9 @@ collectorBrowserRouter.post("/agents/:id/uploads", (req, res) => {
   }
   if (items.some((item) => !item!.label)) {
     return res.status(409).json({ error: "所选数据中仍有未保存标签的条目" });
+  }
+  if (items.some((item) => stmts.findActiveUploadForItem.get(userId, item!.id))) {
+    return res.status(409).json({ error: "所选数据中已有条目在上传队列中" });
   }
 
   const createBatch = db.transaction(() => items.map((item) => createJob(agent, "upload", {

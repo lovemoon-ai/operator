@@ -31,6 +31,7 @@ interface Job {
   payload: Json;
   status: string;
   progress: number;
+  metrics: Json;
   message: string;
   result: Json | null;
   error: string | null;
@@ -55,6 +56,7 @@ interface Item {
 interface Overview {
   agents: Agent[];
   jobs: Job[];
+  uploads: Job[];
   items: Item[];
 }
 
@@ -67,7 +69,7 @@ interface ScannedSession {
   source_path?: string;
 }
 
-const EMPTY: Overview = { agents: [], jobs: [], items: [] };
+const EMPTY: Overview = { agents: [], jobs: [], uploads: [], items: [] };
 
 export function CollectorDashboard() {
   const [overview, setOverview] = useState<Overview>(EMPTY);
@@ -83,7 +85,11 @@ export function CollectorDashboard() {
     try {
       const response = await fetch("/api/collectors/overview", { cache: "no-store" });
       if (!response.ok) throw new Error(await response.text());
-      const next = await response.json() as Overview;
+      const responseValue = await response.json() as Overview;
+      const next = {
+        ...responseValue,
+        uploads: Array.isArray(responseValue.uploads) ? responseValue.uploads : [],
+      };
       setOverview(next);
       setConfigs((previous) => {
         const merged = { ...previous };
@@ -147,8 +153,17 @@ export function CollectorDashboard() {
     () => Object.fromEntries(overview.agents.map((agent) => [agent.id, agent])),
     [overview.agents],
   );
+  const activeUploadItemIds = useMemo(
+    () => new Set(
+      overview.uploads
+        .filter((job) => job.status === "queued" || job.status === "running")
+        .map((job) => String(job.payload.item_id ?? ""))
+        .filter(Boolean),
+    ),
+    [overview.uploads],
+  );
   const onlineCount = overview.agents.filter((agent) => agent.online).length;
-  const readyCount = overview.items.filter(isUploadable).length;
+  const readyCount = overview.items.filter((item) => isUploadable(item, activeUploadItemIds)).length;
 
   if (loading) return <div className="empty-state">正在加载数采工作站…</div>;
 
@@ -168,6 +183,8 @@ export function CollectorDashboard() {
       </section>
 
       {error && <div className="collector-alert collector-alert--bad" role="alert">{error}</div>}
+
+      <UploadQueue jobs={overview.uploads} agentsById={agentsById} />
 
       <div className="collector-workspace">
         <aside className="collector-sidebar" aria-label="电脑操作提示">
@@ -236,7 +253,9 @@ export function CollectorDashboard() {
             const localSessions = asSessions(state.scannedLocalSessions);
             const config = configs[agent.id] ?? agent.config;
             const agentItems = overview.items.filter((item) => item.agentId === agent.id);
-            const uploadableItems = agentItems.filter(isUploadable);
+            const uploadableItems = agentItems.filter(
+              (item) => isUploadable(item, activeUploadItemIds),
+            );
             const selectedIds = uploadableItems.filter((item) => selectedItems[item.id]).map((item) => item.id);
             const allSelected = uploadableItems.length > 0 && selectedIds.length === uploadableItems.length;
             const modelscopeReady = ["ready", "authenticated"].includes(String(state.modelscope ?? ""));
@@ -348,7 +367,8 @@ export function CollectorDashboard() {
                   ) : (
                     <div className="collector-item-list">
                       {agentItems.map((item) => {
-                        const uploadable = isUploadable(item);
+                        const uploading = activeUploadItemIds.has(item.id);
+                        const uploadable = isUploadable(item, activeUploadItemIds);
                         return (
                           <article className={`collector-item ${selectedItems[item.id] ? "is-selected" : ""}`} key={item.id}>
                             <label className="collector-item__select" title={uploadable ? "选择上传" : "保存标签后可选择"}>
@@ -358,7 +378,7 @@ export function CollectorDashboard() {
                             <div className="collector-item__body">
                               <div className="collector-item__topline">
                                 <div><div className="collector-item__name">{item.datasetName}</div><div className="collector-muted"><code>{item.sourceSessionId}</code></div></div>
-                                <span className={`collector-item__state is-${item.status}`}>{item.status === "uploaded" ? "已上传" : item.label ? "待上传" : "待标签"}</span>
+                                <span className={`collector-item__state is-${uploading ? "uploading" : item.status}`}>{item.status === "uploaded" ? "已上传" : uploading ? "上传中" : item.label ? "待上传" : "待标签"}</span>
                               </div>
                               <div className="collector-item__path" title={item.localPath}>{item.localPath}</div>
                               <QcSummary qc={item.qc} />
@@ -403,6 +423,51 @@ export function CollectorDashboard() {
 
 function StatusMetric({ label, value, good }: { label: string; value: string; good: boolean }) {
   return <div className="collector-metric"><span>{label}</span><strong className={good ? "is-good" : ""}>{value}</strong></div>;
+}
+
+function UploadQueue({ jobs, agentsById }: { jobs: Job[]; agentsById: Record<string, Agent> }) {
+  const active = jobs.filter((job) => job.status === "queued" || job.status === "running");
+  const recent = jobs.filter((job) => job.status !== "queued" && job.status !== "running").slice(0, 6);
+  const visibleJobs = [...active, ...recent];
+  const activeCount = active.length;
+  return (
+    <section className="collector-uploads" aria-label="上传进度">
+      <div className="collector-uploads__head">
+        <div><span className="collector-section-kicker">UPLOADS</span><h2>上传进度</h2></div>
+        <div className="collector-uploads__summary"><strong>{activeCount}</strong><span>正在处理</span></div>
+      </div>
+      {visibleJobs.length === 0 ? (
+        <div className="collector-uploads__empty">选择已打标签的数据后，上传任务会显示在这里。</div>
+      ) : (
+        <div className="collector-upload-list">
+          {visibleJobs.map((job) => {
+            const metrics = job.metrics ?? {};
+            const transferred = Number(metrics.transferredBytes ?? 0);
+            const total = Number(metrics.totalBytes ?? 0);
+            const speed = Number(metrics.bytesPerSecond ?? 0);
+            const eta = Number(metrics.etaSeconds ?? 0);
+            const percent = Math.max(0, Math.min(100, Math.round(job.progress * 100)));
+            const dataset = shortValue(job.payload.dataset_name) || "未命名数据";
+            return (
+              <article className={`collector-upload is-${job.status}`} key={job.id}>
+                <div className="collector-upload__topline">
+                  <div><strong>{dataset}</strong><span>{agentsById[job.agentId]?.name ?? job.agentId}</span></div>
+                  <b>{localizeJobStatus(job.status)}{job.status === "running" ? ` · ${percent}%` : ""}</b>
+                </div>
+                <progress max={1} value={job.progress} />
+                <div className="collector-upload__metrics">
+                  <span>{total > 0 ? `${formatBytes(transferred)} / ${formatBytes(total)}` : job.status === "queued" ? "等待前序任务" : "正在准备文件"}</span>
+                  <span>{speed > 0 ? `${formatBytes(speed)}/s` : "可断点续传"}</span>
+                  <span>{eta > 0 && job.status === "running" ? `预计剩余 ${formatDuration(eta)}` : job.status === "completed" ? "上传完成" : localizeError(job.message)}</span>
+                </div>
+                {job.error && <div className="collector-upload__error">{localizeError(job.error)}</div>}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function PreviewGallery({ item }: { item: Item }) {
@@ -462,7 +527,9 @@ function updateConfig(setter: Dispatch<SetStateAction<Record<string, Json>>>, ag
 }
 
 function asSessions(value: unknown): ScannedSession[] { return Array.isArray(value) ? value as ScannedSession[] : []; }
-function isUploadable(item: Item): boolean { return !!item.label && item.status !== "uploaded"; }
+function isUploadable(item: Item, activeUploadItemIds?: Set<string>): boolean {
+  return !!item.label && item.status !== "uploaded" && !activeUploadItemIds?.has(item.id);
+}
 
 function localizeState(value: string): string {
   const values: Record<string, string> = { ready: "可用", authenticated: "已登录", "not authenticated": "未登录", fixture: "本地数据模式", "not found": "未找到", "not connected": "未连接", "multiple devices": "连接了多台设备", unknown: "未知" };
@@ -528,6 +595,7 @@ function localizeError(value: string): string {
     ["label item before upload", "上传前请先填写并保存标签"],
     ["ModelScope credentials were not provisioned", "Station 尚未向 Agent 配置 ModelScope 凭据"],
     ["Upload job is missing item or local data", "上传失败：本地数据目录不存在"],
+    ["Agent reconnected; resuming from cache", "Agent 已重新连接，将从上传缓存继续"],
     ["adb was not found; install Android Platform Tools", "未找到 ADB，请安装 Android Platform Tools 或填写 ADB 路径"],
     ["adb was not found in the Agent package", "Agent 安装包中未找到 ADB"],
   ];
@@ -543,4 +611,12 @@ function formatBytes(value: number): string {
   let unit = 0;
   while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function formatDuration(value: number): string {
+  const seconds = Math.max(0, Math.round(value));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 }

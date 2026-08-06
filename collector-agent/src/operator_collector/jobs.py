@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from typing import Any, Callable
 from .runtime import FIXED_MODELSCOPE_REPO_ID, find_tool, modelscope_token
 
 
-Progress = Callable[[float, str], None]
+Progress = Callable[..., None]
 DEFAULT_QUEST_ROOT = "/sdcard/DCIM/SpatialMP4"
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -28,7 +29,18 @@ _MODELSCOPE_STATE_CACHE: tuple[str, float, str] = ("", 0.0, "not found")
 @dataclass
 class JobContext:
     config: dict[str, Any]
-    progress: Progress
+    reporter: Progress
+
+    def progress(
+        self,
+        value: float,
+        message: str,
+        metrics: dict[str, Any] | None = None,
+    ) -> None:
+        if metrics is None:
+            self.reporter(value, message)
+        else:
+            self.reporter(value, message, metrics)
 
     @property
     def data_root(self) -> Path:
@@ -72,6 +84,144 @@ class JobContext:
         if not found:
             raise RuntimeError("adb was not found in the Agent package or system PATH")
         return found
+
+
+class _UploadProgressBar:
+    def __init__(
+        self,
+        tracker: "_UploadProgressTracker",
+        iterable: Any,
+        total: int,
+        unit: str,
+        description: str,
+    ) -> None:
+        self._tracker = tracker
+        self._iterable = iterable
+        self._total = max(0, int(total or 0))
+        self._is_bytes = unit == "B" and self._total > 0
+        self._description = description or f"file-{id(self)}"
+        self._current = 0
+
+    def __enter__(self) -> "_UploadProgressBar":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+    def __iter__(self):
+        return iter(self._iterable or ())
+
+    def update(self, amount: int = 1) -> None:
+        if not self._is_bytes:
+            return
+        self._current = min(self._total, self._current + max(0, int(amount)))
+        self._tracker.update(self._description, self._current, self._total)
+
+    def close(self) -> None:
+        if self._is_bytes and self._current:
+            self._tracker.update(self._description, self._current, self._total, force=True)
+
+
+class _UploadProgressTracker:
+    """Aggregate byte progress from ModelScope's parallel upload streams."""
+
+    def __init__(
+        self,
+        context: JobContext,
+        total_bytes: int,
+        file_count: int,
+        workers: int,
+    ) -> None:
+        self._context = context
+        self.total_bytes = max(1, total_bytes)
+        self.file_count = file_count
+        self.workers = workers
+        self._started = time.monotonic()
+        self._last_reported = 0.0
+        self._files: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def tqdm(self, iterable: Any = None, *args: Any, **kwargs: Any) -> _UploadProgressBar:
+        return _UploadProgressBar(
+            self,
+            iterable,
+            int(kwargs.get("total") or 0),
+            str(kwargs.get("unit") or ""),
+            str(kwargs.get("desc") or ""),
+        )
+
+    def update(
+        self,
+        key: str,
+        current: int,
+        _file_total: int,
+        *,
+        force: bool = False,
+    ) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._files[key] = max(self._files.get(key, 0), current)
+            transferred = min(self.total_bytes, sum(self._files.values()))
+            if not force and now - self._last_reported < 0.8:
+                return
+            self._last_reported = now
+
+        elapsed = max(0.001, now - self._started)
+        speed = transferred / elapsed
+        remaining = max(0, self.total_bytes - transferred)
+        eta = remaining / speed if speed > 0 else 0.0
+        ratio = min(1.0, transferred / self.total_bytes)
+        progress = 0.05 + ratio * 0.92
+        message = (
+            f"正在上传 {_format_bytes(transferred)} / {_format_bytes(self.total_bytes)}"
+            f" · {ratio * 100:.1f}% · {_format_bytes(speed)}/s"
+        )
+        if eta > 0:
+            message += f" · 预计剩余 {_format_duration(eta)}"
+        self._context.progress(
+            progress,
+            message,
+            {
+                "phase": "uploading",
+                "transferredBytes": transferred,
+                "totalBytes": self.total_bytes,
+                "bytesPerSecond": round(speed),
+                "etaSeconds": round(eta),
+                "filesTotal": self.file_count,
+                "workers": self.workers,
+                "resumable": True,
+            },
+        )
+
+    def summary(self) -> dict[str, int | float]:
+        elapsed = max(0.001, time.monotonic() - self._started)
+        return {
+            "total_bytes": self.total_bytes,
+            "duration_seconds": round(elapsed, 3),
+            "average_bytes_per_second": round(self.total_bytes / elapsed),
+        }
+
+
+def _format_bytes(value: float) -> str:
+    units = ("B", "KB", "MB", "GB", "TB")
+    amount = max(0.0, float(value))
+    unit = 0
+    while amount >= 1024 and unit < len(units) - 1:
+        amount /= 1024
+        unit += 1
+    digits = 0 if unit == 0 else 1
+    return f"{amount:.{digits}f} {units[unit]}"
+
+
+def _format_duration(seconds: float) -> str:
+    remaining = max(0, int(seconds))
+    if remaining < 60:
+        return f"{remaining} 秒"
+    minutes, seconds = divmod(remaining, 60)
+    if minutes < 60:
+        return f"{minutes} 分 {seconds} 秒"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} 小时 {minutes} 分"
 
 
 def run_job(kind: str, payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
@@ -350,26 +500,75 @@ def upload_item(payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
     token = modelscope_token(context.config)
     if not token:
         raise RuntimeError("ModelScope credentials were not provisioned by Station")
-    context.progress(0.05, "Starting resumable ModelScope upload")
-    from modelscope_hub import HubApi
-
-    HubApi(token=token).upload_folder(
-        FIXED_MODELSCOPE_REPO_ID,
-        "dataset",
-        local_path,
-        path_in_repo=f"sessions/{dataset_name}",
-        revision=revision,
-        commit_message=f"add {dataset_name}",
-        use_cache=True,
-        disable_tqdm=True,
+    files = [
+        path
+        for path in local_path.rglob("*")
+        if path.is_file() and path.name not in {".ms_upload_cache", ".ms_upload_progress"}
+    ]
+    total_bytes = sum(path.stat().st_size for path in files)
+    if total_bytes <= 0:
+        raise RuntimeError("Upload dataset does not contain any files")
+    try:
+        configured_workers = int(context.config.get("modelscope_upload_workers") or 8)
+    except (TypeError, ValueError):
+        configured_workers = 8
+    workers = max(1, min(configured_workers, 8))
+    context.progress(
+        0.02,
+        f"正在准备可续传上传 · {len(files)} 个文件 · {_format_bytes(total_bytes)}",
+        {
+            "phase": "preparing",
+            "transferredBytes": 0,
+            "totalBytes": total_bytes,
+            "bytesPerSecond": 0,
+            "etaSeconds": 0,
+            "filesTotal": len(files),
+            "workers": workers,
+            "resumable": True,
+        },
     )
-    context.progress(1.0, "ModelScope upload complete")
+    from modelscope_hub import HubApi
+    import modelscope_hub._upload as modelscope_upload
+
+    tracker = _UploadProgressTracker(context, total_bytes, len(files), workers)
+    original_tqdm = modelscope_upload.tqdm
+    modelscope_upload.tqdm = tracker.tqdm
+    try:
+        HubApi(token=token).upload_folder(
+            FIXED_MODELSCOPE_REPO_ID,
+            "dataset",
+            local_path,
+            path_in_repo=f"sessions/{dataset_name}",
+            revision=revision,
+            commit_message=f"add {dataset_name}",
+            max_workers=workers,
+            use_cache=True,
+            disable_tqdm=False,
+        )
+    finally:
+        modelscope_upload.tqdm = original_tqdm
+    summary = tracker.summary()
+    context.progress(
+        1.0,
+        f"ModelScope 上传完成 · {_format_bytes(total_bytes)}",
+        {
+            "phase": "completed",
+            "transferredBytes": total_bytes,
+            "totalBytes": total_bytes,
+            "bytesPerSecond": summary["average_bytes_per_second"],
+            "etaSeconds": 0,
+            "filesTotal": len(files),
+            "workers": workers,
+            "resumable": True,
+        },
+    )
     return {
         "item_id": item_id,
         "repo_id": FIXED_MODELSCOPE_REPO_ID,
         "revision": revision,
         "path_in_repo": f"sessions/{dataset_name}",
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        **summary,
     }
 
 

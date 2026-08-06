@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import platform
 import socket
+import threading
 import time
 import urllib.parse
 import webbrowser
@@ -24,6 +25,7 @@ class CollectorAgent:
         self.open_browser = open_browser
         self.remote_config = dict(self.local.get("remote_config") or {})
         self.state: dict[str, Any] = {}
+        self._state_lock = threading.RLock()
 
     def ensure_enrolled(self, timeout_seconds: int = 600) -> None:
         if self.client.token:
@@ -71,7 +73,8 @@ class CollectorAgent:
 
     def heartbeat(self) -> None:
         base_state = workstation_state(self._runtime_config())
-        base_state.update(self.state)
+        with self._state_lock:
+            base_state.update(self.state)
         response = self.client.json(
             "POST",
             "/api/collector-agent/heartbeat",
@@ -83,29 +86,48 @@ class CollectorAgent:
             },
         )
         if response and isinstance(response.get("config"), dict):
-            self.remote_config = dict(response["config"])
-            self.local["remote_config"] = self.remote_config
-            save_config(self.local)
+            with self._state_lock:
+                self.remote_config = dict(response["config"])
+                self.local["remote_config"] = self.remote_config
+                save_config(self.local)
 
         credentials = (response or {}).get("uploadCredentials")
         if isinstance(credentials, dict):
             provisioned_token = str(credentials.get("token") or "").strip()
-            if provisioned_token and self.local.get("modelscope_token") != provisioned_token:
-                self.local["modelscope_token"] = provisioned_token
-                save_config(self.local)
+            with self._state_lock:
+                if provisioned_token and self.local.get("modelscope_token") != provisioned_token:
+                    self.local["modelscope_token"] = provisioned_token
+                    save_config(self.local)
+
+    def _heartbeat_forever(self, stopped: threading.Event) -> None:
+        """Keep presence independent from long-running transfer jobs."""
+        delay = 0.0
+        backoff = 5.0
+        while not stopped.wait(delay):
+            try:
+                self.heartbeat()
+                delay = 5.0
+                backoff = 5.0
+            except Exception as error:
+                print(f"Collector heartbeat error: {error}", flush=True)
+                delay = backoff
+                backoff = min(backoff * 2, 30.0)
 
     def run_forever(self) -> None:
         self.ensure_enrolled()
-        next_heartbeat = 0.0
+        heartbeat_stopped = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_forever,
+            args=(heartbeat_stopped,),
+            name="operator-collector-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         backoff = 1.0
         print(f"Operator Collector {__version__} connected to {self.server_url}", flush=True)
         try:
             while True:
                 try:
-                    now = time.monotonic()
-                    if now >= next_heartbeat:
-                        self.heartbeat()
-                        next_heartbeat = now + 5
                     job = self.client.json("POST", "/api/collector-agent/jobs/next")
                     if job:
                         self._execute(job)
@@ -118,6 +140,9 @@ class CollectorAgent:
                     backoff = min(backoff * 2, 30)
         except KeyboardInterrupt:
             print("Collector stopped.", flush=True)
+        finally:
+            heartbeat_stopped.set()
+            heartbeat_thread.join(timeout=2)
 
     def _execute(self, job: dict[str, Any]) -> None:
         job_id = str(job["id"])
@@ -125,12 +150,19 @@ class CollectorAgent:
         payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
         print(f"Running job {job_id}: {kind}", flush=True)
 
-        def progress(value: float, message: str) -> None:
+        def progress(
+            value: float,
+            message: str,
+            metrics: dict[str, Any] | None = None,
+        ) -> None:
             print(f"  {value * 100:5.1f}% {message}", flush=True)
+            body: dict[str, Any] = {"progress": value, "message": message}
+            if metrics:
+                body["metrics"] = metrics
             self.client.json(
                 "POST",
                 f"/api/collector-agent/jobs/{urllib.parse.quote(job_id)}/progress",
-                {"progress": value, "message": message},
+                body,
             )
 
         try:
@@ -138,8 +170,9 @@ class CollectorAgent:
             if kind == "scan":
                 source = str(result.get("source") or "quest")
                 state_key = "scannedLocalSessions" if source == "local" else "scannedQuestSessions"
-                self.state[state_key] = result.get("sessions", [])
-                self.state[f"last{source.title()}ScanAt"] = time.time()
+                with self._state_lock:
+                    self.state[state_key] = result.get("sessions", [])
+                    self.state[f"last{source.title()}ScanAt"] = time.time()
             complete = self.client.json(
                 "POST",
                 f"/api/collector-agent/jobs/{urllib.parse.quote(job_id)}/complete",
@@ -192,8 +225,9 @@ class CollectorAgent:
         self.remote_config = {}
 
     def _runtime_config(self) -> dict[str, Any]:
-        config = dict(self.remote_config)
-        token = str(self.local.get("modelscope_token") or "").strip()
+        with self._state_lock:
+            config = dict(self.remote_config)
+            token = str(self.local.get("modelscope_token") or "").strip()
         if token:
             config["_modelscope_token"] = token
         return config
