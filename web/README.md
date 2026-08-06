@@ -39,6 +39,7 @@ process that:
   (this is where the XR client uploads),
 - exposes the read API at `/api/ingest-read/*` (consumed by the UI),
 - exposes per-session review state at `/api/reviews/*`,
+- coordinates paired USB collector workstations at `/collectors`,
 - delegates everything else to Next.js.
 
 Configure via env vars:
@@ -50,6 +51,7 @@ Configure via env vars:
 | `MAX_BYTES` | `100 GB` | hard cap on Upload-Length |
 | `AUTH_BYPASS` | auto in dev when SSO is unset | `1` skips SSO and logs in as a fixed dev user |
 | `AUTH_SESSION_SECRET` | dev fallback | iron-session cookie secret (32+ chars); REQUIRED in prod |
+| `AUTH_COOKIE_SECURE` | `1` in production | set `0` only for a private-LAN HTTP deployment |
 | `AUTH_BASE_URL` | `http://localhost:<PORT>` | origin used to build the OIDC `redirect_uri` |
 | `OIDC_ISSUER` | — | OIDC discovery URL |
 | `OIDC_CLIENT_ID` | — | OIDC client id |
@@ -64,6 +66,21 @@ Configure via env vars:
 | `RERUN_TOPK_FRAMES` | unset (unlimited) | cap on RGB+depth frames logged into the .rrd |
 | `RERUN_JPEG_QUALITY` | `85` | JPEG quality for RGB frames stored in the .rrd |
 | `RERUN_DISABLED` | unset | when `1`, skip the rerun worker entirely |
+| `OPERATOR_MODELSCOPE_TOKEN` | — | private Station-only credential for fixed collector repository `chenghy666/test` |
+
+## USB collector workstations
+
+Open `/collectors` to pair and manage the cross-platform Collector Agent. The
+page can start Ego, scan Quest recordings, import with verified deletion,
+preview and QC sessions, regenerate image previews, move local datasets to the
+managed trash, apply a normalized label, and enqueue batch ModelScope uploads.
+Collector Agent 0.1.3 bundles ADB, FFmpeg, Python and the ModelScope SDK. Uploads
+are locked to `chenghy666/test`; full datasets stay on the collector computer,
+while Station stores their metadata and preview.
+
+See `docs/tutorials/collector-web-operator-guide.md` for collector workstation
+setup and daily operation, and `web/deploy/station/README.md` for Station
+deployment and service management.
 
 ## Post-ingest workers
 

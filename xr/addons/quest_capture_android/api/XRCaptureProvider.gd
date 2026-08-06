@@ -160,6 +160,12 @@ func get_xr_time_to_godot_ticks_offset_ns() -> int:
 	return int(_plugin.call("getXrTimeToGodotTicksOffsetNs"))
 
 
+func query_passthrough_camera_metadata_json(eye: String = "left") -> String:
+	if _plugin == null:
+		return JSON.stringify({"ok": false, "error": "QuestCapturePlugin unavailable"})
+	return str(_plugin.call("queryPassthroughCameraMetadataJson", eye))
+
+
 func get_left_camera_metadata_json() -> String:
 	if _plugin == null:
 		return "{}"

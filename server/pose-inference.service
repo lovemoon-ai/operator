@@ -1,0 +1,16 @@
+[Unit]
+Description=Operator Quest Pose Inference WebSocket service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=evophys
+WorkingDirectory=/home/evophys/code/operator
+EnvironmentFile=/home/evophys/.config/operator/pose-inference.env
+ExecStart=/home/evophys/code/operator/server/.venv/bin/python /home/evophys/code/operator/server/pose_inference_ws.py --host 0.0.0.0 --public-host 10.10.99.72 --port 63920
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

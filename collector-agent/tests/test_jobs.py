@@ -11,11 +11,15 @@ from operator_collector.jobs import (
     JobContext,
     _create_preview_frames,
     build_dataset_name,
+    delete_local_item,
     import_session,
     label_item,
+    preview_item,
     scan,
+    upload_item,
     validate_session,
 )
+from operator_collector.runtime import FIXED_MODELSCOPE_REPO_ID, find_tool
 
 
 def make_fixture(root: Path, session_id: str = "20260804_020030") -> Path:
@@ -168,6 +172,80 @@ class JobTests(unittest.TestCase):
                 previews = _create_preview_frames(fixture, context)
 
             self.assertEqual([path.name for path in previews], ["01.jpg", "02.jpg", "03.jpg"])
+
+    def test_preview_reports_missing_ffmpeg(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "data" / "sessions" / "demo"
+            session.mkdir(parents=True)
+            (session / "media.mp4").write_bytes(b"video")
+            context = JobContext(
+                {"data_root": str(root / "data")},
+                lambda _value, _message: None,
+            )
+            with patch("operator_collector.jobs.find_tool", return_value=""):
+                with self.assertRaisesRegex(RuntimeError, "FFmpeg"):
+                    preview_item(
+                        {"item_id": "item-1", "local_path": str(session)}, context
+                    )
+
+    def test_delete_moves_managed_session_to_trash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "data" / "sessions" / "demo"
+            session.mkdir(parents=True)
+            (session / "media.mp4").write_bytes(b"video")
+            context = JobContext(
+                {"data_root": str(root / "data")},
+                lambda _value, _message: None,
+            )
+            result = delete_local_item(
+                {"item_id": "item-1", "local_path": str(session)}, context
+            )
+            self.assertFalse(session.exists())
+            trash_path = Path(result["trash_path"])
+            self.assertTrue(trash_path.is_dir())
+            self.assertEqual(trash_path.parent, root / "data" / "trash")
+
+    def test_upload_always_uses_fixed_private_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            session = root / "data" / "sessions" / "demo"
+            session.mkdir(parents=True)
+            (session / "media.mp4").write_bytes(b"video")
+            context = JobContext(
+                {
+                    "data_root": str(root / "data"),
+                    "_modelscope_token": "test-secret",
+                },
+                lambda _value, _message: None,
+            )
+            with patch("modelscope_hub.HubApi") as hub_api:
+                result = upload_item(
+                    {
+                        "item_id": "item-1",
+                        "local_path": str(session),
+                        "dataset_name": "demo",
+                        "repo_id": "attacker/other-repo",
+                    },
+                    context,
+                )
+            self.assertEqual(result["repo_id"], FIXED_MODELSCOPE_REPO_ID)
+            call = hub_api.return_value.upload_folder.call_args
+            self.assertEqual(call.args[0], FIXED_MODELSCOPE_REPO_ID)
+            self.assertEqual(call.args[1], "dataset")
+            self.assertEqual(call.kwargs["path_in_repo"], "sessions/demo")
+
+    def test_bundled_tool_is_preferred_over_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ffmpeg = root / "tools" / "ffmpeg" / "ffmpeg"
+            ffmpeg.parent.mkdir(parents=True)
+            ffmpeg.write_bytes(b"binary")
+            with patch.dict(
+                "os.environ", {"OPERATOR_COLLECTOR_HOME": str(root)}, clear=False
+            ):
+                self.assertEqual(find_tool({}, "ffmpeg"), str(ffmpeg))
 
 
 if __name__ == "__main__":

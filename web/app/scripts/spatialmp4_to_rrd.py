@@ -506,8 +506,23 @@ def load_camera2_projection_calibration(
     """
     if profile.name != "quest":
         return None
-    sidecar_path = input_path.with_suffix("") / f"{eye}_camera_characteristics.json"
-    if not sidecar_path.exists():
+    sidecar_name = f"{eye}_camera_characteristics.json"
+    candidates = [
+        # Original on-device layout:
+        #   /sdcard/Movies/SpatialMP4/<session>.mp4
+        #   /sdcard/Movies/SpatialMP4/<session>/left_camera_characteristics.json
+        input_path.with_suffix("") / sidecar_name,
+        # Manual-copy layout used by docs/tutorials/quest-manual-rerun.md:
+        #   tmp_data/quest/<session>/media.mp4
+        #   tmp_data/quest/<session>/sidecars/left_camera_characteristics.json
+        input_path.parent / "sidecars" / sidecar_name,
+        # Flat debug layout:
+        #   tmp_data/quest/<session>/media.mp4
+        #   tmp_data/quest/<session>/left_camera_characteristics.json
+        input_path.parent / sidecar_name,
+    ]
+    sidecar_path = next((p for p in candidates if p.exists()), None)
+    if sidecar_path is None:
         return None
     try:
         char: Dict[str, Any] = json.loads(sidecar_path.read_text())

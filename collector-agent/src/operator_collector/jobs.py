@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .runtime import FIXED_MODELSCOPE_REPO_ID, find_tool, modelscope_token
+
 
 Progress = Callable[[float, str], None]
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -65,10 +67,9 @@ class JobContext:
 
     @property
     def adb(self) -> str:
-        configured = str(self.config.get("adb_path") or "").strip()
-        found = configured or shutil.which("adb")
+        found = find_tool(self.config, "adb")
         if not found:
-            raise RuntimeError("adb was not found; install Android Platform Tools")
+            raise RuntimeError("adb was not found in the Agent package or system PATH")
         return found
 
 
@@ -79,6 +80,8 @@ def run_job(kind: str, payload: dict[str, Any], context: JobContext) -> dict[str
         "import": import_session,
         "label": label_item,
         "upload": upload_item,
+        "preview": preview_item,
+        "delete_local": delete_local_item,
     }
     handler = handlers.get(kind)
     if not handler:
@@ -103,7 +106,7 @@ def workstation_state(config: dict[str, Any]) -> dict[str, Any]:
     adb_state = "fixture" if fixture else "not found"
     quest_state = "fixture" if fixture else "not connected"
     if not fixture:
-        adb = str(config.get("adb_path") or "").strip() or shutil.which("adb")
+        adb = find_tool(config, "adb")
         if adb:
             adb_state = "ready"
             try:
@@ -119,35 +122,39 @@ def workstation_state(config: dict[str, Any]) -> dict[str, Any]:
             except Exception as error:  # state reporting must not crash the service
                 adb_state = f"error: {error}"
 
-    modelscope = _modelscope_state()
+    modelscope = _modelscope_state(config)
 
     return {
         "adb": adb_state,
         "quest": quest_state,
-        "ffmpeg": "ready" if (str(config.get("ffmpeg_path") or "").strip() or shutil.which("ffmpeg")) else "not found",
+        "ffmpeg": "ready" if find_tool(config, "ffmpeg") else "not found",
         "modelscope": modelscope,
+        "modelscopeRepo": FIXED_MODELSCOPE_REPO_ID,
         "dataRoot": str(data_root.resolve()) if data_root else "",
         "freeBytes": free_bytes,
         "platform": platform.platform(),
     }
 
 
-def _modelscope_state() -> str:
+def _modelscope_state(config: dict[str, Any]) -> str:
     global _MODELSCOPE_STATE_CACHE
-    executable = shutil.which("ms-hub") or ""
-    if not executable:
+    token = modelscope_token(config)
+    if not token:
         _MODELSCOPE_STATE_CACHE = ("", 0.0, "not found")
         return "not found"
-    cached_executable, expires_at, cached_state = _MODELSCOPE_STATE_CACHE
+    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    cached_key, expires_at, cached_state = _MODELSCOPE_STATE_CACHE
     now = time.monotonic()
-    if cached_executable == executable and now < expires_at:
+    if cached_key == cache_key and now < expires_at:
         return cached_state
     try:
-        _run([executable, "whoami"], timeout=15)
+        from modelscope_hub import HubApi
+
+        HubApi(token=token).whoami()
         state = "authenticated"
     except Exception:
         state = "not authenticated"
-    _MODELSCOPE_STATE_CACHE = (executable, now + 60, state)
+    _MODELSCOPE_STATE_CACHE = (cache_key, now + 60, state)
     return state
 
 
@@ -221,7 +228,9 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
             qc = validate_session(local_source)
             if not qc["ok"]:
                 raise RuntimeError("本地数据校验失败: " + "; ".join(qc["errors"]))
-            previews = _create_preview_frames(local_source, context)
+            previews, preview_warning = _create_previews_with_warning(
+                local_source, context, qc
+            )
             context.progress(1.0, "本地数据集已读取")
             return {
                 "source_session_id": session_id,
@@ -230,6 +239,7 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
                 "label": _read_existing_label(local_source),
                 "qc": qc,
                 "preview_paths": [str(preview) for preview in previews],
+                "preview_warning": preview_warning,
                 "quest_deleted": False,
             }
     elif source_kind != "quest":
@@ -252,7 +262,7 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
         if not qc["ok"]:
             raise RuntimeError("Import integrity checks failed: " + "; ".join(qc["errors"]))
 
-        previews = _create_preview_frames(partial, context)
+        previews, preview_warning = _create_previews_with_warning(partial, context, qc)
         os.replace(partial, destination)
         preview_paths = [
             destination / preview.parent.name / preview.name
@@ -275,6 +285,7 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
             "label": _read_existing_label(destination),
             "qc": qc,
             "preview_paths": [str(preview) for preview in preview_paths],
+            "preview_warning": preview_warning,
             "quest_deleted": deleted,
         }
     except Exception:
@@ -327,40 +338,76 @@ def upload_item(payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
     item_id = str(payload.get("item_id") or "").strip()
     local_path = Path(str(payload.get("local_path") or "")).expanduser().resolve()
     dataset_name = str(payload.get("dataset_name") or local_path.name).strip()
-    repo_id = str(payload.get("repo_id") or "").strip()
     revision = str(payload.get("revision") or "master").strip()
-    if not item_id or not repo_id or not local_path.is_dir():
-        raise RuntimeError("Upload job is missing item, repository or local data")
+    if not item_id or not local_path.is_dir():
+        raise RuntimeError("Upload job is missing item or local data")
     sessions_root = (context.data_root / "sessions").resolve()
     if local_path.parent != sessions_root:
         raise RuntimeError("Upload path is outside the configured sessions directory")
-    executable = shutil.which("ms-hub")
-    if not executable:
-        raise RuntimeError("ms-hub was not found; configure ModelScope credentials and client")
+    token = modelscope_token(context.config)
+    if not token:
+        raise RuntimeError("ModelScope credentials were not provisioned by Station")
     context.progress(0.05, "Starting resumable ModelScope upload")
-    command = [
-        executable,
-        "upload",
-        repo_id,
-        str(local_path),
-        f"sessions/{dataset_name}",
-        "--repo-type",
+    from modelscope_hub import HubApi
+
+    HubApi(token=token).upload_folder(
+        FIXED_MODELSCOPE_REPO_ID,
         "dataset",
-        "--revision",
-        revision,
-        "--commit-message",
-        f"add {dataset_name}",
-    ]
-    result = _run(command, timeout=24 * 60 * 60)
+        local_path,
+        path_in_repo=f"sessions/{dataset_name}",
+        revision=revision,
+        commit_message=f"add {dataset_name}",
+        use_cache=True,
+        disable_tqdm=True,
+    )
     context.progress(1.0, "ModelScope upload complete")
     return {
         "item_id": item_id,
-        "repo_id": repo_id,
+        "repo_id": FIXED_MODELSCOPE_REPO_ID,
         "revision": revision,
         "path_in_repo": f"sessions/{dataset_name}",
-        "output": result.stdout[-4000:],
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def preview_item(payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
+    item_id = str(payload.get("item_id") or "").strip()
+    local_path = Path(str(payload.get("local_path") or "")).expanduser().resolve()
+    _require_managed_session(item_id, local_path, context)
+    previews = _create_preview_frames(local_path, context)
+    if not previews:
+        raise RuntimeError("没有生成任何预览图片")
+    context.progress(1.0, f"已生成 {len(previews)} 张预览图片")
+    return {
+        "item_id": item_id,
+        "preview_paths": [str(preview) for preview in previews],
+    }
+
+
+def delete_local_item(payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
+    item_id = str(payload.get("item_id") or "").strip()
+    local_path = Path(str(payload.get("local_path") or "")).expanduser().resolve()
+    _require_managed_session(item_id, local_path, context)
+    trash_root = (context.data_root / "trash").resolve()
+    trash_root.mkdir(parents=True, exist_ok=True)
+    suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = trash_root / f"{local_path.name}.{suffix}"
+    if target.exists():
+        target = trash_root / f"{local_path.name}.{suffix}.{item_id[:8]}"
+    context.progress(0.2, "正在将本地数据移到回收站")
+    os.replace(local_path, target)
+    context.progress(1.0, "本地数据已移到回收站")
+    return {
+        "item_id": item_id,
+        "dataset_name": local_path.name,
+        "trash_path": str(target),
+    }
+
+
+def _require_managed_session(item_id: str, local_path: Path, context: JobContext) -> None:
+    sessions_root = (context.data_root / "sessions").resolve()
+    if not item_id or local_path.parent != sessions_root or not local_path.is_dir():
+        raise RuntimeError("Local item is outside the managed sessions directory")
 
 
 def validate_session(session_dir: Path) -> dict[str, Any]:
@@ -585,14 +632,32 @@ def _delete_quest_session(context: JobContext, session_id: str) -> None:
     _run([adb, "shell", command], timeout=120)
 
 
+def _create_previews_with_warning(
+    session_dir: Path,
+    context: JobContext,
+    qc: dict[str, Any],
+) -> tuple[list[Path], str]:
+    try:
+        return _create_preview_frames(session_dir, context), ""
+    except RuntimeError as error:
+        warning = f"图片预览生成失败: {error}"
+        warnings = qc.setdefault("warnings", [])
+        if isinstance(warnings, list) and warning not in warnings:
+            warnings.append(warning)
+        (session_dir / "qc.json").write_text(
+            json.dumps(qc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        return [], warning
+
+
 def _create_preview_frames(session_dir: Path, context: JobContext) -> list[Path]:
     if not bool(context.config.get("preview_enabled", True)):
         return []
     media = session_dir / "media.mp4"
     preview_dir = session_dir / "preview_frames"
-    ffmpeg = str(context.config.get("ffmpeg_path") or "").strip() or shutil.which("ffmpeg")
+    ffmpeg = find_tool(context.config, "ffmpeg")
     if not ffmpeg:
-        return []
+        raise RuntimeError("Agent 安装包中未找到 FFmpeg")
     if preview_dir.exists():
         shutil.rmtree(preview_dir)
     preview_dir.mkdir(mode=0o700)
@@ -620,10 +685,13 @@ def _create_preview_frames(session_dir: Path, context: JobContext) -> list[Path]
     ]
     try:
         _run(command, timeout=60 * 60)
-    except Exception:
+    except Exception as error:
         shutil.rmtree(preview_dir, ignore_errors=True)
-        return []
-    return sorted(preview_dir.glob("*.jpg"))[:6]
+        raise RuntimeError(str(error)) from error
+    previews = sorted(preview_dir.glob("*.jpg"))[:6]
+    if not previews:
+        raise RuntimeError("FFmpeg 执行完成，但没有输出图片")
+    return previews
 
 
 def _read_manifest(session_dir: Path) -> dict[str, Any]:

@@ -113,8 +113,13 @@ ship-fast:
 	$(ADB) shell am force-stop $(package)
 	$(ADB) logcat -c
 	$(ADB) shell am start -n $(package)/$(activity) $(mode_extra)
-	@sleep 1
-	@PID=$$($(ADB) shell "pidof $(package)" | tr -d '\r'); \
+	@PID=""; \
+	for attempt in $$(seq 1 20); do \
+		PID=$$($(ADB) shell "pidof $(package)" | tr -d '\r'); \
+		[ -n "$$PID" ] && break; \
+		sleep 0.5; \
+	done; \
+	if [ -z "$$PID" ]; then echo "App process did not start: $(package)" >&2; exit 1; fi; \
 	echo "--- tailing logcat for pid $$PID (Ctrl-C to stop) ---"; \
 	$(ADB) logcat --pid=$$PID -v brief | \
 		grep -E "godot|Operator|RobotView|TcpHandler|KotlinVideo|AhbVideo|OpenXR"

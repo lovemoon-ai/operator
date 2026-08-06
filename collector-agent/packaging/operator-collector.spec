@@ -4,7 +4,10 @@ import os
 
 from PyInstaller.utils.hooks import collect_submodules
 
-hiddenimports = collect_submodules("operator_collector")
+hiddenimports = (
+    collect_submodules("operator_collector")
+    + collect_submodules("modelscope_hub")
+)
 repo_root = os.path.abspath(os.path.join(SPECPATH, ".."))
 
 analysis = Analysis(

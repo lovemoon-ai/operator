@@ -70,7 +70,7 @@ class CollectorAgent:
         raise TimeoutError("Workstation enrollment expired before it was approved")
 
     def heartbeat(self) -> None:
-        base_state = workstation_state(self.remote_config)
+        base_state = workstation_state(self._runtime_config())
         base_state.update(self.state)
         response = self.client.json(
             "POST",
@@ -86,6 +86,13 @@ class CollectorAgent:
             self.remote_config = dict(response["config"])
             self.local["remote_config"] = self.remote_config
             save_config(self.local)
+
+        credentials = (response or {}).get("uploadCredentials")
+        if isinstance(credentials, dict):
+            provisioned_token = str(credentials.get("token") or "").strip()
+            if provisioned_token and self.local.get("modelscope_token") != provisioned_token:
+                self.local["modelscope_token"] = provisioned_token
+                save_config(self.local)
 
     def run_forever(self) -> None:
         self.ensure_enrolled()
@@ -127,7 +134,7 @@ class CollectorAgent:
             )
 
         try:
-            result = run_job(kind, payload, JobContext(self.remote_config, progress))
+            result = run_job(kind, payload, JobContext(self._runtime_config(), progress))
             if kind == "scan":
                 source = str(result.get("source") or "quest")
                 state_key = "scannedLocalSessions" if source == "local" else "scannedQuestSessions"
@@ -174,7 +181,7 @@ class CollectorAgent:
             "agent_id": self.local.get("agent_id"),
             "paired": bool(self.client.token),
             "config": self.remote_config,
-            "state": workstation_state(self.remote_config),
+            "state": workstation_state(self._runtime_config()),
         }
 
     def reset(self) -> None:
@@ -183,3 +190,10 @@ class CollectorAgent:
         self.local = preserved
         self.client.token = ""
         self.remote_config = {}
+
+    def _runtime_config(self) -> dict[str, Any]:
+        config = dict(self.remote_config)
+        token = str(self.local.get("modelscope_token") or "").strip()
+        if token:
+            config["_modelscope_token"] = token
+        return config

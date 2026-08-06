@@ -6,12 +6,14 @@ import os
 import sys
 import urllib.parse
 
+from . import __version__
 from .agent import CollectorAgent
 from .config import config_path, load_config, save_config
 
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="operator-collector")
+    root.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     root.add_argument("--server", help="Operator server URL")
     commands = root.add_subparsers(dest="command")
     run = commands.add_parser("run", help="Run the background collector agent")

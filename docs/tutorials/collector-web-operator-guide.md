@@ -10,11 +10,10 @@
 - 与电脑系统匹配的 **Operator Collector Agent** 安装包；
 - Station 地址（局域网地址或 SSH 登录方式）；
 - 本机数据保存目录；
-- ModelScope 数据集仓库名，格式为 `组织名/数据集名`。
 
-Quest 必须已安装 Operator、开启开发者模式和 USB 调试。电脑还需要 ADB；如需
-生成兼容预览和上传，负责人还应配置 FFmpeg、`ms-hub` 及 ModelScope 登录。
-网页“工作站状态”会显示这些工具是否可用。
+Quest 必须已安装 Operator、开启开发者模式和 USB 调试。**0.1.3 及更新版 Agent
+已自带 ADB、FFmpeg、Python 和 ModelScope 上传组件，数采员无需单独安装或
+登录。**网页“工作站状态”会显示它们是否可用。
 
 ## 1. 安装 Agent
 
@@ -134,7 +133,7 @@ Agent 首次启动会打开配对页。登录网站并批准这台电脑，回�
 - **数据保存目录**：导入后数据存放的位置；
 - **本地已有数据集目录**：不连接 Quest 时要扫描的位置；
 - **Quest 录制根目录**：不知道时可先留空，连接后再确认；
-- **ModelScope 数据集仓库**：必须是 `组织名/数据集名`，不能填本机路径。
+- **ModelScope 目标仓库**固定为 `chenghy666/test`，无需填写 token 或仓库名。
 
 ## 3. 连接 Quest 并采集
 
@@ -167,9 +166,12 @@ Agent 首次启动会打开配对页。登录网站并批准这台电脑，回�
 3. 等待“校验通过”，检查前两分钟内每 20 秒抽取的预览图、manifest 和 sidecars。
 4. 输入短标签，例如 `wash`，点击“保存标签并重命名”。目录会变成类似：
    `20260804_wash_020030902`。
-5. 确认网页显示 ModelScope“已登录”，勾选一条或多条已标记数据，再点击
+5. 如果没有图片，点击“生成预览”；旧预览不正确时点击“重新生成预览”。
+6. 确认网页显示 ModelScope“已登录”，勾选一条或多条已标记数据，再点击
    “批量上传到私有仓库”。
-6. 等待任务显示“已完成”；失败时保留本地数据并把错误截图交给负责人。
+7. 等待任务显示“已完成”；失败时保留本地数据并把错误截图交给负责人。
+8. 确认不再需要本机数据后，可点“删除本地数据”；数据会先移到数据目录下的
+   `trash`，任务成功后网页记录才消失。
 
 不连接 Quest 时，填写“本地已有数据集目录”，点击“扫描本地数据”，后续预览、
 标签和上传步骤完全相同。
@@ -223,8 +225,10 @@ launchctl bootout "gui/$(id -u)" \
 ```bash
 rm -f "$HOME/Library/LaunchAgents/com.lovemoon.operator-collector.plist"
 rm -f "$HOME/Library/Application Support/Operator Collector/bin/operator-collector"
+rm -rf "$HOME/Library/Application Support/Operator Collector/tools"
 sudo rm -f /Library/LaunchAgents/com.lovemoon.operator-collector.plist
 sudo rm -f /usr/local/bin/operator-collector
+sudo rm -rf /usr/local/lib/operator-collector
 sudo pkgutil --forget com.lovemoon.operator-collector
 ```
 
@@ -239,5 +243,5 @@ rm -f "$HOME/Library/Application Support/Operator Collector/config.json"
 - **工作站离线**：确认 Agent 已启动、Station 地址正确，并刷新网页。
 - **Quest 未连接**：重新插线，在 Quest 内允许 USB 调试。
 - **扫描不到数据**：确认录制已保存，并检查 Quest 录制根目录。
-- **FFmpeg/ModelScope 未找到**：联系负责人配置，原始数据仍可正常读取和保存。
+- **FFmpeg/ModelScope 不可用**：先升级到 Agent 0.1.3，再联系负责人检查 Station。
 - **校验或上传失败**：不要删除任何原文件，保存错误截图并联系负责人。

@@ -1,0 +1,5 @@
+websockets>=13,<16
+Pillow>=10,<12
+qrcode[pil]>=7.4,<9
+matplotlib>=3.8,<4
+numpy>=1.26,<3

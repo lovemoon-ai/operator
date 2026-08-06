@@ -33,6 +33,9 @@ tmp*
 .deps
 .deps/
 
+.codegraph/
+.cursor/
+
 # Web workspace dependency/build output.
 web/node_modules
 web/.next/
@@ -116,3 +119,19 @@ xr/native/pico_openxr/godot-cpp
 
 # release artifacts
 xr/dist/
+
+# Operator local runtime data and collected datasets.
+.runtime/
+operator-export/
+server/.venv/
+
+# Collector Agent build environments and installers.
+collector-agent/.build-venv/
+collector-agent/build/
+collector-agent/dist/
+collector-agent/.pytest_cache/
+
+# Local credentials and editor/patch backups.
+.env
+.env.*
+!.env.example

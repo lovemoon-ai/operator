@@ -23,6 +23,10 @@ const DB_PATH = path.join(DATA_ROOT, "operator.db");
 mkdirSync(DATA_ROOT, { recursive: true });
 
 export const db = new Database(DB_PATH);
+// Next's production builder evaluates multiple route bundles concurrently.
+// Give idempotent schema initialization and short WAL checkpoints time to
+// finish instead of failing a sibling worker immediately with SQLITE_BUSY.
+db.pragma("busy_timeout = 5000");
 db.pragma("journal_mode = WAL");
 db.pragma("synchronous = NORMAL");
 db.pragma("foreign_keys = ON");

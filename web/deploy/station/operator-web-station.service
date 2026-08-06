@@ -1,0 +1,16 @@
+[Unit]
+Description=Operator Station web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/evophys/code/operator/web/app
+EnvironmentFile=/home/evophys/.config/operator-station/station.env
+ExecStart=/usr/bin/npm run start
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
