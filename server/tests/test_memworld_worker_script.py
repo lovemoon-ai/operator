@@ -10,6 +10,7 @@ OPERATOR_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = OPERATOR_ROOT / "run_memworld_direct_dmd1000_worker.sh"
 GATEWAY_SCRIPT = OPERATOR_ROOT / "run_quest_memworld.sh"
 NV_GATEWAY_SCRIPT = OPERATOR_ROOT / "run_quest_memworld_nv.sh"
+NV_TUNNEL_SCRIPT = OPERATOR_ROOT / "run_memworld_nv_tunnel.sh"
 DIRECT_DMD_WORKER_SCRIPT = OPERATOR_ROOT / "run_memworld_direct_dmd1000_worker.sh"
 
 
@@ -30,6 +31,10 @@ class MemWorldWorkerScriptTests(unittest.TestCase):
         self.assertIn("MEMWORLD_INITIAL_RGB must point", source)
         self.assertNotIn("CHECKPOINT", source)
         self.assertNotIn("Direct-DMD", source)
+        tunnel_source = NV_TUNNEL_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("MEMWORLD_LOCAL_WORKER_PORT:-18768", tunnel_source)
+        self.assertIn("MEMWORLD_NV_WORKER_PORT:-18768", tunnel_source)
+        self.assertIn("MEMWORLD_REMOTE_WORKER_PORT", tunnel_source)
 
     def test_direct_dmd_worker_uses_step1335_checkpoint_by_default(self):
         source = DIRECT_DMD_WORKER_SCRIPT.read_text(encoding="utf-8")
@@ -60,8 +65,11 @@ class MemWorldWorkerScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_conda.chmod(0o755)
+            memworld_root = Path(temp_dir) / "memworld"
+            memworld_root.mkdir()
             environment = os.environ.copy()
             environment["CONDA_BIN"] = str(fake_conda)
+            environment["MEMWORLD_ROOT"] = str(memworld_root)
             result = subprocess.run(
                 ["bash", str(SCRIPT)],
                 check=True,
@@ -78,22 +86,23 @@ class MemWorldWorkerScriptTests(unittest.TestCase):
             "python",
             "deploy/egoquest_ws/server.py",
             "--project-root",
-            "/home/evophys/code/MemWorld-direct-dmd1000",
+            str(memworld_root),
             "--model-dir",
-            "/home/evophys/code/MemWorld-direct-dmd1000/models/Wan2.2-TI2V-5B",
+            str(memworld_root / "models/Wan2.2-TI2V-5B"),
             "--checkpoint",
-            (
-                "/home/evophys/code/MemWorld-direct-dmd1000/models/"
-                "object_interaction_step1335/formal_repaired_direct_dmd_outer1335_dfa2a44f98e7e20/dit_step1335.safetensors"
+            str(
+                memworld_root
+                / "models/object_interaction_step1335/"
+                "formal_repaired_direct_dmd_outer1335_dfa2a44f98e7e20/dit_step1335.safetensors"
             ),
             "--host",
             "127.0.0.1",
             "--port",
             "8765",
             "--warmup-initial-rgb",
-            "/home/evophys/code/MemWorld-direct-dmd1000/anchor.jpg",
+            str(memworld_root / "anchor.jpg"),
             "--warmup-static-memory",
-            "/home/evophys/code/MemWorld-direct-dmd1000/anchor.jpg",
+            str(memworld_root / "anchor.jpg"),
             "--warmup-runs",
             "2",
             "--warmup-num-inference-steps",

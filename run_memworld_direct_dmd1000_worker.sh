@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-memworld_root="/home/evophys/code/MemWorld-direct-dmd1000"
+memworld_root="${MEMWORLD_ROOT:-/home/evophys/code/MemWorld-direct-dmd1000}"
 conda_bin="${CONDA_BIN:-/home/evophys/miniconda3/bin/conda}"
 model_dir="${MEMWORLD_MODEL_DIR:-${memworld_root}/models/Wan2.2-TI2V-5B}"
 checkpoint="${MEMWORLD_CHECKPOINT:-${memworld_root}/models/object_interaction_step1335/formal_repaired_direct_dmd_outer1335_dfa2a44f98e7e20/dit_step1335.safetensors}"

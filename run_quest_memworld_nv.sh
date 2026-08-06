@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-lowlatency_root="${MEMWORLD_LOWLATENCY_ROOT:-/home/evophys/code/memworld-lowlatency-v1}"
-gateway_entry="${lowlatency_root}/run_lowlatency_gateway.sh"
+operator_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 public_host="${1:-10.10.99.72}"
+local_worker_port="${MEMWORLD_LOCAL_WORKER_PORT:-18768}"
 
-if [[ ! -x "$gateway_entry" ]]; then
-  echo "MemWorld low-latency gateway entry is missing or not executable: $gateway_entry" >&2
+if [[ -z "${MEMWORLD_INITIAL_RGB:-}" || ! -f "$MEMWORLD_INITIAL_RGB" ]]; then
+  echo "MEMWORLD_INITIAL_RGB must point to an existing local initialization image" >&2
   exit 2
 fi
 
-export MEMWORLD_PUBLIC_HOST="$public_host"
-export MEMWORLD_GATEWAY_PORT="${MEMWORLD_GATEWAY_PORT:-63920}"
-export MEMWORLD_DASHBOARD_PORT="${MEMWORLD_DASHBOARD_PORT:-63921}"
-export MEMWORLD_LOCAL_WORKER_PORT="${MEMWORLD_LOCAL_WORKER_PORT:-18769}"
-exec "$gateway_entry"
+export MEMWORLD_WORKER_URL="tcp://127.0.0.1:${local_worker_port}"
+exec "$operator_root/run_quest_memworld.sh" "$public_host"

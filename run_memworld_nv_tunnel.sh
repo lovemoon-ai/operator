@@ -9,6 +9,9 @@ if [[ ! -x "$tunnel_entry" ]]; then
   exit 2
 fi
 
-export MEMWORLD_LOCAL_WORKER_PORT="${MEMWORLD_LOCAL_WORKER_PORT:-18769}"
-export MEMWORLD_REMOTE_WORKER_PORT="${MEMWORLD_REMOTE_WORKER_PORT:-18769}"
+local_worker_port="${MEMWORLD_LOCAL_WORKER_PORT:-18768}"
+remote_worker_port="${MEMWORLD_REMOTE_WORKER_PORT:-${MEMWORLD_NV_WORKER_PORT:-18768}}"
+
+export MEMWORLD_LOCAL_WORKER_PORT="$local_worker_port"
+export MEMWORLD_REMOTE_WORKER_PORT="$remote_worker_port"
 exec "$tunnel_entry"
