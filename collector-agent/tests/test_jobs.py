@@ -18,6 +18,7 @@ from operator_collector.jobs import (
     scan,
     upload_item,
     validate_session,
+    workstation_state,
 )
 from operator_collector.runtime import FIXED_MODELSCOPE_REPO_ID, find_tool
 
@@ -188,6 +189,21 @@ class JobTests(unittest.TestCase):
                     preview_item(
                         {"item_id": "item-1", "local_path": str(session)}, context
                     )
+
+    def test_default_quest_root_matches_ego_capture_directory(self) -> None:
+        context = JobContext({}, lambda _value, _message: None)
+        self.assertEqual(context.quest_root, "/sdcard/DCIM/SpatialMP4")
+
+    def test_workstation_state_reports_bundled_python_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = workstation_state(
+                {
+                    "fixture_root": directory,
+                    "data_root": directory,
+                }
+            )
+        self.assertEqual(state["python"], "ready")
+        self.assertRegex(str(state["pythonVersion"]), r"^\d+\.\d+\.\d+")
 
     def test_delete_moves_managed_session_to_trash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

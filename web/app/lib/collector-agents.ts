@@ -12,6 +12,8 @@ const AGENT_ONLINE_MS = 20_000;
 const PREVIEW_ROOT = path.join(DATA_ROOT, "collector-previews");
 const MAX_BATCH_UPLOAD_ITEMS = 100;
 const FIXED_MODELSCOPE_REPO_ID = "chenghy666/test";
+const DEFAULT_QUEST_ROOT = "/sdcard/DCIM/SpatialMP4";
+const LEGACY_QUEST_ROOT = "/sdcard/Movies/SpatialMP4";
 
 const JOB_KINDS = new Set(["scan", "start_ego", "import", "label", "upload", "preview", "delete_local"]);
 
@@ -280,6 +282,27 @@ function safeJson(value: string | null | undefined): unknown {
     return null;
   }
 }
+
+function migrateLegacyQuestRoots(): void {
+  const rows = db.prepare("SELECT id, config_json FROM collector_agents").all() as Array<{
+    id: string;
+    config_json: string;
+  }>;
+  const update = db.prepare("UPDATE collector_agents SET config_json = ? WHERE id = ?");
+  const migrate = db.transaction(() => {
+    for (const row of rows) {
+      const parsed = safeJson(row.config_json);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const config = parsed as Record<string, unknown>;
+      if (config.quest_root !== LEGACY_QUEST_ROOT) continue;
+      config.quest_root = DEFAULT_QUEST_ROOT;
+      update.run(JSON.stringify(config), row.id);
+    }
+  });
+  migrate();
+}
+
+migrateLegacyQuestRoots();
 
 function bodyString(value: unknown, max = 256): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -733,7 +756,7 @@ collectorBrowserRouter.post("/enrollments/:id/approve", (req, res) => {
   const config = {
     data_root: "",
     local_source_root: "",
-    quest_root: "/sdcard/Movies/SpatialMP4",
+    quest_root: DEFAULT_QUEST_ROOT,
     delete_after_import_default: false,
     preview_enabled: true,
     modelscope_revision: "master",

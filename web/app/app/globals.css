@@ -572,7 +572,7 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
 .collector-status.is-online { color: var(--collector-cyan); background: rgba(105, 230, 212, 0.1); }
 
 .collector-control-deck { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: stretch; }
-.collector-status-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.collector-status-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .collector-metric { min-width: 0; padding: 12px 13px; border: 1px solid rgba(132, 167, 204, 0.14); border-radius: 13px; background: var(--collector-surface-2); }
 .collector-metric span { display: block; margin-bottom: 5px; color: #75899f; font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; }
 .collector-metric strong { display: block; overflow: hidden; color: #d3dfea; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }

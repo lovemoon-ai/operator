@@ -19,6 +19,7 @@ from .runtime import FIXED_MODELSCOPE_REPO_ID, find_tool, modelscope_token
 
 
 Progress = Callable[[float, str], None]
+DEFAULT_QUEST_ROOT = "/sdcard/DCIM/SpatialMP4"
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MODELSCOPE_STATE_CACHE: tuple[str, float, str] = ("", 0.0, "not found")
@@ -58,7 +59,7 @@ class JobContext:
 
     @property
     def quest_root(self) -> str:
-        value = str(self.config.get("quest_root") or "/sdcard/Movies/SpatialMP4").strip()
+        value = str(self.config.get("quest_root") or DEFAULT_QUEST_ROOT).strip()
         if not value.startswith("/sdcard/") and not value.startswith("/storage/emulated/0/"):
             raise RuntimeError("Quest root must be under /sdcard or /storage/emulated/0")
         if any(part in {"", ".", ".."} for part in value.split("/")[1:]):
@@ -129,6 +130,8 @@ def workstation_state(config: dict[str, Any]) -> dict[str, Any]:
         "quest": quest_state,
         "ffmpeg": "ready" if find_tool(config, "ffmpeg") else "not found",
         "modelscope": modelscope,
+        "python": "ready",
+        "pythonVersion": platform.python_version(),
         "modelscopeRepo": FIXED_MODELSCOPE_REPO_ID,
         "dataRoot": str(data_root.resolve()) if data_root else "",
         "freeBytes": free_bytes,

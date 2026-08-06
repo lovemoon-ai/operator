@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "operator-collector"
-version = "0.1.3"
+version = "0.1.4"
 description = "Cross-platform local workstation agent for Operator Quest data collection"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }

@@ -260,6 +260,7 @@ export function CollectorDashboard() {
                     <StatusMetric label="Quest" value={localizeState(String(state.quest ?? "unknown"))} good={!String(state.quest ?? "").includes("not")} />
                     <StatusMetric label="ADB" value={localizeState(String(state.adb ?? "unknown"))} good={String(state.adb ?? "") === "ready"} />
                     <StatusMetric label="FFmpeg" value={localizeState(String(state.ffmpeg ?? "unknown"))} good={String(state.ffmpeg ?? "") === "ready"} />
+                    <StatusMetric label="Python" value={`${localizeState(String(state.python ?? "unknown"))} · ${String(state.pythonVersion ?? "未知版本")}`} good={String(state.python ?? "") === "ready"} />
                     <StatusMetric label="ModelScope" value={localizeState(String(state.modelscope ?? "unknown"))} good={modelscopeReady} />
                     <StatusMetric label="剩余空间" value={formatBytes(Number(state.freeBytes ?? 0))} good={Number(state.freeBytes ?? 0) > 0} />
                   </div>
@@ -275,7 +276,7 @@ export function CollectorDashboard() {
                   <div className="collector-settings__grid">
                     <label>数据保存目录<input value={String(config.data_root ?? "")} placeholder="例如 /Users/name/OperatorData" onChange={(event) => updateConfig(setConfigs, agent.id, config, "data_root", event.target.value)} /><span>数据保存到该目录的 sessions 子目录。</span></label>
                     <label>本地已有数据集目录<input value={String(config.local_source_root ?? config.fixture_root ?? "")} placeholder="一条数据或包含多条数据的目录" onChange={(event) => updateConfig(setConfigs, agent.id, config, "local_source_root", event.target.value)} /><span>无需连接 Quest 也可以扫描。</span></label>
-                    <label>Quest 录制根目录<input value={String(config.quest_root ?? "")} placeholder="/sdcard/Movies/SpatialMP4" onChange={(event) => updateConfig(setConfigs, agent.id, config, "quest_root", event.target.value)} /></label>
+                    <label>Quest 录制根目录<input value={String(config.quest_root ?? "")} placeholder="/sdcard/DCIM/SpatialMP4" onChange={(event) => updateConfig(setConfigs, agent.id, config, "quest_root", event.target.value)} /></label>
                     <label>ModelScope 目标仓库<input value="chenghy666/test" readOnly /><span>固定私有仓库，无需操作员配置。</span></label>
                     <label>ADB 路径（可选）<input value={String(config.adb_path ?? "")} placeholder="例如 /opt/homebrew/bin/adb" onChange={(event) => updateConfig(setConfigs, agent.id, config, "adb_path", event.target.value)} /></label>
                     <label>FFmpeg 路径（可选）<input value={String(config.ffmpeg_path ?? "")} placeholder="例如 /opt/homebrew/bin/ffmpeg" onChange={(event) => updateConfig(setConfigs, agent.id, config, "ffmpeg_path", event.target.value)} /></label>
