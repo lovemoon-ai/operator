@@ -21,6 +21,7 @@ from .runtime import FIXED_MODELSCOPE_REPO_ID, find_tool, modelscope_token
 
 Progress = Callable[..., None]
 DEFAULT_QUEST_ROOT = "/sdcard/DCIM/SpatialMP4"
+LEGACY_QUEST_ROOT = "/sdcard/Movies/SpatialMP4"
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MODELSCOPE_STATE_CACHE: tuple[str, float, str] = ("", 0.0, "not found")
@@ -71,12 +72,20 @@ class JobContext:
 
     @property
     def quest_root(self) -> str:
-        value = str(self.config.get("quest_root") or DEFAULT_QUEST_ROOT).strip()
-        if not value.startswith("/sdcard/") and not value.startswith("/storage/emulated/0/"):
-            raise RuntimeError("Quest root must be under /sdcard or /storage/emulated/0")
-        if any(part in {"", ".", ".."} for part in value.split("/")[1:]):
-            raise RuntimeError("Quest root contains an unsafe path component")
-        return value.rstrip("/")
+        return self.quest_roots[0]
+
+    @property
+    def quest_roots(self) -> list[str]:
+        configured = str(self.config.get("quest_root") or "").strip()
+        candidates = [configured, DEFAULT_QUEST_ROOT, LEGACY_QUEST_ROOT]
+        roots: list[str] = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            value = _validate_quest_root(candidate)
+            if value not in roots:
+                roots.append(value)
+        return roots
 
     @property
     def adb(self) -> str:
@@ -84,6 +93,15 @@ class JobContext:
         if not found:
             raise RuntimeError("adb was not found in the Agent package or system PATH")
         return found
+
+
+def _validate_quest_root(value: str) -> str:
+    value = value.strip()
+    if not value.startswith("/sdcard/") and not value.startswith("/storage/emulated/0/"):
+        raise RuntimeError("Quest root must be under /sdcard or /storage/emulated/0")
+    if any(part in {"", ".", ".."} for part in value.split("/")[1:]):
+        raise RuntimeError("Quest root contains an unsafe path component")
+    return value.rstrip("/")
 
 
 class _UploadProgressBar:
@@ -233,6 +251,7 @@ def run_job(kind: str, payload: dict[str, Any], context: JobContext) -> dict[str
         "upload": upload_item,
         "preview": preview_item,
         "delete_local": delete_local_item,
+        "delete_quest": delete_quest_session,
     }
     handler = handlers.get(kind)
     if not handler:
@@ -370,6 +389,7 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
     sessions_root.mkdir(parents=True, exist_ok=True)
     destination = sessions_root / session_id
     local_source: Path | None = None
+    quest_source: dict[str, str] | None = None
     if source_kind == "local":
         local_source = _resolve_local_source(
             context.local_source_root,
@@ -395,7 +415,9 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
                 "preview_warning": preview_warning,
                 "quest_deleted": False,
             }
-    elif source_kind != "quest":
+    elif source_kind == "quest":
+        quest_source = _resolve_quest_source(context, session_id, payload)
+    else:
         raise RuntimeError(f"不支持的数据来源: {source_kind}")
 
     partial = incoming_root / f"{session_id}.partial"
@@ -409,8 +431,9 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
             assert local_source is not None
             _copy_local_session(local_source, session_id, partial)
         else:
-            _pull_quest_session(context, session_id, partial)
-        context.progress(0.65, "Validating manifest, media and sidecars")
+            assert quest_source is not None
+            _pull_quest_session(context, session_id, partial, quest_source)
+        context.progress(0.65, "Validating manifest and media")
         qc = validate_session(partial)
         if not qc["ok"]:
             raise RuntimeError("Import integrity checks failed: " + "; ".join(qc["errors"]))
@@ -428,7 +451,8 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
             if source_kind == "local":
                 qc["warnings"].append("本地来源数据不会被自动删除")
             else:
-                _delete_quest_session(context, session_id)
+                assert quest_source is not None
+                _delete_quest_source(context, quest_source)
                 deleted = True
         context.progress(1.0, "Import complete")
         return {
@@ -634,8 +658,6 @@ def validate_session(session_dir: Path) -> dict[str, Any]:
     if not checks["media_exists"]:
         errors.append("media.mp4 is missing or empty")
     checks["sidecars"] = sidecars.is_dir()
-    if not checks["sidecars"]:
-        errors.append("sidecars directory is missing")
 
     expected_hash = str(
         (((manifest.get("artifacts") or {}).get("media") or {}).get("sha256") or "")
@@ -714,13 +736,14 @@ def _scan_local(root: Path) -> list[dict[str, Any]]:
         session_id = str(manifest.get("session_id") or candidate.name)
         media = _fixture_media(candidate, session_id)
         sidecars = candidate / "sidecars"
-        if not sidecars.is_dir():
-            sidecars = candidate / session_id
+        complete = media.is_file() and media.stat().st_size > 0
         sessions.append({
             "session_id": session_id,
             "media_bytes": media.stat().st_size if media.is_file() else 0,
             "has_manifest": True,
             "has_sidecars": sidecars.is_dir(),
+            "complete": complete,
+            "layout": "normalized" if (candidate / "media.mp4").is_file() else "session_directory",
             "source": "local",
             "source_path": str(candidate.resolve()),
         })
@@ -732,39 +755,93 @@ def _scan_fixture(root: Path) -> list[dict[str, Any]]:
 
 
 def _scan_quest(context: JobContext) -> list[dict[str, Any]]:
-    adb, root = context.adb, context.quest_root
-    quoted = shlex.quote(root)
-    command = f"find {quoted} -maxdepth 1 -type f -name '*.mp4' 2>/dev/null"
-    output = _run([adb, "shell", command], timeout=60).stdout
+    adb = context.adb
     sessions: list[dict[str, Any]] = []
-    for media_path in sorted(line.strip() for line in output.splitlines() if line.strip()):
-        session_id = Path(media_path).stem
-        if not SESSION_RE.fullmatch(session_id):
-            continue
-        size_output = _run(
-            [adb, "shell", f"stat -c %s {shlex.quote(media_path)} 2>/dev/null || wc -c < {shlex.quote(media_path)}"],
-            timeout=20,
-        ).stdout.strip()
-        try:
-            media_bytes = int(size_output.splitlines()[-1])
-        except (ValueError, IndexError):
-            media_bytes = 0
-        sidecar_dir = f"{root}/{session_id}"
-        manifest_result = subprocess.run(
-            [adb, "shell", f"test -f {shlex.quote(sidecar_dir + '/manifest.json')}"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        sessions.append({
-            "session_id": session_id,
-            "media_bytes": media_bytes,
-            "has_manifest": manifest_result.returncode == 0,
-            "has_sidecars": manifest_result.returncode == 0,
-            "source": "quest",
-            "source_path": media_path,
-        })
+    for root in context.quest_roots:
+        quoted_root = shlex.quote(root)
+        directory_output = _run(
+            [adb, "shell", f"if [ -d {quoted_root} ]; then find {quoted_root} -mindepth 1 -maxdepth 1 -type d 2>/dev/null; fi"],
+            timeout=60,
+        ).stdout
+        for session_dir in sorted(line.strip() for line in directory_output.splitlines() if line.strip()):
+            session_id = session_dir.rstrip("/").rsplit("/", 1)[-1]
+            if not SESSION_RE.fullmatch(session_id):
+                continue
+            media_path = f"{session_dir}/{session_id}.mp4"
+            if not _adb_test_file(adb, media_path):
+                continue
+            manifest_path = f"{session_dir}/manifest.json"
+            has_manifest = _adb_test_file(adb, manifest_path)
+            sessions.append(_quest_scan_record(
+                adb, root, session_id, "session_directory", session_dir,
+                media_path, manifest_path, has_manifest,
+            ))
+
+        file_output = _run(
+            [adb, "shell", f"if [ -d {quoted_root} ]; then find {quoted_root} -maxdepth 1 -type f -name '*.mp4' 2>/dev/null; fi"],
+            timeout=60,
+        ).stdout
+        for media_path in sorted(line.strip() for line in file_output.splitlines() if line.strip()):
+            if media_path.endswith(".partial.mp4"):
+                continue
+            session_id = media_path.rsplit("/", 1)[-1][:-4]
+            if not SESSION_RE.fullmatch(session_id):
+                continue
+            session_dir = f"{root}/{session_id}"
+            manifest_path = f"{session_dir}/manifest.json"
+            has_manifest = _adb_test_file(adb, manifest_path)
+            sessions.append(_quest_scan_record(
+                adb, root, session_id, "legacy_siblings", media_path,
+                media_path, manifest_path, has_manifest,
+            ))
     return sessions
+
+
+def _quest_scan_record(
+    adb: str,
+    root: str,
+    session_id: str,
+    layout: str,
+    source_path: str,
+    media_path: str,
+    manifest_path: str,
+    has_manifest: bool,
+) -> dict[str, Any]:
+    media_bytes = _adb_file_size(adb, media_path)
+    return {
+        "session_id": session_id,
+        "media_bytes": media_bytes,
+        "has_manifest": has_manifest,
+        "has_sidecars": has_manifest,
+        "complete": has_manifest and media_bytes > 0,
+        "layout": layout,
+        "quest_root": root,
+        "media_path": media_path,
+        "manifest_path": manifest_path,
+        "source": "quest",
+        "source_path": source_path,
+    }
+
+
+def _adb_test_file(adb: str, path: str) -> bool:
+    result = subprocess.run(
+        [adb, "shell", f"test -f {shlex.quote(path)}"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return result.returncode == 0
+
+
+def _adb_file_size(adb: str, path: str) -> int:
+    output = _run(
+        [adb, "shell", f"stat -c %s {shlex.quote(path)} 2>/dev/null || wc -c < {shlex.quote(path)}"],
+        timeout=20,
+    ).stdout.strip()
+    try:
+        return int(output.splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 def _resolve_local_source(root: Path, session_id: str, explicit_path: str) -> Path:
@@ -792,11 +869,29 @@ def _copy_local_session(source: Path, session_id: str, destination: Path) -> Non
         raise RuntimeError(f"本地数据集缺少视频: {session_id}")
     shutil.copy2(media, destination / "media.mp4")
     sidecars = source / "sidecars"
-    if not sidecars.is_dir():
-        sidecars = source / session_id
-    if not sidecars.is_dir():
-        raise RuntimeError(f"本地数据集缺少 sidecars: {session_id}")
-    shutil.copytree(sidecars, destination / "sidecars")
+    if sidecars.is_dir():
+        shutil.copytree(sidecars, destination / "sidecars")
+    else:
+        # Current Quest recordings are self-contained and keep metadata in the
+        # MP4. Preserve any optional debug artifacts without requiring them.
+        ignored = {
+            media.name,
+            "media.mp4",
+            "manifest.json",
+            "labels.json",
+            "qc.json",
+            "preview.mp4",
+            "previews",
+        }
+        # Keep current-layout artifacts at their original relative paths so
+        # manifest artifact filenames continue to resolve after import.
+        extras = [entry for entry in source.iterdir() if entry.name not in ignored]
+        for entry in extras:
+            target = destination / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target)
+            elif entry.is_file():
+                shutil.copy2(entry, target)
     manifest = source / "manifest.json"
     if not manifest.is_file():
         manifest = sidecars / "manifest.json"
@@ -811,27 +906,121 @@ def _copy_fixture_session(root: Path, session_id: str, destination: Path) -> Non
     _copy_local_session(source, session_id, destination)
 
 
-def _pull_quest_session(context: JobContext, session_id: str, destination: Path) -> None:
-    adb, root = context.adb, context.quest_root
-    media = f"{root}/{session_id}.mp4"
-    sidecars = f"{root}/{session_id}"
-    _run([adb, "pull", media, str(destination / "media.mp4")], timeout=6 * 60 * 60)
-    _run([adb, "pull", sidecars, str(destination / "sidecars")], timeout=6 * 60 * 60)
-    manifest = destination / "sidecars" / "manifest.json"
-    if not manifest.is_file():
-        raise RuntimeError("Quest sidecars did not contain manifest.json")
+def _quest_source(root: str, session_id: str, layout: str) -> dict[str, str]:
+    session_dir = f"{root}/{session_id}"
+    if layout == "session_directory":
+        media = f"{session_dir}/{session_id}.mp4"
+        source_path = session_dir
+    elif layout == "legacy_siblings":
+        media = f"{root}/{session_id}.mp4"
+        source_path = media
+    else:
+        raise RuntimeError(f"不支持的 Quest 数据结构: {layout}")
+    return {
+        "root": root,
+        "layout": layout,
+        "session_dir": session_dir,
+        "media": media,
+        "manifest": f"{session_dir}/manifest.json",
+        "source_path": source_path,
+    }
+
+
+def _resolve_quest_source(
+    context: JobContext,
+    session_id: str,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    requested_root = str(payload.get("quest_root") or "").strip()
+    requested_layout = str(payload.get("layout") or "").strip()
+    roots = context.quest_roots
+    if requested_root:
+        requested_root = _validate_quest_root(requested_root)
+        if requested_root not in roots:
+            raise RuntimeError("Quest 数据路径不在允许的扫描目录中")
+        roots = [requested_root]
+    if requested_layout:
+        if requested_layout not in {"session_directory", "legacy_siblings"}:
+            raise RuntimeError("Quest 数据结构参数无效")
+        return _quest_source(roots[0], session_id, requested_layout)
+
+    # Backward compatibility for jobs queued by an older Station frontend.
+    for root in roots:
+        for layout in ("session_directory", "legacy_siblings"):
+            source = _quest_source(root, session_id, layout)
+            if _adb_test_file(context.adb, source["media"]) and _adb_test_file(
+                context.adb, source["manifest"]
+            ):
+                return source
+    raise RuntimeError(f"Quest 上找不到完整数据: {session_id}")
+
+
+def _pull_quest_session(
+    context: JobContext,
+    session_id: str,
+    destination: Path,
+    source: dict[str, str],
+) -> None:
+    adb = context.adb
+    if source["layout"] == "legacy_siblings":
+        _run([adb, "pull", source["media"], str(destination / "media.mp4")], timeout=6 * 60 * 60)
+        _run([adb, "pull", source["session_dir"], str(destination / "sidecars")], timeout=6 * 60 * 60)
+        manifest = destination / "sidecars" / "manifest.json"
+        if not manifest.is_file():
+            raise RuntimeError("Quest sidecars did not contain manifest.json")
+        shutil.copy2(manifest, destination / "manifest.json")
+        return
+
+    pulled_root = destination / "quest_session"
+    _run([adb, "pull", source["session_dir"], str(pulled_root)], timeout=6 * 60 * 60)
+    pulled = pulled_root
+    if not (pulled / "manifest.json").is_file() and (pulled / session_id).is_dir():
+        pulled = pulled / session_id
+    media = pulled / f"{session_id}.mp4"
+    manifest = pulled / "manifest.json"
+    if not media.is_file() or not manifest.is_file():
+        raise RuntimeError("Quest 新格式数据缺少 MP4 或 manifest.json")
+    shutil.move(str(media), destination / "media.mp4")
     shutil.copy2(manifest, destination / "manifest.json")
 
+    ignored = {f"{session_id}.partial.mp4", "manifest.json"}
+    extras = [entry for entry in pulled.iterdir() if entry.name not in ignored]
+    for entry in extras:
+        # Preserve current-layout relative paths referenced by manifest.json.
+        shutil.move(str(entry), destination / entry.name)
+    shutil.rmtree(pulled_root, ignore_errors=True)
 
-def _delete_quest_session(context: JobContext, session_id: str) -> None:
-    adb, root = context.adb, context.quest_root
-    media = f"{root}/{session_id}.mp4"
-    sidecars = f"{root}/{session_id}"
-    command = (
-        f"test -f {shlex.quote(media)} && test -d {shlex.quote(sidecars)} && "
-        f"rm -f {shlex.quote(media)} && rm -rf {shlex.quote(sidecars)}"
-    )
-    _run([adb, "shell", command], timeout=120)
+
+def _delete_quest_source(context: JobContext, source: dict[str, str]) -> None:
+    media = shlex.quote(source["media"])
+    manifest = shlex.quote(source["manifest"])
+    session_dir = shlex.quote(source["session_dir"])
+    if source["layout"] == "session_directory":
+        command = f"test -f {media} && test -f {manifest} && rm -rf {session_dir}"
+    else:
+        command = (
+            f"test -f {media} && test -f {manifest} && test -d {session_dir} && "
+            f"rm -f {media} && rm -rf {session_dir}"
+        )
+    _run([context.adb, "shell", command], timeout=120)
+
+
+def delete_quest_session(payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
+    session_id = str(payload.get("session_id") or "").strip()
+    if not SESSION_RE.fullmatch(session_id):
+        raise RuntimeError("Invalid session ID")
+    source = _resolve_quest_source(context, session_id, payload)
+    context.progress(0.2, "正在删除 Quest 数据")
+    _delete_quest_source(context, source)
+    context.progress(0.8, "Quest 数据已删除，正在刷新列表")
+    sessions = _scan_quest(context)
+    context.progress(1.0, "Quest 数据已删除")
+    return {
+        "session_id": session_id,
+        "source_path": source["source_path"],
+        "layout": source["layout"],
+        "sessions": sessions,
+    }
 
 
 def _create_previews_with_warning(

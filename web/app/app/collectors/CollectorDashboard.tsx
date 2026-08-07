@@ -65,6 +65,10 @@ interface ScannedSession {
   media_bytes?: number;
   has_manifest?: boolean;
   has_sidecars?: boolean;
+  complete?: boolean;
+  layout?: "session_directory" | "legacy_siblings" | "normalized";
+  quest_root?: string;
+  media_path?: string;
   source?: string;
   source_path?: string;
 }
@@ -295,7 +299,7 @@ export function CollectorDashboard() {
                   <div className="collector-settings__grid">
                     <label>数据保存目录<input value={String(config.data_root ?? "")} placeholder="例如 /Users/name/OperatorData" onChange={(event) => updateConfig(setConfigs, agent.id, config, "data_root", event.target.value)} /><span>数据保存到该目录的 sessions 子目录。</span></label>
                     <label>本地已有数据集目录<input value={String(config.local_source_root ?? config.fixture_root ?? "")} placeholder="一条数据或包含多条数据的目录" onChange={(event) => updateConfig(setConfigs, agent.id, config, "local_source_root", event.target.value)} /><span>无需连接 Quest 也可以扫描。</span></label>
-                    <label>Quest 录制根目录<input value={String(config.quest_root ?? "")} placeholder="/sdcard/DCIM/SpatialMP4" onChange={(event) => updateConfig(setConfigs, agent.id, config, "quest_root", event.target.value)} /></label>
+                    <label>Quest 自定义扫描目录<input value={String(config.quest_root ?? "")} placeholder="/sdcard/DCIM/SpatialMP4" onChange={(event) => updateConfig(setConfigs, agent.id, config, "quest_root", event.target.value)} /><span>始终同时扫描 DCIM 和 Movies；这里可填写额外目录。</span></label>
                     <label>ModelScope 目标仓库<input value="chenghy666/test" readOnly /><span>固定私有仓库，无需操作员配置。</span></label>
                     <label>ADB 路径（可选）<input value={String(config.adb_path ?? "")} placeholder="例如 /opt/homebrew/bin/adb" onChange={(event) => updateConfig(setConfigs, agent.id, config, "adb_path", event.target.value)} /></label>
                     <label>FFmpeg 路径（可选）<input value={String(config.ffmpeg_path ?? "")} placeholder="例如 /opt/homebrew/bin/ffmpeg" onChange={(event) => updateConfig(setConfigs, agent.id, config, "ffmpeg_path", event.target.value)} /></label>
@@ -323,7 +327,31 @@ export function CollectorDashboard() {
                     busy={busy}
                     source="quest"
                     extra={<label className="collector-check"><input type="checkbox" checked={!!deleteAfter[agent.id]} onChange={(event) => setDeleteAfter((previous) => ({ ...previous, [agent.id]: event.target.checked }))} />校验成功后删除 Quest 原数据</label>}
-                    onImport={(session) => request(`${agent.id}:import:quest:${session.session_id}`, `/api/collectors/agents/${agent.id}/jobs`, { method: "POST", body: JSON.stringify({ kind: "import", payload: { source: "quest", session_id: session.session_id, delete_after: !!deleteAfter[agent.id] } }) })}
+                    onImport={(session) => request(
+                      `${agent.id}:import:quest:${session.session_id}`,
+                      `/api/collectors/agents/${agent.id}/jobs`,
+                      {
+                        method: "POST",
+                        body: JSON.stringify({
+                          kind: "import",
+                          payload: questSessionPayload(session, { delete_after: !!deleteAfter[agent.id] }),
+                        }),
+                      },
+                    )}
+                    onDelete={(session) => {
+                      if (!window.confirm(`确定永久删除 Quest 上的 ${session.session_id} 吗？此操作无法撤销。`)) return;
+                      void request(
+                        `${agent.id}:delete_quest:${session.source_path ?? session.session_id}`,
+                        `/api/collectors/agents/${agent.id}/jobs`,
+                        {
+                          method: "POST",
+                          body: JSON.stringify({
+                            kind: "delete_quest",
+                            payload: questSessionPayload(session),
+                          }),
+                        },
+                      );
+                    }}
                   />
                 </div>
 
@@ -493,7 +521,19 @@ function PreviewGallery({ item }: { item: Item }) {
   return <div className="collector-preview-empty"><strong>暂无图片预览</strong><span>{warning ? localizeError(warning) : "前 2 分钟 · 每 20 秒一张"}</span></div>;
 }
 
-function DatasetSourceCard({ title, count, emptyText, sessions, agent, busy, source, extra, onImport }: {
+function questSessionPayload(session: ScannedSession, extra: Json = {}): Json {
+  return {
+    source: "quest",
+    session_id: session.session_id,
+    source_path: session.source_path,
+    quest_root: session.quest_root,
+    layout: session.layout,
+    ...extra,
+  };
+}
+
+
+function DatasetSourceCard({ title, count, emptyText, sessions, agent, busy, source, extra, onImport, onDelete }: {
   title: string;
   count: number;
   emptyText: string;
@@ -503,13 +543,39 @@ function DatasetSourceCard({ title, count, emptyText, sessions, agent, busy, sou
   source: "local" | "quest";
   extra?: ReactNode;
   onImport: (session: ScannedSession) => void;
+  onDelete?: (session: ScannedSession) => void;
 }) {
   return (
     <section className="collector-source-card">
       <div className="collector-card__title"><h3>{title}<span>{count}</span></h3>{extra}</div>
       {sessions.length === 0 ? <div className="collector-source-empty">{emptyText}</div> : (
         <div className="collector-table-wrap"><table className="collector-table"><thead><tr><th>数据 ID</th><th>大小</th><th>完整性</th><th /></tr></thead><tbody>{sessions.map((session) => (
-          <tr key={`${source}:${session.source_path ?? session.session_id}`}><td><code>{session.session_id}</code></td><td>{formatBytes(session.media_bytes ?? 0)}</td><td><span className={session.has_manifest && session.has_sidecars ? "collector-complete" : "collector-incomplete"}>{session.has_manifest && session.has_sidecars ? "完整" : "缺文件"}</span></td><td><button className="primary" disabled={!agent.online || busy === `${agent.id}:import:${source}:${session.session_id}`} onClick={() => onImport(session)}>{source === "local" ? "读取" : "导入"}</button></td></tr>
+          <tr key={`${source}:${session.source_path ?? session.session_id}`}>
+            <td>
+              <code>{session.session_id}</code>
+              {source === "quest" && <small className="collector-source-path">
+                {session.quest_root} · {session.layout === "session_directory" ? "新格式" : "旧格式"}
+              </small>}
+            </td>
+            <td>{formatBytes(session.media_bytes ?? 0)}</td>
+            <td>
+              <span className={session.complete ?? (session.has_manifest && session.has_sidecars) ? "collector-complete" : "collector-incomplete"}>
+                {session.complete ?? (session.has_manifest && session.has_sidecars) ? "完整" : "缺文件"}
+              </span>
+            </td>
+            <td><div className="collector-table-actions">
+              <button
+                className="primary"
+                disabled={!agent.online || !(session.complete ?? (session.has_manifest && session.has_sidecars)) || busy === `${agent.id}:import:${source}:${session.session_id}`}
+                onClick={() => onImport(session)}
+              >{source === "local" ? "读取" : "导入"}</button>
+              {source === "quest" && onDelete && <button
+                className="danger"
+                disabled={!agent.online || !(session.complete ?? (session.has_manifest && session.has_sidecars)) || busy.startsWith(`${agent.id}:delete_quest:`)}
+                onClick={() => onDelete(session)}
+              >删除</button>}
+            </div></td>
+          </tr>
         ))}</tbody></table></div>
       )}
     </section>
@@ -536,7 +602,7 @@ function localizeState(value: string): string {
   return values[value] ?? value;
 }
 
-function localizeJobKind(value: string): string { return ({ scan: "扫描", start_ego: "启动 Ego", import: "读取数据", label: "标签", upload: "上传", preview: "生成预览", delete_local: "删除本地数据" } as Record<string, string>)[value] ?? value; }
+function localizeJobKind(value: string): string { return ({ scan: "扫描", start_ego: "启动 Ego", import: "读取数据", label: "标签", upload: "上传", preview: "生成预览", delete_local: "删除本地数据", delete_quest: "删除 Quest 数据" } as Record<string, string>)[value] ?? value; }
 function localizeJobStatus(value: string): string { return ({ queued: "等待中", running: "执行中", completed: "已完成", failed: "失败" } as Record<string, string>)[value] ?? value; }
 
 function formatJobCommand(job: Job): string {
@@ -551,6 +617,7 @@ function formatJobCommand(job: Job): string {
     case "upload": return `上传到 ModelScope${dataset ? ` · ${dataset}` : ""}`;
     case "preview": return `生成图片预览${dataset ? ` · ${dataset}` : ""}`;
     case "delete_local": return `删除本地数据${dataset ? ` · ${dataset}` : ""}`;
+    case "delete_quest": return `删除 Quest 数据${session ? ` · ${session}` : ""}`;
     default: return localizeJobKind(job.kind);
   }
 }
@@ -561,6 +628,7 @@ function formatJobResult(job: Job): string {
   if (job.status === "running") return localizeError(job.message || `执行中 · ${Math.round(job.progress * 100)}%`);
   const result = job.result ?? {};
   if (job.kind === "scan" && Array.isArray(result.sessions)) return `完成 · 发现 ${result.sessions.length} 条数据`;
+  if (job.kind === "delete_quest") return "Quest 数据已删除";
   if (job.kind === "import") {
     const name = shortValue(result.dataset_name);
     return name ? `读取完成 · ${name}` : "读取和校验完成";

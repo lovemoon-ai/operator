@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,7 @@ from operator_collector.jobs import (
     _create_preview_frames,
     build_dataset_name,
     delete_local_item,
+    delete_quest_session,
     import_session,
     label_item,
     preview_item,
@@ -194,6 +197,150 @@ class JobTests(unittest.TestCase):
     def test_default_quest_root_matches_ego_capture_directory(self) -> None:
         context = JobContext({}, lambda _value, _message: None)
         self.assertEqual(context.quest_root, "/sdcard/DCIM/SpatialMP4")
+        self.assertEqual(
+            context.quest_roots,
+            ["/sdcard/DCIM/SpatialMP4", "/sdcard/Movies/SpatialMP4"],
+        )
+
+    def test_custom_quest_root_does_not_replace_standard_scan_roots(self) -> None:
+        context = JobContext(
+            {"quest_root": "/sdcard/OperatorCustom"},
+            lambda _value, _message: None,
+        )
+        self.assertEqual(
+            context.quest_roots,
+            [
+                "/sdcard/OperatorCustom",
+                "/sdcard/DCIM/SpatialMP4",
+                "/sdcard/Movies/SpatialMP4",
+            ],
+        )
+
+    def test_scan_quest_finds_new_and_legacy_layouts_in_both_roots(self) -> None:
+        context = JobContext(
+            {"adb_path": "/fake/adb"},
+            lambda _value, _message: None,
+        )
+
+        def fake_run(command: list[str], timeout: float):
+            shell = command[-1]
+            output = ""
+            if "-type d" in shell and "/DCIM/" in shell:
+                output = "/sdcard/DCIM/SpatialMP4/20260806_010101\n"
+            elif "-type f" in shell and "/Movies/" in shell:
+                output = (
+                    "/sdcard/Movies/SpatialMP4/20260805_020202.mp4\n"
+                    "/sdcard/Movies/SpatialMP4/20260805_020203.partial.mp4\n"
+                )
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with (
+            patch("operator_collector.jobs._run", side_effect=fake_run),
+            patch("operator_collector.jobs._adb_test_file", return_value=True),
+            patch("operator_collector.jobs._adb_file_size", return_value=1234),
+        ):
+            result = scan({"source": "quest"}, context)
+
+        self.assertEqual(len(result["sessions"]), 2)
+        self.assertEqual(
+            {session["layout"] for session in result["sessions"]},
+            {"session_directory", "legacy_siblings"},
+        )
+        self.assertEqual(
+            {session["quest_root"] for session in result["sessions"]},
+            {"/sdcard/DCIM/SpatialMP4", "/sdcard/Movies/SpatialMP4"},
+        )
+        self.assertTrue(all(session["complete"] for session in result["sessions"]))
+
+    def test_current_layout_validates_and_imports_without_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = make_fixture(root)
+            shutil.rmtree(fixture / "sidecars")
+            qc = validate_session(fixture)
+            self.assertTrue(qc["ok"])
+            self.assertFalse(qc["checks"]["sidecars"])
+
+            data_root = root / "managed"
+            context = JobContext(
+                {
+                    "adb_path": "/fake/adb",
+                    "data_root": str(data_root),
+                    "preview_enabled": False,
+                },
+                lambda _value, _message: None,
+            )
+            session_id = "20260806_030303"
+            media = b"new-layout-media"
+            manifest = {
+                "schema": "spatialmp4.quest_capture.spool.v3",
+                "session_id": session_id,
+                "artifacts": {
+                    "media": {
+                        "bytes": len(media),
+                        "sha256": hashlib.sha256(media).hexdigest(),
+                    }
+                },
+            }
+
+            def fake_pull(command: list[str], timeout: float):
+                if len(command) >= 4 and command[1] == "pull":
+                    destination = Path(command[3])
+                    destination.mkdir(parents=True)
+                    (destination / f"{session_id}.mp4").write_bytes(media)
+                    (destination / "manifest.json").write_text(
+                        json.dumps(manifest), encoding="utf-8"
+                    )
+                    (destination / "android_timebase.json").write_text(
+                        "{}", encoding="utf-8"
+                    )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("operator_collector.jobs._run", side_effect=fake_pull):
+                imported = import_session(
+                    {
+                        "source": "quest",
+                        "session_id": session_id,
+                        "quest_root": "/sdcard/DCIM/SpatialMP4",
+                        "layout": "session_directory",
+                    },
+                    context,
+                )
+
+            imported_path = Path(imported["local_path"])
+            self.assertTrue(imported["qc"]["ok"])
+            self.assertEqual((imported_path / "media.mp4").read_bytes(), media)
+            self.assertTrue((imported_path / "manifest.json").is_file())
+            self.assertTrue((imported_path / "android_timebase.json").is_file())
+
+    def test_delete_quest_removes_only_the_scanned_source(self) -> None:
+        context = JobContext(
+            {"adb_path": "/fake/adb"},
+            lambda _value, _message: None,
+        )
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], timeout: float):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            patch("operator_collector.jobs._run", side_effect=fake_run),
+            patch("operator_collector.jobs._scan_quest", return_value=[]),
+        ):
+            result = delete_quest_session(
+                {
+                    "session_id": "20260806_040404",
+                    "quest_root": "/sdcard/DCIM/SpatialMP4",
+                    "layout": "session_directory",
+                },
+                context,
+            )
+
+        delete_command = commands[0][-1]
+        self.assertIn("rm -rf /sdcard/DCIM/SpatialMP4/20260806_040404", delete_command)
+        self.assertNotIn("/sdcard/Movies/", delete_command)
+        self.assertEqual(result["sessions"], [])
 
     def test_workstation_state_reports_bundled_python_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

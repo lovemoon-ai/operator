@@ -652,6 +652,9 @@ textarea { resize: vertical; min-height: 90px; font-family: var(--mono); font-si
 .collector-table th, .collector-table td { padding: 9px 7px; border-bottom-color: rgba(126, 167, 214, 0.1); }
 .collector-table th { color: #6f849a; font-size: 9px; text-transform: uppercase; letter-spacing: 0.08em; }
 .collector-table code { color: #b8c7d7; font-size: 10px; }
+.collector-source-path { display: block; max-width: 220px; margin-top: 3px; overflow: hidden; color: #60768b; font: 8px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.collector-table-actions { display: flex; justify-content: flex-end; gap: 5px; }
+.collector-table-actions button { min-width: 48px; padding: 6px 8px; font-size: 9px; }
 .collector-complete { color: var(--collector-cyan); }
 .collector-incomplete { color: var(--warn); }
 

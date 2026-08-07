@@ -12,7 +12,7 @@
 - 自己的**数采 ID**和 6 位数字 **PIN**；
 - 本机数据保存目录；
 
-Quest 必须已安装 Operator、开启开发者模式和 USB 调试。**0.1.5 及更新版 Agent
+Quest 必须已安装 Operator、开启开发者模式和 USB 调试。**0.1.6 及更新版 Agent
 已自带 ADB、FFmpeg、Python 和 ModelScope 上传组件，数采员无需单独安装或
 登录。**网页“工作站状态”会显示它们是否可用。
 
@@ -136,7 +136,8 @@ Agent 首次启动会打开配对页。批准这台电脑，回到“数据采�
 
 - **数据保存目录**：导入后数据存放的位置；
 - **本地已有数据集目录**：不连接 Quest 时要扫描的位置；
-- **Quest 录制根目录**：不知道时可先留空，连接后再确认；
+- **Quest 自定义扫描目录**：通常无需填写；Agent 始终扫描 DCIM 和 Movies 两个标准
+  目录，只有数据保存在其他位置时才填写；
 - **ModelScope 目标仓库**固定为 `chenghy666/test`，无需填写 token 或仓库名。
 
 ## 3. 连接 Quest 并采集
@@ -153,21 +154,28 @@ Agent 首次启动会打开配对页。批准这台电脑，回到“数据采�
 4. 网页确认工作站“在线”、Quest“已连接”，点击“启动 Ego”。
 5. Ego 打开后可以拔掉 USB；录制不依赖电脑或 Wi-Fi。
 6. 停止录制并等待 Quest 明确提示保存完成，再重新连接 USB。
-7. 点击“扫描 Quest”。如不知道路径，可执行：
+7. 点击“扫描 Quest”。Agent 会同时扫描新 APK 默认的
+   `/sdcard/DCIM/SpatialMP4` 和旧版 `/sdcard/Movies/SpatialMP4`，并自动兼容
+   新旧数据结构。
+
+   如仍找不到数据，可执行：
 
    ```text
    adb shell "find /sdcard -type f -name '*.mp4' 2>/dev/null"
    adb shell "find /sdcard -type f -name 'manifest.json' 2>/dev/null"
    ```
 
-   把 MP4 所在目录填入“Quest 录制根目录”，保存后重新扫描。
+   把 MP4 所在目录填入“Quest 自定义扫描目录”，保存后重新扫描。Station 不会自动
+   修改这个自定义路径。
 
 ## 4. 导入、检查、标签和上传
 
 1. 在“Quest 中的录制”找到刚录制的数据，点击“读取并校验”。
 2. 如确实需要释放 Quest 空间，可勾选“校验并保存成功后删除 Quest 原数据”。
-   只有电脑端校验成功后才会删除对应源数据。
-3. 等待“校验通过”，检查前两分钟内每 20 秒抽取的预览图、manifest 和 sidecars。
+   只有电脑端校验成功后才会删除对应源数据。也可以在 Quest 数据列表点击“删除”，
+   直接永久删除该条 Quest 数据；此操作无法撤销。
+3. 等待“校验通过”，检查前两分钟内每 20 秒抽取的预览图和 manifest。旧格式的
+   sidecars 会完整保留；新格式的数据流主要嵌入 MP4，不要求单独的 sidecars 目录。
 4. 输入短标签，例如 `wash`，点击“保存标签并重命名”。目录会变成类似：
    `20260804_wash_020030902`。
 5. 如果没有图片，点击“生成预览”；旧预览不正确时点击“重新生成预览”。
@@ -182,7 +190,8 @@ Agent 首次启动会打开配对页。批准这台电脑，回到“数据采�
 不连接 Quest 时，填写“本地已有数据集目录”，点击“扫描本地数据”，后续预览、
 标签和上传步骤完全相同。
 
-> 不要只复制 MP4，也不要手动修改或删除 manifest、sidecars 和 Quest 原文件。
+> 不要只复制 MP4，也不要手动修改 manifest、可选 sidecars 和 Quest 原文件。新旧
+> 两种 Quest 数据结构均由 Agent 自动识别和整理。
 
 ## 5. 停止或卸载 Agent
 
@@ -248,6 +257,6 @@ rm -f "$HOME/Library/Application Support/Operator Collector/config.json"
 
 - **工作站离线**：确认 Agent 已启动、Station 地址正确，并刷新网页。
 - **Quest 未连接**：重新插线，在 Quest 内允许 USB 调试。
-- **扫描不到数据**：确认录制已保存，并检查 Quest 录制根目录。
-- **FFmpeg/ModelScope 不可用**：先升级到 Agent 0.1.5，再联系负责人检查 Station。
+- **扫描不到数据**：确认录制已保存；其他位置需填入“Quest 自定义扫描目录”。
+- **FFmpeg/ModelScope 不可用**：先升级到 Agent 0.1.6，再联系负责人检查 Station。
 - **校验或上传失败**：不要删除任何原文件，保存错误截图并联系负责人。

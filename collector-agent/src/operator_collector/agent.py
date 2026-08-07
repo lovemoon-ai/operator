@@ -173,6 +173,10 @@ class CollectorAgent:
                 with self._state_lock:
                     self.state[state_key] = result.get("sessions", [])
                     self.state[f"last{source.title()}ScanAt"] = time.time()
+            elif kind == "delete_quest":
+                with self._state_lock:
+                    self.state["scannedQuestSessions"] = result.get("sessions", [])
+                    self.state["lastQuestScanAt"] = time.time()
             complete = self.client.json(
                 "POST",
                 f"/api/collector-agent/jobs/{urllib.parse.quote(job_id)}/complete",

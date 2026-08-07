@@ -14,9 +14,7 @@ const PREVIEW_ROOT = path.join(DATA_ROOT, "collector-previews");
 const MAX_BATCH_UPLOAD_ITEMS = 100;
 const FIXED_MODELSCOPE_REPO_ID = "chenghy666/test";
 const DEFAULT_QUEST_ROOT = "/sdcard/DCIM/SpatialMP4";
-const LEGACY_QUEST_ROOT = "/sdcard/Movies/SpatialMP4";
-
-const JOB_KINDS = new Set(["scan", "start_ego", "import", "label", "upload", "preview", "delete_local"]);
+const JOB_KINDS = new Set(["scan", "start_ego", "import", "label", "upload", "preview", "delete_local", "delete_quest"]);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS collector_enrollments (
@@ -316,27 +314,6 @@ function safeJson(value: string | null | undefined): unknown {
   }
 }
 
-function migrateLegacyQuestRoots(): void {
-  const rows = db.prepare("SELECT id, config_json FROM collector_agents").all() as Array<{
-    id: string;
-    config_json: string;
-  }>;
-  const update = db.prepare("UPDATE collector_agents SET config_json = ? WHERE id = ?");
-  const migrate = db.transaction(() => {
-    for (const row of rows) {
-      const parsed = safeJson(row.config_json);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-      const config = parsed as Record<string, unknown>;
-      if (config.quest_root !== LEGACY_QUEST_ROOT) continue;
-      config.quest_root = DEFAULT_QUEST_ROOT;
-      update.run(JSON.stringify(config), row.id);
-    }
-  });
-  migrate();
-}
-
-migrateLegacyQuestRoots();
-
 function bodyString(value: unknown, max = 256): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
@@ -494,9 +471,9 @@ function createJob(agent: AgentRow, kind: string, payload: unknown): JobRow {
 
 function applyJobResult(agent: AgentRow, job: JobRow, result: Record<string, unknown>) {
   const now = new Date().toISOString();
-  if (job.kind === "scan") {
+  if (job.kind === "scan" || job.kind === "delete_quest") {
     const state = (safeJson(agent.state_json) ?? {}) as Record<string, unknown>;
-    const source = result.source === "local" ? "local" : "quest";
+    const source = job.kind === "delete_quest" ? "quest" : result.source === "local" ? "local" : "quest";
     const key = source === "local" ? "scannedLocalSessions" : "scannedQuestSessions";
     state[key] = Array.isArray(result.sessions) ? result.sessions : [];
     state[source === "local" ? "lastLocalScanAt" : "lastQuestScanAt"] = now;
