@@ -46,7 +46,7 @@ import {
   browserAuthMiddleware,
   describeAuth,
 } from "./lib/auth/index.js";
-import { runAsSystem, runAsUser } from "./lib/auth-context.js";
+import { currentUserId, runAsSystem, runAsUser } from "./lib/auth-context.js";
 import { verifyConnectTicket } from "./lib/connect-ticket.js";
 import {
   collectorAgentRouter,
@@ -204,6 +204,7 @@ async function main() {
       ? Number(process.env.ORPHAN_TIMEOUT_MS)
       : undefined,
     auth: () => true,
+    userIdFromReq: () => currentUserId(),
     onSession: async (session) => {
       // eslint-disable-next-line no-console
       console.log(

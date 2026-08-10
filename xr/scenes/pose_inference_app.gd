@@ -1,6 +1,6 @@
 extends Node3D
 
-const EgoQRScannerScript := preload("res://scripts/ego_qr_scanner.gd")
+const EgoQRScannerScript := preload("res://scripts/ui/ego_qr_scanner.gd")
 const TrackingProviderScript := preload("res://scripts/xr/tracking_provider.gd")
 const PoseInferenceClientScript := preload("res://addons/pose-inference/pose_inference_client.gd")
 const PoseInferenceDisplayScript := preload("res://addons/pose-inference/pose_inference_display.gd")
@@ -8,6 +8,7 @@ const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_inte
 const OperatorUIPointerVisualScript := preload("res://scripts/xr/operator_ui_pointer_visual.gd")
 
 const QR_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
+const LAUNCHER_SCENE := "res://scenes/main.tscn"
 
 var _origin: XROrigin3D
 var _camera: XRCamera3D
@@ -46,6 +47,8 @@ func _ready() -> void:
 	add_child(tracking)
 	_client = PoseInferenceClientScript.new()
 	_client.set_tracking_provider(tracking)
+	_client.connection_failed.connect(_on_connection_failed)
+	_client.disconnected_from_server.connect(_on_disconnected)
 	add_child(_client)
 	var display: PoseInferenceDisplay = PoseInferenceDisplayScript.new()
 	display.head_lock_target = _camera
@@ -53,6 +56,7 @@ func _ready() -> void:
 	_client.image_received.connect(display.show_jpeg)
 	_scanner = EgoQRScannerScript.new()
 	_scanner.payload_accepted.connect(_on_qr_payload)
+	_scanner.cancelled.connect(_return_to_launcher)
 	_origin.add_child(_scanner)
 	call_deferred("_open_scanner")
 
@@ -73,8 +77,21 @@ func _open_scanner() -> void:
 func _on_qr_payload(payload: String) -> void:
 	if _client.configure_from_qr(payload):
 		_scanner.close()
-	else:
-		_scanner.open()
+
+
+func _on_connection_failed(reason: String) -> void:
+	_client.disconnect_from_server()
+	_scanner.show_error(reason)
+
+
+func _on_disconnected() -> void:
+	_client.disconnect_from_server()
+	_scanner.show_error("Connection lost. Scan the server QR code again.")
+
+
+func _return_to_launcher() -> void:
+	_client.disconnect_from_server()
+	get_tree().change_scene_to_file(LAUNCHER_SCENE)
 
 
 func _create_aim_pointer(node_name: String, tracker: StringName) -> XRController3D:

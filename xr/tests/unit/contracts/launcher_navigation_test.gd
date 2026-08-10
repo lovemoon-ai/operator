@@ -56,3 +56,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		0.0001,
 		"an untracked camera must use the eye-height fallback"
 	)
+
+	var launcher := ModeSelectScript.new()
+	var seven_positions: Array = launcher._compute_card_positions(7)
+	t.eq(seven_positions.size(), 7, "launcher allocates one position per enabled card")
+	launcher.free()

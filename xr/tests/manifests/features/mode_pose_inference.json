@@ -1,0 +1,33 @@
+{
+  "id": "mode_pose_inference",
+  "feature": "operator_feature_mode_pose_inference",
+  "owner": "app/modes",
+  "required_features": [],
+  "required_capabilities": [
+    "POSE",
+    "HAND_TRACKING",
+    "QR_SCAN",
+    "LIVE_STREAM_SERVER"
+  ],
+  "test_cases": [
+    {
+      "id": "mode_pose_inference.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "mode_pose_inference.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd",
+      "fixture": "fake_platform_quest_like"
+    },
+    {
+      "id": "mode_pose_inference.protocol",
+      "level": "unit",
+      "host_test": "server/tests/test_pose_inference_client_source.py"
+    }
+  ]
+}

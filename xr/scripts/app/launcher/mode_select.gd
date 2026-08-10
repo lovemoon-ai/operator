@@ -220,6 +220,21 @@ func _compute_card_positions(card_count: int) -> Array:
 	# Restored after the merge resolution dropped the array init: the
 	# match block populates ``positions`` then every branch returns it.
 	var positions: Array = []
+	if card_count > 6:
+		var row_count := ceili(float(card_count) / 3.0)
+		var remaining := card_count
+		for row in range(row_count):
+			var count := mini(3, remaining)
+			var angles: Array = [0.0]
+			if count == 2:
+				angles = BOTTOM_ROW_ANGLES_DEG
+			elif count == 3:
+				angles = TOP_ROW_ANGLES_DEG
+			var y := (float(row_count - 1) * 0.5 - float(row)) * (TOP_ROW_Y - BOTTOM_ROW_Y)
+			for i in range(count):
+				positions.append(_card_position(float(angles[i]), y))
+			remaining -= count
+		return positions
 	match card_count:
 		0:
 			return positions

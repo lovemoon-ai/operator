@@ -56,6 +56,8 @@ db.exec(`
     last_patch_at  TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_resources_user ON resources(user_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_resources_active_artifact
+    ON resources(session_id, artifact_kind);
 
   CREATE TABLE IF NOT EXISTS sessions (
     id             TEXT PRIMARY KEY,

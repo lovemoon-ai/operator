@@ -699,7 +699,7 @@ func _write_json(path: String, value: Dictionary) -> void:
 
 func _make_session_id() -> String:
 	var dt := Time.get_datetime_dict_from_system(true)
-	return "%04d%02d%02d_%02d%02d%02d" % [
+	var timestamp := "%04d%02d%02d_%02d%02d%02d" % [
 		dt.year,
 		dt.month,
 		dt.day,
@@ -707,6 +707,14 @@ func _make_session_id() -> String:
 		dt.minute,
 		dt.second
 	]
+	# Timestamp-only IDs collide when two headsets start in the same second.
+	# Mix a stable device id with two clocks and keep a short opaque suffix.
+	var nonce_source := "%s:%s:%s" % [
+		OS.get_unique_id(),
+		Time.get_unix_time_from_system(),
+		Time.get_ticks_usec(),
+	]
+	return "%s_%s" % [timestamp, nonce_source.sha256_text().substr(0, 8)]
 
 
 func _make_unique_session_id(capture_root: String, base_session_id: String) -> String:

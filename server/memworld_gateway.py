@@ -950,6 +950,9 @@ async def websocket_handler(
         await connection.close(1008, "use /memworld")
         return
     state = SessionState()
+    # Model playback is connection-local. The HTTP dashboard remains shared,
+    # but a Quest must never read frames produced for another Quest.
+    session_dashboard = DashboardState()
     slot = LatestWindowQueue(
         frames_per_chunk=FRAMES_PER_CHUNK,
         stride=NEW_FRAMES_PER_CHUNK,
@@ -991,8 +994,17 @@ async def websocket_handler(
                     url=worker_url,
                     session_start=session_start,
                     slot=slot,
-                    on_result=lambda result: _on_worker_result(result, dashboard),
-                    on_status=lambda status, error: dashboard.update_status(worker=status, worker_error=error),
+                    on_result=lambda result: _on_worker_result(
+                        result,
+                        session_dashboard,
+                        mirror=dashboard,
+                    ),
+                    on_status=lambda status, error: _update_worker_status(
+                        status,
+                        error,
+                        session_dashboard,
+                        dashboard,
+                    ),
                 )
                 tasks = [
                     asyncio.create_task(
@@ -1003,7 +1015,7 @@ async def websocket_handler(
                             dashboard,
                         )
                     ),
-                    asyncio.create_task(preview_loop(connection, state, dashboard)),
+                    asyncio.create_task(preview_loop(connection, state, session_dashboard)),
                     asyncio.create_task(worker.run()),
                 ]
                 dashboard.update_status(quest="connected", calibration_id=calibration.calibration_id)
@@ -1033,7 +1045,23 @@ async def websocket_handler(
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def _on_worker_result(result: WorkerResult, dashboard: DashboardState) -> None:
+def _update_worker_status(
+    status: str,
+    error: str | None,
+    session_dashboard: DashboardState,
+    shared_dashboard: DashboardState,
+) -> None:
+    values = {"worker": status, "worker_error": error}
+    session_dashboard.update_status(**values)
+    shared_dashboard.update_status(**values)
+
+
+def _on_worker_result(
+    result: WorkerResult,
+    dashboard: DashboardState,
+    *,
+    mirror: DashboardState | None = None,
+) -> None:
     metadata = result.metadata
     output_age_ms = None
     source_received_ns = metadata.get("_source_server_received_ns")
@@ -1042,8 +1070,7 @@ def _on_worker_result(result: WorkerResult, dashboard: DashboardState) -> None:
             (time.perf_counter_ns() - source_received_ns) / 1_000_000,
             1,
         )
-    dashboard.update_model_frames(
-        result.frames,
+    update_values = dict(
         chunk_id=result.chunk_id,
         inference_ms=float(metadata.get("inference_ms", 0.0)),
         playback_fps=float(metadata.get("fps", PLAYBACK_FPS)),
@@ -1061,6 +1088,9 @@ def _on_worker_result(result: WorkerResult, dashboard: DashboardState) -> None:
         output_last_frame_id=metadata.get("last_frame_id"),
         output_age_ms=output_age_ms,
     )
+    dashboard.update_model_frames(result.frames, **update_values)
+    if mirror is not None and mirror is not dashboard:
+        mirror.update_model_frames(result.frames, **update_values)
     print(
         "MEMWORLD_OUTPUT "
         f"chunk={result.chunk_id} frames={len(result.frames)} "

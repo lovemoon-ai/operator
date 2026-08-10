@@ -76,10 +76,29 @@ const stmts = {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   getResource: db.prepare<[string], ResourceRow>(`SELECT * FROM resources WHERE id = ?`),
+  getResourceScoped: db.prepare<[string, string], ResourceRow>(`
+    SELECT * FROM resources WHERE id = ? AND user_id = ?
+  `),
+  getResourceOwnerForSession: db.prepare<[string], { user_id: string | null }>(`
+    SELECT user_id FROM resources WHERE session_id = ? LIMIT 1
+  `),
+  getActiveResourceForArtifact: db.prepare<
+    [string, string],
+    { id: string; user_id: string | null }
+  >(`
+    SELECT id, user_id FROM resources
+    WHERE session_id = ? AND artifact_kind = ? LIMIT 1
+  `),
   setResourceOffset: db.prepare<[number, string, string]>(`
     UPDATE resources SET offset = ?, last_patch_at = ? WHERE id = ?
   `),
+  setResourceOffsetScoped: db.prepare<[number, string, string, string]>(`
+    UPDATE resources SET offset = ?, last_patch_at = ? WHERE id = ? AND user_id = ?
+  `),
   deleteResource: db.prepare<[string]>(`DELETE FROM resources WHERE id = ?`),
+  deleteResourceScoped: db.prepare<[string, string]>(`
+    DELETE FROM resources WHERE id = ? AND user_id = ?
+  `),
 
   getSession: db.prepare<[string], SessionRow>(`SELECT * FROM sessions WHERE id = ?`),
   getSessionScoped: db.prepare<[string, string], SessionRow>(`
@@ -209,23 +228,47 @@ function recomputeTotalBytes(sessionId: string): number {
 export class SqliteStore implements SessionStore {
   // --- Resources ----------------------------------------------------------
 
-  async createResource(record: ResourceRecord): Promise<void> {
-    const userId = currentUserId() ?? null;
-    stmts.insertResource.run(
-      record.id,
-      userId,
-      record.sessionId,
-      record.artifactKind,
-      record.uploadLength,
-      record.offset,
-      JSON.stringify(record.metadata),
-      record.createdAt,
-      record.lastPatchAt ?? null,
-    );
+  async createResource(record: ResourceRecord, opts: { userId?: string } = {}): Promise<void> {
+    const userId = opts.userId ?? currentUserId() ?? null;
+    const txn = db.transaction(() => {
+      const existingSession = stmts.getSession.get(record.sessionId);
+      if (existingSession && existingSession.user_id !== userId) {
+        throw new SessionOwnershipConflictError(record.sessionId);
+      }
+      const existingResource = stmts.getResourceOwnerForSession.get(record.sessionId);
+      if (existingResource && existingResource.user_id !== userId) {
+        throw new SessionOwnershipConflictError(record.sessionId);
+      }
+      const activeArtifact = stmts.getActiveResourceForArtifact.get(
+        record.sessionId,
+        record.artifactKind,
+      );
+      if (activeArtifact) {
+        throw new ActiveArtifactUploadConflictError(
+          record.sessionId,
+          record.artifactKind,
+        );
+      }
+      stmts.insertResource.run(
+        record.id,
+        userId,
+        record.sessionId,
+        record.artifactKind,
+        record.uploadLength,
+        record.offset,
+        JSON.stringify(record.metadata),
+        record.createdAt,
+        record.lastPatchAt ?? null,
+      );
+    });
+    txn();
   }
 
-  async getResource(id: string): Promise<ResourceRecord | null> {
-    const row = stmts.getResource.get(id);
+  async getResource(id: string, opts: { userId?: string } = {}): Promise<ResourceRecord | null> {
+    const scopedUserId = opts.userId ?? currentUserId() ?? undefined;
+    const row = scopedUserId
+      ? stmts.getResourceScoped.get(id, scopedUserId)
+      : stmts.getResource.get(id);
     if (!row) return null;
     return {
       id: row.id,
@@ -239,12 +282,27 @@ export class SqliteStore implements SessionStore {
     };
   }
 
-  async setResourceOffset(id: string, offset: number, lastPatchAt: string): Promise<void> {
-    stmts.setResourceOffset.run(offset, lastPatchAt, id);
+  async setResourceOffset(
+    id: string,
+    offset: number,
+    lastPatchAt: string,
+    opts: { userId?: string } = {},
+  ): Promise<void> {
+    const scopedUserId = opts.userId ?? currentUserId() ?? undefined;
+    if (scopedUserId) {
+      stmts.setResourceOffsetScoped.run(offset, lastPatchAt, id, scopedUserId);
+    } else {
+      stmts.setResourceOffset.run(offset, lastPatchAt, id);
+    }
   }
 
-  async deleteResource(id: string): Promise<void> {
-    stmts.deleteResource.run(id);
+  async deleteResource(id: string, opts: { userId?: string } = {}): Promise<void> {
+    const scopedUserId = opts.userId ?? currentUserId() ?? undefined;
+    if (scopedUserId) {
+      stmts.deleteResourceScoped.run(id, scopedUserId);
+    } else {
+      stmts.deleteResource.run(id);
+    }
   }
 
   // --- Sessions -----------------------------------------------------------
@@ -253,15 +311,20 @@ export class SqliteStore implements SessionStore {
     sessionId: string,
     artifact: FinalizedArtifact,
     manifest?: Record<string, unknown>,
+    opts: { userId?: string } = {},
   ): Promise<SessionRecord> {
     // Wrap the per-session writes in a transaction so a concurrent reader
     // never sees an artifact row without its parent session row.
     const txn = db.transaction(() => {
       const existing = stmts.getSession.get(sessionId);
+      const userId = opts.userId ?? currentUserId() ?? null;
+      if (existing && userId !== null && existing.user_id !== userId) {
+        throw new SessionOwnershipConflictError(sessionId);
+      }
       if (!existing) {
         stmts.insertSession.run(
           sessionId,
-          currentUserId() ?? null,
+          userId,
           new Date().toISOString(),
         );
       }
@@ -412,5 +475,23 @@ export class SqliteStore implements SessionStore {
       totalBytes: head?.totalBytes ?? 0,
       perDay,
     };
+  }
+}
+
+export class SessionOwnershipConflictError extends Error {
+  readonly code = "SESSION_OWNERSHIP_CONFLICT";
+
+  constructor(sessionId: string) {
+    super(`session ${sessionId} belongs to another user`);
+    this.name = "SessionOwnershipConflictError";
+  }
+}
+
+export class ActiveArtifactUploadConflictError extends Error {
+  readonly code = "ACTIVE_ARTIFACT_UPLOAD_CONFLICT";
+
+  constructor(sessionId: string, artifactKind: string) {
+    super(`artifact ${sessionId}/${artifactKind} is already being uploaded`);
+    this.name = "ActiveArtifactUploadConflictError";
   }
 }

@@ -126,8 +126,12 @@ func is_controller_mode_active(hand: int) -> bool:
 func get_head_pose() -> Dictionary:
 	if not _camera:
 		return {}
+	var tracked := false
+	if _xr_interface != null:
+		tracked = _xr_interface.get_tracking_status() == XRInterface.XR_NORMAL_TRACKING
 	var t := _camera.global_transform
 	return {
+		"tracked": tracked,
 		"position": t.origin,
 		"rotation": t.basis.get_rotation_quaternion(),
 		"timestamp_ns": Time.get_ticks_usec() * 1000

@@ -1,0 +1,34 @@
+{
+  "id": "mode_memworld",
+  "feature": "operator_feature_mode_memworld",
+  "owner": "app/modes",
+  "required_features": [],
+  "required_capabilities": [
+    "POSE",
+    "HAND_TRACKING",
+    "CAMERA_RGB",
+    "QR_SCAN",
+    "LIVE_STREAM_SERVER"
+  ],
+  "test_cases": [
+    {
+      "id": "mode_memworld.preset_matrix",
+      "level": "static",
+      "suite": "static.presets",
+      "preset_matrix": true
+    },
+    {
+      "id": "mode_memworld.composition",
+      "level": "integration",
+      "suite": "modes.composition",
+      "module": "app/modes",
+      "script": "res://tests/integration/modes/feature_composition_test.gd",
+      "fixture": "fake_platform_quest_like"
+    },
+    {
+      "id": "mode_memworld.protocol",
+      "level": "unit",
+      "host_test": "server/tests/test_memworld_quest_source.py"
+    }
+  ]
+}

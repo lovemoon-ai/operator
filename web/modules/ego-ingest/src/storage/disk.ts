@@ -11,7 +11,8 @@ export interface DiskStorageOptions {
   /**
    * Base directory for both in-progress and finalized files. We create
    * `<root>/.partial/` for chunked uploads and move into
-   * `<root>/<session_id>/<artifact_kind><ext>` on finalize.
+   * `<root>/<owner>/<session_id>/<artifact_kind><ext>` on finalize when
+   * the app supplies an authenticated storage namespace.
    */
   root: string;
   /**
@@ -155,7 +156,13 @@ export class DiskStorage implements StorageDriver {
         await truncate(partial, committedOffset);
       },
       finalize: async (metadata: UploadMetadata, totalBytes: number): Promise<FinalizedLocator> => {
-        const sessionDir = path.join(this.root, sanitizeSegment(metadata.session_id || resourceId));
+        const sessionSegment = sanitizeSegment(metadata.session_id || resourceId);
+        const namespace = metadata.storage_namespace
+          ? sanitizeSegment(metadata.storage_namespace)
+          : "";
+        const sessionDir = namespace
+          ? path.join(this.root, namespace, sessionSegment)
+          : path.join(this.root, sessionSegment);
         await mkdir(sessionDir, { recursive: true });
         const kind = sanitizeSegment(metadata.artifact_kind || "data");
         const ext = inferExtension(metadata.filename, metadata.artifact_kind);

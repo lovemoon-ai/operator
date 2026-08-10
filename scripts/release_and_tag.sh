@@ -12,14 +12,14 @@
 # Usage:
 #   bash scripts/release_and_tag.sh [VERSION]
 #
-#   # default VERSION (0.1.0):
+#   # default VERSION (0.1.6):
 #   bash scripts/release_and_tag.sh
 #
 #   # explicit version:
 #   bash scripts/release_and_tag.sh 1.2.0
 #
 # Env knobs:
-#   VERSION    Release version (default: 0.1.0). Arg $1 overrides this.
+#   VERSION    Release version (default: 0.1.6). Arg $1 overrides this.
 #   REMOTE     Git remote to push the tag to (default: origin).
 #   DIST_DIR   Where the renamed APK is copied (default: xr/dist).
 #   SKIP_BUILD Set to 1 to reuse an existing xr/build/quest/Operator.apk.
@@ -34,7 +34,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 XR_DIR="$REPO_ROOT/xr"
 
 # --- config ----------------------------------------------------------------
-VERSION="${1:-${VERSION:-0.1.0}}"
+VERSION="${1:-${VERSION:-0.1.6}}"
 REMOTE="${REMOTE:-origin}"
 DIST_DIR="${DIST_DIR:-$XR_DIR/dist}"
 APK_SRC="$XR_DIR/build/quest/Operator.apk"
@@ -76,6 +76,23 @@ sync_version_into_preset() {
     ' "$PRESETS_BAK" > "$EXPORT_PRESETS"
 }
 
+verify_apk_identity() {
+    command -v aapt >/dev/null 2>&1 || die "aapt is required to verify the APK identity"
+    local badging actual_package actual_name actual_code
+    badging="$(aapt dump badging "$APK_SRC" 2>/dev/null)" \
+        || die "aapt could not read $APK_SRC"
+    badging="${badging%%$'\n'*}"
+    actual_package="$(printf '%s\n' "$badging" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+    actual_name="$(printf '%s\n' "$badging" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
+    actual_code="$(printf '%s\n' "$badging" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")"
+    [ "$actual_package" = "com.lovemoon.operator" ] \
+        || die "unexpected APK package: ${actual_package:-unknown}"
+    [ "$actual_name" = "$VERSION" ] \
+        || die "APK versionName=${actual_name:-unknown}, expected ${VERSION}; refusing to mislabel it"
+    [ "$actual_code" = "$VERSION_CODE" ] \
+        || die "APK versionCode=${actual_code:-unknown}, expected ${VERSION_CODE}; refusing to mislabel it"
+}
+
 # --- preflight checks ------------------------------------------------------
 command -v git  >/dev/null 2>&1 || die "git not found on PATH"
 [ -d "$XR_DIR" ] || die "xr/ directory not found at $XR_DIR"
@@ -113,12 +130,15 @@ else
 fi
 
 [ -f "$APK_SRC" ] || die "expected APK not found at $APK_SRC"
+verify_apk_identity
 
 # --- stamp / copy ----------------------------------------------------------
 mkdir -p "$DIST_DIR"
 cp -f "$APK_SRC" "$APK_OUT"
+APK_SHA256="$(sha256sum "$APK_OUT" | cut -d' ' -f1)"
+printf '%s  %s\n' "$APK_SHA256" "$(basename "$APK_OUT")" > "${APK_OUT}.sha256"
 APK_SIZE="$(du -h "$APK_OUT" | cut -f1)"
-log "APK -> ${APK_OUT} (${APK_SIZE})"
+log "APK -> ${APK_OUT} (${APK_SIZE}, sha256=${APK_SHA256})"
 
 # --- tag -------------------------------------------------------------------
 log "Creating annotated tag ${TAG}…"
@@ -126,7 +146,8 @@ git tag -a "$TAG" -m "Quest release ${VERSION}
 
 Built: ${TIMESTAMP} UTC
 Commit: ${COMMIT}
-APK: $(basename "$APK_OUT")"
+APK: $(basename "$APK_OUT")
+SHA256: ${APK_SHA256}"
 
 # --- push ------------------------------------------------------------------
 if [ "${NO_PUSH:-0}" = "1" ]; then
@@ -156,7 +177,8 @@ else
 
 Built: ${TIMESTAMP} UTC
 Commit: ${COMMIT}
-APK: $(basename "$APK_OUT")"
+APK: $(basename "$APK_OUT")
+SHA256: ${APK_SHA256}"
     log "GitHub Release published: $(gh repo view --json url -q .url 2>/dev/null)/releases/tag/${TAG}"
 fi
 

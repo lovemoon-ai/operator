@@ -15,6 +15,8 @@ export interface UploadMetadata {
   artifact_kind: ArtifactKind;
   filename: string;
   schema?: string;
+  /** Server-assigned storage namespace. Never accepted from the wire. */
+  storage_namespace?: string;
   /** Free-form pass-through for unknown keys. */
   extra: Record<string, string>;
 }
@@ -84,6 +86,8 @@ export interface IngestOptions {
   store: import("./store/index.js").SessionStore;
   storage: import("./storage/index.js").StorageDriver;
   auth?: AuthFn;
+  /** Stable authenticated owner id for per-user resource and storage isolation. */
+  userIdFromReq?: (req: import("express").Request) => string | undefined;
   /** Reject `Upload-Length` larger than this. Default 100 GB. */
   maxUploadSizeBytes?: number;
   /** Called after a session has all its expected artifacts. */

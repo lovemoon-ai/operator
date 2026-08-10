@@ -294,6 +294,28 @@ class MemWorldGatewayTests(unittest.TestCase):
         self.assertEqual(status["worker_transport"], "nv-tcp")
         self.assertEqual(status["mp4_bytes"], 12345)
 
+    def test_each_quest_keeps_its_own_model_playback_frames(self):
+        shared = DashboardState()
+        quest_a = DashboardState()
+        quest_b = DashboardState()
+        result_a = memworld_gateway.WorkerResult(
+            chunk_id=1,
+            metadata={"inference_ms": 10.0, "fps": 20.0},
+            frames=tuple(f"a-{index}".encode() for index in range(17)),
+        )
+        result_b = memworld_gateway.WorkerResult(
+            chunk_id=2,
+            metadata={"inference_ms": 11.0, "fps": 20.0},
+            frames=tuple(f"b-{index}".encode() for index in range(17)),
+        )
+
+        memworld_gateway._on_worker_result(result_a, quest_a, mirror=shared)
+        memworld_gateway._on_worker_result(result_b, quest_b, mirror=shared)
+
+        self.assertTrue(quest_a.model_frame().startswith(b"a-"))
+        self.assertTrue(quest_b.model_frame().startswith(b"b-"))
+        self.assertTrue(shared.model_frame().startswith(b"b-"))
+
     def test_worker_output_rejects_wrong_chunk(self):
         payload = live_frame_zip()
         result = accept_worker_output(

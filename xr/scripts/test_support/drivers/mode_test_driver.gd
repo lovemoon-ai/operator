@@ -18,6 +18,8 @@ const MODE_CAPABILITY_REQUIREMENTS := {
 	"mode_teleop": ["pose", "controller"],
 	"mode_ego_capture": ["camera_rgb"],
 	"mode_live_feed": ["camera_rgb", "live_stream_server"],
+	"mode_pose_inference": ["pose", "hand_tracking", "qr_scan", "live_stream_server"],
+	"mode_memworld": ["pose", "hand_tracking", "camera_rgb", "qr_scan", "live_stream_server"],
 	"mode_vr": ["pose"],
 	"sink_spatialmp4": ["spatial_mp4_mux"],
 	"sink_live_stream": ["live_stream_server"],

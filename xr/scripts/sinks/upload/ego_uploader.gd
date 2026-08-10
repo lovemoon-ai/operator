@@ -280,6 +280,19 @@ func _worker_loop() -> void:
 			call_deferred("emit_signal", "session_uploaded", sid)
 			call_deferred("emit_signal", "queue_changed", _queue_size())
 			continue
+		# A recording pause/shutdown parks the current TUS resource. It is not
+		# a network failure and must not consume the transient retry budget.
+		var parked := head_matches and bool(job.get("_parked", false))
+		if parked:
+			job.erase("_parked")
+			job["attempt"] = maxi(0, int(job.get("attempt", 0)) - 1)
+			_queue[0] = job
+			_save_queue_locked()
+			var exit_after_park := _exit_requested
+			_mutex.unlock()
+			if exit_after_park:
+				return
+			continue
 		# Failure path. Decide whether to retry the same job (transient) or
 		# drop it from the queue (permanent, or transient-with-budget-exhausted)
 		# so that a poison job does not block every later session forever.
@@ -341,6 +354,7 @@ func _queue_size() -> int:
 # (per-artifact offset, tus_location) survives across retries.
 # Returns true iff every artifact finished.
 func _process_job(job: Dictionary) -> bool:
+	job.erase("_parked")
 	job["attempt"] = int(job.get("attempt", 0)) + 1
 	# Wipe the per-attempt failure flags so a transient retry can't inherit
 	# a stale "permanent" marker from a previous attempt. _fail() will set
@@ -452,9 +466,13 @@ func _upload_artifact(job: Dictionary, kind: String, artifact: Dictionary) -> bo
 	file.seek(offset)
 	while offset < total:
 		_mutex.lock()
-		var should_stop := _exit_requested or _paused or _cancel_requested.has(session_id)
+		var should_exit := _exit_requested
+		var should_pause := _paused
+		var should_cancel := _cancel_requested.has(session_id)
 		_mutex.unlock()
-		if should_stop:
+		if should_exit or should_pause or should_cancel:
+			if should_exit or should_pause:
+				job["_parked"] = true
 			file.close()
 			return false
 

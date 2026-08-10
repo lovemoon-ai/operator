@@ -157,6 +157,8 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
     .catch(logTimerError);
 
   const router = express.Router();
+  const resourceLocks = new Map<string, Promise<void>>();
+  const sessionLocks = new Map<string, Promise<void>>();
 
   router.use((req, res, next) => {
     // Every TUS response gets these. Cheaper than per-handler repetition.
@@ -174,6 +176,7 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
 
   router.post("/", async (req, res) => {
     if (!(await runAuth(auth, req, res))) return;
+    const userId = opts.userIdFromReq?.(req);
     if (req.header("Tus-Resumable") !== TUS_VERSION) return tusError(res, 412, "Tus-Resumable mismatch");
 
     const uploadLength = Number(req.header("Upload-Length") ?? "0");
@@ -191,11 +194,12 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
     if (metadata.schema && !acceptedSchemas.has(metadata.schema)) {
       return tusError(res, 415, `unsupported schema: ${metadata.schema}`);
     }
+    if (userId) metadata.storage_namespace = userId;
 
+    const releaseSession = await acquireNamedLock(sessionLocks, metadata.session_id);
+    try {
     const resourceId = newResourceId();
     const now = new Date().toISOString();
-
-    await opts.storage.openResource(resourceId, { uploadLength });
 
     const record: ResourceRecord = {
       id: resourceId,
@@ -206,19 +210,47 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
       metadata,
       createdAt: now,
     };
-    await opts.store.createResource(record);
-    events.emit({ type: "resource.created", resource: record });
+    try {
+      await opts.store.createResource(record, { userId });
+    } catch (err) {
+      if (isOwnershipConflict(err)) {
+        return tusError(res, 409, "session id belongs to another user");
+      }
+      if (isActiveArtifactConflict(err)) {
+        return tusError(res, 409, "this session artifact is already being uploaded");
+      }
+      throw err;
+    }
+    try {
+      const initialHandle = await opts.storage.openResource(resourceId, { uploadLength });
+      initialHandle.appendStream.end();
+      await initialHandle.commitChunk(0);
+    } catch (err) {
+      await opts.store.deleteResource(resourceId, { userId });
+      throw err;
+    }
+    events.emit({ type: "resource.created", resource: record, userId });
 
     res.setHeader("Location", `${trimSlashes(req.baseUrl)}/${resourceId}`);
     res.setHeader("Upload-Offset", "0");
     res.setHeader("Upload-Length", String(uploadLength));
     res.status(201).end();
+    } finally {
+      releaseSession();
+    }
   });
 
   router.head("/:resourceId", async (req, res) => {
     if (!(await runAuth(auth, req, res))) return;
+    const userId = opts.userIdFromReq?.(req);
     const id = req.params.resourceId!;
-    const record = await opts.store.getResource(id);
+    const release = await acquireNamedLock(resourceLocks, id);
+    try {
+    const initialRecord = await opts.store.getResource(id, { userId });
+    if (!initialRecord) return res.status(404).end();
+    const releaseSession = await acquireNamedLock(sessionLocks, initialRecord.sessionId);
+    try {
+    const record = await opts.store.getResource(id, { userId });
     if (!record) return res.status(404).end();
     // Trust the storage driver's actual append position; if it diverged
     // from the persisted JSON index, repair the index so the following PATCH
@@ -227,21 +259,34 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
     if (diskOffset > record.uploadLength) return tusError(res, 409, "storage offset exceeds Upload-Length");
     const offset = diskOffset;
     if (offset !== record.offset) {
-      await opts.store.setResourceOffset(id, offset, new Date().toISOString());
+      await opts.store.setResourceOffset(id, offset, new Date().toISOString(), { userId });
     }
     res.setHeader("Upload-Offset", String(offset));
     res.setHeader("Upload-Length", String(record.uploadLength));
     res.status(200).end();
+    } finally {
+      releaseSession();
+    }
+    } finally {
+      release();
+    }
   });
 
   router.patch("/:resourceId", async (req, res) => {
     if (!(await runAuth(auth, req, res))) return;
+    const userId = opts.userIdFromReq?.(req);
     if (req.header("Tus-Resumable") !== TUS_VERSION) return tusError(res, 412, "Tus-Resumable mismatch");
     if (req.header("Content-Type") !== "application/offset+octet-stream") {
       return tusError(res, 415, "Content-Type must be application/offset+octet-stream");
     }
     const id = req.params.resourceId!;
-    const record = await opts.store.getResource(id);
+    const release = await acquireNamedLock(resourceLocks, id);
+    try {
+    const initialRecord = await opts.store.getResource(id, { userId });
+    if (!initialRecord) return res.status(404).end();
+    const releaseSession = await acquireNamedLock(sessionLocks, initialRecord.sessionId);
+    try {
+    const record = await opts.store.getResource(id, { userId });
     if (!record) return res.status(404).end();
     const storageOffset = await opts.storage.resourceOffset(id);
     if (storageOffset > record.uploadLength) {
@@ -320,12 +365,13 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
       if (!(await rollbackChunkOrFail(res, handle, storageOffset))) return;
       return tusError(res, 500, `commit failed: ${(err as Error).message}`);
     }
-    await opts.store.setResourceOffset(id, newOffset, now);
+    await opts.store.setResourceOffset(id, newOffset, now, { userId });
     events.emit({
       type: "resource.progress",
       resourceId: id,
       offset: newOffset,
       uploadLength: record.uploadLength,
+      userId,
     });
 
     if (newOffset >= record.uploadLength) {
@@ -347,7 +393,7 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
       // The common case (mp4 arriving after manifest) is fully
       // covered here; the late-manifest path (mp4 first, manifest
       // after) is handled in "part 2 of 2" just below.
-      const existingSession = await opts.store.getSession(record.sessionId);
+      const existingSession = await opts.store.getSession(record.sessionId, { userId });
       const declared = extractDeclaredSha256(
         existingSession?.manifest,
         record.metadata.artifact_kind,
@@ -391,6 +437,7 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
           expectedSha256: declared,
         },
         manifestJson,
+        { userId },
       );
 
       // Integrity check, part 2 of 2: when manifest is the artifact we
@@ -422,12 +469,12 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
             ...art,
             corrupt: true,
             expectedSha256: expected,
-          });
+          }, undefined, { userId });
         }
       }
 
-      await opts.store.deleteResource(id);
-      events.emit({ type: "resource.finalized", resourceId: id, sessionId: record.sessionId });
+      await opts.store.deleteResource(id, { userId });
+      events.emit({ type: "resource.finalized", resourceId: id, sessionId: record.sessionId, userId });
       events.emit({ type: "session.updated", session });
 
       // Orphan watchdog wiring:
@@ -469,13 +516,22 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
 
     res.setHeader("Upload-Offset", String(newOffset));
     res.status(204).end();
+    } finally {
+      releaseSession();
+    }
+    } finally {
+      release();
+    }
   });
 
   router.delete("/sessions/:sessionId", async (req, res) => {
     if (!(await runAuth(auth, req, res))) return;
+    const userId = opts.userIdFromReq?.(req);
     const sessionId = req.params.sessionId!;
+    const releaseSession = await acquireNamedLock(sessionLocks, sessionId);
+    try {
     clearOrphanTimer(sessionId);
-    const targets = await opts.store.getSessionDeletionTargets(sessionId);
+    const targets = await opts.store.getSessionDeletionTargets(sessionId, { userId });
     if (!targets) return res.status(404).end();
     try {
       await cleanupSessionStorage(opts, targets);
@@ -484,15 +540,25 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
       console.warn(`[ego-ingest] cleanupSessionStorage(${sessionId}) failed: ${(err as Error).message}`);
       return tusError(res, 500, "storage cleanup failed");
     }
-    await opts.store.deleteSession(sessionId);
-    events.emit({ type: "session.deleted", sessionId, userId: null });
+    await opts.store.deleteSession(sessionId, { userId });
+    events.emit({ type: "session.deleted", sessionId, userId: userId ?? null });
     res.status(204).end();
+    } finally {
+      releaseSession();
+    }
   });
 
   router.delete("/:resourceId", async (req, res) => {
     if (!(await runAuth(auth, req, res))) return;
+    const userId = opts.userIdFromReq?.(req);
     const id = req.params.resourceId!;
-    const record = await opts.store.getResource(id);
+    const release = await acquireNamedLock(resourceLocks, id);
+    try {
+    const initialRecord = await opts.store.getResource(id, { userId });
+    if (!initialRecord) return res.status(404).end();
+    const releaseSession = await acquireNamedLock(sessionLocks, initialRecord.sessionId);
+    try {
+    const record = await opts.store.getResource(id, { userId });
     if (!record) return res.status(404).end();
     const handle = await opts.storage.reopenResource(id);
     try {
@@ -502,8 +568,14 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
       console.warn(`[ego-ingest] disposeResource(${id}) failed: ${(err as Error).message}`);
       return tusError(res, 500, "storage cleanup failed");
     }
-    await opts.store.deleteResource(id);
+    await opts.store.deleteResource(id, { userId });
     res.status(204).end();
+    } finally {
+      releaseSession();
+    }
+    } finally {
+      release();
+    }
   });
 
   return router;
@@ -513,6 +585,24 @@ export function createIngestMiddleware(opts: IngestOptions & { events?: IngestEv
 
 function alwaysAllow(): true {
   return true;
+}
+
+async function acquireNamedLock(
+  locks: Map<string, Promise<void>>,
+  resourceId: string,
+): Promise<() => void> {
+  const previous = locks.get(resourceId) ?? Promise.resolve();
+  let unlock!: () => void;
+  const current = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  const tail = previous.then(() => current);
+  locks.set(resourceId, tail);
+  await previous;
+  return () => {
+    unlock();
+    if (locks.get(resourceId) === tail) locks.delete(resourceId);
+  };
 }
 
 async function runAuth(auth: AuthFn, req: Request, res: Response): Promise<boolean> {
@@ -551,6 +641,16 @@ async function cleanupSessionStorage(
 
 function tusError(res: Response, status: number, message: string): void {
   res.status(status).type("text/plain").end(message + "\n");
+}
+
+function isOwnershipConflict(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("code" in err)) return false;
+  return (err as { code?: unknown }).code === "SESSION_OWNERSHIP_CONFLICT";
+}
+
+function isActiveArtifactConflict(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("code" in err)) return false;
+  return (err as { code?: unknown }).code === "ACTIVE_ARTIFACT_UPLOAD_CONFLICT";
 }
 
 async function rollbackChunkOrFail(

@@ -41,6 +41,10 @@ class MemWorldQuestSourceTests(unittest.TestCase):
         self.assertIn('"calibration": _calibration', source)
         self.assertIn("func _send_pose()", source)
         self.assertIn('const MAGIC := "PINF"', source)
+        self.assertIn(
+            "next_state == WebSocketPeer.STATE_CLOSED and _want_connection",
+            source,
+        )
 
     def test_memworld_client_has_room_for_full_image_packets(self):
         source = MEMWORLD_CLIENT.read_text(encoding="utf-8")

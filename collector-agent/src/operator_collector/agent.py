@@ -128,6 +128,7 @@ class CollectorAgent:
         try:
             while True:
                 try:
+                    self._flush_pending_completions()
                     job = self.client.json("POST", "/api/collector-agent/jobs/next")
                     if job:
                         self._execute(job)
@@ -159,48 +160,19 @@ class CollectorAgent:
             body: dict[str, Any] = {"progress": value, "message": message}
             if metrics:
                 body["metrics"] = metrics
-            self.client.json(
-                "POST",
-                f"/api/collector-agent/jobs/{urllib.parse.quote(job_id)}/progress",
-                body,
-            )
+            try:
+                self.client.json(
+                    "POST",
+                    f"/api/collector-agent/jobs/{urllib.parse.quote(job_id)}/progress",
+                    body,
+                )
+            except Exception as error:
+                # Progress is advisory. A temporary Station outage must never
+                # turn a committed import/delete into a failed job.
+                print(f"  progress report deferred: {error}", flush=True)
 
         try:
             result = run_job(kind, payload, JobContext(self._runtime_config(), progress))
-            if kind == "scan":
-                source = str(result.get("source") or "quest")
-                state_key = "scannedLocalSessions" if source == "local" else "scannedQuestSessions"
-                with self._state_lock:
-                    self.state[state_key] = result.get("sessions", [])
-                    self.state[f"last{source.title()}ScanAt"] = time.time()
-            elif kind == "delete_quest":
-                with self._state_lock:
-                    self.state["scannedQuestSessions"] = result.get("sessions", [])
-                    self.state["lastQuestScanAt"] = time.time()
-            complete = self.client.json(
-                "POST",
-                f"/api/collector-agent/jobs/{urllib.parse.quote(job_id)}/complete",
-                {"message": "completed", "result": result},
-                timeout=120,
-            )
-            item_id = str((complete or {}).get("itemId") or "")
-            preview_values = result.get("preview_paths")
-            if item_id and isinstance(preview_values, list):
-                previews = [Path(str(value)) for value in preview_values]
-                previews = [preview for preview in previews if preview.is_file()]
-                if previews:
-                    print(f"  uploading {len(previews)} preview images", flush=True)
-                    for index, preview in enumerate(previews[:6]):
-                        self.client.upload_preview_frame(item_id, index, preview)
-            else:
-                # Backward compatibility for jobs created by Agent 0.1.1.
-                preview_value = str(result.get("preview_path") or "")
-                if item_id and preview_value:
-                    preview = Path(preview_value)
-                    if preview.is_file():
-                        print("  uploading browser preview", flush=True)
-                        self.client.upload_preview(item_id, preview)
-            print(f"Job {job_id} completed.", flush=True)
         except Exception as error:
             print(f"Job {job_id} failed: {error}", flush=True)
             try:
@@ -211,6 +183,119 @@ class CollectorAgent:
                 )
             except (ApiError, RuntimeError) as report_error:
                 print(f"Could not report job failure: {report_error}", flush=True)
+            return
+
+        # From this point onward the local operation has committed. Reporting,
+        # journaling, or preview failures must never turn that success into a
+        # Station-side `/fail` transition.
+        if kind == "scan":
+            source = str(result.get("source") or "quest")
+            state_key = "scannedLocalSessions" if source == "local" else "scannedQuestSessions"
+            with self._state_lock:
+                self.state[state_key] = result.get("sessions", [])
+                self.state[f"last{source.title()}ScanAt"] = time.time()
+        elif kind == "delete_quest":
+            with self._state_lock:
+                self.state["scannedQuestSessions"] = result.get("sessions", [])
+                self.state["lastQuestScanAt"] = time.time()
+
+        journaled = True
+        try:
+            self._remember_pending_completion(job_id, result)
+        except Exception as error:
+            journaled = False
+            print(f"Job {job_id} completion journal unavailable: {error}", flush=True)
+        try:
+            complete = self._complete_pending_job(job_id, result)
+        except Exception as error:
+            suffix = "completion is queued" if journaled else "manual reconciliation may be required"
+            print(f"Job {job_id} finished locally; {suffix}: {error}", flush=True)
+            return
+        if journaled:
+            try:
+                self._forget_pending_completion(job_id)
+            except Exception as error:
+                # The on-disk entry may be replayed after restart; Station's
+                # completion endpoint is idempotent, so retaining it is safe.
+                print(f"Job {job_id} completion journal cleanup deferred: {error}", flush=True)
+        self._upload_previews_best_effort(result, complete)
+        print(f"Job {job_id} completed.", flush=True)
+
+    def _remember_pending_completion(
+        self,
+        job_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        with self._state_lock:
+            pending = dict(self.local.get("pending_job_completions") or {})
+            pending[job_id] = result
+            self.local["pending_job_completions"] = pending
+            save_config(self.local)
+
+    def _forget_pending_completion(self, job_id: str) -> None:
+        with self._state_lock:
+            pending = dict(self.local.get("pending_job_completions") or {})
+            if pending.pop(job_id, None) is None:
+                return
+            if pending:
+                self.local["pending_job_completions"] = pending
+            else:
+                self.local.pop("pending_job_completions", None)
+            save_config(self.local)
+
+    def _complete_pending_job(
+        self,
+        job_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        response = self.client.json(
+            "POST",
+            f"/api/collector-agent/jobs/{urllib.parse.quote(job_id)}/complete",
+            {"message": "completed", "result": result},
+            timeout=120,
+        )
+        return response or {}
+
+    def _flush_pending_completions(self) -> None:
+        with self._state_lock:
+            pending = dict(self.local.get("pending_job_completions") or {})
+        for job_id, value in pending.items():
+            if not isinstance(value, dict):
+                self._forget_pending_completion(str(job_id))
+                continue
+            result = dict(value)
+            complete = self._complete_pending_job(str(job_id), result)
+            self._forget_pending_completion(str(job_id))
+            self._upload_previews_best_effort(result, complete)
+
+    def _upload_previews_best_effort(
+        self,
+        result: dict[str, Any],
+        complete: dict[str, Any],
+    ) -> None:
+        item_id = str(complete.get("itemId") or "")
+        if not item_id:
+            return
+        try:
+            preview_values = result.get("preview_paths")
+            if isinstance(preview_values, list):
+                previews = [Path(str(value)) for value in preview_values]
+                previews = [preview for preview in previews if preview.is_file()]
+                if previews:
+                    print(f"  uploading {len(previews)} preview images", flush=True)
+                    for index, preview in enumerate(previews[:6]):
+                        self.client.upload_preview_frame(item_id, index, preview)
+                return
+            # Backward compatibility for jobs created by Agent 0.1.1.
+            preview_value = str(result.get("preview_path") or "")
+            preview = Path(preview_value) if preview_value else None
+            if preview and preview.is_file():
+                print("  uploading browser preview", flush=True)
+                self.client.upload_preview(item_id, preview)
+        except Exception as error:
+            # Preview is optional and can be regenerated. Never reverse a
+            # completed data operation because its thumbnail upload failed.
+            print(f"  preview upload deferred: {error}", flush=True)
 
     def status(self) -> dict[str, Any]:
         return {

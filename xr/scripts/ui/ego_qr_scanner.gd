@@ -187,6 +187,15 @@ func open() -> void:
 	_start_plugin_scan()
 
 
+func show_error(message: String) -> void:
+	open()
+	_set_status(message)
+	if _scan_effect:
+		_scan_effect.set_active(false)
+	if _rescan_button:
+		_rescan_button.visible = true
+
+
 func _reset_for_scan() -> void:
 	_locked_detection = false
 	_running = false

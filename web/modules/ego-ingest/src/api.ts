@@ -207,22 +207,23 @@ export function createReadApi(opts: ReadApiOptions): RequestHandler {
             // a mismatch means "another user's deletion", drop.
             if (event.type === "session.deleted") {
               if (event.userId !== userId) return;
+            } else if (
+              event.type === "resource.created"
+              || event.type === "resource.progress"
+              || event.type === "resource.finalized"
+            ) {
+              if (event.userId !== userId) return;
             } else {
               const sid =
                 event.type === "session.updated"
                   ? event.session.id
                   : event.type === "session.expired"
                   ? event.sessionId
-                  : event.type === "resource.finalized"
-                  ? event.sessionId
                   : null;
               if (sid) {
                 const s = await opts.store.getSession(sid, { userId });
                 if (!s) return;
               }
-              // resource.created / resource.progress carry no sessionId
-              // visible to other users — they're scoped by upload token
-              // upstream, so it's fine to forward as-is to the owner.
             }
           }
           res.write(`event: ${event.type}\n`);

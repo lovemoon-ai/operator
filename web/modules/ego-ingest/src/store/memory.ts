@@ -32,17 +32,34 @@ export class MemoryStore implements SessionStore {
 
   // --- Resource ops ---------------------------------------------------------
 
-  async createResource(record: ResourceRecord): Promise<void> {
+  async createResource(record: ResourceRecord, _opts?: { userId?: string }): Promise<void> {
+    for (const existing of this.resources.values()) {
+      if (
+        existing.sessionId === record.sessionId
+        && existing.artifactKind === record.artifactKind
+      ) {
+        const error = new Error(
+          `artifact ${record.sessionId}/${record.artifactKind} is already being uploaded`,
+        ) as Error & { code: string };
+        error.code = "ACTIVE_ARTIFACT_UPLOAD_CONFLICT";
+        throw error;
+      }
+    }
     this.resources.set(record.id, { ...record });
     this.schedulePersist();
   }
 
-  async getResource(id: string): Promise<ResourceRecord | null> {
+  async getResource(id: string, _opts?: { userId?: string }): Promise<ResourceRecord | null> {
     const r = this.resources.get(id);
     return r ? { ...r } : null;
   }
 
-  async setResourceOffset(id: string, offset: number, lastPatchAt: string): Promise<void> {
+  async setResourceOffset(
+    id: string,
+    offset: number,
+    lastPatchAt: string,
+    _opts?: { userId?: string },
+  ): Promise<void> {
     const r = this.resources.get(id);
     if (!r) return;
     r.offset = offset;
@@ -50,7 +67,7 @@ export class MemoryStore implements SessionStore {
     this.schedulePersist();
   }
 
-  async deleteResource(id: string): Promise<void> {
+  async deleteResource(id: string, _opts?: { userId?: string }): Promise<void> {
     if (this.resources.delete(id)) this.schedulePersist();
   }
 
@@ -60,6 +77,7 @@ export class MemoryStore implements SessionStore {
     sessionId: string,
     artifact: FinalizedArtifact,
     manifest?: Record<string, unknown>,
+    _opts?: { userId?: string },
   ): Promise<SessionRecord> {
     const existing = this.sessions.get(sessionId);
     const session: SessionRecord =

@@ -20,10 +20,15 @@ export interface SessionDeletionTargets {
 export interface SessionStore {
   // --- Resource (in-flight) state -------------------------------------------
 
-  createResource(record: ResourceRecord): Promise<void>;
-  getResource(id: string): Promise<ResourceRecord | null>;
-  setResourceOffset(id: string, offset: number, lastPatchAt: string): Promise<void>;
-  deleteResource(id: string): Promise<void>;
+  createResource(record: ResourceRecord, opts?: { userId?: string }): Promise<void>;
+  getResource(id: string, opts?: { userId?: string }): Promise<ResourceRecord | null>;
+  setResourceOffset(
+    id: string,
+    offset: number,
+    lastPatchAt: string,
+    opts?: { userId?: string },
+  ): Promise<void>;
+  deleteResource(id: string, opts?: { userId?: string }): Promise<void>;
 
   // --- Session (finalized) state --------------------------------------------
 
@@ -31,6 +36,7 @@ export interface SessionStore {
     sessionId: string,
     artifact: FinalizedArtifact,
     manifest?: Record<string, unknown>,
+    opts?: { userId?: string },
   ): Promise<SessionRecord>;
 
   /**

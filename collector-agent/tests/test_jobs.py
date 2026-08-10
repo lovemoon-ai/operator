@@ -4,10 +4,12 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from operator_collector.jobs import (
     JobContext,
@@ -148,11 +150,98 @@ class JobTests(unittest.TestCase):
             self.assertTrue(imported["qc"]["ok"])
             self.assertTrue(Path(imported["local_path"]).is_dir())
 
+            recovered = import_session(
+                {
+                    "source": "local",
+                    "source_path": scanned["sessions"][0]["source_path"],
+                    "session_id": "20260804_020030",
+                },
+                context,
+            )
+            self.assertTrue(recovered["recovered"])
+            self.assertEqual(recovered["local_path"], imported["local_path"])
+
+    def test_invalid_partial_is_preserved_but_does_not_block_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = make_fixture(root)
+            data_root = root / "managed"
+            blocked = data_root / "incoming" / "20260804_020030.partial"
+            blocked.mkdir(parents=True)
+            (blocked / "manifest.json").write_text("{}", encoding="utf-8")
+            context = JobContext(
+                {
+                    "local_source_root": str(fixture),
+                    "data_root": str(data_root),
+                    "preview_enabled": False,
+                },
+                lambda _value, _message: None,
+            )
+
+            imported = import_session(
+                {
+                    "source": "local",
+                    "source_path": str(fixture),
+                    "session_id": "20260804_020030",
+                },
+                context,
+            )
+            self.assertTrue(Path(imported["local_path"]).is_dir())
+            self.assertTrue(blocked.is_dir())
+
+    def test_recovered_import_still_finishes_requested_quest_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = make_fixture(root)
+            data_root = root / "managed"
+            destination = data_root / "sessions" / "20260804_020030"
+            destination.parent.mkdir(parents=True)
+            shutil.copytree(fixture, destination)
+            context = JobContext(
+                {
+                    "adb_path": "/fake/adb",
+                    "data_root": str(data_root),
+                    "preview_enabled": False,
+                },
+                lambda _value, _message: None,
+            )
+            commands: list[list[str]] = []
+
+            def fake_run(command: list[str], timeout: float):
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch("operator_collector.jobs._adb_test_file", return_value=True),
+                patch("operator_collector.jobs._run", side_effect=fake_run),
+                patch("operator_collector.jobs._scan_quest", return_value=[]),
+            ):
+                recovered = import_session(
+                    {
+                        "source": "quest",
+                        "session_id": "20260804_020030",
+                        "quest_root": "/sdcard/DCIM/SpatialMP4",
+                        "layout": "session_directory",
+                        "delete_after": True,
+                    },
+                    context,
+                )
+
+            self.assertTrue(recovered["recovered"])
+            self.assertTrue(recovered["quest_deleted"])
+            self.assertTrue(any("rm -rf" in command[-1] for command in commands))
+
     def test_build_dataset_name_uses_session_clock_and_manifest_millis(self) -> None:
         value = build_dataset_name(
             "20260804_020030", "wash", {"session_start_unix_us": 1785808830902943}
         )
         self.assertEqual(value, "20260804_wash_020030902")
+        unique_value = build_dataset_name(
+            "20260804_020030_a1b2c3d4",
+            "wash",
+            {"session_start_unix_us": 1785808830902943},
+        )
+        self.assertEqual(unique_value, "20260804_wash_020030902_a1b2c3d4")
 
     def test_preview_samples_first_two_minutes_every_twenty_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -252,6 +341,27 @@ class JobTests(unittest.TestCase):
         )
         self.assertTrue(all(session["complete"] for session in result["sessions"]))
 
+    def test_scan_quest_deduplicates_same_session_across_roots(self) -> None:
+        context = JobContext({"adb_path": "/fake/adb"}, lambda *_args: None)
+
+        def fake_run(command: list[str], timeout: float):
+            shell = command[-1]
+            output = ""
+            if "-type d" in shell:
+                root = "/sdcard/DCIM/SpatialMP4" if "/DCIM/" in shell else "/sdcard/Movies/SpatialMP4"
+                output = f"{root}/20260806_010101\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+
+        with (
+            patch("operator_collector.jobs._run", side_effect=fake_run),
+            patch("operator_collector.jobs._adb_test_file", return_value=True),
+            patch("operator_collector.jobs._adb_file_size", return_value=1234),
+        ):
+            result = scan({"source": "quest"}, context)
+
+        self.assertEqual(len(result["sessions"]), 1)
+        self.assertEqual(result["sessions"][0]["quest_root"], "/sdcard/DCIM/SpatialMP4")
+
     def test_current_layout_validates_and_imports_without_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -296,7 +406,10 @@ class JobTests(unittest.TestCase):
                     )
                 return subprocess.CompletedProcess(command, 0, "", "")
 
-            with patch("operator_collector.jobs._run", side_effect=fake_pull):
+            with (
+                patch("operator_collector.jobs._run", side_effect=fake_pull),
+                patch("operator_collector.jobs._adb_test_file", return_value=True),
+            ):
                 imported = import_session(
                     {
                         "source": "quest",
@@ -327,8 +440,20 @@ class JobTests(unittest.TestCase):
         with (
             patch("operator_collector.jobs._run", side_effect=fake_run),
             patch("operator_collector.jobs._scan_quest", return_value=[]),
+            patch(
+                "operator_collector.jobs._adb_test_file",
+                side_effect=[True, True, False, False],
+            ),
         ):
             result = delete_quest_session(
+                {
+                    "session_id": "20260806_040404",
+                    "quest_root": "/sdcard/DCIM/SpatialMP4",
+                    "layout": "session_directory",
+                },
+                context,
+            )
+            recovered = delete_quest_session(
                 {
                     "session_id": "20260806_040404",
                     "quest_root": "/sdcard/DCIM/SpatialMP4",
@@ -341,6 +466,7 @@ class JobTests(unittest.TestCase):
         self.assertIn("rm -rf /sdcard/DCIM/SpatialMP4/20260806_040404", delete_command)
         self.assertNotIn("/sdcard/Movies/", delete_command)
         self.assertEqual(result["sessions"], [])
+        self.assertTrue(recovered["recovered"])
 
     def test_workstation_state_reports_bundled_python_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -371,6 +497,23 @@ class JobTests(unittest.TestCase):
             self.assertTrue(trash_path.is_dir())
             self.assertEqual(trash_path.parent, root / "data" / "trash")
 
+            recovered = delete_local_item(
+                {"item_id": "item-1", "local_path": str(session)}, context
+            )
+            self.assertTrue(recovered["recovered"])
+            self.assertEqual(Path(recovered["trash_path"]), trash_path)
+
+            unrelated = root / "data" / "trash" / "other.prefix"
+            unrelated.mkdir()
+            with self.assertRaises(RuntimeError):
+                delete_local_item(
+                    {
+                        "item_id": "item-2",
+                        "local_path": str(root / "data" / "sessions" / "other"),
+                    },
+                    context,
+                )
+
     def test_upload_always_uses_fixed_private_repository(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -387,7 +530,19 @@ class JobTests(unittest.TestCase):
                     (value, message, metrics)
                 ),
             )
-            with patch("modelscope_hub.HubApi") as hub_api:
+            hub_api = MagicMock()
+            fake_hub = types.ModuleType("modelscope_hub")
+            fake_upload = types.ModuleType("modelscope_hub._upload")
+            fake_upload.tqdm = object()
+            fake_hub.HubApi = hub_api
+            fake_hub._upload = fake_upload
+            with patch.dict(
+                sys.modules,
+                {
+                    "modelscope_hub": fake_hub,
+                    "modelscope_hub._upload": fake_upload,
+                },
+            ):
                 result = upload_item(
                     {
                         "item_id": "item-1",

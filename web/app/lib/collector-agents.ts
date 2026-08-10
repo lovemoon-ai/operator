@@ -10,6 +10,7 @@ import { DATA_ROOT, db } from "./db.js";
 const ENROLLMENT_TTL_MS = 10 * 60 * 1000;
 const AGENT_ONLINE_MS = 30_000;
 const STALE_RUNNING_JOB_MS = 2 * 60 * 60 * 1000;
+const UNCERTAIN_JOB_ERROR = "Result unknown; retry explicitly so recovery checks can run";
 const PREVIEW_ROOT = path.join(DATA_ROOT, "collector-previews");
 const MAX_BATCH_UPLOAD_ITEMS = 100;
 const FIXED_MODELSCOPE_REPO_ID = "chenghy666/test";
@@ -207,6 +208,16 @@ const stmts = {
     UPDATE collector_jobs
     SET status = 'queued', message = 'Agent reconnected; resuming from cache', updated_at = ?
     WHERE agent_id = ? AND status = 'running' AND updated_at < ?
+      AND kind IN ('scan', 'start_ego', 'preview', 'upload')
+  `),
+  failStaleNonIdempotentJobs: db.prepare(`
+    UPDATE collector_jobs
+    SET status = 'failed',
+        message = 'Agent disconnected during a state-changing operation',
+        error = ?,
+        updated_at = ?
+    WHERE agent_id = ? AND status = 'running' AND updated_at < ?
+      AND kind NOT IN ('scan', 'start_ego', 'preview', 'upload')
   `),
   claimJob: db.prepare(`
     UPDATE collector_jobs
@@ -219,18 +230,23 @@ const stmts = {
   updateJobProgress: db.prepare(`
     UPDATE collector_jobs
     SET status = 'running', progress = ?, progress_json = ?, message = ?, updated_at = ?
-    WHERE id = ? AND agent_id = ?
+    WHERE id = ? AND agent_id = ? AND status = 'running'
   `),
   completeJob: db.prepare(`
     UPDATE collector_jobs
     SET status = 'completed', progress = 1, message = ?, result_json = ?,
         error = NULL, updated_at = ?
-    WHERE id = ? AND agent_id = ?
+    WHERE id = ? AND agent_id = ? AND status = 'running'
+  `),
+  reopenUncertainJob: db.prepare(`
+    UPDATE collector_jobs
+    SET status = 'running', message = 'Reconciling delayed agent result', updated_at = ?
+    WHERE id = ? AND agent_id = ? AND status = 'failed' AND error = ?
   `),
   failJob: db.prepare(`
     UPDATE collector_jobs
     SET status = 'failed', message = ?, error = ?, updated_at = ?
-    WHERE id = ? AND agent_id = ?
+    WHERE id = ? AND agent_id = ? AND status = 'running'
   `),
   listJobs: db.prepare<[string], JobRow>(`
     SELECT * FROM collector_jobs WHERE user_id = ?
@@ -641,6 +657,12 @@ collectorAgentRouter.post("/jobs/next", agentAuth, (req: AgentRequest, res) => {
     req.collectorAgent!.id,
     new Date(now.getTime() - STALE_RUNNING_JOB_MS).toISOString(),
   );
+  stmts.failStaleNonIdempotentJobs.run(
+    UNCERTAIN_JOB_ERROR,
+    now.toISOString(),
+    req.collectorAgent!.id,
+    new Date(now.getTime() - STALE_RUNNING_JOB_MS).toISOString(),
+  );
   const row = claimNextJob(req.collectorAgent!.id);
   if (!row) return res.status(204).end();
   res.json(publicJob(row));
@@ -654,6 +676,9 @@ collectorAgentRouter.post(
     const agent = req.collectorAgent!;
     const job = stmts.getJobForAgent.get(req.params.id!, agent.id);
     if (!job) return res.status(404).json({ error: "job not found" });
+    if (job.status !== "running") {
+      return res.json({ ok: true, ignored: true, status: job.status });
+    }
     const progress = Math.max(0, Math.min(1, Number(req.body?.progress ?? 0)));
     const message = bodyString(req.body?.message, 512);
     const metrics = progressMetrics(req.body?.metrics);
@@ -677,13 +702,46 @@ collectorAgentRouter.post(
     const agent = req.collectorAgent!;
     const job = stmts.getJobForAgent.get(req.params.id!, agent.id);
     if (!job) return res.status(404).json({ error: "job not found" });
+    if (job.status === "completed") {
+      const stored = (safeJson(job.result_json) ?? {}) as Record<string, unknown>;
+      return res.json({
+        ok: true,
+        idempotent: true,
+        itemId: bodyString(stored._stationItemId, 128) || null,
+      });
+    }
+    const canReconcile = job.status === "failed" && job.error === UNCERTAIN_JOB_ERROR;
+    if (job.status !== "running" && !canReconcile) {
+      return res.status(409).json({ error: `job is ${job.status}` });
+    }
     const result = req.body?.result && typeof req.body.result === "object"
       ? req.body.result as Record<string, unknown>
       : {};
     const now = new Date().toISOString();
     const message = bodyString(req.body?.message, 512) || "completed";
-    stmts.completeJob.run(message, JSON.stringify(result), now, job.id, agent.id);
-    const itemId = applyJobResult(agent, job, result);
+    let itemId: string | null = null;
+    const complete = db.transaction(() => {
+      if (canReconcile) {
+        const reopened = stmts.reopenUncertainJob.run(
+          now,
+          job.id,
+          agent.id,
+          UNCERTAIN_JOB_ERROR,
+        );
+        if (reopened.changes !== 1) throw new Error("job reconciliation state changed");
+      }
+      itemId = applyJobResult(agent, job, result);
+      const storedResult = itemId ? { ...result, _stationItemId: itemId } : result;
+      const completed = stmts.completeJob.run(
+        message,
+        JSON.stringify(storedResult),
+        now,
+        job.id,
+        agent.id,
+      );
+      if (completed.changes !== 1) throw new Error("job completion state changed");
+    });
+    complete();
     res.json({ ok: true, itemId });
   },
 );
@@ -696,6 +754,9 @@ collectorAgentRouter.post(
     const agent = req.collectorAgent!;
     const job = stmts.getJobForAgent.get(req.params.id!, agent.id);
     if (!job) return res.status(404).json({ error: "job not found" });
+    if (job.status !== "running") {
+      return res.json({ ok: true, ignored: true, status: job.status });
+    }
     const error = bodyString(req.body?.error, 4000) || "unknown agent error";
     const message = bodyString(req.body?.message, 512) || "failed";
     stmts.failJob.run(message, error, new Date().toISOString(), job.id, agent.id);

@@ -3,9 +3,9 @@ import { EventEmitter } from "node:events";
 import type { ResourceRecord, SessionRecord } from "./types.js";
 
 export type IngestEvent =
-  | { type: "resource.created"; resource: ResourceRecord }
-  | { type: "resource.progress"; resourceId: string; offset: number; uploadLength: number }
-  | { type: "resource.finalized"; resourceId: string; sessionId: string }
+  | { type: "resource.created"; resource: ResourceRecord; userId?: string }
+  | { type: "resource.progress"; resourceId: string; offset: number; uploadLength: number; userId?: string }
+  | { type: "resource.finalized"; resourceId: string; sessionId: string; userId?: string }
   | { type: "session.updated"; session: SessionRecord }
   | {
       /**

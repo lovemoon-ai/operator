@@ -12,6 +12,9 @@ const MAX_IMAGE_BYTES := 8 * 1024 * 1024
 const WEBSOCKET_INBOUND_BUFFER_BYTES := 16 * 1024 * 1024
 const HEADER_SIZE := 32
 const MAGIC := "PINF"
+const TARGET_POSE_HZ := 20.0
+const POSE_INTERVAL_S := 1.0 / TARGET_POSE_HZ
+const MAX_OUTBOUND_BUFFER_BYTES := 256 * 1024
 
 var _socket := WebSocketPeer.new()
 var _url := ""
@@ -23,6 +26,7 @@ var _last_sent_time_ns := 0
 var _reconnect_after_s := 0.0
 var _want_connection := false
 var _tracking: TrackingProvider
+var _pose_elapsed_s := 0.0
 
 
 func set_calibration(calibration: Dictionary) -> void:
@@ -30,6 +34,9 @@ func set_calibration(calibration: Dictionary) -> void:
 
 
 func configure_from_qr(payload: String) -> bool:
+	if not bool(_calibration.get("ok", false)):
+		connection_failed.emit("Camera calibration is unavailable; check camera permission/plugin")
+		return false
 	var parsed: Variant = JSON.parse_string(payload)
 	if typeof(parsed) != TYPE_DICTIONARY:
 		connection_failed.emit("QR code must contain JSON")
@@ -67,7 +74,10 @@ func _process(delta: float) -> void:
 		_state = next_state
 	if _state == WebSocketPeer.STATE_OPEN:
 		_drain_packets()
-		_send_pose()
+		_pose_elapsed_s += delta
+		if _pose_elapsed_s >= POSE_INTERVAL_S:
+			_pose_elapsed_s = fmod(_pose_elapsed_s, POSE_INTERVAL_S)
+			_send_pose()
 	elif _want_connection and _state == WebSocketPeer.STATE_CLOSED:
 		_reconnect_after_s -= delta
 		if _reconnect_after_s <= 0.0:
@@ -89,6 +99,7 @@ func _connect() -> void:
 
 func _on_state_changed(next_state: int) -> void:
 	if next_state == WebSocketPeer.STATE_OPEN:
+		_pose_elapsed_s = POSE_INTERVAL_S
 		_socket.send_text(JSON.stringify({
 			"type": "hello",
 			"protocol": "operator.memworld.v1",
@@ -99,14 +110,18 @@ func _on_state_changed(next_state: int) -> void:
 	elif _state == WebSocketPeer.STATE_OPEN and next_state == WebSocketPeer.STATE_CLOSED:
 		disconnected_from_server.emit()
 		_reconnect_after_s = 1.0
+	elif next_state == WebSocketPeer.STATE_CLOSED and _want_connection:
+		connection_failed.emit("Unable to establish the MemWorld WebSocket connection")
 
 
 func _send_pose() -> void:
 	if _tracking == null:
 		return
+	if _socket.get_current_outbound_buffered_amount() > MAX_OUTBOUND_BUFFER_BYTES:
+		return
 	_frame_id += 1
 	_last_sent_time_ns = Time.get_ticks_usec() * 1000
-	_socket.send_text(JSON.stringify({
+	var error := _socket.send_text(JSON.stringify({
 		"type": "pose",
 		"frame_id": _frame_id,
 		"capture_time_ns": _last_sent_time_ns,
@@ -114,6 +129,8 @@ func _send_pose() -> void:
 		"left": _format_hand(0),
 		"right": _format_hand(1),
 	}))
+	if error != OK:
+		connection_failed.emit("WebSocket pose send failed: %d" % error)
 
 
 func _format_hand(hand: int) -> Dictionary:
@@ -130,7 +147,7 @@ func _format_hand(hand: int) -> Dictionary:
 
 
 func _format_pose(value: Dictionary) -> Dictionary:
-	if not bool(value.get("tracked", true)) or not value.has("position") or not value.has("rotation"):
+	if not bool(value.get("tracked", false)) or not value.has("position") or not value.has("rotation"):
 		return {"tracked": false}
 	var p: Vector3 = value["position"]
 	var q: Quaternion = value["rotation"]

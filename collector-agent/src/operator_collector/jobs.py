@@ -27,6 +27,10 @@ LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _MODELSCOPE_STATE_CACHE: tuple[str, float, str] = ("", 0.0, "not found")
 
 
+class QuestSourceNotFoundError(RuntimeError):
+    pass
+
+
 @dataclass
 class JobContext:
     config: dict[str, Any]
@@ -388,6 +392,17 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
     incoming_root.mkdir(parents=True, exist_ok=True)
     sessions_root.mkdir(parents=True, exist_ok=True)
     destination = sessions_root / session_id
+    if destination.is_dir():
+        return _completed_import_result(
+            destination,
+            session_id,
+            context,
+            source_kind=source_kind,
+            delete_after=delete_after,
+            payload=payload,
+        )
+    if destination.exists():
+        raise RuntimeError(f"Destination path is not a directory: {destination}")
     local_source: Path | None = None
     quest_source: dict[str, str] | None = None
     if source_kind == "local":
@@ -421,8 +436,23 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
         raise RuntimeError(f"不支持的数据来源: {source_kind}")
 
     partial = incoming_root / f"{session_id}.partial"
-    if partial.exists() or destination.exists():
-        raise RuntimeError(f"Destination already exists for {session_id}; refusing to overwrite")
+    if partial.is_dir():
+        previous_qc = validate_session(partial)
+        if previous_qc["ok"]:
+            os.replace(partial, destination)
+            context.progress(0.9, "Recovered a previously verified local copy")
+            return _completed_import_result(
+                destination,
+                session_id,
+                context,
+                source_kind=source_kind,
+                delete_after=delete_after,
+                payload=payload,
+            )
+        # Preserve the failed attempt for forensics and use a fresh path.
+        partial = incoming_root / f"{session_id}.partial.{time.time_ns()}"
+    elif partial.exists():
+        raise RuntimeError(f"Import recovery path is not a directory: {partial}")
     partial.mkdir(mode=0o700)
 
     try:
@@ -466,9 +496,49 @@ def import_session(payload: dict[str, Any], context: JobContext) -> dict[str, An
             "quest_deleted": deleted,
         }
     except Exception:
-        # A failed copy is deliberately retained under incoming for forensics.
-        # The final sessions directory is never created until validation passes.
+        # Failed attempts remain under incoming for forensics. A later retry
+        # uses a fresh attempt path, while a complete verified partial is
+        # promoted atomically instead of blocking forever.
         raise
+
+
+def _completed_import_result(
+    destination: Path,
+    session_id: str,
+    context: JobContext,
+    *,
+    source_kind: str,
+    delete_after: bool,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    qc = validate_session(destination)
+    if not qc["ok"]:
+        raise RuntimeError(
+            "Existing imported dataset failed integrity checks: "
+            + "; ".join(qc["errors"])
+        )
+    previews, preview_warning = _create_previews_with_warning(destination, context, qc)
+    quest_deleted = False
+    if delete_after and source_kind == "quest":
+        # The previous attempt may have committed the verified local copy and
+        # then lost power/network while deleting the Quest source. Reconcile
+        # that second half instead of silently declaring the whole job done.
+        delete_quest_session({**payload, "session_id": session_id}, context)
+        quest_deleted = True
+    elif delete_after and source_kind == "local":
+        qc["warnings"].append("本地来源数据不会被自动删除")
+    context.progress(1.0, "Import already committed; recovered existing result")
+    return {
+        "source_session_id": session_id,
+        "dataset_name": destination.name,
+        "local_path": str(destination),
+        "label": _read_existing_label(destination),
+        "qc": qc,
+        "preview_paths": [str(preview) for preview in previews],
+        "preview_warning": preview_warning,
+        "quest_deleted": quest_deleted,
+        "recovered": True,
+    }
 
 
 def label_item(payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
@@ -613,9 +683,22 @@ def preview_item(payload: dict[str, Any], context: JobContext) -> dict[str, Any]
 def delete_local_item(payload: dict[str, Any], context: JobContext) -> dict[str, Any]:
     item_id = str(payload.get("item_id") or "").strip()
     local_path = Path(str(payload.get("local_path") or "")).expanduser().resolve()
-    _require_managed_session(item_id, local_path, context)
+    sessions_root = (context.data_root / "sessions").resolve()
+    if not item_id or local_path.parent != sessions_root:
+        raise RuntimeError("Local item is outside the managed sessions directory")
     trash_root = (context.data_root / "trash").resolve()
     trash_root.mkdir(parents=True, exist_ok=True)
+    if not local_path.exists():
+        recovered = _find_trashed_item(trash_root, local_path.name)
+        if recovered:
+            context.progress(1.0, "本地数据此前已移到回收站")
+            return {
+                "item_id": item_id,
+                "dataset_name": local_path.name,
+                "trash_path": str(recovered),
+                "recovered": True,
+            }
+    _require_managed_session(item_id, local_path, context)
     suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = trash_root / f"{local_path.name}.{suffix}"
     if target.exists():
@@ -628,6 +711,16 @@ def delete_local_item(payload: dict[str, Any], context: JobContext) -> dict[str,
         "dataset_name": local_path.name,
         "trash_path": str(target),
     }
+
+
+def _find_trashed_item(trash_root: Path, dataset_name: str) -> Path | None:
+    prefix = f"{dataset_name}."
+    candidates = []
+    for candidate in trash_root.glob(f"{dataset_name}.*"):
+        suffix = candidate.name[len(prefix):]
+        if candidate.is_dir() and re.fullmatch(r"\d{8}T\d{6}Z(?:\.[A-Za-z0-9_-]{1,32})?", suffix):
+            candidates.append(candidate)
+    return max(candidates, key=lambda value: value.name, default=None)
 
 
 def _require_managed_session(item_id: str, local_path: Path, context: JobContext) -> None:
@@ -708,7 +801,7 @@ def validate_session(session_dir: Path) -> dict[str, Any]:
 
 
 def build_dataset_name(session_id: str, label: str, manifest: dict[str, Any]) -> str:
-    match = re.fullmatch(r"(\d{8})_(\d{6})", session_id)
+    match = re.fullmatch(r"(\d{8})_(\d{6})(?:_([A-Za-z0-9]+))?", session_id)
     millis = 0
     try:
         unix_us = int(float(manifest.get("session_start_unix_us", 0)))
@@ -716,11 +809,13 @@ def build_dataset_name(session_id: str, label: str, manifest: dict[str, Any]) ->
     except (TypeError, ValueError):
         pass
     if match:
-        date_part, time_part = match.groups()
+        date_part, time_part, unique_suffix = match.groups()
     else:
         now = datetime.now(timezone.utc)
         date_part, time_part = now.strftime("%Y%m%d"), now.strftime("%H%M%S")
-    return f"{date_part}_{label}_{time_part}{millis:03d}"
+        unique_suffix = None
+    suffix = f"_{unique_suffix}" if unique_suffix else ""
+    return f"{date_part}_{label}_{time_part}{millis:03d}{suffix}"
 
 
 def _scan_local(root: Path) -> list[dict[str, Any]]:
@@ -757,6 +852,7 @@ def _scan_fixture(root: Path) -> list[dict[str, Any]]:
 def _scan_quest(context: JobContext) -> list[dict[str, Any]]:
     adb = context.adb
     sessions: list[dict[str, Any]] = []
+    seen_session_ids: set[str] = set()
     for root in context.quest_roots:
         quoted_root = shlex.quote(root)
         directory_output = _run(
@@ -767,6 +863,8 @@ def _scan_quest(context: JobContext) -> list[dict[str, Any]]:
             session_id = session_dir.rstrip("/").rsplit("/", 1)[-1]
             if not SESSION_RE.fullmatch(session_id):
                 continue
+            if session_id in seen_session_ids:
+                continue
             media_path = f"{session_dir}/{session_id}.mp4"
             if not _adb_test_file(adb, media_path):
                 continue
@@ -776,6 +874,7 @@ def _scan_quest(context: JobContext) -> list[dict[str, Any]]:
                 adb, root, session_id, "session_directory", session_dir,
                 media_path, manifest_path, has_manifest,
             ))
+            seen_session_ids.add(session_id)
 
         file_output = _run(
             [adb, "shell", f"if [ -d {quoted_root} ]; then find {quoted_root} -maxdepth 1 -type f -name '*.mp4' 2>/dev/null; fi"],
@@ -787,6 +886,8 @@ def _scan_quest(context: JobContext) -> list[dict[str, Any]]:
             session_id = media_path.rsplit("/", 1)[-1][:-4]
             if not SESSION_RE.fullmatch(session_id):
                 continue
+            if session_id in seen_session_ids:
+                continue
             session_dir = f"{root}/{session_id}"
             manifest_path = f"{session_dir}/manifest.json"
             has_manifest = _adb_test_file(adb, manifest_path)
@@ -794,6 +895,7 @@ def _scan_quest(context: JobContext) -> list[dict[str, Any]]:
                 adb, root, session_id, "legacy_siblings", media_path,
                 media_path, manifest_path, has_manifest,
             ))
+            seen_session_ids.add(session_id)
     return sessions
 
 
@@ -808,11 +910,21 @@ def _quest_scan_record(
     has_manifest: bool,
 ) -> dict[str, Any]:
     media_bytes = _adb_file_size(adb, media_path)
+    has_sidecars = any(
+        _adb_test_file(adb, f"{root}/{session_id}/{relative}")
+        for relative in (
+            "android_timebase.json",
+            "left_camera_frames.jsonl",
+            "right_camera_frames.jsonl",
+            "poses/hands.jsonl",
+            "depth/frames.jsonl",
+        )
+    )
     return {
         "session_id": session_id,
         "media_bytes": media_bytes,
         "has_manifest": has_manifest,
-        "has_sidecars": has_manifest,
+        "has_sidecars": has_sidecars,
         "complete": has_manifest and media_bytes > 0,
         "layout": layout,
         "quest_root": root,
@@ -942,7 +1054,12 @@ def _resolve_quest_source(
     if requested_layout:
         if requested_layout not in {"session_directory", "legacy_siblings"}:
             raise RuntimeError("Quest 数据结构参数无效")
-        return _quest_source(roots[0], session_id, requested_layout)
+        source = _quest_source(roots[0], session_id, requested_layout)
+        if _adb_test_file(context.adb, source["media"]) and _adb_test_file(
+            context.adb, source["manifest"]
+        ):
+            return source
+        raise QuestSourceNotFoundError(f"Quest 上找不到完整数据: {session_id}")
 
     # Backward compatibility for jobs queued by an older Station frontend.
     for root in roots:
@@ -952,7 +1069,7 @@ def _resolve_quest_source(
                 context.adb, source["manifest"]
             ):
                 return source
-    raise RuntimeError(f"Quest 上找不到完整数据: {session_id}")
+    raise QuestSourceNotFoundError(f"Quest 上找不到完整数据: {session_id}")
 
 
 def _pull_quest_session(
@@ -1009,7 +1126,20 @@ def delete_quest_session(payload: dict[str, Any], context: JobContext) -> dict[s
     session_id = str(payload.get("session_id") or "").strip()
     if not SESSION_RE.fullmatch(session_id):
         raise RuntimeError("Invalid session ID")
-    source = _resolve_quest_source(context, session_id, payload)
+    try:
+        source = _resolve_quest_source(context, session_id, payload)
+    except QuestSourceNotFoundError:
+        sessions = _scan_quest(context)
+        if any(value.get("session_id") == session_id for value in sessions):
+            raise
+        context.progress(1.0, "Quest 数据此前已删除")
+        return {
+            "session_id": session_id,
+            "source_path": str(payload.get("source_path") or ""),
+            "layout": str(payload.get("layout") or ""),
+            "sessions": sessions,
+            "recovered": True,
+        }
     context.progress(0.2, "正在删除 Quest 数据")
     _delete_quest_source(context, source)
     context.progress(0.8, "Quest 数据已删除，正在刷新列表")
