@@ -43,6 +43,13 @@
       "script": "res://tests/unit/capture/capture_panel_debug_buttons_test.gd"
     },
     {
+      "id": "capture.recording_frame_guide_geometry",
+      "level": "unit",
+      "suite": "capture.pipeline",
+      "module": "app/modes",
+      "script": "res://tests/unit/capture/recording_frame_guide_test.gd"
+    },
+    {
       "id": "launcher.navigation_policy",
       "level": "unit",
       "suite": "modes.navigation",

@@ -7,6 +7,7 @@ const BodyMotionSamplerScript := preload("res://scripts/core/sensors/body_motion
 const ViewLockedCapturePanelScript := preload("res://scripts/ui/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/ui/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/ui/view_locked_status_popup.gd")
+const RecordingFrameGuideScript := preload("res://scripts/ui/recording_frame_guide.gd")
 const SettingsLauncherButtonScript := preload("res://scripts/ui/settings_launcher_button.gd")
 const EgoUploaderScript := preload("res://scripts/sinks/upload/ego_uploader.gd")
 const EgoQRScannerScript := preload("res://scripts/ui/ego_qr_scanner.gd")
@@ -86,6 +87,7 @@ var settings_panel
 var settings_button
 var record_control
 var status_popup
+var recording_frame_guide
 var writer: Object
 # WP5: shared canonical-frame fanout (StreamBinding over the sinks below)
 # injected into the samplers so all sensor writes flow through SensorFrames.
@@ -1075,6 +1077,8 @@ func _on_capture_session_error(message: String) -> void:
 
 
 func _on_capture_session_started(_session_dir: String) -> void:
+	if recording_frame_guide:
+		recording_frame_guide.hide_guide()
 	if pose_sampler != null and pose_sampler.has_method("on_session_started"):
 		pose_sampler.on_session_started(
 			_session_dir,
@@ -1269,6 +1273,11 @@ func _setup_xr_scene() -> void:
 	if _hand_skeleton_overlay.has_method("set_xr_origin"):
 		_hand_skeleton_overlay.call("set_xr_origin", origin)
 	origin.add_child(_hand_skeleton_overlay)
+
+	if not _is_live_feed_mode():
+		recording_frame_guide = RecordingFrameGuideScript.new()
+		recording_frame_guide.name = "RecordingFrameGuide"
+		origin.add_child(recording_frame_guide)
 
 	if _is_live_feed_mode() and enable_live_pull:
 		live_pull_view = LivePullDenseMapViewScript.new()
@@ -1684,9 +1693,32 @@ func _try_start_camera_plugin() -> void:
 		return
 	if not _start_native_openxr_hand_recording():
 		_abort_capture_start("Native 60 Hz hand recorder failed to start")
+		return
+	_show_recording_frame_guide_if_available()
+
+
+func _show_recording_frame_guide_if_available() -> void:
+	if recording_frame_guide == null:
+		return
+	recording_frame_guide.hide_guide()
+	if not _recording or _is_live_feed_mode():
+		return
+	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
+		return
+	if camera_plugin == null:
+		return
+	var raw_metadata := str(camera_plugin.call("getLeftCameraMetadataJson"))
+	if not recording_frame_guide.configure_from_metadata_json(raw_metadata):
+		push_warning("[Operator] Recording frame guide hidden: exact Quest camera calibration unavailable")
+		return
+	recording_frame_guide.update_from_head_transform(hmd_camera.transform)
+	recording_frame_guide.show_guide()
+	print("[Operator] Recording frame guide active: %s" % recording_frame_guide.resolution_text())
 
 
 func _stop_camera_plugin() -> void:
+	if recording_frame_guide:
+		recording_frame_guide.hide_guide()
 	# Native camera/hand workers hold OpenXR sessions and feed the
 	# active native writer. Join them before the provider finalizes that writer.
 	_stop_native_openxr_hand_recording()
@@ -2134,6 +2166,8 @@ func _update_view_locked_panel() -> void:
 		record_control.transform = hmd_camera.transform * RECORD_CONTROL_OFFSET
 	if status_popup:
 		status_popup.transform = hmd_camera.transform * STATUS_POPUP_OFFSET
+	if recording_frame_guide and recording_frame_guide.visible:
+		recording_frame_guide.update_from_head_transform(hmd_camera.transform)
 	if qr_scanner and qr_scanner.visible:
 		qr_scanner.transform = hmd_camera.transform * QR_SCANNER_OFFSET
 

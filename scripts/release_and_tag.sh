@@ -12,14 +12,14 @@
 # Usage:
 #   bash scripts/release_and_tag.sh [VERSION]
 #
-#   # default VERSION (0.1.6):
+#   # default VERSION (0.1.7):
 #   bash scripts/release_and_tag.sh
 #
 #   # explicit version:
 #   bash scripts/release_and_tag.sh 1.2.0
 #
 # Env knobs:
-#   VERSION    Release version (default: 0.1.6). Arg $1 overrides this.
+#   VERSION    Release version (default: 0.1.7). Arg $1 overrides this.
 #   REMOTE     Git remote to push the tag to (default: origin).
 #   DIST_DIR   Where the renamed APK is copied (default: xr/dist).
 #   SKIP_BUILD Set to 1 to reuse an existing xr/build/quest/Operator.apk.
@@ -34,7 +34,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 XR_DIR="$REPO_ROOT/xr"
 
 # --- config ----------------------------------------------------------------
-VERSION="${1:-${VERSION:-0.1.6}}"
+VERSION="${1:-${VERSION:-0.1.7}}"
 REMOTE="${REMOTE:-origin}"
 DIST_DIR="${DIST_DIR:-$XR_DIR/dist}"
 APK_SRC="$XR_DIR/build/quest/Operator.apk"
