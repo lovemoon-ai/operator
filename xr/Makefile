@@ -127,13 +127,13 @@ install-pico build-install-pico ship-pico ship-pico-fast: ADB=$(ADB_PICO)
 # fails to load and every simulated robot breaks. A full push avoids it without
 # wiping app data.
 install-quest:
-	$(ADB) install -r -d --no-incremental $(apk_quest)
+	$(ADB) install -r -d $(apk_quest)
 
 install-pico:
-	$(ADB) install -r -d --no-incremental $(apk_pico)
+	$(ADB) install -r -d $(apk_pico)
 
 install-androidxr:
-	$(ADB) install -r -d --no-incremental $(apk_androidxr)
+	$(ADB) install -r -d $(apk_androidxr)
 
 uninstall:
 	$(ADB) uninstall $(package)
