@@ -16,6 +16,7 @@ const FallbackBodyAdapterCls = preload("res://scripts/robot_constraint/fallback_
 const BODY_TRACKER_NAME := &"/user/body_tracker"
 
 signal canonical_frame_ready(frame: Dictionary)
+signal tracking_unavailable(source: String, reason: String)
 ## Emitted with the *raw* vendor frame (one of the per-vendor schemas:
 ## ``operator.raw_vendor_pose.v1``, source = ``pico_bd_body_tracking`` or
 ## ``meta_fb_body_tracking``). Lets ``SessionSpoolWriter`` archive the
@@ -39,6 +40,8 @@ enum SourceMode {
 
 @export var source_mode: SourceMode = SourceMode.AUTO
 @export var sample_rate_hz: float = 60.0
+@export var allow_fallback := true
+@export var pico_unavailable_grace_s := 2.0
 
 var tracking_provider: Object  # TrackingProvider
 var pico_openxr_bridge: Object
@@ -52,6 +55,8 @@ var _time_since_last_sample: float = 0.0
 var _enabled: bool = false
 var _last_pico_diag_key := ""
 var _last_pico_diag_usec := 0
+var _pico_unavailable_since_usec := 0
+var _pico_unavailable_emitted := false
 
 const PICO_DIAG_REPRINT_USEC := 5_000_000
 const PICO_BODY_STATUS_VALID := 1
@@ -67,6 +72,8 @@ func configure(p_tracking_provider: Object, p_pico_bridge: Object = null) -> voi
 func set_enabled(value: bool) -> void:
 	_enabled = value
 	_time_since_last_sample = 0.0
+	if not value:
+		_reset_pico_availability()
 
 
 func is_enabled() -> bool:
@@ -108,9 +115,10 @@ func _physics_process(delta: float) -> void:
 			var godot_frame := _sample_godot(ts_ns)
 			if not godot_frame.is_empty():
 				partial_frames.append(godot_frame)
-			var fallback_frame := _sample_fallback(ts_ns)
-			if not fallback_frame.is_empty():
-				partial_frames.append(fallback_frame)
+			if allow_fallback:
+				var fallback_frame := _sample_fallback(ts_ns)
+				if not fallback_frame.is_empty():
+					partial_frames.append(fallback_frame)
 	# Drop empty entries to avoid emitting an empty frame when all sources
 	# are off.
 	var non_empty: Array = []
@@ -151,6 +159,7 @@ func _sample_pico(timestamp_ns: int) -> Dictionary:
 		if typeof(status) == TYPE_DICTIONARY:
 			if not bool((status as Dictionary).get("bd_body_tracking_supported", false)):
 				_log_pico_diag_once("unsupported", "Pico body source unsupported: %s" % JSON.stringify(status))
+				_note_pico_unavailable("unsupported")
 				return {}
 	var body: Variant = pico_openxr_bridge.call("sample_body_joints")
 	if typeof(body) != TYPE_DICTIONARY:
@@ -158,6 +167,7 @@ func _sample_pico(timestamp_ns: int) -> Dictionary:
 			"sample_not_dict",
 			"Pico body sample returned %s, expected Dictionary" % type_string(typeof(body))
 		)
+		_note_pico_unavailable("invalid_sample")
 		return {}
 	var body_dict := body as Dictionary
 	var joints_v: Variant = body_dict.get("joints", [])
@@ -165,17 +175,20 @@ func _sample_pico(timestamp_ns: int) -> Dictionary:
 	if joint_count <= 0:
 		_log_pico_diag_once(_pico_diag_key(body_dict, "empty"),
 			"Pico body sample has no joints: %s" % _pico_body_diag_summary(body_dict))
+		_note_pico_unavailable("no_joints")
 		return {}
 	if _pico_bridge_has_body_tracking2() and not _pico_body_state_ready(body_dict):
 		_log_pico_diag_once(_pico_diag_key(body_dict, "not_ready"),
 			"Pico body state not ready; ignoring sample: %s"
 			% _pico_body_diag_summary(body_dict))
+		_note_pico_unavailable("body_state_not_ready")
 		return {}
 	var raw_span := _pico_raw_joint_span(body_dict)
 	if raw_span >= 0.0 and raw_span < PICO_MIN_BODY_SPAN_M:
 		_log_pico_diag_once(_pico_diag_key(body_dict, "collapsed"),
 			"Pico body sample collapsed to one point; ignoring sample: %s"
 			% _pico_body_diag_summary(body_dict))
+		_note_pico_unavailable("collapsed_joints")
 		return {}
 	# Pico's body_dict IS the vendor proto — joint indices, position +
 	# rotation sub-dicts, flags. Translate it directly into the
@@ -187,10 +200,30 @@ func _sample_pico(timestamp_ns: int) -> Dictionary:
 		_log_pico_diag_once(_pico_diag_key(body_dict, "invalid"),
 			"Pico body sample produced no valid canonical joints: %s"
 			% _pico_body_diag_summary(body_dict))
+		_note_pico_unavailable("no_canonical_joints")
 	else:
+		_reset_pico_availability()
 		_log_pico_diag_once(_pico_diag_key(body_dict, "online"),
 			"Pico body source online: %s" % _pico_body_diag_summary(body_dict))
 	return frame
+
+
+func _note_pico_unavailable(reason: String) -> void:
+	if _pico_unavailable_emitted:
+		return
+	var now := Time.get_ticks_usec()
+	if _pico_unavailable_since_usec == 0:
+		_pico_unavailable_since_usec = now
+	var grace_usec := int(maxf(pico_unavailable_grace_s, 0.0) * 1_000_000.0)
+	if now - _pico_unavailable_since_usec < grace_usec:
+		return
+	_pico_unavailable_emitted = true
+	tracking_unavailable.emit("pico", reason)
+
+
+func _reset_pico_availability() -> void:
+	_pico_unavailable_since_usec = 0
+	_pico_unavailable_emitted = false
 
 
 func _log_pico_diag_once(key: String, message: String) -> void:
