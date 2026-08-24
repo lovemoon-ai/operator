@@ -36,6 +36,13 @@
       "script": "res://tests/unit/teleop/dual_arm_mapping_test.gd"
     },
     {
+      "id": "teleop.pico_body_tracking_availability",
+      "level": "unit",
+      "suite": "teleop.targets",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/pico_body_tracking_availability_test.gd"
+    },
+    {
       "id": "teleop.ee_pose_trajectory",
       "level": "unit",
       "suite": "teleop.visualization",

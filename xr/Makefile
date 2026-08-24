@@ -9,7 +9,7 @@
 
 .PHONY: verify-ndk setup-vendors-patched log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
-ADB?=adb
+ADB?=$(firstword $(wildcard $(HOME)/Library/Android/sdk/platform-tools/adb) $(wildcard $(HOME)/Android/Sdk/platform-tools/adb) adb)
 ADB_BASE:=$(ADB)
 QUEST_SERIAL?=
 PICO_SERIAL?=
@@ -127,13 +127,13 @@ install-pico build-install-pico ship-pico ship-pico-fast: ADB=$(ADB_PICO)
 # fails to load and every simulated robot breaks. A full push avoids it without
 # wiping app data.
 install-quest:
-	$(ADB) install -r -d $(apk_quest)
+	$(ADB) install --no-incremental -r -d $(apk_quest)
 
 install-pico:
-	$(ADB) install -r -d $(apk_pico)
+	$(ADB) install --no-incremental -r -d $(apk_pico)
 
 install-androidxr:
-	$(ADB) install -r -d $(apk_androidxr)
+	$(ADB) install --no-incremental -r -d $(apk_androidxr)
 
 uninstall:
 	$(ADB) uninstall $(package)

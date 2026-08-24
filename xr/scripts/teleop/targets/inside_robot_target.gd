@@ -182,15 +182,33 @@ func _dispose_runtime_node(node: Node) -> void:
 
 func _create_body_provider() -> void:
 	var bridge := _pico_bridge()
+	var requires_body := bool(profile.get("requires_body_tracking", false))
 	if bridge != null and bridge.has_method("start_body_tracking"):
 		_started_pico_body = bool(bridge.call("start_body_tracking", {}))
 	_body_provider = BodyPoseProviderScript.new()
 	_body_provider.name = "InsideRobotBodyPoseProvider"
 	_body_provider.configure(tracking_provider, bridge)
-	_body_provider.source_mode = BodyPoseProviderScript.SourceMode.AUTO
+	_body_provider.allow_fallback = not requires_body
+	if requires_body:
+		_body_provider.source_mode = (
+			BodyPoseProviderScript.SourceMode.PICO_ONLY
+			if bridge != null and bridge.has_method("sample_body_joints")
+			else BodyPoseProviderScript.SourceMode.GODOT_ONLY
+		)
+		_body_provider.tracking_unavailable.connect(_on_body_tracking_unavailable)
+	else:
+		_body_provider.source_mode = BodyPoseProviderScript.SourceMode.AUTO
 	_body_provider.sample_rate_hz = 60.0
 	runtime_root.add_child(_body_provider)
 	_body_provider.set_enabled(true)
+
+
+func _on_body_tracking_unavailable(source: String, _reason: String) -> void:
+	if source != "pico" or state == State.IDLE or state == State.FAULTED:
+		return
+	var message := tr("UI_PICO_BODY_TRACKING_UNAVAILABLE")
+	stop()
+	_fail("pico_body_tracking_unavailable", message)
 
 
 func _create_local_embodiment() -> void:
