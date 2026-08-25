@@ -200,6 +200,7 @@ func _build_detail(split: HBoxContainer) -> void:
 	_detail_scroll.follow_focus = true
 	_detail_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_detail_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_configure_settings_scrollbar(_detail_scroll)
 	detail_margin.add_child(_detail_scroll)
 
 	# Single VBox holds all group containers as siblings; we just toggle

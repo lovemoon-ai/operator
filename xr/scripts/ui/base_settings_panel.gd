@@ -11,19 +11,28 @@ const COL_SECTION := Color(0.65, 0.70, 0.75)
 const COL_STATUS := Color(0.55, 0.80, 0.66)
 const ACTION_BUTTON_HEIGHT := 68
 const ACTION_BUTTON_MIN_WIDTH := 260
+const HAND_SCROLLBAR_WIDTH := 36
 const ICON_PATH := "res://assets/icons/%s.svg"
+const COL_SCROLL_TRACK := Color(0.12, 0.14, 0.17, 0.92)
+const COL_SCROLL_TRACK_HIGHLIGHT := Color(1.0, 0.647, 0.169, 0.22)
+const COL_SCROLL_GRABBER := Color(0.48, 0.53, 0.58, 0.96)
+const COL_SCROLL_GRABBER_HIGHLIGHT := Color(1.0, 0.68, 0.25, 1.0)
+const COL_SCROLL_GRABBER_PRESSED := Color(1.0, 0.82, 0.45, 1.0)
 
 # Exit used to be a hold-to-confirm action (2 s hold + ring indicator). We
 # moved to single-click because the launcher now owns the actual app-quit
 # affordance — the in-panel Exit only navigates back to the launcher, so
 # the long-hold friction was overkill. The `HoldIndicator` ring and the
 # `_exit_holding`/`_exit_hold_seconds` machinery were removed along with
-# `EXIT_HOLD_SECONDS`. Subclasses that still call `super._process(delta)`
-# get a no-op stub below.
+# `EXIT_HOLD_SECONDS`.
 
 var _content: VBoxContainer
 var _scroll_container: ScrollContainer
 var _highlighted_slot: PanelContainer
+var _highlighted_scrollbar: VScrollBar
+var _scrollbar_overlay: Control
+var _settings_scrollbars: Array[Dictionary] = []
+var _hand_scrollbars_enabled := false
 # 内部 PanelContainer，用于 open/close 缩放与淡入淡出动效
 var _panel: PanelContainer
 # 当前激活的开/关补间，避免并发冲突
@@ -61,10 +70,13 @@ func _setup_settings_panel(
 
 
 func _process(_delta: float) -> void:
-	# Kept as a no-op stub so subclasses' `super._process(delta)` continues
-	# to resolve cleanly. There's nothing per-frame for the panel itself
-	# now that the exit hold-to-confirm flow is gone.
-	pass
+	if _hand_scrollbars_enabled:
+		_sync_hand_scrollbar_overlays()
+
+
+func set_feedback_input_mode(mode: String, controller: XRController3D = null) -> void:
+	super.set_feedback_input_mode(mode, controller)
+	_set_hand_scrollbars_enabled(mode == "hands")
 
 
 func _settings_path() -> String:
@@ -319,6 +331,7 @@ func _on_confirm_requested() -> void:
 
 func _on_pointer_cleared() -> void:
 	_set_highlighted_slot(null)
+	_set_highlighted_scrollbar(null)
 
 
 func scroll_by_pixels(delta_pixels: float) -> bool:
@@ -337,6 +350,152 @@ func _scroll_container_by_pixels(scroll: ScrollContainer, delta_pixels: float) -
 	var before := scroll.scroll_vertical
 	scroll.scroll_vertical = clampi(before + int(round(delta_pixels)), 0, max_scroll)
 	return scroll.scroll_vertical != before
+
+
+func _configure_settings_scrollbar(scroll: ScrollContainer) -> void:
+	if scroll == null or _scrollbar_overlay == null:
+		return
+	var source_scrollbar := scroll.get_v_scroll_bar()
+	if source_scrollbar == null or source_scrollbar.has_meta(&"settings_scrollbar_configured"):
+		return
+	source_scrollbar.set_meta(&"settings_scrollbar_configured", true)
+
+	var hand_scrollbar := VScrollBar.new()
+	hand_scrollbar.visible = false
+	hand_scrollbar.custom_minimum_size.x = HAND_SCROLLBAR_WIDTH
+	hand_scrollbar.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	hand_scrollbar.focus_mode = Control.FOCUS_NONE
+	hand_scrollbar.z_index = 10
+	hand_scrollbar.mouse_entered.connect(_on_settings_scrollbar_mouse_entered.bind(hand_scrollbar))
+	hand_scrollbar.mouse_exited.connect(_on_settings_scrollbar_mouse_exited.bind(hand_scrollbar))
+	hand_scrollbar.value_changed.connect(_on_hand_scrollbar_value_changed.bind(source_scrollbar))
+	_apply_settings_scrollbar_style(hand_scrollbar, false)
+	_scrollbar_overlay.add_child(hand_scrollbar)
+	var binding := {
+		"source": source_scrollbar,
+		"hand": hand_scrollbar,
+		"source_self_modulate": source_scrollbar.self_modulate,
+		"source_mouse_filter": source_scrollbar.mouse_filter,
+	}
+	_settings_scrollbars.append(binding)
+	_apply_source_scrollbar_mode(binding, _hand_scrollbars_enabled)
+	_sync_hand_scrollbar_overlays.call_deferred()
+
+
+func _set_hand_scrollbars_enabled(enabled: bool) -> void:
+	if _hand_scrollbars_enabled == enabled:
+		return
+	_hand_scrollbars_enabled = enabled
+	for binding in _settings_scrollbars:
+		_apply_source_scrollbar_mode(binding, enabled)
+	if not enabled:
+		_set_highlighted_scrollbar(null)
+		for binding in _settings_scrollbars:
+			var hand_scrollbar := binding.get("hand") as VScrollBar
+			if is_instance_valid(hand_scrollbar):
+				hand_scrollbar.visible = false
+		return
+	_sync_hand_scrollbar_overlays.call_deferred()
+
+
+func _apply_source_scrollbar_mode(binding: Dictionary, hand_mode: bool) -> void:
+	var source_scrollbar := binding.get("source") as VScrollBar
+	if not is_instance_valid(source_scrollbar):
+		return
+	var original_modulate: Color = binding.get("source_self_modulate", Color.WHITE)
+	if hand_mode:
+		var hidden_modulate := original_modulate
+		hidden_modulate.a = 0.0
+		source_scrollbar.self_modulate = hidden_modulate
+		source_scrollbar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	else:
+		source_scrollbar.self_modulate = original_modulate
+		source_scrollbar.mouse_filter = int(
+			binding.get("source_mouse_filter", Control.MOUSE_FILTER_STOP)
+		)
+
+
+func _sync_hand_scrollbar_overlays() -> void:
+	if not _hand_scrollbars_enabled or _scrollbar_overlay == null:
+		return
+	var overlay_inverse := _scrollbar_overlay.get_global_transform_with_canvas().affine_inverse()
+	for binding in _settings_scrollbars:
+		var source_scrollbar := binding.get("source") as VScrollBar
+		var hand_scrollbar := binding.get("hand") as VScrollBar
+		if not is_instance_valid(source_scrollbar) or not is_instance_valid(hand_scrollbar):
+			continue
+		var should_show := source_scrollbar.is_visible_in_tree()
+		if not should_show:
+			hand_scrollbar.visible = false
+			continue
+		hand_scrollbar.position = overlay_inverse * source_scrollbar.get_global_transform_with_canvas().origin
+		hand_scrollbar.size = Vector2(HAND_SCROLLBAR_WIDTH, source_scrollbar.size.y)
+		hand_scrollbar.min_value = source_scrollbar.min_value
+		hand_scrollbar.max_value = source_scrollbar.max_value
+		hand_scrollbar.step = source_scrollbar.step
+		hand_scrollbar.page = source_scrollbar.page
+		hand_scrollbar.value = source_scrollbar.value
+		hand_scrollbar.visible = true
+
+
+func _on_hand_scrollbar_value_changed(value: float, source_scrollbar: VScrollBar) -> void:
+	if is_instance_valid(source_scrollbar):
+		source_scrollbar.value = value
+
+
+func _on_settings_scrollbar_mouse_entered(scrollbar: VScrollBar) -> void:
+	if _highlighted_scrollbar == scrollbar:
+		return
+	_play_ui_sound("hover", -5.0)
+	_set_highlighted_scrollbar(scrollbar)
+
+
+func _on_settings_scrollbar_mouse_exited(scrollbar: VScrollBar) -> void:
+	if _highlighted_scrollbar == scrollbar:
+		_set_highlighted_scrollbar(null)
+
+
+func _set_highlighted_scrollbar(scrollbar: VScrollBar) -> void:
+	if _highlighted_scrollbar == scrollbar:
+		return
+	if _highlighted_scrollbar != null:
+		_apply_settings_scrollbar_style(_highlighted_scrollbar, false)
+	_highlighted_scrollbar = scrollbar
+	if _highlighted_scrollbar != null:
+		_apply_settings_scrollbar_style(_highlighted_scrollbar, true)
+
+
+func _apply_settings_scrollbar_style(scrollbar: VScrollBar, highlighted: bool) -> void:
+	if not is_instance_valid(scrollbar):
+		return
+	var track_style := StyleBoxFlat.new()
+	track_style.bg_color = COL_SCROLL_TRACK_HIGHLIGHT if highlighted else COL_SCROLL_TRACK
+	track_style.border_color = COL_ACCENT if highlighted else Color.TRANSPARENT
+	track_style.set_border_width_all(2)
+	track_style.set_corner_radius_all(int(HAND_SCROLLBAR_WIDTH * 0.5))
+	scrollbar.add_theme_stylebox_override("scroll", track_style)
+	scrollbar.add_theme_stylebox_override("scroll_focus", track_style)
+	scrollbar.add_theme_stylebox_override(
+		"grabber",
+		_scrollbar_grabber_style(COL_SCROLL_GRABBER_HIGHLIGHT if highlighted else COL_SCROLL_GRABBER)
+	)
+	scrollbar.add_theme_stylebox_override(
+		"grabber_highlight", _scrollbar_grabber_style(COL_SCROLL_GRABBER_HIGHLIGHT)
+	)
+	scrollbar.add_theme_stylebox_override(
+		"grabber_pressed", _scrollbar_grabber_style(COL_SCROLL_GRABBER_PRESSED)
+	)
+
+
+func _scrollbar_grabber_style(color: Color) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = color
+	style.set_corner_radius_all(int(HAND_SCROLLBAR_WIDTH * 0.5))
+	style.content_margin_left = 5
+	style.content_margin_right = 5
+	style.content_margin_top = 5
+	style.content_margin_bottom = 5
+	return style
 
 
 func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String, use_outer_scroll: bool = true) -> void:
@@ -358,6 +517,11 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 	margin.add_theme_constant_override("margin_top", 30)
 	margin.add_theme_constant_override("margin_bottom", 30)
 	panel.add_child(margin)
+
+	_scrollbar_overlay = Control.new()
+	_scrollbar_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_scrollbar_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	panel.add_child(_scrollbar_overlay)
 
 	var root := VBoxContainer.new()
 	root.add_theme_constant_override("separation", 14)
@@ -407,6 +571,7 @@ func _build_panel(viewport: SubViewport, title_key: String, confirm_key: String,
 		_scroll_container.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 		# Keep a tapped field on screen once the keyboard claims its space.
 		_scroll_container.follow_focus = true
+		_configure_settings_scrollbar(_scroll_container)
 		root.add_child(_scroll_container)
 		_scroll_container.add_child(_content)
 	else:
@@ -539,6 +704,7 @@ func _interactive_style(highlighted: bool) -> StyleBoxFlat:
 ## Icon-only; no accompanying label — the glyph carries the meaning and the
 ## label proved noisy beside the panel title.
 func set_input_mode_indicator(mode: String) -> void:
+	_set_hand_scrollbars_enabled(mode == "hands")
 	if mode == _input_mode_indicator_current:
 		return
 	_input_mode_indicator_current = mode
