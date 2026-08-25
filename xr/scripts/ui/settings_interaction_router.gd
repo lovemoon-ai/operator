@@ -4,15 +4,24 @@ class_name SettingsInteractionRouter
 const LEFT_HAND_TRACKER := &"/user/hand_tracker/left"
 const RIGHT_HAND_TRACKER := &"/user/hand_tracker/right"
 const HAND_JOINT_PALM := 0
+const HAND_JOINT_WRIST := 1
 const HAND_JOINT_THUMB_TIP := 5
+const HAND_JOINT_INDEX_FINGER_PROXIMAL := 7
 const HAND_JOINT_INDEX_FINGER_TIP := 10
+const HAND_JOINT_MIDDLE_FINGER_PROXIMAL := 12
+const HAND_JOINT_MIDDLE_FINGER_TIP := 15
 const HAND_PINCH_PRESS_DISTANCE_M := 0.055
 const HAND_PINCH_RELEASE_DISTANCE_M := 0.075
+const HAND_PINCH_OPEN_DISTANCE_M := 0.120
 const HAND_PINCH_PRESS_VALUE := 0.55
 const HAND_PINCH_RELEASE_VALUE := 0.35
 const HAND_RAY_SMOOTH_ALPHA := 0.42
+const HAND_RAY_PALM_FORWARD_OFFSET_M := 0.018
+const HAND_RAY_MAX_FINGER_BLEND := 0.18
 const HAND_RAY_FORWARD_BIAS := 0.70
 const HAND_ACTIVE_SWITCH_GRACE_MS := 350
+const HAND_RAY_STRATEGY_AIM := &"aim"
+const HAND_RAY_STRATEGY_PALM := &"palm"
 
 var click_actions: PackedStringArray = PackedStringArray(["trigger_click", "primary_click", "select_button"])
 var analog_trigger_action: StringName = &"trigger"
@@ -28,6 +37,7 @@ var busy := false
 var debug_enabled := false
 
 var origin: XROrigin3D
+var hmd_camera: XRCamera3D
 var left_pointer: XRController3D
 var right_pointer: XRController3D
 var ui_pointer_visual: Node
@@ -45,6 +55,7 @@ var _hand_ray_origin := Vector3.ZERO
 var _hand_ray_direction := Vector3.ZERO
 var _last_scroll_ticks_usec := 0
 var _debug_pointer_state := "idle"
+var _hand_ray_strategy := _hand_ray_strategy_for_platform(OS.has_feature("pico"))
 
 
 func _notification(what: int) -> void:
@@ -54,11 +65,13 @@ func _notification(what: int) -> void:
 
 func configure(
 		xr_origin: XROrigin3D,
+		camera: XRCamera3D,
 		left: XRController3D,
 		right: XRController3D,
 		pointer_visual: Node
 ) -> void:
 	origin = xr_origin
+	hmd_camera = camera
 	left_pointer = left
 	right_pointer = right
 	ui_pointer_visual = pointer_visual
@@ -124,6 +137,10 @@ func get_debug_state() -> String:
 
 static func _is_finite_vector(value: Vector3) -> bool:
 	return is_finite(value.x) and is_finite(value.y) and is_finite(value.z)
+
+
+static func _hand_ray_strategy_for_platform(pico_build: bool) -> StringName:
+	return HAND_RAY_STRATEGY_PALM if pico_build else HAND_RAY_STRATEGY_AIM
 
 
 static func _palm_pose_ray(palm_transform: Transform3D) -> Dictionary:
@@ -510,7 +527,13 @@ func _hand_ray_for_side(side: String) -> Dictionary:
 		pointer = left_pointer
 		tracker_name = LEFT_HAND_TRACKER
 
-	var hand_ray := _hand_joint_ray(tracker_name, side)
+	if _hand_ray_strategy == HAND_RAY_STRATEGY_AIM:
+		var aim_ray := _hand_aim_ray(pointer, tracker_name, side)
+		if not aim_ray.is_empty():
+			return aim_ray
+		return _legacy_hand_joint_ray(tracker_name, side)
+
+	var hand_ray := _pico_palm_joint_ray(tracker_name, side)
 	if hand_ray.is_empty():
 		return {}
 	if pointer != null and _has_tracking(pointer) and _feedback_mode_for_pointer(pointer) == "hands":
@@ -552,7 +575,37 @@ func _stale_active_hand_ray() -> Dictionary:
 	}
 
 
-func _hand_joint_ray(tracker_name: StringName, side: String) -> Dictionary:
+func _hand_aim_ray(pointer: XRController3D, tracker_name: StringName, side: String) -> Dictionary:
+	if pointer == null or not _has_tracking(pointer):
+		return {}
+	if pointer.pose != &"aim" and pointer.name.to_lower().find("aim") == -1:
+		return {}
+	if _feedback_mode_for_pointer(pointer) != "hands":
+		return {}
+	var tracker := _tracked_hand(tracker_name)
+	if tracker == null:
+		return {}
+	var ray_direction := -pointer.global_transform.basis.z
+	if ray_direction.length_squared() < 0.000001:
+		return {}
+	var index_tip := _hand_joint_transform(tracker, HAND_JOINT_INDEX_FINGER_TIP)
+	var thumb_tip := _hand_joint_transform(tracker, HAND_JOINT_THUMB_TIP)
+	var pinch_distance := _pinch_distance_from_joints(index_tip, thumb_tip)
+	var pinch_state := _hand_interaction_pinch(pointer)
+	return {
+		"source": "aim_%s" % side,
+		"side": side,
+		"origin": pointer.global_transform.origin,
+		"direction": ray_direction.normalized(),
+		"pinch_value_valid": bool(pinch_state.get("valid", false)),
+		"pinch_value": float(pinch_state.get("value", 0.0)),
+		"pinch_ready": bool(pinch_state.get("ready", false)),
+		"pinch_valid": pinch_distance >= 0.0,
+		"pinch_distance": pinch_distance,
+	}
+
+
+func _pico_palm_joint_ray(tracker_name: StringName, side: String) -> Dictionary:
 	var tracker := _tracked_hand(tracker_name)
 	if tracker == null:
 		return {}
@@ -589,6 +642,163 @@ func _hand_joint_ray(tracker_name: StringName, side: String) -> Dictionary:
 		"pinch_valid": pinch_distance >= 0.0,
 		"pinch_distance": pinch_distance,
 	}
+
+
+func _legacy_hand_joint_ray(tracker_name: StringName, side: String) -> Dictionary:
+	var tracker := _tracked_hand(tracker_name)
+	if tracker == null:
+		return {}
+
+	var palm_joint := _hand_joint_transform(tracker, HAND_JOINT_PALM)
+	if palm_joint.is_empty():
+		return {}
+	var wrist_joint := _hand_joint_transform(tracker, HAND_JOINT_WRIST)
+	var index_proximal_joint := _hand_joint_transform(tracker, HAND_JOINT_INDEX_FINGER_PROXIMAL)
+	var middle_proximal_joint := _hand_joint_transform(tracker, HAND_JOINT_MIDDLE_FINGER_PROXIMAL)
+	var index_tip_joint := _hand_joint_transform(tracker, HAND_JOINT_INDEX_FINGER_TIP)
+	var middle_tip_joint := _hand_joint_transform(tracker, HAND_JOINT_MIDDLE_FINGER_TIP)
+	var thumb_tip_joint := _hand_joint_transform(tracker, HAND_JOINT_THUMB_TIP)
+
+	var palm := _joint_position_or(palm_joint, Vector3.ZERO)
+	var wrist := _joint_position_or(wrist_joint, palm)
+	var index_proximal := _joint_position_or(index_proximal_joint, palm)
+	var middle_proximal := _joint_position_or(middle_proximal_joint, index_proximal)
+	var index_tip := _joint_position_or(index_tip_joint, index_proximal)
+	var middle_tip := _joint_position_or(middle_tip_joint, middle_proximal)
+	var palm_basis: Basis = palm_joint.get("basis", Basis.IDENTITY)
+	var pinch_distance := _pinch_distance_from_joints(index_tip_joint, thumb_tip_joint)
+
+	var ray_direction := _stable_hand_ray_direction(
+		palm_basis,
+		palm,
+		wrist,
+		index_proximal,
+		middle_proximal,
+		index_tip,
+		middle_tip,
+		pinch_distance
+	)
+	if ray_direction.length_squared() < 0.000001:
+		return {}
+	ray_direction = ray_direction.normalized()
+
+	var knuckle_center := (index_proximal + middle_proximal) * 0.5
+	var ray_origin := palm
+	if ray_origin.distance_squared_to(wrist) < 0.000001:
+		ray_origin = knuckle_center.lerp(wrist, 0.35)
+	ray_origin += ray_direction * HAND_RAY_PALM_FORWARD_OFFSET_M
+
+	return {
+		"source": "joint_%s" % side,
+		"side": side,
+		"origin": ray_origin,
+		"direction": ray_direction,
+		"pinch_value_valid": false,
+		"pinch_value": 0.0,
+		"pinch_valid": pinch_distance >= 0.0,
+		"pinch_distance": pinch_distance,
+	}
+
+
+func _stable_hand_ray_direction(
+		palm_basis: Basis,
+		palm: Vector3,
+		wrist: Vector3,
+		index_proximal: Vector3,
+		middle_proximal: Vector3,
+		index_tip: Vector3,
+		middle_tip: Vector3,
+		pinch_distance: float
+) -> Vector3:
+	var candidates: Array[Vector3] = []
+	_append_ray_candidate(candidates, -palm_basis.z)
+	_append_ray_candidate(candidates, palm_basis.z)
+	_append_ray_candidate(candidates, palm_basis.y)
+	_append_ray_candidate(candidates, -palm_basis.y)
+	_append_ray_candidate(candidates, palm_basis.x)
+	_append_ray_candidate(candidates, -palm_basis.x)
+
+	var knuckle_center := (index_proximal + middle_proximal) * 0.5
+	var proximal_axis := knuckle_center - wrist
+	if proximal_axis.length_squared() > 0.000001:
+		proximal_axis = proximal_axis.normalized()
+		_append_ray_candidate(candidates, proximal_axis)
+		var across := index_proximal - middle_proximal
+		if across.length_squared() > 0.000001:
+			var palm_normal := proximal_axis.cross(across.normalized())
+			_append_ray_candidate(candidates, palm_normal)
+			_append_ray_candidate(candidates, -palm_normal)
+
+	var ray_direction := _best_hand_ray_candidate(candidates, palm, proximal_axis)
+	var fingertip_center := (index_tip + middle_tip) * 0.5
+	var finger_direction := fingertip_center - knuckle_center
+	if finger_direction.length_squared() > 0.000001:
+		finger_direction = finger_direction.normalized()
+
+	if ray_direction.length_squared() < 0.000001:
+		ray_direction = finger_direction
+	if ray_direction.length_squared() < 0.000001 and hmd_camera != null:
+		ray_direction = -hmd_camera.global_transform.basis.z
+	if ray_direction.length_squared() < 0.000001:
+		return Vector3.ZERO
+
+	if finger_direction.length_squared() > 0.000001 \
+			and ray_direction.normalized().dot(finger_direction) > 0.2:
+		var blend := _hand_finger_blend(pinch_distance)
+		ray_direction = ray_direction.normalized().lerp(finger_direction, blend).normalized()
+	return ray_direction.normalized()
+
+
+func _append_ray_candidate(candidates: Array[Vector3], candidate: Vector3) -> void:
+	if candidate.length_squared() < 0.000001:
+		return
+	candidates.append(candidate.normalized())
+
+
+func _best_hand_ray_candidate(
+		candidates: Array[Vector3],
+		palm: Vector3,
+		finger_axis: Vector3
+) -> Vector3:
+	var away_from_head := Vector3.ZERO
+	var camera_forward := Vector3.ZERO
+	if hmd_camera != null:
+		away_from_head = palm - hmd_camera.global_position
+		if away_from_head.length_squared() > 0.000001:
+			away_from_head = away_from_head.normalized()
+		camera_forward = -hmd_camera.global_transform.basis.z
+		if camera_forward.length_squared() > 0.000001:
+			camera_forward = camera_forward.normalized()
+	if finger_axis.length_squared() > 0.000001:
+		finger_axis = finger_axis.normalized()
+
+	var best := Vector3.ZERO
+	var best_score := -9999.0
+	for candidate in candidates:
+		var score := 0.0
+		if away_from_head.length_squared() > 0.000001:
+			var away_dot := candidate.dot(away_from_head)
+			score += away_dot
+			if away_dot < -0.12:
+				score -= 3.0
+		if camera_forward.length_squared() > 0.000001:
+			score += candidate.dot(camera_forward) * 0.45
+		if finger_axis.length_squared() > 0.000001:
+			score += maxf(candidate.dot(finger_axis), 0.0) * 0.12
+		if score > best_score:
+			best_score = score
+			best = candidate
+	return best
+
+
+func _hand_finger_blend(pinch_distance: float) -> float:
+	if pinch_distance < 0.0:
+		return 0.0
+	if pinch_distance <= HAND_PINCH_RELEASE_DISTANCE_M:
+		return 0.0
+	var t := (pinch_distance - HAND_PINCH_RELEASE_DISTANCE_M) \
+			/ (HAND_PINCH_OPEN_DISTANCE_M - HAND_PINCH_RELEASE_DISTANCE_M)
+	return clampf(t, 0.0, 1.0) * HAND_RAY_MAX_FINGER_BLEND
 
 
 func _hand_pinch_active(ray: Dictionary) -> bool:
