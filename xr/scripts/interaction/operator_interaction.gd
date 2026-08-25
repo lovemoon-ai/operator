@@ -215,9 +215,10 @@ func _sync_rig() -> void:
 	_ensure_pointer_visual()
 	_router.configure(
 		_origin,
+		_camera,
 		_left_pointer,
 		_right_pointer,
-			_pointer_visual
+		_pointer_visual
 	)
 
 
