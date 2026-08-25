@@ -1,0 +1,7 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" uid="uid://clc5dre31iskm" path="res://addons/godot-xr-tools/xr/start_xr.tscn" id="1_startxr"]
+[ext_resource type="Script" path="res://scripts/xr/operator_start_xr.gd" id="2_operator_startxr"]
+
+[node name="OperatorStartXR" instance=ExtResource("1_startxr")]
+script = ExtResource("2_operator_startxr")

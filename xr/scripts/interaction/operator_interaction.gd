@@ -78,6 +78,7 @@ func _ready() -> void:
 		print("[Operator] Interaction debug log: %s" % _debug_log_path())
 	_router = SettingsInteractionRouterScript.new()
 	_router.name = "OperatorInteractionRouter"
+	_router.debug_enabled = _debug_log_enabled
 	add_child(_router)
 	set_process(true)
 
@@ -213,10 +214,9 @@ func _sync_rig() -> void:
 	_right_pointer = right_pointer
 	_ensure_pointer_visual()
 	_router.configure(
-			_origin,
-			_camera,
-			_left_pointer,
-			_right_pointer,
+		_origin,
+		_left_pointer,
+		_right_pointer,
 			_pointer_visual
 	)
 
@@ -351,8 +351,38 @@ func _detect_mode() -> String:
 		_last_controller_input_msec = now
 	var controller_tracking := _controller_tracking(_right_pointer) \
 			or _controller_tracking(_left_pointer)
-	var hands_unobstructed := _hand_tracker_unobstructed(LEFT_HAND_TRACKER) \
-			or _hand_tracker_unobstructed(RIGHT_HAND_TRACKER)
+	var controller_profile := _tracker_profile_is_controller(_left_pointer) \
+			or _tracker_profile_is_controller(_right_pointer)
+	var hand_profile := _tracker_profile_is_hand(_left_pointer) \
+			or _tracker_profile_is_hand(_right_pointer)
+	var tracked_mode := _mode_from_evidence(
+		controller_input,
+		controller_profile,
+		hand_profile,
+		controller_tracking,
+		false,
+		false
+	)
+	if not tracked_mode.is_empty():
+		return tracked_mode
+	return _mode_from_evidence(
+		false,
+		false,
+		false,
+		false,
+		_hand_pinch_gesture_active(),
+		_hands_data_present()
+	)
+
+
+static func _mode_from_evidence(
+		controller_input: bool,
+		controller_profile: bool,
+		hand_profile: bool,
+		controller_tracking: bool,
+		hand_gesture: bool,
+		hand_tracking: bool
+) -> String:
 	# Real controller evidence always wins over passive hand-joint data. Pico can
 	# report UNKNOWN-source optical joints while a pico4_controller pose and its
 	# actions are active; treating those joints as an exclusive hands signal is
@@ -369,13 +399,12 @@ func _detect_mode() -> String:
 	# other side already reports pico4_controller. Testing hands first let that
 	# one bare hand pin the whole app to MODE_HANDS and starved the live
 	# controller, until the user happened to press a trigger.
-	if _tracker_profile_is_controller(_left_pointer) \
-			or _tracker_profile_is_controller(_right_pointer):
+	if controller_profile:
 		return MODE_CONTROLLERS
 	# XR_EXT_hand_interaction is an unambiguous bare-hand profile. It is checked
 	# before generic pose tracking because Godot exposes it through the same
 	# left_hand/right_hand XRController3D nodes.
-	if _tracker_profile_is_hand(_left_pointer) or _tracker_profile_is_hand(_right_pointer):
+	if hand_profile:
 		return MODE_HANDS
 	# A live non-hand controller pose remains in controller mode without a time
 	# limit. This prevents the pointer from disappearing after an idle timeout.
@@ -384,9 +413,9 @@ func _detect_mode() -> String:
 	# Only consider joint/pinch evidence after no physical controller pose is
 	# active. UNKNOWN is valid optical data on Pico, but is not by itself proof
 	# that a simultaneously tracked controller should be disabled.
-	if _hand_pinch_gesture_active():
+	if hand_gesture:
 		return MODE_HANDS
-	if hands_unobstructed or _hands_data_present():
+	if hand_tracking:
 		return MODE_HANDS
 	return ""
 
@@ -479,7 +508,10 @@ func _write_debug_snapshot() -> void:
 	var recent_ms := -1
 	if _last_controller_input_msec > 0:
 		recent_ms = now - _last_controller_input_msec
-	_append_debug_line("%d mode=%s busy=%d scene=%s targets=%d input_ago_ms=%d | L[%s] R[%s] | handL[%s] handR[%s]" % [
+	var router_debug := "none"
+	if _router != null and _router.has_method("get_debug_state"):
+		router_debug = String(_router.call("get_debug_state"))
+	_append_debug_line("%d mode=%s busy=%d scene=%s targets=%d input_ago_ms=%d | L[%s] R[%s] | handL[%s] handR[%s] | route[%s]" % [
 		now,
 		current_mode,
 		int(busy),
@@ -490,6 +522,7 @@ func _write_debug_snapshot() -> void:
 		_pointer_debug(_right_pointer),
 		_hand_debug(LEFT_HAND_TRACKER),
 		_hand_debug(RIGHT_HAND_TRACKER),
+		router_debug,
 	])
 
 
@@ -641,15 +674,6 @@ func _hand_tracker_active(tracker_path: StringName) -> bool:
 	if not hand_tracker.has_tracking_data:
 		return false
 	return hand_tracker.hand_tracking_source != XRHandTracker.HAND_TRACKING_SOURCE_CONTROLLER
-
-
-func _hand_tracker_unobstructed(tracker_path: StringName) -> bool:
-	var tracker := XRServer.get_tracker(tracker_path)
-	if not (tracker is XRHandTracker):
-		return false
-	var hand_tracker := tracker as XRHandTracker
-	return hand_tracker.has_tracking_data \
-			and hand_tracker.hand_tracking_source == XRHandTracker.HAND_TRACKING_SOURCE_UNOBSTRUCTED
 
 
 func _controller_tracking(controller: XRController3D) -> bool:
