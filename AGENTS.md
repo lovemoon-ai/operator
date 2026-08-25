@@ -25,7 +25,18 @@ Required host state:
 - `godot` on `PATH`, version 4.5.1 stable.
 - matching Android export templates.
 - Android platform tools on `PATH`.
+- `ninja` on `PATH`. The upstream `mujoco-android` / `pinocchio-android`
+  wrapper scripts hardcode `cmake -G Ninja`, and nothing in the repo installs
+  it. Comes bundled with the SDK CMake package
+  (`sdkmanager "cmake;3.22.1"`) or from `apt install ninja-build`.
+- `cmake` 3.26 or newer on `PATH`. **Do not use the SDK's own cmake 3.22.1**:
+  it cannot read NDK 28's version, so CMake applies an NDK<22 workaround that
+  forces `-fuse-ld=gold` onto MuJoCo's IPO link, and the host x86_64 `ld.gold`
+  dies on aarch64 (`unsupported ELF machine number 183`).
 - a real Android XR device for runtime tests.
+
+`make build-*` runs `verify-host-tools` first, which checks all of the above
+and points at the SDK's bundled ninja without letting its cmake shadow yours.
 
 ```bash
 make deps

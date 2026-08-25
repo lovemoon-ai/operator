@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: verify-ndk setup-vendors-patched log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: verify-host-tools verify-ndk setup-vendors-patched log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 ADB?=$(firstword $(wildcard $(HOME)/Library/Android/sdk/platform-tools/adb) $(wildcard $(HOME)/Android/Sdk/platform-tools/adb) adb)
 ADB_BASE:=$(ADB)
@@ -49,6 +49,96 @@ verify-ndk:
 		exit 1; fi
 	@echo "[ndk] using pinned NDK $(NDK_VERSION) at $(PINNED_ANDROID_NDK)"
 
+# ---------------------------------------------------------------------------
+# Host build tools — cmake/ninja come from the Android SDK by default
+# ---------------------------------------------------------------------------
+# The build is not self-contained. `deps` clones two upstream wrapper repos
+# (mujoco-android, pinocchio-android) whose scripts run `cmake -S ... -G Ninja`
+# against a bare `cmake` from PATH. Nothing installs ninja, and CMake only
+# reports it deep inside a configure that has already fetched sources:
+#     CMake Error: CMake was unable to find a build program corresponding to
+#     Ninja. CMAKE_MAKE_PROGRAM is not set.
+# That failure is normally masked — the MuJoCo build is skipped whenever
+# libmujoco.so already exists, so a host missing ninja looks healthy until
+# something forces a rebuild (fresh checkout, cleaned tree, or a changed
+# OPERATOR_DEPS_CACHE_ROOT, which orphans the old build products).
+#
+# So fix the toolchain, not the symptom — but only for ninja. The Android SDK's
+# CMake package ships cmake and ninja together, and ninja is the half worth
+# adopting: it is a pure build executor, version-insensitive, and always present
+# once the SDK CMake package is installed.
+#
+# Its cmake is NOT adopted, and must not shadow the host's. With NDK 28's
+# toolchain file, cmake 3.22.1 fails to populate CMAKE_ANDROID_NDK_VERSION, and
+# CMake's own Modules/Compiler/Clang.cmake then takes this branch:
+#
+#     if(ANDROID AND NOT CMAKE_ANDROID_NDK_VERSION VERSION_GREATER_EQUAL "22")
+#       set(CMAKE_${lang}_LINK_OPTIONS_IPO "-fuse-ld=gold")   # ndk issue #242
+#
+# — an empty version compares as "not >= 22", so a workaround meant for NDK < 22
+# fires on NDK 28. MuJoCo enables IPO, so -fuse-ld=gold lands on the link line
+# after MuJoCo's own -fuse-ld=lld and wins, and the host x86_64 /usr/bin/ld.gold
+# then dies on aarch64 objects:
+#     ld.gold: fatal error: crtbegin_so.o: unsupported ELF machine number 183
+# Measured with identical sources, NDK and build tree, varying only cmake:
+#     3.22.1 -> CMAKE_ANDROID_NDK_VERSION=''      IPO link opts=-fuse-ld=gold  FAILS
+#     3.26.0 -> CMAKE_ANDROID_NDK_VERSION='28.1'  IPO link opts=(empty)        links
+#     3.31.8 -> CMAKE_ANDROID_NDK_VERSION='28.1'  IPO link opts=(empty)        links
+# This is NOT the -fuse-ld=lld probe in MujocoLinkOptions.cmake: SUPPORTS_LLD is
+# 1 under all three. cmake_minimum_required(VERSION 3.22) in the CMakeLists here
+# is therefore necessary but not sufficient. 3.26.0 is the oldest version
+# actually proven on this tree; 3.23..3.25 were never tested, so the floor below
+# is set to what was measured rather than to a guess.
+#
+# ninja is exposed through a shim directory holding only a symlink, so adding it
+# to PATH cannot drag the SDK's cmake along with it. Override the SDK package
+# with ANDROID_CMAKE_VERSION=x.y.z; if none is installed we fall back to
+# whatever ninja is already on PATH. verify-host-tools reports which won.
+ANDROID_CMAKE_VERSION ?= 3.22.1
+ANDROID_SDK_NINJA := $(firstword $(wildcard $(ANDROID_SDK_ROOT)/cmake/$(ANDROID_CMAKE_VERSION)/bin/ninja) $(wildcard $(ANDROID_SDK_ROOT)/cmake/*/bin/ninja))
+HOST_TOOL_DIR := $(abspath build/hosttools)
+ifneq ($(ANDROID_SDK_NINJA),)
+export PATH := $(HOST_TOOL_DIR):$(PATH)
+endif
+
+OPERATOR_BUILD_TOOLS ?= $(HOME)/.local/opt/operator-build-tools
+REQUIRED_CMAKE_VERSION := 3.26
+EXPECTED_GODOT_VERSION := 4.5.1
+
+verify-host-tools:
+	@if [ -n "$(ANDROID_SDK_NINJA)" ]; then \
+	    mkdir -p "$(HOST_TOOL_DIR)"; \
+	    ln -sf "$(ANDROID_SDK_NINJA)" "$(HOST_TOOL_DIR)/ninja"; \
+	fi
+	@missing=""; \
+	for t in cmake ninja godot; do \
+	    command -v $$t >/dev/null 2>&1 || missing="$$missing $$t"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	    echo "[host] missing required build tool(s):$$missing" >&2; \
+	    echo "[host] ninja ships with the Android SDK CMake package:" >&2; \
+	    echo "[host]   sdkmanager \"cmake;$(ANDROID_CMAKE_VERSION)\"" >&2; \
+	    echo "[host] or install on the host:  sudo apt install ninja-build" >&2; \
+	    echo "[host] or source the toolchain: $(OPERATOR_BUILD_TOOLS)/env.sh" >&2; \
+	    echo "[host] NOTE: do not put the SDK's cmake on PATH — 3.22.1 misreads the" >&2; \
+	    echo "[host]       NDK version and forces MuJoCo onto host ld.gold. Needs >= $(REQUIRED_CMAKE_VERSION)." >&2; \
+	    exit 1; \
+	fi; \
+	cmake_v=$$(cmake --version 2>/dev/null | head -1 | awk '{print $$3}'); \
+	if [ "$$(printf '%s\n%s\n' "$(REQUIRED_CMAKE_VERSION)" "$$cmake_v" | sort -V | head -1)" != "$(REQUIRED_CMAKE_VERSION)" ]; then \
+	    echo "[host] cmake $$cmake_v ($$(command -v cmake)) is older than the required $(REQUIRED_CMAKE_VERSION)" >&2; \
+	    echo "[host] older cmake misreads CMAKE_ANDROID_NDK_VERSION and links MuJoCo with host ld.gold." >&2; \
+	    exit 1; \
+	fi; \
+	godot_v=$$(godot --version 2>/dev/null | head -1); \
+	case "$$godot_v" in \
+	    $(EXPECTED_GODOT_VERSION).stable*) ;; \
+	    *) echo "[host] WARNING: godot '$$godot_v' is not $(EXPECTED_GODOT_VERSION).stable — export templates may not match" >&2 ;; \
+	esac; \
+	echo "[host] cmake $$cmake_v ($$(command -v cmake))"; \
+	echo "[host] ninja $$(ninja --version) ($$(readlink -f "$$(command -v ninja)"))"; \
+	echo "[host] godot $$godot_v"
+
 apk_quest=build/quest/Operator.apk
 apk_quest_test=build/quest_test/Operator.apk
 apk_pico=build/pico/Operator.apk
@@ -82,7 +172,7 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest: verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest)
@@ -90,12 +180,12 @@ build-quest: deps verify-ndk setup-vendors-patched prepare-android-libs build-ah
 # Test-harness APK (export preset "Meta Quest Test"):
 # operator_feature_test_harness=true, includes res://tests/** and
 # res://scripts/test_support/**. Consumed by tests/xr_module_harness.sh.
-build-quest-test: deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest-test: verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_quest_test)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest Test,$(apk_quest_test))
 	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest_test)
 
-build-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-pico: verify-host-tools verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr prepare-capture-plugins build-retargeting verify-retargeting-lib
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 
@@ -103,12 +193,12 @@ build-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-c
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
 # 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
-build-mujoco-quest: deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
+build-mujoco-quest: verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
 	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest)
 
-build-mujoco-pico: verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr
+build-mujoco-pico: verify-host-tools verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
 
