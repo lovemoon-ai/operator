@@ -36,11 +36,11 @@
       "script": "res://tests/unit/capture/pico_rgb_resolution_options_test.gd"
     },
     {
-      "id": "capture.panel_debug_buttons",
+      "id": "capture.panel_groups",
       "level": "unit",
       "suite": "capture.pipeline",
       "module": "core/capture",
-      "script": "res://tests/unit/capture/capture_panel_debug_buttons_test.gd"
+      "script": "res://tests/unit/capture/capture_panel_groups_test.gd"
     },
     {
       "id": "launcher.navigation_policy",
