@@ -1,6 +1,6 @@
 extends RefCounted
-## Keeps the shared PICO APK on the established interaction contract: explicit
-## controller evidence wins, while bare-hand interaction remains the fallback.
+## Keeps the shared XR interaction contract stable: PICO uses its calibrated
+## palm ray, while non-PICO builds retain the OpenXR hand aim path.
 
 const CASE_ID := "contracts.pico_interaction_parity"
 const OperatorInteractionScript := preload("res://scripts/interaction/operator_interaction.gd")
@@ -79,6 +79,16 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.is_false(
 		SettingsInteractionRouterScript._is_finite_vector(Vector3(NAN, 0.0, 0.0)),
 		"invalid XR vectors must be rejected"
+	)
+	t.eq(
+		SettingsInteractionRouterScript._hand_ray_strategy_for_platform(true),
+		SettingsInteractionRouterScript.HAND_RAY_STRATEGY_PALM,
+		"PICO builds must use the palm-only hand ray"
+	)
+	t.eq(
+		SettingsInteractionRouterScript._hand_ray_strategy_for_platform(false),
+		SettingsInteractionRouterScript.HAND_RAY_STRATEGY_AIM,
+		"non-PICO builds must keep the OpenXR hand aim path"
 	)
 
 	var palm_basis := Basis(Vector3.UP, deg_to_rad(35.0)) \
