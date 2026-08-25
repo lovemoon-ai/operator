@@ -1323,6 +1323,7 @@ func _build_local_upload_menu(parent: Container) -> void:
 	_local_upload_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
 	_local_upload_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_local_upload_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_configure_settings_scrollbar(_local_upload_scroll)
 	_local_upload_view.add_child(_local_upload_scroll)
 
 	_local_upload_list = VBoxContainer.new()
