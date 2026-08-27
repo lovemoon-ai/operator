@@ -80,11 +80,24 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		//   adb shell setprop debug.xrobo.force_yuv_plane 1
 		// which falls back to Plan B's CPU plane copy + 3 L8 textures
 		// + GPU YUV->RGB shader (proven to display real frames).
+		private fun isPicoDevice(): Boolean {
+			return listOf(Build.MANUFACTURER, Build.BRAND, Build.PRODUCT, Build.DEVICE)
+				.any { value ->
+					val normalized = value.orEmpty().lowercase()
+					normalized.contains("pico") || normalized == "sparrow"
+				}
+		}
+
 		private val ahbNativeAvailable: Boolean = run {
 			val forceYuv = readSystemProp("debug.xrobo.force_yuv_plane") == "1"
 			if (forceYuv) {
 				Log.i(TAG, "debug.xrobo.force_yuv_plane=1 — disabling AHB path, " +
 					"using YUV plane upload (visible video, no zero-copy)")
+				return@run false
+			}
+			if (isPicoDevice()) {
+				Log.i(TAG, "PICO device detected — disabling unsupported Vulkan AHB import, " +
+					"using YUV plane upload")
 				return@run false
 			}
 			try {

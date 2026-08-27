@@ -135,6 +135,41 @@ func get_debug_state() -> String:
 	return _debug_pointer_state if debug_enabled else "disabled"
 
 
+func is_teleop_input_captured() -> bool:
+	var target := _pressed_target if _pressed_target != null else _hover_target
+	if not _target_captures_teleop_input(target):
+		return false
+	# A press only captures teleop input for targets that actually act on it.
+	# A passive display (the video panel) implements set_pointer_pressed() as a
+	# no-op, so treating a press on it as capture would neutralize every
+	# controller key -- including the grip deadman -- while the operator is
+	# merely pointing through it at the robot. Fall through to the scroll test
+	# so such a target still captures while it is being actively adjusted.
+	if _pressed_target != null and _target_captures_teleop_press(_pressed_target):
+		return true
+	var pointer := _active_controller_pointer()
+	return pointer != null and absf(_scroll_axis(pointer)) >= scroll_dead_zone
+
+
+static func _target_captures_teleop_input(target: Object) -> bool:
+	return (
+		target != null
+		and target.has_method("captures_teleop_input")
+		and bool(target.call("captures_teleop_input"))
+	)
+
+
+## Whether a pointer press on this target should capture teleop input.
+## Targets that do not declare captures_teleop_press() keep the historical
+## behavior of capturing on press.
+static func _target_captures_teleop_press(target: Object) -> bool:
+	if target == null:
+		return false
+	if not target.has_method("captures_teleop_press"):
+		return true
+	return bool(target.call("captures_teleop_press"))
+
+
 static func _is_finite_vector(value: Vector3) -> bool:
 	return is_finite(value.x) and is_finite(value.y) and is_finite(value.z)
 
@@ -235,12 +270,7 @@ func _update_controller_pointer() -> void:
 		_release_pressed_target()
 		_hand_pointer_down = false
 
-	var pointer: XRController3D = _controller_pointer_down
-	if pointer == null:
-		if _has_tracking(right_pointer):
-			pointer = right_pointer
-		elif _has_tracking(left_pointer):
-			pointer = left_pointer
+	var pointer := _active_controller_pointer()
 	if pointer == null:
 		_set_hover_target(null)
 		_hide_ui_pointer_visual()
@@ -264,6 +294,16 @@ func _update_controller_pointer() -> void:
 		_show_ui_pointer_visual(ray_origin, ray_direction, target, _controller_pointer_down != null)
 	else:
 		_show_idle_ui_pointer_visual(ray_origin, ray_direction)
+
+
+func _active_controller_pointer() -> XRController3D:
+	if _controller_pointer_down != null:
+		return _controller_pointer_down
+	if _has_tracking(right_pointer):
+		return right_pointer
+	if _has_tracking(left_pointer):
+		return left_pointer
+	return null
 
 
 func _update_hand_pointer() -> void:

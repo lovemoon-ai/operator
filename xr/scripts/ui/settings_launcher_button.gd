@@ -5,13 +5,17 @@ signal pressed
 
 const VIEWPORT_SIZE := Vector2i(160, 160)
 const BUTTON_DIAMETER := 132.0
+const NORMAL_QUAD_SIZE := Vector2(0.08, 0.08)
+const PREVIEW_QUAD_SIZE := Vector2(0.18, 0.18)
 
 var _button: Button
 
 
 func _init() -> void:
 	interaction_priority = 30
-	var viewport := _setup_viewport_layer("SettingsButtonViewport", VIEWPORT_SIZE, Vector2(0.08, 0.08), 3, 10.0)
+	var viewport := _setup_viewport_layer(
+		"SettingsButtonViewport", VIEWPORT_SIZE, NORMAL_QUAD_SIZE, 3, 10.0
+	)
 	_build_button(viewport)
 	visible = false
 
@@ -51,3 +55,9 @@ func _button_style(bg_color: Color) -> StyleBoxFlat:
 func _on_pressed() -> void:
 	_play_feedback("click", 0.0, self)
 	pressed.emit()
+
+
+func set_video_preview_mode(enabled: bool) -> void:
+	quad_size = PREVIEW_QUAD_SIZE if enabled else NORMAL_QUAD_SIZE
+	if _button != null:
+		_button.text = "×" if enabled else "⚙"

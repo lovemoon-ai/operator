@@ -113,6 +113,20 @@
       "script": "res://tests/unit/teleop/xrt_video_session_test.gd"
     },
     {
+      "id": "teleop.video_connection_controller",
+      "level": "unit",
+      "suite": "teleop.lifecycle",
+      "module": "app/modes",
+      "script": "res://tests/unit/teleop/video_connection_controller_test.gd"
+    },
+    {
+      "id": "teleop.live_video_panel_layout",
+      "level": "unit",
+      "suite": "teleop.visualization",
+      "module": "app/modes",
+      "script": "res://tests/unit/teleop/live_video_panel_layout_test.gd"
+    },
+    {
       "id": "teleop.pyoperator_real_headset_stream",
       "level": "device",
       "suite": "python.pyoperator",
