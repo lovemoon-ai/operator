@@ -119,7 +119,7 @@ GODOT_CPP_BUILD_DIR := $(DEPS_BUILD_DIR)/godot-cpp
 # Phony targets exposed to xr/Makefile
 # ---------------------------------------------------------------------------
 
-.PHONY: deps setup-vendors prepare-android-libs build-ahb build-godot-mujoco build-retargeting verify-retargeting-lib build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins build-pinocchio-gdext clean-addons
+.PHONY: deps deps-teleop setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-retargeting verify-retargeting-lib build-pico-openxr prepare-pico-openxr-loader clean-pico-openxr-loader-stage build-capture-plugins prepare-capture-plugins build-pinocchio-gdext clean-addons
 
 # ---------------------------------------------------------------------------
 # Third-party vendored addons
@@ -144,6 +144,12 @@ GODOT_CPP_BUILD_DIR := $(DEPS_BUILD_DIR)/godot-cpp
 #   edit UPSTREAM_TAG in addons/godotopenxrvendors/prepare.sh and re-run --force.
 deps:
 	$(DEPS_SCRIPT)
+
+# Minimum external source set for the teleop-only build profile. Inside Robot
+# remains supported, so MuJoCo and retargeting stay; capture-only FFmpeg,
+# SpatialMP4, and Pinocchio are deliberately not synchronized.
+deps-teleop:
+	$(DEPS_SCRIPT) godot-xr-tools godot-cpp mujoco-android retargeting
 
 setup-vendors:
 	@if [ ! -d "$(GODOT_XR_TOOLS_ADDON)" ]; then \

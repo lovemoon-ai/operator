@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: verify-host-tools verify-ndk setup-vendors-patched log build-quest build-quest-test build-pico build-androidxr build-mujoco-quest build-mujoco-pico install-quest install-pico install-androidxr run run-live-feed run-live-capture run-vr run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: verify-host-tools verify-ndk setup-vendors-patched log build-quest build-quest-teleop build-quest-test build-pico build-pico-teleop build-androidxr build-mujoco-quest build-mujoco-pico print-build-profile install-quest install-pico install-androidxr run run-live-feed run-live-capture run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 ADB?=$(firstword $(wildcard $(HOME)/Library/Android/sdk/platform-tools/adb) $(wildcard $(HOME)/Android/Sdk/platform-tools/adb) adb)
 ADB_BASE:=$(ADB)
@@ -16,6 +16,48 @@ PICO_SERIAL?=
 ADB_QUEST=$(if $(QUEST_SERIAL),$(ADB_BASE) -s $(QUEST_SERIAL),$(ADB_BASE))
 ADB_PICO=$(if $(PICO_SERIAL),$(ADB_BASE) -s $(PICO_SERIAL),$(ADB_BASE))
 GRADLE_USER_HOME?=$(HOME)/.gradle
+
+# Build profile controls which product surface and native dependencies are
+# included in this invocation. It selects *which export preset Godot runs* and
+# which native dependencies Make builds first:
+#
+#   OPERATOR_BUILD_PROFILE=teleop make build-pico
+#   make build-quest OPERATOR_BUILD_PROFILE=teleop
+#
+# `full` preserves the existing build exactly ("Meta Quest" / "Pico"). `teleop`
+# runs the paired Teleop presets ("Meta Quest Teleop" / "Pico Teleop"), which
+# keep both Outside and Inside Robot support (AHB video, MuJoCo, retargeting,
+# Pico tracking) while dropping the capture-only FFmpeg/AAR/hand-capture stack
+# and its resources. The presets are ordinary Godot presets: exporting one from
+# the editor produces the same APK as the matching make target. Nothing here
+# edits export_presets.cfg. validate_xr_features.py enforces that each Teleop
+# preset stays identical to its base except for features, quick entry and the
+# resource filter.
+OPERATOR_BUILD_PROFILE ?= full
+OPERATOR_BUILD_PROFILE := $(strip $(OPERATOR_BUILD_PROFILE))
+OPERATOR_QUICK_ENTRY ?=
+OPERATOR_QUICK_ENTRY := $(strip $(OPERATOR_QUICK_ENTRY))
+VALID_OPERATOR_BUILD_PROFILES := full teleop
+VALID_OPERATOR_QUICK_ENTRIES := launcher teleop ego_capture live_feed
+
+ifeq ($(filter $(OPERATOR_BUILD_PROFILE),$(VALID_OPERATOR_BUILD_PROFILES)),)
+$(error Unsupported OPERATOR_BUILD_PROFILE='$(OPERATOR_BUILD_PROFILE)'; expected one of: $(VALID_OPERATOR_BUILD_PROFILES))
+endif
+ifneq ($(OPERATOR_QUICK_ENTRY),)
+ifeq ($(filter $(OPERATOR_QUICK_ENTRY),$(VALID_OPERATOR_QUICK_ENTRIES)),)
+$(error Unsupported OPERATOR_QUICK_ENTRY='$(OPERATOR_QUICK_ENTRY)'; expected one of: $(VALID_OPERATOR_QUICK_ENTRIES))
+endif
+endif
+ifeq ($(OPERATOR_BUILD_PROFILE),teleop)
+ifneq ($(OPERATOR_QUICK_ENTRY),)
+ifeq ($(filter $(OPERATOR_QUICK_ENTRY),launcher teleop),)
+$(error OPERATOR_BUILD_PROFILE=teleop only supports OPERATOR_QUICK_ENTRY=launcher or teleop)
+endif
+endif
+endif
+
+export OPERATOR_BUILD_PROFILE
+export OPERATOR_QUICK_ENTRY
 
 # ---------------------------------------------------------------------------
 # Pinned Android NDK — single source of truth: android/build/config.gradle
@@ -150,19 +192,44 @@ release_manifest=android/build/src/release/AndroidManifest.xml
 
 define godot_export_release
 	@set -e; \
+	echo "[build-profile] profile=$(OPERATOR_BUILD_PROFILE) quick_entry=$(if $(OPERATOR_QUICK_ENTRY),$(OPERATOR_QUICK_ENTRY),preset) preset=$(2)"; \
 	tmp_manifest=$$(mktemp); \
 	cp $(release_manifest) $$tmp_manifest; \
-	restore_manifest() { \
+	restore_release_manifest() { \
 		status=$$?; \
 		trap - EXIT INT TERM; \
 		cp $$tmp_manifest $(release_manifest); \
 		rm -f $$tmp_manifest; \
 		exit $$status; \
 	}; \
-	trap restore_manifest EXIT INT TERM; \
+	trap restore_release_manifest EXIT INT TERM; \
 	set +e; \
 	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3)
 endef
+
+FULL_QUEST_BUILD_DEPS := verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+FULL_PICO_BUILD_DEPS := verify-host-tools verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr prepare-capture-plugins build-retargeting verify-retargeting-lib
+TELEOP_QUEST_BUILD_DEPS := verify-host-tools deps-teleop verify-ndk setup-vendors prepare-android-libs build-ahb build-godot-mujoco clean-pico-openxr-loader-stage build-retargeting verify-retargeting-lib
+TELEOP_PICO_BUILD_DEPS := verify-host-tools deps-teleop verify-ndk setup-vendors prepare-android-libs build-ahb build-godot-mujoco build-pico-openxr build-retargeting verify-retargeting-lib
+
+FULL_QUEST_EXPORT_PRESET := Meta Quest
+FULL_PICO_EXPORT_PRESET := Pico
+TELEOP_QUEST_EXPORT_PRESET := Meta Quest Teleop
+TELEOP_PICO_EXPORT_PRESET := Pico Teleop
+
+ifeq ($(OPERATOR_BUILD_PROFILE),teleop)
+QUEST_BUILD_DEPS := $(TELEOP_QUEST_BUILD_DEPS)
+PICO_BUILD_DEPS := $(TELEOP_PICO_BUILD_DEPS)
+QUEST_EXPORT_PRESET := $(TELEOP_QUEST_EXPORT_PRESET)
+PICO_EXPORT_PRESET := $(TELEOP_PICO_EXPORT_PRESET)
+PROFILE_CAPTURE_STACK := disabled
+else
+QUEST_BUILD_DEPS := $(FULL_QUEST_BUILD_DEPS)
+PICO_BUILD_DEPS := $(FULL_PICO_BUILD_DEPS)
+QUEST_EXPORT_PRESET := $(FULL_QUEST_EXPORT_PRESET)
+PICO_EXPORT_PRESET := $(FULL_PICO_EXPORT_PRESET)
+PROFILE_CAPTURE_STACK := enabled
+endif
 
 # Plugin/library build rules (setup-vendors, prepare-android-libs, build-ahb,
 # build-capture-plugins, prepare-capture-plugins, clean-addons).
@@ -172,35 +239,59 @@ include makefiles/Makefile.addons
 # Godot export targets
 # ---------------------------------------------------------------------------
 
-build-quest: verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-quest: $(QUEST_BUILD_DEPS)
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
-	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
+	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),$(QUEST_EXPORT_PRESET),$(apk_quest))
 	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest)
+
+build-quest-teleop:
+	$(MAKE) build-quest OPERATOR_BUILD_PROFILE=teleop OPERATOR_QUICK_ENTRY=teleop
 
 # Test-harness APK (export preset "Meta Quest Test"):
 # operator_feature_test_harness=true, includes res://tests/** and
 # res://scripts/test_support/**. Consumed by tests/xr_module_harness.sh.
-build-quest-test: verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib
+# `override` is required, not stylistic: a plain target-specific assignment
+# loses to a command-line OPERATOR_BUILD_PROFILE=teleop, which would silently
+# strip the harness out of the test APK.
+build-quest-test: override OPERATOR_BUILD_PROFILE := full
+build-quest-test: override OPERATOR_QUICK_ENTRY := launcher
+build-quest-test: $(FULL_QUEST_BUILD_DEPS)
 	@mkdir -p $(dir $(apk_quest_test)) $(GRADLE_USER_HOME)
 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest Test,$(apk_quest_test))
 	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest_test)
 
-build-pico: verify-host-tools verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr prepare-capture-plugins build-retargeting verify-retargeting-lib
+build-pico: $(PICO_BUILD_DEPS)
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
-	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
+	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),$(PICO_EXPORT_PRESET),$(apk_pico))
+
+build-pico-teleop:
+	$(MAKE) build-pico OPERATOR_QUICK_ENTRY=teleop OPERATOR_BUILD_PROFILE=teleop
+
+print-build-profile:
+	@echo "OPERATOR_BUILD_PROFILE=$(OPERATOR_BUILD_PROFILE)"
+	@echo "OPERATOR_QUICK_ENTRY=$(if $(OPERATOR_QUICK_ENTRY),$(OPERATOR_QUICK_ENTRY),(preset default))"
+	@echo "QUEST_EXPORT_PRESET=$(QUEST_EXPORT_PRESET)"
+	@echo "PICO_EXPORT_PRESET=$(PICO_EXPORT_PRESET)"
+	@echo "CAPTURE_STACK=$(PROFILE_CAPTURE_STACK)"
+	@echo "QUEST_BUILD_DEPS=$(QUEST_BUILD_DEPS)"
+	@echo "PICO_BUILD_DEPS=$(PICO_BUILD_DEPS)"
 
 # build-androidxr: setup-vendors prepare-android-libs build-ahb build-hand-capture clean-pico-openxr-loader-stage prepare-capture-plugins
 # 	@mkdir -p $(dir $(apk_androidxr)) $(GRADLE_USER_HOME)
 # 	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Glass XR,$(apk_androidxr))
 
+# Full-stack MuJoCo bring-up targets. They always build and export the full
+# presets, so they pin the profile rather than inheriting a teleop invocation.
+build-mujoco-quest: override OPERATOR_BUILD_PROFILE := full
 build-mujoco-quest: verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage
 	@mkdir -p $(dir $(apk_quest)) $(GRADLE_USER_HOME)
-	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),Meta Quest,$(apk_quest))
+	$(call godot_export_release,GRADLE_USER_HOME=$(GRADLE_USER_HOME),$(FULL_QUEST_EXPORT_PRESET),$(apk_quest))
 	./addons/godotopenxrvendors/prepare.sh --check-apk $(apk_quest)
 
+build-mujoco-pico: override OPERATOR_BUILD_PROFILE := full
 build-mujoco-pico: verify-host-tools verify-ndk setup-vendors prepare-android-libs build-ahb build-hand-capture build-godot-mujoco build-pico-openxr
 	@mkdir -p $(dir $(apk_pico)) $(GRADLE_USER_HOME)
-	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico,$(apk_pico))
+	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),$(FULL_PICO_EXPORT_PRESET),$(apk_pico))
 
 # ---------------------------------------------------------------------------
 # Device install / run / ship
@@ -238,9 +329,11 @@ run-live-feed:
 
 run-live-capture: run-live-feed
 
-run-vr:
-	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode vr
-	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
+# There is deliberately no run-vr target. `operator_feature_mode_vr` has never
+# been true in any preset, so the launcher refuses the `vr` route and the intent
+# could only ever fail. Enabling that one option in a preset is the whole
+# switch: it restores the launcher card, the `operator.mode vr` intent, and the
+# scene is already packed in the full presets. Add the target back then.
 
 run-teleop:
 	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode teleop

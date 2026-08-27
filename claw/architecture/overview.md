@@ -167,8 +167,35 @@ XR live-feed mode
 ## Current XR Modes
 
 `xr/project.godot` boots `res://scenes/main.tscn`, which attaches
-`res://scripts/app/launcher/mode_select.gd`. The launcher opens one of these
-mode scenes:
+`res://scripts/app/launcher/mode_select.gd`. By default it shows the launcher;
+an Android export preset can set `operator_quick_entry` to `teleop`,
+`ego_capture`, or `live_feed` to route the process's first launcher visit
+directly into that mode. Explicit `operator.mode` launch arguments take
+priority. Returning from a mode still shows the launcher instead of reopening
+the configured quick entry.
+
+The quick-entry target must have its matching `operator_feature_mode_*` option
+enabled in the same export preset.
+
+Every mode route — a launcher card, an `operator.mode` launch argument, and the
+quick entry itself — is gated on `operator_feature_mode_*` alone. A mode whose
+feature is off in the running build cannot be reached by any of them.
+
+Build-time specialization is a choice of preset, not a rewrite of one.
+`OPERATOR_BUILD_PROFILE=teleop` makes Make export the `Meta Quest Teleop` /
+`Pico Teleop` preset instead of `Meta Quest` / `Pico`, and build only the native
+dependencies those presets keep. The Teleop presets enable Teleop and Exit,
+set `operator_quick_entry` to `teleop`, and drop the capture, live-feed and VR
+resources plus the Android capture, QR, SpatialMP4/FFmpeg, Live Push and
+hand-capture dependencies. Nothing mutates `export_presets.cfg`, so exporting a
+Teleop preset from the Godot editor produces the same APK as the make target.
+`OPERATOR_QUICK_ENTRY` overrides the preset's startup route for one build and
+nothing else. `cicd/validate_xr_features.py` keeps each Teleop preset identical
+to its full counterpart apart from name, resource filter and `operator_*`
+options, and rejects a resource filter that drops something the retained
+surface still resolves — by path or by `class_name`.
+
+The launcher opens one of these mode scenes:
 
 | Mode | Scene | Script |
 | --- | --- | --- |
@@ -179,6 +206,11 @@ mode scenes:
 | VR | `xr/scenes/vr_mode.tscn` | `xr/scripts/app/modes/vr_mode.gd` |
 | MuJoCo smoke | `xr/scenes/mujoco/mujoco_device_test.tscn` | `xr/scripts/app/modes/mujoco/mujoco_device_test.gd` |
 | Module tests | `xr/scenes/test_runner.tscn` | `xr/scripts/test_support/runner/test_runner_root.gd` |
+
+VR is present but unreachable: no preset has ever enabled
+`operator_feature_mode_vr`, so it has no launcher card and its intent is
+refused. The full presets still pack the scene, so enabling that single option
+is all that is needed to bring it back.
 
 ## Documentation Map
 

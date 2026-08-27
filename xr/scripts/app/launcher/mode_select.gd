@@ -28,6 +28,7 @@ const FALLBACK_EYE_HEIGHT := 1.5
 const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
 const CardSceneTemplate := preload("res://scenes/ui/mode_select_ui.tscn")
 const CardUIScript := preload("res://scripts/ui/mode_select_ui.gd")
+const QuickEntryConfigScript := preload("res://scripts/app/launcher/quick_entry_config.gd")
 
 const CARD_VIEWPORT_SIZE := Vector2(420, 540)
 const CARD_SCREEN_SIZE := Vector2(0.30, 0.38)
@@ -86,11 +87,31 @@ func _ready() -> void:
 			_change_scene(TEST_RUNNER_SCENE)
 			return
 
-	var automation_mode := _get_automation_mode()
-	if not automation_mode.is_empty():
-		print("[Operator] Automation mode selected: %s" % automation_mode)
-		_open_mode(automation_mode)
+	var automation_request := _get_automation_mode_request()
+	var automation_requested := bool(automation_request["requested"])
+	var automation_mode := String(automation_request["mode"])
+	# The quick entry is only read when nothing was requested explicitly, so an
+	# automation run never burns the process's one quick-entry visit.
+	var quick_entry_mode := ""
+	if not automation_requested:
+		quick_entry_mode = QuickEntryConfigScript.consume_for_process(
+			get_tree().root, QuickEntryConfigScript.from_export_tags())
+	var startup_mode := resolve_startup_route(
+		automation_mode, quick_entry_mode, _features, automation_requested)
+	if not startup_mode.is_empty() and _open_mode(startup_mode):
+		if startup_mode == automation_mode:
+			print("[Operator] Automation mode selected: %s" % startup_mode)
+		else:
+			print("[Operator] Export quick entry selected: %s" % startup_mode)
 		return
+	if automation_requested and startup_mode.is_empty():
+		var requested_mode := String(automation_request["raw_mode"])
+		if requested_mode.is_empty():
+			requested_mode = "<empty>"
+		push_error(
+			"[Operator] Requested mode '%s' is not available in this build — "
+			% requested_mode + "showing the launcher"
+		)
 
 	_configure_passthrough()
 	_spawn_cards()
@@ -148,17 +169,21 @@ func _all_launcher_card_modes() -> Array:
 ## flag. In editor/dev runs FeatureSet falls back to registry defaults
 ## (ego_capture and exit are on), so the launcher is never empty.
 func _launcher_card_feature_enabled(mode: String) -> bool:
+	return _mode_feature_enabled(mode, _features)
+
+
+static func _mode_feature_enabled(mode: String, features: FeatureSet) -> bool:
 	match mode:
 		MODE_TELEOP:
-			return _features.enabled(OperatorFeature.MODE_TELEOP)
+			return features.enabled(OperatorFeature.MODE_TELEOP)
 		MODE_EGO_CAPTURE:
-			return _features.enabled(OperatorFeature.MODE_EGO_CAPTURE)
+			return features.enabled(OperatorFeature.MODE_EGO_CAPTURE)
 		MODE_LIVE_FEED:
-			return _features.enabled(OperatorFeature.MODE_LIVE_FEED)
+			return features.enabled(OperatorFeature.MODE_LIVE_FEED)
 		MODE_VR:
-			return _features.enabled(OperatorFeature.MODE_VR)
+			return features.enabled(OperatorFeature.MODE_VR)
 		MODE_EXIT:
-			return _features.enabled(OperatorFeature.MODE_EXIT)
+			return features.enabled(OperatorFeature.MODE_EXIT)
 		_:
 			return false
 
@@ -422,20 +447,66 @@ func _on_card_selected(mode: String) -> void:
 	_open_mode(mode)
 
 
-func _open_mode(mode: String) -> void:
+## Every route into a mode goes through here: launcher cards, the
+## `operator.mode` intent/CLI override and the export quick entry. Returns
+## true when the launcher handed control over (scene change or app quit), so
+## a refused route falls back to showing the launcher instead of a blank scene.
+func _open_mode(mode: String) -> bool:
 	if _changing_scene:
-		return
+		return false
 	var normalized := _normalize_mode(mode)
+	if normalized.is_empty():
+		push_warning("[Operator] Ignoring unknown mode: %s" % mode)
+		return false
+	if not _mode_available(normalized, _features):
+		# A Teleop-only APK ships no capture scenes and no capture native
+		# libraries, so an external intent must not be able to route into one.
+		push_error(
+			"[Operator] Mode '%s' is not available in this build (operator_feature_mode_%s is off)"
+			% [normalized, normalized]
+		)
+		return false
 	if normalized == MODE_EXIT:
 		print("[Operator] Exit card pressed — quitting app")
 		_hide_all_cards()
 		get_tree().quit()
-		return
+		return true
 	var path := _scene_for_mode(normalized)
 	if path.is_empty():
 		push_warning("[Operator] Ignoring unknown mode: %s" % mode)
-		return
+		return false
 	_change_scene(path)
+	return true
+
+
+## MODE_MUJOCO is the one route without an `operator_feature_mode_*` flag: it
+## is an internal bring-up scene, and its native library ships in every build
+## profile.
+static func _mode_available(mode: String, features: FeatureSet) -> bool:
+	if mode == MODE_MUJOCO:
+		return true
+	return _mode_feature_enabled(mode, features)
+
+
+## Picks the startup route for a cold launcher visit; "" means show the
+## launcher. An explicit `operator.mode` request outranks the export quick
+## entry, and a request this build cannot serve falls back to the launcher
+## rather than to the quick entry — a device test that asked for ego_capture
+## must not look like it started by landing in whatever mode the preset opens
+## on.
+static func resolve_startup_route(
+	automation_mode: String,
+	quick_entry_mode: String,
+	features: FeatureSet,
+	automation_requested: bool
+) -> String:
+	if automation_requested:
+		if not automation_mode.is_empty() and _mode_available(automation_mode, features):
+			return automation_mode
+		return ""
+	if not quick_entry_mode.is_empty() and _mode_available(quick_entry_mode, features):
+		return quick_entry_mode
+	return ""
 
 
 func _change_scene(path: String) -> void:
@@ -478,32 +549,39 @@ func _scene_for_mode(mode: String) -> String:
 			return ""
 
 
-func _get_automation_mode() -> String:
-	var mode := _mode_from_args(OS.get_cmdline_user_args())
-	if mode.is_empty():
-		mode = _mode_from_args(OS.get_cmdline_args())
-	if mode.is_empty():
-		mode = _mode_from_environment()
-	return _normalize_mode(mode)
+func _get_automation_mode_request() -> Dictionary:
+	var request := _mode_request_from_args(OS.get_cmdline_user_args())
+	if request.is_empty():
+		request = _mode_request_from_args(OS.get_cmdline_args())
+	if request.is_empty():
+		request = _mode_request_from_environment()
+	if request.is_empty():
+		return {"requested": false, "raw_mode": "", "mode": ""}
+	var raw_mode := String(request["raw_mode"])
+	return {
+		"requested": true,
+		"raw_mode": raw_mode,
+		"mode": _normalize_mode(raw_mode),
+	}
 
 
-func _mode_from_args(args: PackedStringArray) -> String:
+func _mode_request_from_args(args: PackedStringArray) -> Dictionary:
 	for i in range(args.size()):
 		var arg := String(args[i]).strip_edges()
 		if arg == "--operator-mode" or arg == "--mode":
 			if i + 1 < args.size():
-				return String(args[i + 1]).strip_edges()
+				return {"raw_mode": String(args[i + 1]).strip_edges()}
 			push_warning("[Operator] %s requires a value" % arg)
-			return ""
+			return {"raw_mode": ""}
 		if arg.begins_with("--operator-mode="):
-			return arg.substr("--operator-mode=".length()).strip_edges()
+			return {"raw_mode": arg.substr("--operator-mode=".length()).strip_edges()}
 		if arg.begins_with("--mode="):
-			return arg.substr("--mode=".length()).strip_edges()
+			return {"raw_mode": arg.substr("--mode=".length()).strip_edges()}
 		if arg.begins_with("operator.mode="):
-			return arg.substr("operator.mode=".length()).strip_edges()
+			return {"raw_mode": arg.substr("operator.mode=".length()).strip_edges()}
 		if arg.begins_with("operator_mode="):
-			return arg.substr("operator_mode=".length()).strip_edges()
-	return ""
+			return {"raw_mode": arg.substr("operator_mode=".length()).strip_edges()}
+	return {}
 
 
 ## Intent extras surface as command-line args (same mechanism as
@@ -523,11 +601,11 @@ func _requested_test_suite() -> String:
 	return ""
 
 
-func _mode_from_environment() -> String:
+func _mode_request_from_environment() -> Dictionary:
 	for key in ["OPERATOR_MODE", "XR_OPERATOR_MODE"]:
 		if OS.has_environment(key):
-			return OS.get_environment(key).strip_edges()
-	return ""
+			return {"raw_mode": OS.get_environment(key).strip_edges()}
+	return {}
 
 
 func _normalize_mode(raw_mode: String) -> String:
