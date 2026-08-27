@@ -19,6 +19,7 @@ var _enable_latched: Dictionary = {}  # enable target -> bool (hysteresis state)
 # release delay: engage above PRESS, drop below RELEASE, hold state in between.
 const ENABLE_PRESS_THRESHOLD := 0.6
 const ENABLE_RELEASE_THRESHOLD := 0.4
+const HandGestureMapperScript = preload("res://scripts/input/hand_gesture_mapper.gd")
 
 # --- Driving hand -------------------------------------------------------------
 # One controller drives one arm. Rather than hard-coding "right" (which breaks
@@ -75,6 +76,9 @@ func is_deadman_engaged_for_hand(hand: int) -> bool:
 # several times per frame. That cost lands in _process, which is also where
 # commands are sent, so it shows up directly as a lower delivered command rate.
 var _input_cache: Dictionary = {}
+var _hand_target_cache: Dictionary = {}
+var _hand_joint_cache: Dictionary = {}
+var _hand_control_unlocked := false
 
 
 func _cached_input(tracking: TrackingProvider, hand: int) -> Dictionary:
@@ -114,6 +118,7 @@ func configure(descriptor: Dictionary) -> void:
 	_mappings = descriptor.get("input_mapping", [])
 	_dead_zones.clear()
 	_button_targets.clear()
+	_hand_control_unlocked = false
 	# Build dead zone lookup from control_schema.axes
 	var schema = descriptor.get("control_schema", {})
 	for axis_def in schema.get("axes", []):
@@ -125,6 +130,8 @@ func configure(descriptor: Dictionary) -> void:
 func collect_command(tracking: TrackingProvider) -> Dictionary:
 	# Fresh inputs each command; the cache only dedupes within this one frame.
 	_input_cache.clear()
+	_hand_target_cache.clear()
+	_hand_joint_cache.clear()
 	# Resolve the driving hand BEFORE reading any source, so every `active_*`
 	# lookup in this frame refers to the same controller.
 	_update_driving_hand(tracking)
@@ -188,8 +195,13 @@ func collect_command(tracking: TrackingProvider) -> Dictionary:
 
 
 func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
+	var hand_binding: Array = HandGestureMapperScript.source_binding(source)
+	if hand_binding.size() == 2:
+		return _get_hand_target(tracking, int(hand_binding[0]), int(hand_binding[1]))
 	# Map all possible VR input sources
 	match source:
+		"left_hand_clutch": return _get_hand_clutch(tracking, HAND_LEFT)
+		"right_hand_clutch": return _get_hand_clutch(tracking, HAND_RIGHT)
 		"left_joystick_x": return _get_input(tracking, 0, "joystick").x
 		"left_joystick_y": return _get_input(tracking, 0, "joystick").y
 		"right_joystick_x": return _get_input(tracking, 1, "joystick").x
@@ -221,6 +233,58 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"active_button_b": return _get_input_bool(tracking, _driving_hand, "by_button")
 		"active_hand_joints": return tracking.get_hand_joints(_driving_hand)
 	return null
+
+
+func _get_hand_target(tracking: TrackingProvider, hand: int, channel: int) -> float:
+	if not _hand_target_cache.has(hand):
+		_hand_target_cache[hand] = HandGestureMapperScript.targets_from_tracking(
+			_cached_hand_joints(tracking, hand),
+			_cached_input(tracking, hand)
+		)
+	var targets: PackedFloat64Array = _hand_target_cache[hand]
+	if channel < 0 or channel >= targets.size():
+		return 0.0
+	return clampf(float(targets[channel]), 0.0, 1.0)
+
+
+func _get_hand_clutch(tracking: TrackingProvider, hand: int) -> float:
+	var joints := _cached_hand_joints(tracking, hand)
+	if not _hand_control_unlocked:
+		return 0.0
+	return 1.0 if HandGestureMapperScript.has_required_joints(joints) else 0.0
+
+
+func set_hand_control_unlocked(unlocked: bool) -> void:
+	_hand_control_unlocked = unlocked
+	if not unlocked:
+		for target in _enable_latched:
+			if _is_enable_target(str(target)):
+				_enable_latched[target] = false
+
+
+func is_hand_control_unlocked() -> bool:
+	return _hand_control_unlocked
+
+
+func get_hand_control_state(hand: int) -> Dictionary:
+	var joints_v: Variant = _hand_joint_cache.get(hand, [])
+	var joints: Array = joints_v if joints_v is Array else []
+	var wrist_position: Variant = HandGestureMapperScript.wrist_position(joints)
+	return {
+		"tracked": wrist_position is Vector3,
+		"position": wrist_position,
+		"index_tip": HandGestureMapperScript.index_tip_position(joints),
+		"wrist_button_transform": HandGestureMapperScript.wrist_button_transform(joints),
+		"control_enabled": is_deadman_engaged_for_hand(hand),
+	}
+
+
+func _cached_hand_joints(tracking: TrackingProvider, hand: int) -> Array:
+	if _hand_joint_cache.has(hand):
+		return _hand_joint_cache[hand]
+	var joints: Array = tracking.get_hand_joints(hand)
+	_hand_joint_cache[hand] = joints
+	return joints
 
 
 ## Scaled numeric form of a VR source, so a caller can apply its own thresholds

@@ -8,7 +8,8 @@ extends Node
 ##   "service": "xrobo-agent",
 ##   "name": "Robot-1",
 ##   "tcp_port": 63901,
-##   "video_port": 12345
+##   "video_port": 12345,
+##   "telemetry_port": 63903
 ## }
 
 signal robot_found(name: String, ip: String, pose_port: int, video_port: int, device_type: String, device_name: String)
@@ -20,7 +21,7 @@ const ROBOT_TIMEOUT: float = 10.0
 
 ## UDP peer for receiving broadcasts
 var _udp_peer: PacketPeerUDP = null
-## Known robots: name -> { ip, pose_port, video_port, last_seen }
+## Known robots: name -> { ip, pose_port, video_port, telemetry_port, last_seen }
 var _known_robots: Dictionary = {}
 ## Whether scanning is active
 var _scanning: bool = false
@@ -58,6 +59,7 @@ func _process_announcement(text: String, sender_ip: String) -> void:
 	var robot_name: String = json.get("name", "Unknown Robot")
 	var tcp_port: int = json.get("tcp_port", 0)
 	var video_port: int = json.get("video_port", 0)
+	var telemetry_port: int = json.get("telemetry_port", tcp_port + 2)
 	var device_type: String = json.get("device_type", "")
 	var device_name: String = json.get("device_name", "")
 
@@ -65,17 +67,30 @@ func _process_announcement(text: String, sender_ip: String) -> void:
 		return
 
 	var is_new := not _known_robots.has(robot_name)
+	var previous: Dictionary = _known_robots.get(robot_name, {})
+	var endpoint_changed := (
+		not is_new
+		and (
+			str(previous.get("ip", "")) != sender_ip
+			or int(previous.get("pose_port", 0)) != tcp_port
+			or int(previous.get("video_port", 0)) != video_port
+			or int(previous.get("telemetry_port", 0)) != telemetry_port
+			or str(previous.get("device_type", "")) != device_type
+			or str(previous.get("device_name", "")) != device_name
+		)
+	)
 
 	_known_robots[robot_name] = {
 		"ip": sender_ip,
 		"pose_port": tcp_port,
 		"video_port": video_port,
+		"telemetry_port": telemetry_port,
 		"device_type": device_type,
 		"device_name": device_name,
 		"last_seen": Time.get_ticks_msec() / 1000.0,
 	}
 
-	if is_new:
+	if is_new or endpoint_changed:
 		print("[Discovery] Robot found: %s at %s:%d (type: %s)" % [robot_name, sender_ip, tcp_port, device_type])
 		robot_found.emit(robot_name, sender_ip, tcp_port, video_port, device_type, device_name)
 

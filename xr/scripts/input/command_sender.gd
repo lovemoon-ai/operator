@@ -63,6 +63,18 @@ func _send_command(command: Dictionary) -> Error:
 	return tcp_handler.send_command("DeviceCommand", json_bytes)
 
 
+func send_immediate_command() -> Error:
+	if not control_mode or not tracking_provider or not _transport_ready():
+		return ERR_CONNECTION_ERROR
+	var command := control_mode.collect_command(tracking_provider)
+	_report_enable_transition(command)
+	_report_active_command_summary(command)
+	var result := _send_command(command)
+	if result == OK:
+		command_sent.emit(command)
+	return result
+
+
 func set_sending(enabled: bool) -> void:
 	_sending = enabled
 	_time_since_last_send = 0.0

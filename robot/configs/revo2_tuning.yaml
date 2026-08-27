@@ -1,0 +1,10 @@
+adapter_link:
+  endpoint: "tcp:127.0.0.1:63910"
+
+bridge:
+  name: "Revo2 Hand"
+  pose_port: 63901
+  discovery_port: 63900
+  pose_udp_port: 63902
+  telemetry_port: 63903
+  video: null
