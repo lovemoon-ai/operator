@@ -64,6 +64,76 @@
       "script": "res://tests/unit/teleop/sdk_mode_suspension_test.gd"
     },
     {
+      "id": "teleop.xrt_protocol",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_protocol_test.gd"
+    },
+    {
+      "id": "teleop.xrt_client",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_client_test.gd"
+    },
+    {
+      "id": "teleop.xr_tracking_sampler",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xr_tracking_sampler_test.gd"
+    },
+    {
+      "id": "teleop.xrt_tracking_encoder",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_tracking_encoder_test.gd"
+    },
+    {
+      "id": "teleop.xrt_sender",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_sender_test.gd"
+    },
+    {
+      "id": "teleop.xrt_target_lifecycle",
+      "level": "unit",
+      "suite": "teleop.lifecycle",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_target_lifecycle_test.gd"
+    },
+    {
+      "id": "teleop.xrt_camera_protocol",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_camera_protocol_test.gd"
+    },
+    {
+      "id": "teleop.xrt_video_session",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_video_session_test.gd"
+    },
+    {
+      "id": "teleop.video_connection_controller",
+      "level": "unit",
+      "suite": "teleop.lifecycle",
+      "module": "app/modes",
+      "script": "res://tests/unit/teleop/video_connection_controller_test.gd"
+    },
+    {
+      "id": "teleop.live_video_panel_layout",
+      "level": "unit",
+      "suite": "teleop.visualization",
+      "module": "app/modes",
+      "script": "res://tests/unit/teleop/live_video_panel_layout_test.gd"
+    },
+    {
       "id": "teleop.pyoperator_real_headset_stream",
       "level": "device",
       "suite": "python.pyoperator",

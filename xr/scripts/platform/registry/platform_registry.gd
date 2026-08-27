@@ -15,6 +15,23 @@ const QrProviderScript := preload("res://scripts/platform/registry/qr_provider.g
 ## Dependency rule: app/core/sinks code never references vendor singleton
 ## names — it goes through this registry (or an injected adapter).
 
+## Outcome of apply_boundary_policy(). NOT_APPLICABLE ("this platform has no
+## boundary call to make, and needs none") must stay distinguishable from
+## FAILED ("there was a call to make and it did not work") so XRSessionPolicy
+## warns about the second and stays quiet about the first. PARTIAL covers the
+## PICO subset runtimes: guardian disabled, mesh possibly still drawn.
+const BOUNDARY_NOT_APPLICABLE := 0
+const BOUNDARY_APPLIED := 1
+const BOUNDARY_PARTIAL := 2
+const BOUNDARY_FAILED := 3
+
+const _BOUNDARY_STATUS_NAMES := {
+	BOUNDARY_NOT_APPLICABLE: "not_applicable",
+	BOUNDARY_APPLIED: "applied",
+	BOUNDARY_PARTIAL: "partial",
+	BOUNDARY_FAILED: "failed",
+}
+
 static var _shared: Object
 
 var _pico_adapter: Object
@@ -154,6 +171,92 @@ func live_server_plugin() -> Object:
 
 func boundary_extension() -> Object:
 	return _quest_adapter.boundary_extension()
+
+
+static func boundary_status_to_string(status: int) -> String:
+	return str(_BOUNDARY_STATUS_NAMES.get(status, "unknown"))
+
+
+## Applies the XR safety-boundary policy on every vendor adapter that has one.
+## Returns {"status": int (one of BOUNDARY_*), "detail": String}.
+##
+## The four outcomes are deliberately distinct. Collapsing them into a single
+## bool (`pico_applied or quest_applied`) made "no boundary API on this
+## platform" indistinguishable from "the call failed" — which is why the app
+## used to warn about a missing API on Quest, where the guardian is already
+## suppressed by a manifest feature and there is nothing to call — and it also
+## hid a real failure whenever the other adapter succeeded.
+func apply_boundary_policy(visible: bool) -> Dictionary:
+	var results: Array[Dictionary] = [
+		_pico_boundary_result(visible),
+		_quest_boundary_result(visible),
+	]
+	var failed := false
+	var partial := false
+	var applied := false
+	for result in results:
+		if not bool(result.get("applicable", false)):
+			continue
+		if not bool(result.get("applied", false)):
+			failed = true
+		elif not bool(result.get("complete", false)):
+			partial = true
+		else:
+			applied = true
+	var status := BOUNDARY_NOT_APPLICABLE
+	if failed:
+		status = BOUNDARY_FAILED
+	elif partial:
+		status = BOUNDARY_PARTIAL
+	elif applied:
+		status = BOUNDARY_APPLIED
+	var notes: PackedStringArray = PackedStringArray()
+	for result in results:
+		# Adapters for absent hardware would only add noise to the log line.
+		if bool(result.get("applicable", false)) or bool(result.get("present", false)):
+			notes.append("%s: %s" % [result.get("provider", "?"), result.get("reason", "")])
+	if notes.is_empty():
+		notes.append("no vendor boundary API on this device")
+	return {"status": status, "detail": ", ".join(notes)}
+
+
+## PICO drives the boundary through the native GDExtension bridge. The bridge's
+## bool return only covers the required xrSetVirtualBoundaryEnablePICO call, so
+## the companion status getter is what tells "guardian off, mesh gone" from
+## "guardian off, mesh may still be drawn".
+func _pico_boundary_result(visible: bool) -> Dictionary:
+	var bridge: Object = _pico_adapter.openxr_bridge_native()
+	if bridge == null or not bridge.has_method("set_boundary_visible"):
+		return {
+			"provider": "pico", "present": false, "applicable": false, "applied": false,
+			"complete": not visible, "reason": "no PICO OpenXR bridge in this runtime",
+		}
+	if not bool(_pico_adapter.set_boundary_visible(visible)):
+		return {
+			"provider": "pico", "present": true, "applicable": true, "applied": false,
+			"complete": false, "reason": "XR_PICO_virtual_boundary enable call did not apply",
+		}
+	var complete := true
+	var reason := "XR_PICO_virtual_boundary applied"
+	if bridge.has_method("get_boundary_status"):
+		var native_status: Dictionary = bridge.call("get_boundary_status")
+		complete = bool(native_status.get("complete", true))
+		if not complete:
+			reason = "guardian disabled, but the best-effort visibility setters did not all apply (visible=%s see_through=%s)" % [
+				native_status.get("visible_applied", false),
+				native_status.get("see_through_applied", false),
+			]
+	return {
+		"provider": "pico", "present": true, "applicable": true, "applied": true,
+		"complete": complete, "reason": reason,
+	}
+
+
+func _quest_boundary_result(visible: bool) -> Dictionary:
+	var result: Dictionary = _quest_adapter.apply_boundary_policy(visible)
+	result["provider"] = "quest"
+	result["present"] = _quest_adapter.is_present()
+	return result
 
 
 func depth_extension_info() -> Dictionary:

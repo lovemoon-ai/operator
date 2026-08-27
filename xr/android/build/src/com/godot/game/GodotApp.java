@@ -74,6 +74,9 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_TELEOP_SYNTHETIC = "operator.teleop.synthetic";
 	private static final String EXTRA_TELEOP_HOST = "operator.teleop.host";
 	private static final String EXTRA_TELEOP_PORT = "operator.teleop.port";
+	private static final String EXTRA_TELEOP_PROTOCOL = "operator.teleop.protocol";
+	private static final String EXTRA_XROBOT_TOOLKIT_DEVICE_SN = "operator.teleop.xrobot_toolkit_device_sn";
+	private static final String EXTRA_TELEOP_PICO_BODY_CALIBRATE = "operator.teleop.pico_body_calibrate";
 	private static final String EXTRA_TELEOP_DURATION = "operator.teleop.duration";
 	// Inside Robot startup (in-headset embodiment). Without these the Inside
 	// path can only be reached by hand in the headset, so its startup cannot
@@ -160,6 +163,9 @@ public class GodotApp extends GodotActivity {
 		appendIntentExtraArg(args, EXTRA_TELEOP_SYNTHETIC, "--operator-teleop-synthetic");
 		appendIntentExtraArg(args, EXTRA_TELEOP_HOST, "--operator-teleop-host");
 		appendIntentExtraArg(args, EXTRA_TELEOP_PORT, "--operator-teleop-port");
+		appendIntentExtraArg(args, EXTRA_TELEOP_PROTOCOL, "--operator-teleop-protocol");
+		appendIntentExtraArg(args, EXTRA_XROBOT_TOOLKIT_DEVICE_SN, "--operator-xrobot-toolkit-device-sn");
+		appendIntentExtraArg(args, EXTRA_TELEOP_PICO_BODY_CALIBRATE, "--operator-teleop-pico-body-calibrate");
 		appendIntentExtraArg(args, EXTRA_TELEOP_DURATION, "--operator-teleop-duration");
 		appendIntentExtraArg(args, EXTRA_TELEOP_SCOPE, "--operator-teleop-scope");
 		appendIntentExtraArg(args, EXTRA_TELEOP_PROFILE, "--operator-teleop-profile");

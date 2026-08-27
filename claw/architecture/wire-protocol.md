@@ -64,6 +64,99 @@ to the headset process and may reset after reconnect, so consumers treat a
 different id as the next snapshot rather than assuming it is globally
 monotonic.
 
+### XRoboToolkit compatibility TCP
+
+Outside Robot settings may select `xrobot_toolkit_v1` instead of the Operator
+session protocol. This is a separate wire format and a separate TCP connection;
+it is never nested inside `XRoboProtocol` and cannot be active at the same time
+as `DeviceCommand` or `XrStateFrame`.
+
+```text
+u8      0x3F
+u8      command
+i32_le  payload_length
+bytes   payload
+i64_le  unix_timestamp_ms
+u8      0xA5
+```
+
+The client sends connect (`0x19`), version (`0x6c`), ten-second heartbeat
+(`0x23`), and Tracking (`0x6d`) packets. Tracking uses the legacy outer JSON
+object with `functionName="Tracking"` and a JSON string in `value`. Controller
+fields are always complete. Body is included only for a complete, valid
+24-joint `pico_bd_24` sample; incomplete data is omitted rather than replayed.
+Top-level and Body timestamps use Unix nanoseconds, joint `t` retains the
+OpenXR/PICO source timestamp, and `predictTime` is predicted-display time in
+microseconds. Body poses remain in the raw OpenXR values because the legacy
+PICO Unity SDK conversion and the old APP's `z/qz/qw` conversion cancel before
+the packet reaches RoboticsService. Hand positions are also kept in OpenXR
+coordinates; hand rotations explicitly remove Godot's fixed humanoid-bone
+orientation adjustment before encoding. For PICO controllers, the right-hand
+OpenXR `select_button` is accepted as the legacy right `menuButton`, while the
+left mapping remains the dedicated Menu action. Independent Motion output is
+disabled while Body is active because requesting it switches the PICO runtime
+out of full-body mode. Settings may provide the legacy PICO `EQUIPMENT_SN`;
+otherwise the app falls back to its platform unique id. Exact automatic
+`EQUIPMENT_SN` lookup requires the PICO Enterprise service libraries, which are
+not currently shipped in Operator.
+The receive path accepts server frames headed by `0xcf`; the legacy `0x5f`
+`timeTest` probe is answered with the same raw `timeTest` payload on `0x6d`.
+The implementation lives under `xr/scripts/compat/xrobot_toolkit/` and requires
+no robot-side changes or gateway process. This compatibility target covers TCP
+`63901`; Episode HTTP and UDP discovery remain independent scopes.
+
+XRoboToolkit FPV is a second, independently selectable video transport. It is
+not sent through the Tracking connection. XR automatically binds the first
+available local port in `12346..12353`, connects to the PC camera-command
+service on TCP `13579`, and sends a length-prefixed `OPEN_CAMERA`. The PC then
+connects back to the advertised PICO address and listener port. The local
+receive port is transport state and is not an operator-facing setting.
+
+```text
+u32_be command_body_len
+i32_le command_name_len
+bytes  command_name             # OPEN_CAMERA or CLOSE_CAMERA
+i32_le payload_len
+bytes  payload
+```
+
+The `OPEN_CAMERA` payload is:
+
+```text
+u8,u8  magic                    # CA FE
+u8     version                  # 1
+i32_le width
+i32_le height
+i32_le fps
+i32_le bitrate
+i32_le enable_mv_hevc
+i32_le render_mode
+i32_le pico_video_listener_port
+u8 + bytes camera_name
+u8 + bytes pico_ipv4
+```
+
+The reverse video connection carries complete Annex-B H.264 access units:
+
+```text
+u32_be access_unit_len
+bytes  annex_b_h264_access_unit
+```
+
+`XrtVideoSession` parses these access units and submits them to the same
+`LiveVideoView` decoder used by Operator timed video. The wire format has no
+source frame sequence or drop counter, so its transport-loss HUD value is
+reported as `N/A`; local stale and decoder-busy drops remain available.
+
+For automated PICO launches, Android intent extras map directly to the target:
+`operator.teleop.host`, `operator.teleop.port`,
+`operator.teleop.protocol=xrobot_toolkit_v1`, and
+`operator.teleop.xrobot_toolkit_device_sn`. The latter should be the legacy
+PICO `EQUIPMENT_SN` when the deployed RoboticsService identifies clients by SN.
+`operator.teleop.pico_body_calibrate=true` opens PICO's body-tracking
+calibration flow after XR startup. The same action is available from the
+XRoboToolkit-compatible Teleop settings panel.
+
 ### Outside Robot descriptor v2
 
 Every descriptor emitted by `robot-service` is normalized to version 2. Legacy

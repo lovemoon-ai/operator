@@ -60,12 +60,6 @@ const RUNTIME_DISPLAY_OPTION_KEYS := [
 @export var default_live_result_port := 63912
 @export var default_live_server_auth_token := ""
 @export var enable_live_pull := true
-## When false (default), the headset's safety / guardian / boundary overlay is
-## hidden on session begin so it doesn't intrude on passthrough captures. Set
-## to true to leave the platform overlay alone (Quest only; the Pico runtime
-## already suppresses its safe zone while in passthrough).
-@export var keep_safety_zone_visible := false
-
 # Optional host-driven validation override: flip to true (and rebuild/install)
 # to start a recording at _ready(), let it run for AUTO_STOP_AFTER_SECONDS,
 # then stop and quit. Designed for adb-driven smoke runs from a desktop while
@@ -1744,8 +1738,6 @@ func _on_openxr_session_begun() -> void:
 		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
 	if keep_passthrough_visible:
 		_set_passthrough_visible(true)
-	if not keep_safety_zone_visible:
-		_suppress_boundary_visibility()
 	if _recording and _stream_enabled("record_depth"):
 		depth_sampler.start()
 
@@ -3253,12 +3245,3 @@ func _upload_kind_label(kind: String) -> String:
 		"media":
 			return tr("UI_UPLOAD_KIND_MEDIA")
 	return kind
-
-
-func _suppress_boundary_visibility() -> void:
-	var boundary := _platform_registry().boundary_extension()
-	if boundary == null:
-		return
-	if boundary.has_method("is_boundary_visibility_supported") and bool(boundary.call("is_boundary_visibility_supported")):
-		boundary.call("set_boundary_visible", false)
-		print("Quest boundary visibility suppressed")

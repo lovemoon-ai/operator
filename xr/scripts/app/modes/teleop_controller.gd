@@ -1,7 +1,8 @@
 extends Node3D
 ## Main scene controller for Teleoperate-Anything.
-## Initializes XR with passthrough. Uses v2 protocol:
-## Hello → DeviceDescriptor → DeviceCommand ↔ Telemetry.
+## Initializes XR with passthrough. Outside Robot can use either the native v2
+## session (Hello → DeviceDescriptor → DeviceCommand ↔ Telemetry) or the
+## separate XRoboToolkit-compatible tracking stream.
 ##
 ## UI model:
 ##  - At launch, view-locked composition-layer SettingsPanel is visible if
@@ -20,10 +21,20 @@ const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher
 const HandUnlockButtonScript = preload("res://scripts/ui/hand_unlock_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
 const OUTSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/outside_robot_target.gd"
+const XROBOT_TOOLKIT_TARGET_PATH := "res://scripts/teleop/targets/xrobot_toolkit_target.gd"
+const XROBOT_TOOLKIT_VIDEO_SESSION_PATH := (
+	"res://scripts/compat/xrobot_toolkit/xrt_video_session.gd"
+)
 const INSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/inside_robot_target.gd"
+
+const VIDEO_PROTOCOL_OPERATOR := "operator_timed_h264"
+const VIDEO_PROTOCOL_XROBOT_TOOLKIT := "xrobot_toolkit_fpv"
+const VIDEO_TEST_FIRST_FRAME_TIMEOUT_SEC := 8.0
 
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
+const VIDEO_PREVIEW_CLOSE_INSET := Vector2(0.13, 0.13)
+const VIDEO_PREVIEW_CLOSE_Z_OFFSET := 0.04
 const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 const DEFAULT_TELEMETRY_PORT := 63903
 const TELEMETRY_PORT_OFFSET := 2
@@ -94,6 +105,7 @@ var _video_tcp_handler: TcpHandler
 ## descriptor advertises `transport=udp` (or `transport=auto` plus a
 ## non-zero `udp_port`).
 var _video_udp_handler: UdpVideoHandler
+var _xrt_video_session: Node
 var _active_video_transport: String = "tcp"  # "tcp" or "udp"
 var _last_video_feed: Dictionary = {}
 var _active_telemetry_port := DEFAULT_TELEMETRY_PORT
@@ -101,6 +113,7 @@ var _telemetry_retry_remaining := 0.0
 var _clock_sync: RobotClockSync
 var _known_robots: Dictionary = {}
 var _outside_target: Node
+var _xrt_target: Node
 var _inside_target: Node
 var _active_target: Node
 
@@ -109,9 +122,16 @@ var _settings_button: Node3D
 var _hand_unlock_button: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
-# True while the settings panel is open: teleop is suspended — neither
-# DeviceCommand nor XrStateFrame streams, and the controller overlay is hidden
-# — so the panel owns the controllers exclusively.
+var _manual_video_protocol := ""
+var _manual_video_options: Dictionary = {}
+var _video_test_active := false
+var _video_test_restore_show_panel := false
+## True once a video test in this settings visit actually decoded frames.
+var _video_test_saw_video := false
+var _video_test_generation := 0
+# True while the settings panel is open: teleop is suspended — DeviceCommand,
+# XrStateFrame, and XRoboToolkit Tracking are all disabled, and the controller
+# overlay is hidden — so the panel owns the controllers exclusively.
 var _teleop_suspended := false
 # Persisted from the active descriptor. SDK mode and robot-control mode are
 # mutually exclusive across every suspend/resume transition.
@@ -135,6 +155,9 @@ const SYNTH_KEY_ENABLE := "--operator-teleop-synthetic"
 const SYNTH_KEY_DURATION := "--operator-teleop-duration"
 const TELEOP_KEY_HOST := "--operator-teleop-host"
 const TELEOP_KEY_PORT := "--operator-teleop-port"
+const TELEOP_KEY_PROTOCOL := "--operator-teleop-protocol"
+const TELEOP_KEY_XROBOT_TOOLKIT_DEVICE_SN := "--operator-xrobot-toolkit-device-sn"
+const TELEOP_KEY_PICO_BODY_CALIBRATE := "--operator-teleop-pico-body-calibrate"
 ## Inside Robot launch overrides. Inside is otherwise only reachable by hand in
 ## the headset, which leaves its startup — profile load, embodiment creation,
 ## solver binding — impossible to exercise or diagnose from a device test.
@@ -218,6 +241,9 @@ func _ready() -> void:
 	_video_udp_handler.disconnected_from_server.connect(_on_video_disconnected)
 	_video_udp_handler.connection_failed.connect(_on_video_connection_failed)
 	_video_udp_handler.video_frame_received.connect(_on_video_frame_received)
+	for controller in [_left_controller, _right_controller]:
+		if controller != null:
+			controller.button_pressed.connect(_on_video_test_exit_button_pressed)
 
 	_discovery.robot_found.connect(_on_robot_found)
 	_discovery.robot_lost.connect(_on_robot_lost)
@@ -269,7 +295,22 @@ func _process(_delta: float) -> void:
 		if _settings_panel:
 			_settings_panel.transform = _camera.transform * SETTINGS_PANEL_OFFSET
 		if _settings_button:
-			_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
+			if (
+				_video_test_active
+				and _robot_view
+				and _robot_view.has_method("get_panel_anchor_transform")
+			):
+				var panel_size := _video_panel_size()
+				_settings_button.global_transform = _robot_view.call(
+					"get_panel_anchor_transform",
+					Vector3(
+						panel_size.x * 0.5 - VIDEO_PREVIEW_CLOSE_INSET.x,
+						panel_size.y * 0.5 - VIDEO_PREVIEW_CLOSE_INSET.y,
+						VIDEO_PREVIEW_CLOSE_Z_OFFSET,
+					)
+				)
+			else:
+				_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
 	_update_hand_unlock_button(_delta)
@@ -353,6 +394,21 @@ func _create_v2_nodes() -> void:
 	_bind_target_signals(_outside_target)
 	add_child(_outside_target)
 
+	var xrt_script := load(XROBOT_TOOLKIT_TARGET_PATH)
+	if xrt_script == null:
+		push_error("[Operator] Cannot load XRoboToolkit-compatible target")
+	else:
+		var xrt_instance: Variant = xrt_script.new()
+		if xrt_instance == null:
+			push_error("[Operator] Cannot instantiate XRoboToolkit-compatible target")
+		else:
+			_xrt_target = xrt_instance
+	if _xrt_target != null:
+		_xrt_target.name = "XRobotToolkitTarget"
+		_xrt_target.configure(_tracking_provider)
+		_bind_target_signals(_xrt_target)
+		add_child(_xrt_target)
+
 	var inside_script := load(INSIDE_ROBOT_TARGET_PATH)
 	if inside_script == null:
 		push_error("[Operator] Cannot load Inside Robot target")
@@ -416,6 +472,25 @@ func _create_v2_nodes() -> void:
 	_video_udp_handler.name = "VideoUdpHandler"
 	add_child(_video_udp_handler)
 
+	var xrt_video_script := load(XROBOT_TOOLKIT_VIDEO_SESSION_PATH)
+	if xrt_video_script == null:
+		push_error("[Operator] Cannot load XRobotToolkit video session")
+	else:
+		var xrt_video_instance: Variant = xrt_video_script.new()
+		if xrt_video_instance == null:
+			push_error("[Operator] Cannot instantiate XRobotToolkit video session")
+		else:
+			_xrt_video_session = xrt_video_instance
+	if _xrt_video_session != null:
+		_xrt_video_session.name = "XRobotToolkitVideoSession"
+		_xrt_video_session.connect("connected", Callable(self, "_on_xrt_video_connected"))
+		_xrt_video_session.connect("disconnected", Callable(self, "_on_xrt_video_disconnected"))
+		_xrt_video_session.connect("failed", Callable(self, "_on_xrt_video_failed"))
+		_xrt_video_session.connect(
+			"video_frame_received", Callable(self, "_on_xrt_video_frame_received")
+		)
+		add_child(_xrt_video_session)
+
 	# [opt 5] Clock-sync helper. Sends ClockPing on the command channel
 	# every second; the offset it learns is read by VideoLatencyTracker
 	# to make `tx=` honest.
@@ -432,6 +507,10 @@ func _create_settings_ui_nodes() -> void:
 	_settings_panel = SettingsUI.new()
 	_settings_panel.name = "TeleopSettingsPanel"
 	_settings_panel.settings_applied.connect(_on_settings_applied)
+	_settings_panel.video_connect_requested.connect(_on_video_connect_requested)
+	_settings_panel.pico_body_calibration_requested.connect(
+		_on_pico_body_calibration_requested
+	)
 	_settings_panel.exit_requested.connect(_on_settings_exit_requested)
 	_origin.add_child(_settings_panel)
 	_settings_ui = _settings_panel
@@ -547,15 +626,30 @@ func _on_xr_started() -> void:
 
 	var launch_host := _teleop_arg(TELEOP_KEY_HOST, "")
 	if not _synthetic and not launch_host.is_empty():
+		var launch_options: Dictionary = SettingsUI.load_settings()
 		var launch_port := int(_teleop_arg(TELEOP_KEY_PORT, str(SYNTH_DEFAULT_PORT)))
+		launch_options["target_scope"] = "outside"
+		launch_options["protocol"] = _teleop_arg(
+			TELEOP_KEY_PROTOCOL, str(launch_options.get("protocol", "operator")))
+		launch_options["ip"] = launch_host
+		launch_options["port"] = launch_port
+		launch_options["xrobot_toolkit_device_sn"] = _teleop_arg(
+			TELEOP_KEY_XROBOT_TOOLKIT_DEVICE_SN,
+			str(launch_options.get("xrobot_toolkit_device_sn", "")),
+		)
 		if _settings_panel and _settings_panel.has_method("close"):
 			_settings_panel.close()
 		else:
 			_settings_panel.visible = false
 		_settings_button.visible = true
 		_set_teleop_suspended(false)
-		print("[Operator] Direct-connect launch override %s:%d" % [launch_host, launch_port])
-		_connect_to_robot(launch_host, launch_port)
+		print(
+			"[Operator] Direct-connect launch override %s:%d via %s"
+			% [launch_host, launch_port, str(launch_options.get("protocol", "operator"))]
+		)
+		_start_outside_with_options(launch_options)
+		if _teleop_flag_set(TELEOP_KEY_PICO_BODY_CALIBRATE):
+			call_deferred("_on_pico_body_calibration_requested")
 	elif not _synthetic:
 		_begin_launch_window()
 
@@ -586,6 +680,7 @@ func _configure_passthrough() -> void:
 ## endpoint. The robot type is not a client setting — the DeviceDescriptor
 ## received on handshake defines what the client sends and displays.
 func _on_settings_applied(options: Dictionary) -> void:
+	_end_video_test()
 	var target_scope := str(options.get("target_scope", "outside"))
 	print(
 		(
@@ -602,6 +697,22 @@ func _on_settings_applied(options: Dictionary) -> void:
 	_inside_resume_options = {}
 	_applied_options = options.duplicate(true)
 
+	# A manual video override is only meaningful for the endpoint it was
+	# configured against. `_connect_video_stream()` short-circuits to it
+	# whenever it is non-empty, so without this re-seed one "Connect video"
+	# press would pin every later auto-connect to that host -- even after the
+	# operator confirmed a different robot, whose descriptor-advertised video
+	# endpoint would then be ignored for the rest of the session. Only touch
+	# an override that is already active, so confirming settings never starts
+	# pinning video for an operator who never asked for one.
+	if not _manual_video_options.is_empty():
+		var next_video_ip := str(options.get("video_ip", "")).strip_edges()
+		var next_video_port := int(options.get("video_port", 0))
+		if next_video_ip.is_empty() or next_video_port <= 0 or next_video_port > 65535:
+			_manual_video_options.clear()
+		else:
+			_manual_video_options = options.duplicate(true)
+
 	# A per-item Test action is only a preview. Confirm is the ownership
 	# boundary where every persisted option becomes part of the working page.
 	_apply_runtime_settings(options)
@@ -610,7 +721,7 @@ func _on_settings_applied(options: Dictionary) -> void:
 	if target_scope == "inside":
 		_set_revo2_hand_runtime_enabled(false)
 		if _inside_target == null:
-			_show_settings_panel_with_status("Inside Robot runtime is unavailable")
+			_show_settings_panel_with_status(tr("UI_INSIDE_RUNTIME_UNAVAILABLE"))
 			return
 		_active_target = _inside_target
 		_command_sender.transport = null
@@ -618,19 +729,25 @@ func _on_settings_applied(options: Dictionary) -> void:
 		_disconnect_outside_media()
 		_inside_target.start(options)
 	else:
-		_active_target = _outside_target
-		_command_sender.transport = _outside_target
-		_connect_to_robot(str(options.get("ip", "")), int(options.get("port", 63901)))
+		if not _start_outside_with_options(options):
+			return
 	# Resume only after the old target is stopped and the new target owns the
 	# session. A not-yet-ready target remains disabled in _set_teleop_suspended.
 	_hide_settings_panel()
 
 
 func _apply_runtime_settings(options: Dictionary) -> void:
+	# `_end_video_test()` can only flip the panel toggle for the *next* read of
+	# the form; `options` was captured when Confirm was pressed. OR in the flag
+	# so a preview that proved video works still reaches the work page even on
+	# that path.
+	var show_video_panel := (
+		bool(options.get("show_video_panel", false)) or _video_test_saw_video
+	)
 	if _robot_view:
 		_robot_view.follow_camera = bool(options.get("video_face_locked", true))
 		if _robot_view.has_method("set_show_video_panel"):
-			_robot_view.set_show_video_panel(bool(options.get("show_video_panel", false)))
+			_robot_view.set_show_video_panel(show_video_panel)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.set_enabled(
 			bool(options.get("show_operation_trajectory", false))
@@ -638,6 +755,7 @@ func _apply_runtime_settings(options: Dictionary) -> void:
 
 
 func _on_settings_button_pressed() -> void:
+	_end_video_test()
 	_show_settings_panel()
 
 
@@ -761,6 +879,26 @@ func _on_settings_close_requested() -> void:
 	_hide_settings_panel()
 
 
+func _on_pico_body_calibration_requested() -> void:
+	var bridge_autoload := get_node_or_null("/root/PicoOpenXRBridge")
+	var bridge: Object = null
+	if bridge_autoload != null and bridge_autoload.has_method("get_bridge"):
+		bridge = bridge_autoload.call("get_bridge")
+	if bridge == null or not bridge.has_method("start_body_tracking_calibration_app"):
+		var unavailable := tr("UI_PICO_BODY_CALIBRATION_UNAVAILABLE")
+		push_warning("[Operator] %s" % unavailable)
+		_set_status(unavailable)
+		return
+	var opened := bool(bridge.call("start_body_tracking_calibration_app"))
+	if opened:
+		print("[Operator] PICO Body Calibration opened")
+		_set_status(tr("UI_PICO_BODY_CALIBRATION_OPENED"))
+	else:
+		var failed := tr("UI_PICO_BODY_CALIBRATION_FAILED")
+		push_warning("[Operator] %s" % failed)
+		_set_status(failed)
+
+
 ## Exit on the panel returns to the mode-select / launcher scene so the
 ## user can pick a different mode without restarting the app. The session
 ## is torn down cleanly first; the Exit *card* on the launcher itself is
@@ -783,6 +921,8 @@ func _on_settings_exit_requested() -> void:
 		_video_tcp_handler.disconnect_from_robot()
 	if _video_udp_handler:
 		_video_udp_handler.disconnect_from_robot()
+	if _xrt_video_session:
+		_xrt_video_session.call("stop")
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 
@@ -808,20 +948,28 @@ func _set_teleop_suspended(suspended: bool) -> void:
 
 
 ## Apply the single stream-selection invariant at connection, descriptor and
-## UI-suspension boundaries. The settings panel pauses all tracking output;
-## resuming restores exactly one protocol for the active descriptor.
+## UI-suspension boundaries. Exactly one of DeviceCommand, XrStateFrame, or
+## XRoboToolkit Tracking may be active at a time.
 func _sync_stream_senders() -> void:
 	# _tcp_handler is scene-typed as Node, so its method result is a Variant.
 	# Keep these booleans explicit: Godot 4.5 cannot infer `:=` through the
 	# dynamic call when this base script is compiled from an exported APK.
 	var connected: bool = _tcp_handler != null and bool(_tcp_handler.call("is_connected_to_robot"))
-	var outside_active: bool = (
+	var operator_outside_active: bool = (
 		connected and _active_target == _outside_target and not _teleop_suspended
 	)
+	var xrt_active: bool = (
+		_xrt_target != null
+		and _active_target == _xrt_target
+		and _xrt_target.is_ready()
+		and not _teleop_suspended
+	)
 	if _robot_control_sink:
-		_robot_control_sink.set_sending(outside_active and not _sdk_mode)
+		_robot_control_sink.set_sending(operator_outside_active and not _sdk_mode)
 	if _xr_state_sender:
-		_xr_state_sender.set_sending(outside_active and _sdk_mode)
+		_xr_state_sender.set_sending(operator_outside_active and _sdk_mode)
+	if _xrt_target != null:
+		_xrt_target.set_control_enabled(xrt_active)
 	if _inside_target != null:
 		_inside_target.set_control_enabled(
 			_active_target == _inside_target and not _teleop_suspended and _inside_target.is_ready()
@@ -912,10 +1060,26 @@ const _LAUNCH_DISCOVERY_WINDOW_SEC: float = 3.0
 
 
 func _begin_launch_window() -> void:
-	var persisted := SettingsUI.load_settings()
+	var persisted: Dictionary = SettingsUI.load_settings()
 	if str(persisted.get("target_scope", "outside")) == "inside":
 		print("[Operator] Inside Robot selected — opening embodiment setup")
 		_show_settings_panel_with_status(tr("UI_INSIDE_ROBOT"))
+		return
+	if str(persisted.get("protocol", "operator")) == "xrobot_toolkit_v1":
+		var saved_host := str(persisted.get("ip", "")).strip_edges()
+		var show_on_launch := bool(persisted.get("show_on_launch", false))
+		if show_on_launch or _is_loopback_host(saved_host):
+			_show_settings_panel_with_status(
+				"XRoboToolkit mode uses the configured RoboticsService endpoint"
+			)
+			return
+		_settings_button.visible = true
+		_set_teleop_suspended(false)
+		print(
+			"[Operator] Auto-connecting XRoboToolkit compatibility target @ %s:%d"
+			% [saved_host, int(persisted.get("port", 63901))]
+		)
+		_start_outside_with_options(persisted)
 		return
 	_launch_window_token += 1
 	_launch_window_active = true
@@ -1102,6 +1266,29 @@ func _connect_to_robot(ip: String, port: int) -> void:
 	_outside_target.start({"host": ip, "port": port})
 
 
+func _start_outside_with_options(options: Dictionary) -> bool:
+	var protocol := str(options.get("protocol", "operator"))
+	if protocol == "xrobot_toolkit_v1":
+		if _xrt_target == null:
+			_show_settings_panel_with_status(tr("UI_XROBOT_TOOLKIT_RUNTIME_UNAVAILABLE"))
+			return false
+		_active_target = _xrt_target
+		_command_sender.transport = null
+		_robot_control_sink.set_sending(false)
+		_xr_state_sender.set_sending(false)
+		_disconnect_outside_media()
+		_xrt_target.start({
+			"host": str(options.get("ip", "")),
+			"port": int(options.get("port", 63901)),
+			"device_sn": str(options.get("xrobot_toolkit_device_sn", "")),
+		})
+		return true
+	_active_target = _outside_target
+	_command_sender.transport = _outside_target
+	_connect_to_robot(str(options.get("ip", "")), int(options.get("port", 63901)))
+	return true
+
+
 func _on_connected() -> void:
 	_set_status(tr("UI_CONNECTED_HANDSHAKE"))
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
@@ -1223,16 +1410,24 @@ func _telemetry_port_for(ip: String, pose_port: int) -> int:
 
 func _on_video_connected() -> void:
 	print("[Operator] Video stream connected")
+	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
+		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_CONNECTED"))
 
 
 func _on_video_disconnected() -> void:
 	print("[Operator] Video stream disconnected")
+	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
+		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_DISCONNECTED"))
+		_return_from_failed_video_test()
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 
 
 func _on_video_connection_failed(reason: String) -> void:
 	print("[Operator] Video connection failed: %s" % reason)
+	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
+		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_FAILED") % reason)
+		_return_from_failed_video_test()
 
 
 func _on_video_frame_received(packet: Dictionary) -> void:
@@ -1242,6 +1437,242 @@ func _on_video_frame_received(packet: Dictionary) -> void:
 		_robot_view.report_video_packet(packet)
 	elif _robot_view and _robot_view.has_method("report_video_frame"):
 		_robot_view.report_video_frame(packet)
+
+
+func _on_video_connect_requested(options: Dictionary) -> void:
+	_connect_configured_video(options, true)
+
+
+func _video_preview_close_button_offset() -> Transform3D:
+	var panel_size := _video_panel_size()
+	var panel_distance := 3.0
+	if _robot_view:
+		var distance_value: Variant = _robot_view.get("follow_distance")
+		if distance_value != null:
+			panel_distance = float(distance_value)
+	return Transform3D(
+		Basis.IDENTITY,
+		Vector3(
+			panel_size.x * 0.5 - VIDEO_PREVIEW_CLOSE_INSET.x,
+			panel_size.y * 0.5 - VIDEO_PREVIEW_CLOSE_INSET.y,
+			-panel_distance + VIDEO_PREVIEW_CLOSE_Z_OFFSET,
+		)
+	)
+
+
+func _video_panel_size() -> Vector2:
+	var panel_size := Vector2(3.2, 1.8)
+	if _robot_view:
+		var size_value: Variant = _robot_view.get("display_size")
+		if size_value is Vector2:
+			panel_size = size_value
+	return panel_size
+
+
+func _connect_configured_video(options: Dictionary, show_test: bool) -> void:
+	var protocol := str(options.get("video_protocol", VIDEO_PROTOCOL_OPERATOR))
+	var host := str(options.get("video_ip", "")).strip_edges()
+	var port := int(options.get("video_port", 0))
+	if host.is_empty() or port <= 0 or port > 65535:
+		_set_video_status(tr("UI_VIDEO_STATUS_INVALID_ENDPOINT"))
+		return
+	_manual_video_options = options.duplicate(true)
+
+	var feed := {
+		"width": 1280,
+		"height": 720,
+		"codec": "h264",
+		"stereo": bool(options.get("video_sbs", false)),
+	}
+	if _robot_view and _robot_view.has_method("clear_video_stream"):
+		_robot_view.clear_video_stream()
+
+	if protocol == VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+		if _xrt_video_session == null:
+			_set_video_status(tr("UI_VIDEO_STATUS_XROBOT_TOOLKIT_UNAVAILABLE"))
+			return
+		_video_tcp_handler.disconnect_from_robot()
+		_video_udp_handler.disconnect_from_robot()
+		if _robot_view and _robot_view.has_method("configure_video_stream"):
+			_robot_view.configure_video_stream(feed)
+		_manual_video_protocol = VIDEO_PROTOCOL_XROBOT_TOOLKIT
+		_active_video_transport = "xrobot_toolkit"
+		if _robot_view and _robot_view.has_method("set_packet_source"):
+			_robot_view.set_packet_source(_xrt_video_session)
+		_xrt_video_session.call("start", {
+			"host": host,
+			"command_port": port,
+			"width": 1280,
+			"height": 720,
+			"fps": 30,
+			"bitrate": 6_000_000,
+			"camera_name": "UNITREE_HEAD",
+		})
+		_set_video_status(tr("UI_VIDEO_STATUS_XROBOT_TOOLKIT_CONNECTING") % [host, port])
+	else:
+		if _xrt_video_session:
+			_xrt_video_session.call("stop")
+		_video_udp_handler.disconnect_from_robot()
+		# Disconnect before configuring, exactly as the XRobotToolkit branch
+		# above does. disconnect_from_robot() emits disconnected_from_server
+		# synchronously and _on_video_disconnected() unconditionally calls
+		# clear_video_stream(), so configuring first would stop the decoder we
+		# just started and no frame would ever decode. Leaving the socket
+		# already DISCONNECTED also stops connect_to_video_stream() from
+		# re-entering disconnect_from_robot() and re-emitting the signal.
+		_video_tcp_handler.disconnect_from_robot()
+		if _robot_view and _robot_view.has_method("configure_video_stream"):
+			_robot_view.configure_video_stream(feed)
+		_manual_video_protocol = VIDEO_PROTOCOL_OPERATOR
+		_active_video_transport = "tcp"
+		if _robot_view and _robot_view.has_method("set_packet_source"):
+			_robot_view.set_packet_source(_video_tcp_handler)
+		_video_tcp_handler.connect_to_video_stream(host, port)
+		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_CONNECTING") % [host, port])
+
+	if show_test:
+		_begin_video_test(options)
+
+
+func _begin_video_test(options: Dictionary) -> void:
+	if not _video_test_active:
+		_video_test_saw_video = false
+		# Restore the *persisted* preference, not the live form value.
+		# `options` is the unsaved settings dialog: an operator who ticks
+		# "show video panel" purely to run this preview and then leaves
+		# without saving would otherwise be left with the panel switched on,
+		# contradicting the preference actually stored on disk.
+		var persisted: Dictionary = SettingsUI.load_settings()
+		_video_test_restore_show_panel = bool(
+			persisted.get("show_video_panel", options.get("show_video_panel", false))
+		)
+	_video_test_active = true
+	_video_test_generation += 1
+	if _robot_view and _robot_view.has_method("set_show_video_panel"):
+		_robot_view.set_show_video_panel(true)
+	_release_global_interaction_pointer()
+	if _settings_panel and _settings_panel.has_method("close"):
+		_settings_panel.close()
+	elif _settings_panel:
+		_settings_panel.visible = false
+	if _settings_button:
+		if _settings_button.has_method("set_video_preview_mode"):
+			_settings_button.call("set_video_preview_mode", true)
+		_settings_button.visible = true
+	_watch_video_test_first_frame(_video_test_generation)
+
+
+func _watch_video_test_first_frame(generation: int) -> void:
+	if not is_inside_tree():
+		return
+	await get_tree().create_timer(VIDEO_TEST_FIRST_FRAME_TIMEOUT_SEC).timeout
+	_handle_video_test_first_frame_timeout(generation)
+
+
+func _handle_video_test_first_frame_timeout(generation: int) -> void:
+	if not _video_test_active or generation != _video_test_generation:
+		return
+	if _video_is_streaming():
+		_note_video_test_success()
+		return
+	_set_video_status(tr("UI_VIDEO_STATUS_TEST_TIMEOUT"))
+	_end_video_test()
+	_show_settings_panel()
+
+
+func _end_video_test() -> void:
+	if not _video_test_active:
+		return
+	if _video_is_streaming():
+		_note_video_test_success()
+	_video_test_active = false
+	_video_test_generation += 1
+	if _robot_view and _robot_view.has_method("set_show_video_panel"):
+		_robot_view.set_show_video_panel(_video_test_restore_show_panel)
+	if _settings_button and _settings_button.has_method("set_video_preview_mode"):
+		_settings_button.call("set_video_preview_mode", false)
+
+
+func _video_is_streaming() -> bool:
+	return (
+		_robot_view != null
+		and _robot_view.has_method("is_receiving_video")
+		and bool(_robot_view.call("is_receiving_video"))
+	)
+
+
+## A video test that decoded real frames proves the endpoint works, so switch
+## the panel preference on. The whole point of the test button is that a
+## successful debug carries through to the work page -- previously the preview
+## was force-shown for the test and then restored to a preference that defaults
+## to false, so the operator watched video work and then confirmed into a work
+## page with no video panel at all.
+func _note_video_test_success() -> void:
+	if _video_test_saw_video:
+		return
+	_video_test_saw_video = true
+	_video_test_restore_show_panel = true
+	if _settings_ui and _settings_ui.has_method("set_show_video_panel_enabled"):
+		_settings_ui.call("set_show_video_panel_enabled", true)
+
+
+func _return_from_failed_video_test() -> void:
+	if not _video_test_active:
+		return
+	_end_video_test()
+	_show_settings_panel()
+
+
+func _on_video_test_exit_button_pressed(action: StringName) -> void:
+	if not _video_test_active:
+		return
+	if action != &"menu_button" and action != &"by_button":
+		return
+	_end_video_test()
+	_show_settings_panel()
+
+
+func _set_video_status(text: String) -> void:
+	print("[Operator] %s" % text)
+	if _settings_ui and _settings_ui.has_method("set_video_status"):
+		_settings_ui.call("set_video_status", text)
+
+
+func _on_xrt_video_connected() -> void:
+	if _manual_video_protocol != VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+		return
+	_set_video_status(tr("UI_VIDEO_STATUS_XROBOT_TOOLKIT_CONNECTED"))
+
+
+func _on_xrt_video_disconnected(reason: String = "") -> void:
+	if _manual_video_protocol != VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+		return
+	_set_video_status(
+		tr("UI_VIDEO_STATUS_XROBOT_TOOLKIT_DISCONNECTED_REASON") % reason
+		if not reason.is_empty()
+		else tr("UI_VIDEO_STATUS_XROBOT_TOOLKIT_DISCONNECTED")
+	)
+	if _robot_view and _robot_view.has_method("clear_video_stream"):
+		_robot_view.clear_video_stream()
+	_return_from_failed_video_test()
+
+
+func _on_xrt_video_failed(reason: String) -> void:
+	if _manual_video_protocol != VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+		return
+	_set_video_status(tr("UI_VIDEO_STATUS_XROBOT_TOOLKIT_FAILED") % reason)
+	if _robot_view and _robot_view.has_method("clear_video_stream"):
+		_robot_view.clear_video_stream()
+	_return_from_failed_video_test()
+
+
+func _on_xrt_video_frame_received(packet: Dictionary) -> void:
+	if _manual_video_protocol != VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+		return
+	var compatible_packet := packet.duplicate(true)
+	compatible_packet["transport_loss_available"] = false
+	if _robot_view and _robot_view.has_method("report_video_packet"):
+		_robot_view.report_video_packet(compatible_packet)
 
 
 func _on_device_connected(descriptor: Dictionary) -> void:
@@ -1584,6 +2015,9 @@ func _on_robot_lost(robot_name: String) -> void:
 
 
 func _connect_video_stream(ip: String) -> void:
+	if not _manual_video_options.is_empty():
+		_connect_configured_video(_manual_video_options, false)
+		return
 	if ip.is_empty():
 		return
 
@@ -1691,10 +2125,7 @@ func _on_target_ready(descriptor: Dictionary, target: Node) -> void:
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_teleop_controller_panel.call("set_bridge_connected", true)
-	if target == _inside_target:
-		_inside_target.set_control_enabled(not _teleop_suspended)
-	elif not _teleop_suspended:
-		_robot_control_sink.set_sending(true)
+	_sync_stream_senders()
 
 
 func _on_target_state_changed(_state: int, detail: String, target: Node) -> void:
@@ -1726,6 +2157,9 @@ func _on_target_fault(code: String, message: String, target: Node) -> void:
 
 func _stop_active_target() -> void:
 	_robot_control_sink.set_sending(false)
+	_xr_state_sender.set_sending(false)
+	if _xrt_target != null:
+		_xrt_target.set_control_enabled(false)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	if _active_target != null:
@@ -1741,6 +2175,12 @@ func _disconnect_outside_media() -> void:
 		_video_udp_handler.disconnect_from_robot()
 	if _telemetry_tcp_handler:
 		_telemetry_tcp_handler.disconnect_from_robot()
+	# The XRobotToolkit FPV session is outside media too. Leaving it running
+	# across a target switch kept its socket open to the old host and left it
+	# wired up as the robot view's packet source, so the next target rendered
+	# stale frames from the robot we just left.
+	if _xrt_video_session:
+		_xrt_video_session.call("stop")
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 
@@ -1795,7 +2235,11 @@ func _teleop_arg(key: String, fallback: String) -> String:
 
 
 func _synthetic_flag_set() -> bool:
-	var raw := _teleop_arg(SYNTH_KEY_ENABLE, "").to_lower()
+	return _teleop_flag_set(SYNTH_KEY_ENABLE)
+
+
+func _teleop_flag_set(key: String) -> bool:
+	var raw := _teleop_arg(key, "").to_lower()
 	return raw == "1" or raw == "true" or raw == "yes" or raw == "on"
 
 

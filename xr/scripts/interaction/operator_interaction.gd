@@ -157,6 +157,14 @@ func get_current_mode() -> String:
 	return current_mode
 
 
+func is_teleop_input_captured() -> bool:
+	return (
+		_router != null
+		and _router.has_method("is_teleop_input_captured")
+		and bool(_router.call("is_teleop_input_captured"))
+	)
+
+
 func set_busy(next_busy: bool) -> void:
 	busy = next_busy
 	if _router != null:

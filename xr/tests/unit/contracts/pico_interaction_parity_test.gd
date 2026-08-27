@@ -6,6 +6,14 @@ const CASE_ID := "contracts.pico_interaction_parity"
 const OperatorInteractionScript := preload("res://scripts/interaction/operator_interaction.gd")
 const OperatorStartXRScript := preload("res://scripts/xr/operator_start_xr.gd")
 const SettingsInteractionRouterScript := preload("res://scripts/ui/settings_interaction_router.gd")
+const TrackingProviderScript := preload("res://scripts/xr/tracking_provider.gd")
+
+
+class TeleopCapturingTarget:
+	extends RefCounted
+
+	func captures_teleop_input() -> bool:
+		return true
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
@@ -131,3 +139,26 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		).is_empty(),
 		"a palm pose without a direction axis must be rejected"
 	)
+
+	var capture_target := TeleopCapturingTarget.new()
+	t.is_true(
+		SettingsInteractionRouterScript._target_captures_teleop_input(capture_target),
+		"video interaction targets must be able to capture teleop controller input"
+	)
+	t.is_false(
+		SettingsInteractionRouterScript._target_captures_teleop_input(RefCounted.new()),
+		"ordinary interaction targets must not suppress teleop input"
+	)
+	var neutral_input := TrackingProviderScript._neutral_controller_input({
+		"trigger": 0.8,
+		"grip": 0.9,
+		"primary": Vector2(0.4, -0.7),
+		"primary_click": 1.0,
+		"timestamp_ns": 123,
+	})
+	t.is_true((neutral_input["primary"] as Vector2).is_zero_approx(),
+		"captured joystick vectors must be neutralized")
+	t.eq(neutral_input["trigger"], 0.0, "captured trigger input must be neutralized")
+	t.eq(neutral_input["grip"], 0.0, "captured deadman input must be neutralized")
+	t.eq(neutral_input["primary_click"], 0.0, "captured joystick clicks must be neutralized")
+	t.eq(neutral_input["timestamp_ns"], 123, "input capture must preserve sample timing")

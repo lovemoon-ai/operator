@@ -56,6 +56,13 @@
       "script": "res://tests/unit/contracts/pico_interaction_parity_test.gd"
     },
     {
+      "id": "contracts.xr_session_policy",
+      "level": "contract",
+      "suite": "contracts.xr_session",
+      "module": "xr",
+      "script": "res://tests/unit/contracts/xr_session_policy_test.gd"
+    },
+    {
       "id": "capture.start_stop_with_fake_sources",
       "level": "integration",
       "suite": "capture.pipeline",
