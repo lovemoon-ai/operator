@@ -2,6 +2,7 @@ extends RefCounted
 
 const CaptureAppBaseScript := preload("res://scripts/app/modes/capture_app_base.gd")
 const ModeSelectScript := preload("res://scripts/app/launcher/mode_select.gd")
+const QuickEntryConfigScript := preload("res://scripts/app/launcher/quick_entry_config.gd")
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
@@ -34,6 +35,135 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"a mode that disabled passthrough must not retain it"
 	)
 	capture.free()
+
+	t.eq(
+		QuickEntryConfigScript.resolve_from_tags(PackedStringArray()),
+		QuickEntryConfigScript.MODE_LAUNCHER,
+		"exports without a quick-entry tag must keep the launcher"
+	)
+	var quick_entry_modes: Array[String] = [
+		QuickEntryConfigScript.MODE_LAUNCHER,
+		QuickEntryConfigScript.MODE_TELEOP,
+		QuickEntryConfigScript.MODE_EGO_CAPTURE,
+		QuickEntryConfigScript.MODE_LIVE_FEED,
+	]
+	for mode in quick_entry_modes:
+		var tag := QuickEntryConfigScript.tag_for_mode(mode)
+		t.eq(
+			QuickEntryConfigScript.resolve_from_tags(PackedStringArray([tag])),
+			mode,
+			"quick-entry tag must resolve to %s" % mode
+		)
+
+	var process_root := Node.new()
+	t.eq(
+		QuickEntryConfigScript.consume_for_process(
+			process_root, QuickEntryConfigScript.MODE_TELEOP),
+		QuickEntryConfigScript.MODE_TELEOP,
+		"quick entry must be applied on the first launcher visit"
+	)
+	t.eq(
+		QuickEntryConfigScript.consume_for_process(
+			process_root, QuickEntryConfigScript.MODE_TELEOP),
+		"",
+		"quick entry must not reopen the mode after returning to the launcher"
+	)
+	process_root.free()
+
+	var launcher_root := Node.new()
+	t.eq(
+		QuickEntryConfigScript.consume_for_process(
+			launcher_root, QuickEntryConfigScript.MODE_LAUNCHER),
+		"",
+		"the launcher default must not create a direct startup route"
+	)
+	t.eq(
+		QuickEntryConfigScript.consume_for_process(
+			launcher_root, QuickEntryConfigScript.MODE_LIVE_FEED),
+		QuickEntryConfigScript.MODE_LIVE_FEED,
+		"showing the launcher must not consume a future direct route"
+	)
+	launcher_root.free()
+
+	var teleop_only := FeatureSet.from_enabled_ids([
+		OperatorFeature.MODE_TELEOP,
+		OperatorFeature.MODE_EXIT,
+	])
+	t.is_true(
+		ModeSelectScript._mode_available(ModeSelectScript.MODE_TELEOP, teleop_only),
+		"a teleop-only build must allow the teleop mode"
+	)
+	t.is_true(
+		ModeSelectScript._mode_available(ModeSelectScript.MODE_MUJOCO, teleop_only),
+		"the internal MuJoCo bring-up route has no feature flag and always resolves"
+	)
+	for disabled_mode in [
+		ModeSelectScript.MODE_EGO_CAPTURE,
+		ModeSelectScript.MODE_LIVE_FEED,
+		ModeSelectScript.MODE_VR,
+	]:
+		t.is_false(
+			ModeSelectScript._mode_available(disabled_mode, teleop_only),
+			"a teleop-only build must reject the stripped mode %s" % disabled_mode
+		)
+
+	var full_build := FeatureSet.from_enabled_ids([
+		OperatorFeature.MODE_TELEOP,
+		OperatorFeature.MODE_EGO_CAPTURE,
+		OperatorFeature.MODE_LIVE_FEED,
+		OperatorFeature.MODE_EXIT,
+	])
+	t.is_true(
+		ModeSelectScript._mode_available(ModeSelectScript.MODE_EGO_CAPTURE, full_build),
+		"a full build must keep the ego capture automation route"
+	)
+	t.is_false(
+		ModeSelectScript._mode_available(ModeSelectScript.MODE_VR, full_build),
+		"a mode disabled by its feature flag stays unreachable in a full build"
+	)
+
+	t.eq(
+		ModeSelectScript.resolve_startup_route(
+			ModeSelectScript.MODE_EGO_CAPTURE,
+			ModeSelectScript.MODE_TELEOP,
+			full_build,
+			true),
+		ModeSelectScript.MODE_EGO_CAPTURE,
+		"an explicit request must outrank the export quick entry"
+	)
+	t.eq(
+		ModeSelectScript.resolve_startup_route(
+			"", ModeSelectScript.MODE_TELEOP, teleop_only, false),
+		ModeSelectScript.MODE_TELEOP,
+		"the quick entry must open when nothing was requested explicitly"
+	)
+	t.eq(
+		ModeSelectScript.resolve_startup_route(
+			ModeSelectScript.MODE_EGO_CAPTURE,
+			ModeSelectScript.MODE_TELEOP,
+			teleop_only,
+			true),
+		"",
+		"a request this build cannot serve must fall back to the launcher, "
+		+ "never to the quick-entry mode"
+	)
+	t.eq(
+		ModeSelectScript.resolve_startup_route("", "", full_build, false),
+		"",
+		"no request and no quick entry must show the launcher"
+	)
+	t.eq(
+		ModeSelectScript.resolve_startup_route(
+			"", ModeSelectScript.MODE_LIVE_FEED, teleop_only, false),
+		"",
+		"a quick entry whose mode was stripped must show the launcher"
+	)
+	t.eq(
+		ModeSelectScript.resolve_startup_route(
+			"", ModeSelectScript.MODE_TELEOP, teleop_only, true),
+		"",
+		"an invalid explicit request must show the launcher, never the quick entry"
+	)
 
 	var low_tracked_camera := Transform3D(
 		Basis.from_euler(Vector3(0.2, -0.4, 0.1)),

@@ -18,7 +18,7 @@ func _exit_tree() -> void:
 class QuestCaptureAndroidExportPlugin:
 	extends EditorExportPlugin
 
-	var _include_quest := false
+	var _include_quest_capture := false
 
 	func _supports_platform(platform: EditorExportPlatform) -> bool:
 		return platform is EditorExportPlatformAndroid
@@ -26,15 +26,18 @@ class QuestCaptureAndroidExportPlugin:
 	func _get_name() -> String:
 		return "QuestCapturePlugin"
 
-	func _export_begin(features: PackedStringArray, is_debug: bool, path: String, flags: int) -> void:
-		_include_quest = features.has("quest")
+	func _export_begin(
+		features: PackedStringArray, _is_debug: bool, _path: String, _flags: int
+	) -> void:
+		_include_quest_capture = features.has("quest") \
+			and features.has("operator_capture_stack")
 
 	func _export_end() -> void:
-		_include_quest = false
+		_include_quest_capture = false
 
 	func _get_android_libraries(platform: EditorExportPlatform, debug: bool) -> PackedStringArray:
 		var libraries := PackedStringArray()
-		if not _include_quest:
+		if not _include_quest_capture:
 			return libraries
 		var flavor := "debug" if debug else "release"
 		# Stage 3 split: the muxer's AAR moved to addons/spatialmp4_muxer/ and
@@ -46,7 +49,7 @@ class QuestCaptureAndroidExportPlugin:
 		return libraries
 
 	func _get_android_manifest_element_contents(platform: EditorExportPlatform, debug: bool) -> String:
-		if not _include_quest:
+		if not _include_quest_capture:
 			return ""
 		# BOUNDARYLESS_APP opts the app into Meta's Boundaryless mode so the
 		# Quest runtime fully suppresses the guardian (not just the visual
