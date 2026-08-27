@@ -144,3 +144,6 @@ tests/results
 
 # editable install metadata from prepare_lerobot_so101.sh
 plugins/lerobot-teleop/python/*.egg-info/
+
+*.log
+*.pid

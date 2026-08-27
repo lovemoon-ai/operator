@@ -25,8 +25,9 @@ use teleop_protocol::DeviceTelemetry;
 
 use crate::protocol::{CommandCodec, CommandFrame};
 
-/// Push period for the periodic telemetry send (~10 Hz).
-const TELEMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+/// Push period for responsive hand feedback (~50 Hz). This runs on a dedicated
+/// socket, so increasing visual feedback rate cannot delay the command stream.
+const TELEMETRY_PERIOD: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Run the telemetry server, binding `port` on all interfaces. Never returns
 /// under normal operation.

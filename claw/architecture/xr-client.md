@@ -146,6 +146,17 @@ The settings page has one `Robot` group. Its first row picks the type —
 picker and retargeting backend for Inside, or discovery, address, and
 connection state for Outside.
 
+A configuration item's Test action is diagnostic preview only; it must not be
+the owner of runtime state. Confirming the complete settings page is the
+activation boundary: the selected target starts, required transports connect,
+and every enabled runtime visualization becomes active on the working page.
+Descriptor-driven features may be pre-enabled from discovery metadata for
+immediate disconnected/connecting feedback, then must be reconciled against
+the authoritative descriptor returned by the live session. Opening settings
+suspends those features without destroying their configuration; closing or
+confirming resumes the configured runtime, while safety-sensitive controls
+return locked.
+
 How an Inside robot is drawn depends on what its profile declares. A profile
 with an `overlay_script` uses that bespoke, retargeting-aware overlay
 (the humanoids). Otherwise a `visual_model` GLB is rendered by

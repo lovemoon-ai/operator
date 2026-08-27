@@ -17,6 +17,7 @@ extends Node3D
 
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
+const HandUnlockButtonScript = preload("res://scripts/ui/hand_unlock_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
 const OUTSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/outside_robot_target.gd"
 const INSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/inside_robot_target.gd"
@@ -24,6 +25,18 @@ const INSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/inside_robot_tar
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
+const DEFAULT_TELEMETRY_PORT := 63903
+const TELEMETRY_PORT_OFFSET := 2
+const TELEMETRY_RETRY_DELAY_SEC := 1.0
+const REVO2_DEVICE_TYPE := "revo2_dual_hand"
+const REVO2_HAND_CHANNELS := [
+	"thumb_flex",
+	"thumb_aux",
+	"index_flex",
+	"middle_flex",
+	"ring_flex",
+	"pinky_flex",
+]
 
 @onready var _start_xr: XRToolsStartXR = get_node_or_null("StartXR")
 @onready var _origin: XROrigin3D = $XROrigin3D
@@ -38,6 +51,12 @@ const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 # single-arm rig only ever populates the driving hand's slot.
 const ControlFrameGizmoScript = preload("res://scripts/ui/control_frame_gizmo.gd")
 const EEPoseTrajectoryScript = preload("res://scripts/ui/ee_pose_trajectory.gd")
+const DexterousHandFeedbackOverlayScript = preload(
+	"res://scripts/ui/dexterous_hand_feedback_overlay.gd"
+)
+const HandControlIndicatorScript = preload(
+	"res://scripts/ui/hand_control_indicator.gd"
+)
 const HAND_LEFT := 0
 const HAND_RIGHT := 1
 var _control_frame_gizmos := {}  # hand -> Node3D
@@ -45,6 +64,10 @@ var _control_frame := {HAND_LEFT: Quaternion.IDENTITY, HAND_RIGHT: Quaternion.ID
 var _control_frame_valid := {HAND_LEFT: false, HAND_RIGHT: false}
 var _control_frame_mirror := {HAND_LEFT: true, HAND_RIGHT: true}
 var _ee_pose_trajectory: EEPoseTrajectory
+var _hand_feedback_overlay: DexterousHandFeedbackOverlay
+var _hand_control_indicators := {}
+var _revo2_hand_runtime_enabled := false
+var _revo2_hand_control_unlocked := false
 @onready var _tracking_provider: Node = $TrackingProvider
 @onready var _tcp_handler: Node = $TcpHandler
 @onready var _discovery: Node = $Discovery
@@ -60,6 +83,9 @@ var _command_sender: CommandSender
 ## Raw atomic state publisher, enabled only when the descriptor advertises
 ## `xr_stream` (the embedded pyoperator SDK mode).
 var _xr_state_sender: XrStateSender
+## Dedicated telemetry connection. xr-bridge intentionally separates the
+## command and telemetry sockets so slow UI consumers cannot delay commands.
+var _telemetry_tcp_handler: TcpHandler
 ## TCP video handler — used when the descriptor selects "tcp" or as the
 ## fallback for "auto"-mode descriptors that didn't supply a UDP port.
 var _video_tcp_handler: TcpHandler
@@ -70,6 +96,8 @@ var _video_tcp_handler: TcpHandler
 var _video_udp_handler: UdpVideoHandler
 var _active_video_transport: String = "tcp"  # "tcp" or "udp"
 var _last_video_feed: Dictionary = {}
+var _active_telemetry_port := DEFAULT_TELEMETRY_PORT
+var _telemetry_retry_remaining := 0.0
 var _clock_sync: RobotClockSync
 var _known_robots: Dictionary = {}
 var _outside_target: Node
@@ -78,6 +106,7 @@ var _active_target: Node
 
 var _settings_panel: Node3D
 var _settings_button: Node3D
+var _hand_unlock_button: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
 # True while the settings panel is open: teleop is suspended — neither
@@ -173,6 +202,11 @@ func _ready() -> void:
 	_tcp_handler.connection_failed.connect(_on_connection_failed)
 	_tcp_handler.command_received.connect(_on_command_received)
 
+	_telemetry_tcp_handler.connected_to_server.connect(_on_telemetry_connected)
+	_telemetry_tcp_handler.disconnected_from_server.connect(_on_telemetry_disconnected)
+	_telemetry_tcp_handler.connection_failed.connect(_on_telemetry_connection_failed)
+	_telemetry_tcp_handler.command_received.connect(_on_telemetry_command_received)
+
 	_video_tcp_handler.connected_to_server.connect(_on_video_connected)
 	_video_tcp_handler.disconnected_from_server.connect(_on_video_disconnected)
 	_video_tcp_handler.connection_failed.connect(_on_video_connection_failed)
@@ -209,20 +243,12 @@ func _ready() -> void:
 	# instead of waiting for discovery to finish.
 	_settings_panel.visible = false
 	_settings_button.visible = false
+	_hand_unlock_button.visible = false
 
-	# Apply persisted video-mode immediately so RobotView starts in the
-	# user's preferred orientation (face-locked vs world-locked) without
-	# waiting for a fresh OK press.
+	# Apply persisted runtime options immediately. The settings page's Test
+	# actions are previews only; the confirmed options own the working page.
 	var persisted: Dictionary = SettingsUI.load_settings()
-	if _robot_view:
-		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
-		# `show_video_panel` defaults to false: a fresh install should NOT
-		# pop a placeholder quad in front of the operator before any robot
-		# has sent a frame. The user opts in via the Settings panel toggle.
-		if _robot_view.has_method("set_show_video_panel"):
-			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
-	if _ee_pose_trajectory:
-		_ee_pose_trajectory.set_enabled(bool(persisted.get("show_operation_trajectory", false)))
+	_apply_runtime_settings(persisted)
 
 	var xr_interface := XRServer.find_interface("OpenXR")
 	if xr_interface and xr_interface.is_initialized():
@@ -246,9 +272,12 @@ func _process(_delta: float) -> void:
 			_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
+	_update_hand_unlock_button(_delta)
+	_tick_telemetry_reconnect(_delta)
 	# Position refreshes every frame so the gizmo tracks the controller smoothly;
 	# its orientation only changes when telemetry reports a new captured frame.
 	_update_control_frame_gizmo()
+	_update_hand_control_indicators()
 
 
 # Push the detected input source down to the teleop settings panel so the
@@ -258,12 +287,16 @@ var _last_indicator_mode := ""
 
 
 func _apply_settings_input_indicator(mode: String) -> void:
-	if _settings_ui == null or not _settings_ui.has_method("set_input_mode_indicator"):
-		return
 	if mode == _last_indicator_mode:
 		return
 	_last_indicator_mode = mode
-	_settings_ui.call("set_input_mode_indicator", mode)
+	if _settings_ui != null and _settings_ui.has_method("set_input_mode_indicator"):
+		_settings_ui.call("set_input_mode_indicator", mode)
+	var controller := _right_controller if mode == "controllers" else null
+	if _settings_button and _settings_button.has_method("set_feedback_input_mode"):
+		_settings_button.call("set_feedback_input_mode", mode, controller)
+	if _hand_unlock_button and _hand_unlock_button.has_method("set_feedback_input_mode"):
+		_hand_unlock_button.call("set_feedback_input_mode", mode, controller)
 
 
 func _bind_operator_interaction() -> void:
@@ -349,11 +382,24 @@ func _create_v2_nodes() -> void:
 	_ee_pose_trajectory = EEPoseTrajectoryScript.new()
 	_ee_pose_trajectory.name = "EEPoseTrajectory"
 	add_child(_ee_pose_trajectory)
+	_hand_feedback_overlay = DexterousHandFeedbackOverlayScript.new()
+	_hand_feedback_overlay.name = "DexterousHandFeedbackOverlay"
+	_camera.add_child(_hand_feedback_overlay)
+	_hand_feedback_overlay.set_enabled(false)
+	for hand in [HAND_LEFT, HAND_RIGHT]:
+		var indicator := HandControlIndicatorScript.new()
+		indicator.name = "LeftHandControlIndicator" if hand == HAND_LEFT else "RightHandControlIndicator"
+		_origin.add_child(indicator)
+		_hand_control_indicators[hand] = indicator
 	_command_sender.command_sent.connect(_on_command_sent)
 
 	_xr_state_sender = XrStateSender.new()
 	_xr_state_sender.name = "XrStateSender"
 	add_child(_xr_state_sender)
+
+	_telemetry_tcp_handler = TcpHandler.new()
+	_telemetry_tcp_handler.name = "TelemetryTcpHandler"
+	add_child(_telemetry_tcp_handler)
 
 	# Dedicated video stream handler. [issue 005 / item 6] Bumped to
 	# 32 MiB so a freshly connected client surviving a brief WiFi
@@ -394,6 +440,11 @@ func _create_settings_ui_nodes() -> void:
 	_settings_button.name = "TeleopSettingsButton"
 	_settings_button.pressed.connect(_on_settings_button_pressed)
 	_origin.add_child(_settings_button)
+
+	_hand_unlock_button = HandUnlockButtonScript.new()
+	_hand_unlock_button.name = "HandUnlockButton"
+	_hand_unlock_button.toggled.connect(_on_hand_unlock_toggled)
+	_origin.add_child(_hand_unlock_button)
 
 	_teleop_controller_panel = TeleopControllerPanelScript.new()
 	_teleop_controller_panel.name = "TeleopControllerPanel"
@@ -536,9 +587,6 @@ func _configure_passthrough() -> void:
 ## received on handshake defines what the client sends and displays.
 func _on_settings_applied(options: Dictionary) -> void:
 	var target_scope := str(options.get("target_scope", "outside"))
-	var video_face_locked := bool(options.get("video_face_locked", true))
-	var show_video_panel := bool(options.get("show_video_panel", false))
-	var show_operation_trajectory := bool(options.get("show_operation_trajectory", false))
 	print(
 		(
 			"[Operator] Settings applied: target=%s options=%s"
@@ -554,16 +602,13 @@ func _on_settings_applied(options: Dictionary) -> void:
 	_inside_resume_options = {}
 	_applied_options = options.duplicate(true)
 
-	# Apply video window mode immediately.
-	if _robot_view:
-		_robot_view.follow_camera = video_face_locked
-		if _robot_view.has_method("set_show_video_panel"):
-			_robot_view.set_show_video_panel(show_video_panel)
-	if _ee_pose_trajectory:
-		_ee_pose_trajectory.set_enabled(show_operation_trajectory)
+	# A per-item Test action is only a preview. Confirm is the ownership
+	# boundary where every persisted option becomes part of the working page.
+	_apply_runtime_settings(options)
 
 	_stop_active_target()
 	if target_scope == "inside":
+		_set_revo2_hand_runtime_enabled(false)
 		if _inside_target == null:
 			_show_settings_panel_with_status("Inside Robot runtime is unavailable")
 			return
@@ -581,8 +626,133 @@ func _on_settings_applied(options: Dictionary) -> void:
 	_hide_settings_panel()
 
 
+func _apply_runtime_settings(options: Dictionary) -> void:
+	if _robot_view:
+		_robot_view.follow_camera = bool(options.get("video_face_locked", true))
+		if _robot_view.has_method("set_show_video_panel"):
+			_robot_view.set_show_video_panel(bool(options.get("show_video_panel", false)))
+	if _ee_pose_trajectory:
+		_ee_pose_trajectory.set_enabled(
+			bool(options.get("show_operation_trajectory", false))
+		)
+
+
 func _on_settings_button_pressed() -> void:
 	_show_settings_panel()
+
+
+func _on_hand_unlock_toggled(unlocked: bool) -> void:
+	_set_revo2_hand_control_unlocked(unlocked)
+
+
+func _set_revo2_hand_control_unlocked(unlocked: bool) -> void:
+	var was_unlocked := _revo2_hand_control_unlocked
+	var transport_connected: bool = (
+		_active_target == _outside_target
+		and _tcp_handler != null
+		and _tcp_handler.is_connected_to_robot()
+	)
+	_revo2_hand_control_unlocked = (
+		unlocked
+		and _revo2_hand_runtime_enabled
+		and transport_connected
+		and not _teleop_suspended
+	)
+	var mode = _active_control_mode()
+	if mode != null and mode.has_method("set_hand_control_unlocked"):
+		mode.call("set_hand_control_unlocked", _revo2_hand_control_unlocked)
+	if was_unlocked and not _revo2_hand_control_unlocked and _command_sender != null:
+		_command_sender.send_immediate_command()
+	_update_hand_unlock_button()
+	print("[Operator] Revo2 hand control unlocked=%s" % str(_revo2_hand_control_unlocked))
+
+
+func _update_hand_unlock_button(delta: float = 0.0) -> void:
+	if _hand_unlock_button == null:
+		return
+	var show_button: bool = (
+		_revo2_hand_runtime_enabled
+		and _active_target == _outside_target
+		and not _synthetic
+		and (_settings_panel == null or not _settings_panel.visible)
+	)
+	var available: bool = (
+		show_button
+		and not _teleop_suspended
+		and _tcp_handler != null
+		and _tcp_handler.is_connected_to_robot()
+	)
+	var mode = _active_control_mode()
+	if not show_button or mode == null or not mode.has_method("get_hand_control_state"):
+		_hand_unlock_button.call(
+			"update_direct_touch", null, null, false, false, delta
+		)
+		return
+	var left_state: Dictionary = mode.get_hand_control_state(HAND_LEFT)
+	var right_state: Dictionary = mode.get_hand_control_state(HAND_RIGHT)
+	_hand_unlock_button.call(
+		"update_direct_touch",
+		left_state.get("wrist_button_transform", null),
+		right_state.get("index_tip", null),
+		_revo2_hand_control_unlocked,
+		available,
+		delta
+	)
+
+
+func _set_revo2_hand_runtime_enabled(enabled: bool) -> void:
+	_revo2_hand_runtime_enabled = enabled
+	if not enabled:
+		_set_revo2_hand_control_unlocked(false)
+		if _hand_feedback_overlay:
+			_hand_feedback_overlay.clear()
+	if _hand_feedback_overlay:
+		_hand_feedback_overlay.set_enabled(enabled)
+	if not enabled:
+		for indicator_v in _hand_control_indicators.values():
+			var indicator = indicator_v
+			if indicator != null:
+				indicator.update_state(null, false, false, false)
+	_update_hand_unlock_button()
+
+
+func _prepare_outside_runtime_features(ip: String) -> void:
+	var info_v: Variant = _known_robots.get(ip, {})
+	var info: Dictionary = info_v if info_v is Dictionary else {}
+	_set_revo2_hand_runtime_enabled(
+		str(info.get("device_type", "")) == REVO2_DEVICE_TYPE
+	)
+
+
+static func _descriptor_supports_revo2_hand_runtime(descriptor: Dictionary) -> bool:
+	var device_v: Variant = descriptor.get("device", {})
+	var device: Dictionary = device_v if device_v is Dictionary else {}
+	if str(device.get("type", "")) == REVO2_DEVICE_TYPE:
+		return true
+
+	var schema_v: Variant = descriptor.get("control_schema", {})
+	var schema: Dictionary = schema_v if schema_v is Dictionary else {}
+	var missing_axes := {}
+	for side in ["left", "right"]:
+		for channel in REVO2_HAND_CHANNELS:
+			missing_axes["revo2_%s_%s" % [side, channel]] = true
+	for axis_v in schema.get("axes", []):
+		if not axis_v is Dictionary:
+			continue
+		var axis_name := str((axis_v as Dictionary).get("name", ""))
+		missing_axes.erase(axis_name)
+
+	var telemetry_v: Variant = descriptor.get("telemetry_schema", {})
+	var telemetry_schema: Dictionary = telemetry_v if telemetry_v is Dictionary else {}
+	var telemetry_names := {}
+	for value_v in telemetry_schema.get("values", []):
+		if value_v is Dictionary:
+			telemetry_names[str((value_v as Dictionary).get("name", ""))] = true
+	return (
+		missing_axes.is_empty()
+		and telemetry_names.has("revo2_left_position")
+		and telemetry_names.has("revo2_right_position")
+	)
 
 
 ## Legacy close signal: hide it and re-show the floating settings button so
@@ -597,6 +767,7 @@ func _on_settings_close_requested() -> void:
 ## what actually quits the process.
 func _on_settings_exit_requested() -> void:
 	print("[Operator] Settings exit requested — returning to mode select")
+	_set_revo2_hand_control_unlocked(false)
 	_cancel_launch_window()
 	if _robot_control_sink:
 		_robot_control_sink.set_sending(false)
@@ -620,6 +791,8 @@ func _on_settings_exit_requested() -> void:
 ## holds the arm) and the controller overlay hides, so panel interaction can't
 ## move the arm or show stale grip/trigger hints.
 func _set_teleop_suspended(suspended: bool) -> void:
+	if suspended:
+		_set_revo2_hand_control_unlocked(false)
 	if _teleop_suspended == suspended:
 		return
 	_teleop_suspended = suspended
@@ -628,6 +801,8 @@ func _set_teleop_suspended(suspended: bool) -> void:
 		# Do not bridge the hand motion performed while settings owns the
 		# controllers with one long segment when teleop resumes.
 		_ee_pose_trajectory.break_all()
+	if _hand_feedback_overlay:
+		_hand_feedback_overlay.set_suspended(suspended)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_suspended"):
 		_teleop_controller_panel.call("set_suspended", suspended)
 
@@ -664,6 +839,8 @@ func _show_settings_panel() -> void:
 		_settings_ui.set_discovering(false)
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
+	if _hand_unlock_button and _hand_unlock_button.has_method("cancel_touch"):
+		_hand_unlock_button.call("cancel_touch")
 	if _settings_panel and _settings_panel.has_method("set_feedback_input_mode"):
 		var mode := _current_interaction_mode()
 		_settings_panel.set_feedback_input_mode(
@@ -674,6 +851,7 @@ func _show_settings_panel() -> void:
 	else:
 		_settings_panel.visible = true
 	_settings_button.visible = false
+	_hand_unlock_button.visible = false
 
 
 func _hide_settings_panel() -> void:
@@ -684,6 +862,7 @@ func _hide_settings_panel() -> void:
 		_settings_panel.visible = false
 	_settings_button.visible = true
 	_set_teleop_suspended(false)
+	_update_hand_unlock_button()
 	_resume_inside_embodiment()
 
 
@@ -814,10 +993,7 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	# the panel-hide step (panel was never shown). Also apply persisted
 	# video mode so the auto-path matches what OK would do.
 	var persisted: Dictionary = SettingsUI.load_settings()
-	if _robot_view:
-		_robot_view.follow_camera = bool(persisted.get("video_face_locked", true))
-		if _robot_view.has_method("set_show_video_panel"):
-			_robot_view.set_show_video_panel(bool(persisted.get("show_video_panel", false)))
+	_apply_runtime_settings(persisted)
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
 
@@ -872,6 +1048,7 @@ func _push_discovery_to_settings_ui() -> void:
 			"ip": ip,
 			"pose_port": raw.get("pose_port", 63901),
 			"video_port": raw.get("video_port", 0),
+			"telemetry_port": raw.get("telemetry_port", DEFAULT_TELEMETRY_PORT),
 			"device_type": raw.get("device_type", ""),
 			"device_name": raw.get("device_name", ""),
 		}
@@ -910,13 +1087,18 @@ func _on_command_sent(command: Dictionary) -> void:
 
 
 func _connect_to_robot(ip: String, port: int) -> void:
+	_set_revo2_hand_control_unlocked(false)
+	_prepare_outside_runtime_features(ip)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.clear()
+	if _hand_feedback_overlay:
+		_hand_feedback_overlay.clear()
 	_set_status(tr("UI_CONNECTING_TO") % [ip, port])
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	_active_target = _outside_target
 	_command_sender.transport = _outside_target
+	_active_telemetry_port = _telemetry_port_for(ip, port)
 	_outside_target.start({"host": ip, "port": port})
 
 
@@ -927,21 +1109,26 @@ func _on_connected() -> void:
 	_session.on_connected()
 	if _outside_target:
 		_outside_target.mark_transport_connected()
+	_connect_telemetry_stream(_tcp_handler.get_host())
 	_connect_video_stream(_tcp_handler.get_host())
 	if _clock_sync:
 		_clock_sync.start()
 
 
 func _on_disconnected() -> void:
+	_set_revo2_hand_control_unlocked(false)
 	_set_status(tr("UI_DISCONNECTED"))
 	_robot_control_sink.set_sending(false)
 	_xr_state_sender.set_sending(false)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.clear()
+	if _hand_feedback_overlay:
+		_hand_feedback_overlay.clear()
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	_video_tcp_handler.disconnect_from_robot()
 	_video_udp_handler.disconnect_from_robot()
+	_telemetry_tcp_handler.disconnect_from_robot()
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 	_session.on_disconnected()
@@ -952,6 +1139,8 @@ func _on_disconnected() -> void:
 
 
 func _on_connection_failed(reason: String) -> void:
+	_set_revo2_hand_control_unlocked(false)
+	_telemetry_tcp_handler.disconnect_from_robot()
 	_set_status(tr("UI_CONNECTION_FAILED") % reason)
 	if _outside_target:
 		_outside_target.mark_connection_failed(reason)
@@ -969,6 +1158,67 @@ func _on_command_received(command: String, data: PackedByteArray) -> void:
 			pass
 		_:
 			print("[Operator] Unknown command: %s" % command)
+
+
+func _connect_telemetry_stream(ip: String) -> void:
+	if ip.is_empty() or _active_telemetry_port <= 0 or _active_telemetry_port > 65535:
+		return
+	if (
+		_telemetry_tcp_handler.is_connected_to_robot()
+		and _telemetry_tcp_handler.get_host() == ip
+		and _telemetry_tcp_handler.get_port() == _active_telemetry_port
+	):
+		return
+	_telemetry_tcp_handler.disconnect_from_robot()
+	_telemetry_retry_remaining = TELEMETRY_RETRY_DELAY_SEC
+	print("[Operator] Connecting telemetry stream to %s:%d" % [ip, _active_telemetry_port])
+	_telemetry_tcp_handler.connect_to_robot(ip, _active_telemetry_port)
+
+
+func _on_telemetry_connected() -> void:
+	_telemetry_retry_remaining = 0.0
+	print("[Operator] Telemetry stream connected")
+
+
+func _on_telemetry_disconnected() -> void:
+	_telemetry_retry_remaining = TELEMETRY_RETRY_DELAY_SEC
+	print("[Operator] Telemetry stream disconnected")
+	if _hand_feedback_overlay:
+		_hand_feedback_overlay.clear()
+
+
+func _on_telemetry_connection_failed(reason: String) -> void:
+	_telemetry_retry_remaining = TELEMETRY_RETRY_DELAY_SEC
+	print("[Operator] Telemetry connection failed: %s" % reason)
+
+
+func _tick_telemetry_reconnect(delta: float) -> void:
+	if _telemetry_tcp_handler == null or _tcp_handler == null:
+		return
+	if _active_target != _outside_target or not _tcp_handler.is_connected_to_robot():
+		return
+	if _telemetry_tcp_handler.get_state() != TcpHandler.State.DISCONNECTED:
+		return
+	_telemetry_retry_remaining = maxf(_telemetry_retry_remaining - maxf(delta, 0.0), 0.0)
+	if _telemetry_retry_remaining > 0.0:
+		return
+	_connect_telemetry_stream(_tcp_handler.get_host())
+
+
+func _on_telemetry_command_received(command: String, data: PackedByteArray) -> void:
+	if _session.handle_command(command, data):
+		return
+	print("[Operator] Unknown telemetry command: %s" % command)
+
+
+func _telemetry_port_for(ip: String, pose_port: int) -> int:
+	if _known_robots.has(ip):
+		var info: Dictionary = _known_robots[ip]
+		var discovered_port := int(info.get("telemetry_port", 0))
+		if discovered_port > 0 and discovered_port <= 65535:
+			return discovered_port
+	var derived := pose_port + TELEMETRY_PORT_OFFSET
+	return derived if derived > 0 and derived <= 65535 else DEFAULT_TELEMETRY_PORT
 
 
 func _on_video_connected() -> void:
@@ -1002,6 +1252,12 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	if _outside_target:
 		_outside_target.apply_descriptor(descriptor)
 	_robot_control_sink.configure_for_device(descriptor)
+	# The descriptor is authoritative. Activate the same hand controls and
+	# feedback used by the feature test in the normal working-page lifecycle.
+	_set_revo2_hand_runtime_enabled(
+		_descriptor_supports_revo2_hand_runtime(descriptor)
+	)
+	_set_revo2_hand_control_unlocked(false)
 	var xr_stream: Variant = descriptor.get("xr_stream", null)
 	_sdk_mode = xr_stream is Dictionary
 	if _sdk_mode:
@@ -1042,6 +1298,7 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 
 
 func _on_device_disconnected() -> void:
+	_set_revo2_hand_control_unlocked(false)
 	_sdk_mode = false
 	_robot_control_sink.set_sending(false)
 	_xr_state_sender.set_sending(false)
@@ -1061,6 +1318,8 @@ func _on_telemetry_received(_data: Dictionary) -> void:
 	# section. For now we just drop the data so the signal stays connected
 	# (Session still parses telemetry frames so consumer can subscribe).
 	_capture_control_frame(_data)
+	if _hand_feedback_overlay and _revo2_hand_runtime_enabled:
+		_hand_feedback_overlay.update_telemetry(_data)
 	if _synthetic:
 		_synth_capture_telemetry(_data)
 
@@ -1114,6 +1373,33 @@ func _capture_control_frame_for_hand(
 func _update_control_frame_gizmo() -> void:
 	for hand in [HAND_LEFT, HAND_RIGHT]:
 		_update_control_frame_gizmo_for_hand(hand)
+
+
+func _update_hand_control_indicators() -> void:
+	var mode = _active_control_mode()
+	var transport_connected: bool = (
+		_active_target == _outside_target
+		and _tcp_handler != null
+		and _tcp_handler.is_connected_to_robot()
+	)
+	for hand in [HAND_LEFT, HAND_RIGHT]:
+		var indicator = _hand_control_indicators.get(hand, null)
+		if indicator == null:
+			continue
+		if not _revo2_hand_runtime_enabled or mode == null \
+				or not mode.has_method("get_hand_control_state"):
+			indicator.update_state(null, false, false, false)
+			continue
+		var state: Dictionary = mode.get_hand_control_state(hand)
+		var shown: bool = bool(state.get("tracked", false))
+		var control_enabled: bool = (
+			transport_connected
+			and not _teleop_suspended
+			and bool(state.get("control_enabled", false))
+		)
+		indicator.update_state(
+			state.get("position", null), transport_connected, control_enabled, shown
+		)
 
 
 func _update_control_frame_gizmo_for_hand(hand: int) -> void:
@@ -1234,10 +1520,17 @@ func _on_robot_found(
 	# Discovery feed drives both (1) auto-reconnect of the video stream
 	# when the descriptor matches the currently connected host, and (2)
 	# the SettingsPanel's "Discovered" dropdown (per the D launch flow).
+	var telemetry_port := pose_port + TELEMETRY_PORT_OFFSET
+	var discovered: Dictionary = _discovery.get_known_robots()
+	if discovered.has(robot_name):
+		telemetry_port = int(
+			(discovered[robot_name] as Dictionary).get("telemetry_port", telemetry_port)
+		)
 	_known_robots[ip] = {
 		"name": robot_name,
 		"pose_port": pose_port,
 		"video_port": video_port,
+		"telemetry_port": telemetry_port,
 		"device_type": device_type,
 		"device_name": device_name,
 	}
@@ -1257,12 +1550,15 @@ func _on_robot_found(
 					"ip": ip,
 					"pose_port": pose_port,
 					"video_port": video_port,
+					"telemetry_port": telemetry_port,
 					"device_type": device_type,
 					"device_name": device_name,
 				}
 			)
 		)
 	if _tcp_handler.is_connected_to_robot() and _tcp_handler.get_host() == ip:
+		_active_telemetry_port = telemetry_port
+		_connect_telemetry_stream(ip)
 		_connect_video_stream(ip)
 
 
@@ -1275,6 +1571,8 @@ func _on_robot_lost(robot_name: String) -> void:
 				_video_tcp_handler.disconnect_from_robot()
 			if _video_udp_handler.is_connected_to_robot() and _video_udp_handler.get_host() == ip:
 				_video_udp_handler.disconnect_from_robot()
+			if _telemetry_tcp_handler.is_connected_to_robot() and _telemetry_tcp_handler.get_host() == ip:
+				_telemetry_tcp_handler.disconnect_from_robot()
 			break
 	if (
 		_settings_panel
@@ -1441,6 +1739,8 @@ func _disconnect_outside_media() -> void:
 		_video_tcp_handler.disconnect_from_robot()
 	if _video_udp_handler:
 		_video_udp_handler.disconnect_from_robot()
+	if _telemetry_tcp_handler:
+		_telemetry_tcp_handler.disconnect_from_robot()
 	if _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 

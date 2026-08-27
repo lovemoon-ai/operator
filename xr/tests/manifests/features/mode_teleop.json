@@ -50,6 +50,13 @@
       "script": "res://tests/unit/teleop/ee_pose_trajectory_test.gd"
     },
     {
+      "id": "teleop.revo2_hand_feedback",
+      "level": "unit",
+      "suite": "teleop.visualization",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/revo2_hand_feedback_test.gd"
+    },
+    {
       "id": "teleop.sdk_mode_suspension",
       "level": "unit",
       "suite": "teleop.lifecycle",
