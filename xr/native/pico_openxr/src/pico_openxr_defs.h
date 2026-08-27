@@ -141,6 +141,7 @@ static constexpr const char *XR_PICO_BODY_TRACKING2_EXTENSION_NAME = "XR_PICO_bo
 static constexpr const char *XR_BD_BODY_TRACKING_EXTENSION_NAME = "XR_BD_body_tracking";
 static constexpr const char *XR_EXT_HAND_TRACKING_EXTENSION_NAME = "XR_EXT_hand_tracking";
 static constexpr const char *XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME = "XR_KHR_convert_timespec_time";
+static constexpr const char *XR_PICO_VIRTUAL_BOUNDARY_EXTENSION_NAME = "XR_PICO_virtual_boundary";
 
 static constexpr uint32_t XR_MOTION_TRACKER_MAX_SIZE_PICO = 6;
 static constexpr uint32_t XR_BODY_JOINT_COUNT_BD = 24;
@@ -731,6 +732,20 @@ struct XrBodyTrackingStatePICO {
 };
 
 using PFN_xrGetExternalCameraInfoPICO = XrResult(XRAPI_PTR)(XrSession session, XrExternalCameraParameterPICO *info);
+
+// XR_PICO_virtual_boundary. Not published in a PICO SDK header; the
+// prototypes below were recovered from the on-device runtime
+// (/product/priv-app/XRRuntime/XRRuntime.apk -> libpxrruntime.so). Each
+// entrypoint takes (XrSession, XrBool32) and is dispatched by name through
+// xrGetInstanceProcAddr, so no PICO library has to be linked or bundled.
+//
+// Passing XR_FALSE to xrSetVirtualBoundaryEnablePICO is what the runtime
+// forwards to its internal guardian IPC as "set guardian system disable =
+// true"; the two visibility setters additionally hide the boundary mesh and
+// the seethrough wash the runtime draws when you approach it.
+using PFN_xrSetVirtualBoundaryEnablePICO = XrResult(XRAPI_PTR)(XrSession session, XrBool32 enable);
+using PFN_xrSetVirtualBoundaryVisiblePICO = XrResult(XRAPI_PTR)(XrSession session, XrBool32 visible);
+using PFN_xrSetVirtualBoundarySeeThroughVisiblePICO = XrResult(XRAPI_PTR)(XrSession session, XrBool32 visible);
 using PFN_xrPollFutureEXT = XrResult(XRAPI_PTR)(XrInstance instance, const XrFuturePollInfoEXT *pollInfo, XrFuturePollResultEXT *pollResult);
 using PFN_xrEnumerateAvailableCamerasPICO = XrResult(XRAPI_PTR)(XrInstance instance, const XrAvailableCamerasEnumerateInfoPICO *enumerateInfo, uint32_t cameraIdCapacityInput, uint32_t *cameraIdCountOutput, XrCameraIdPICO *cameraIds);
 using PFN_xrEnumerateCameraPropertyTypesPICO = XrResult(XRAPI_PTR)(XrInstance instance, XrCameraIdPICO cameraId, uint32_t typeCapacityInput, uint32_t *typeCountOutput, XrCameraPropertyTypePICO *types);

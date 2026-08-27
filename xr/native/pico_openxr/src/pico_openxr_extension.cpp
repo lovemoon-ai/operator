@@ -19,9 +19,11 @@
 #if defined(__ANDROID__)
 #include <android/log.h>
 #define PROBE_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Operator-PROBE", __VA_ARGS__)
+#define PICO_BOUNDARY_LOG(...) __android_log_print(ANDROID_LOG_WARN, "Operator-PicoBoundary", __VA_ARGS__)
 #else
 #include <cstdio>
 #define PROBE_LOG(...) do { fprintf(stderr, "[Operator-PROBE] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#define PICO_BOUNDARY_LOG(...) do { fprintf(stderr, "[Operator-PicoBoundary] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
 #endif
 
 using namespace godot;
@@ -76,6 +78,7 @@ PicoOpenXRExtension::PicoOpenXRExtension() :
 	request_extensions[XR_PICO_BODY_TRACKING2_EXTENSION_NAME] = &pico_body_tracking2_ext;
 	request_extensions[XR_BD_BODY_TRACKING_EXTENSION_NAME] = &bd_body_tracking_ext;
 	request_extensions[XR_EXT_HAND_TRACKING_EXTENSION_NAME] = &hand_tracking_ext;
+	request_extensions[XR_PICO_VIRTUAL_BOUNDARY_EXTENSION_NAME] = &virtual_boundary_ext;
 }
 
 PicoOpenXRExtension::~PicoOpenXRExtension() {
@@ -105,6 +108,9 @@ void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("stop_body_tracking"), &PicoOpenXRExtension::stop_body_tracking);
 	ClassDB::bind_method(D_METHOD("start_body_tracking_calibration_app"), &PicoOpenXRExtension::start_body_tracking_calibration_app);
 	ClassDB::bind_method(D_METHOD("sample_body_joints"), &PicoOpenXRExtension::sample_body_joints);
+	ClassDB::bind_method(D_METHOD("get_predicted_display_time_ns"), &PicoOpenXRExtension::get_predicted_display_time_ns);
+	ClassDB::bind_method(D_METHOD("set_boundary_visible", "visible"), &PicoOpenXRExtension::set_boundary_visible);
+	ClassDB::bind_method(D_METHOD("get_boundary_status"), &PicoOpenXRExtension::get_boundary_status);
 	ClassDB::bind_method(D_METHOD("probe_view_space_pose"), &PicoOpenXRExtension::probe_view_space_pose);
 	ClassDB::bind_method(D_METHOD("log_head_pose_comparison", "godot_head_transform"), &PicoOpenXRExtension::log_head_pose_comparison);
 }
@@ -135,7 +141,8 @@ void PicoOpenXRExtension::_on_instance_created(uint64_t p_instance) {
 				" XR_PICO_motion_tracking=", motion_tracking_ext,
 				" XR_PICO_body_tracking2=", pico_body_tracking2_ext,
 				" XR_BD_body_tracking=", bd_body_tracking_ext,
-				" XR_EXT_hand_tracking=", hand_tracking_ext);
+				" XR_EXT_hand_tracking=", hand_tracking_ext,
+				" XR_PICO_virtual_boundary=", virtual_boundary_ext);
 }
 
 void PicoOpenXRExtension::_on_instance_destroyed() {
@@ -176,11 +183,20 @@ void PicoOpenXRExtension::_on_instance_destroyed() {
 	xrCreateHandTrackerEXT_ptr = nullptr;
 	xrDestroyHandTrackerEXT_ptr = nullptr;
 	xrLocateHandJointsEXT_ptr = nullptr;
+	xrSetVirtualBoundaryEnablePICO_ptr = nullptr;
+	xrSetVirtualBoundaryVisiblePICO_ptr = nullptr;
+	xrSetVirtualBoundarySeeThroughVisiblePICO_ptr = nullptr;
+	boundary_enable_applied = false;
+	boundary_visible_applied = false;
+	boundary_see_through_applied = false;
 }
 
 void PicoOpenXRExtension::_on_session_created(uint64_t p_session) {
 	session = reinterpret_cast<XrSession>(p_session);
 	UtilityFunctions::print("PicoOpenXRExtension session created");
+	if (!set_boundary_visible(false)) {
+		PICO_BOUNDARY_LOG("failed to suppress the PICO safety boundary; continuing without it");
+	}
 	refresh_external_camera_info();
 	if (motion_tracking_ext && requested_motion_tracker_count > 0) {
 		request_motion_trackers(requested_motion_tracker_count);
@@ -194,6 +210,11 @@ void PicoOpenXRExtension::_on_session_destroyed() {
 	session = nullptr;
 	motion_tracker_ids.clear();
 	motion_request_sent = false;
+	// The boundary policy is re-applied per session; do not report the previous
+	// session's outcome once this one is gone.
+	boundary_enable_applied = false;
+	boundary_visible_applied = false;
+	boundary_see_through_applied = false;
 }
 
 bool PicoOpenXRExtension::_on_event_polled(const void *event) {
@@ -856,6 +877,8 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 	result["message"] = int(XR_BODY_TRACKING_MESSAGE_NO_ERROR_PICO);
 	result["all_tracked"] = false;
 	result["joints"] = Array();
+	const XrTime display_time = current_display_time();
+	result["source_timestamp_ns"] = static_cast<int64_t>(display_time);
 
 	if (!ensure_body_tracker(Dictionary())) {
 		return result;
@@ -904,7 +927,7 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 		XR_TYPE_BODY_JOINTS_LOCATE_INFO_BD,
 		nullptr,
 		current_play_space(),
-		current_display_time(),
+		display_time,
 	};
 	if (!locate_info.baseSpace || locate_info.time == 0) {
 		return result;
@@ -934,6 +957,7 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 		joint_record["joint"] = static_cast<int>(joint);
 		joint_record["flags"] = static_cast<int64_t>(joint_location.locationFlags);
 		joint_record["radius_m"] = 0.0;
+		joint_record["source_timestamp_ns"] = static_cast<int64_t>(display_time);
 		if (pico_body_tracking2_ext) {
 			joint_record["posture"] = static_cast<int>(posture_storage[joint]);
 			const XrBodyJointVelocityPICO &velocity = velocities_storage[joint];
@@ -1005,6 +1029,12 @@ bool PicoOpenXRExtension::resolve_functions() {
 		xrDestroyHandTrackerEXT_ptr = reinterpret_cast<PFN_xrDestroyHandTrackerEXT>(api->get_instance_proc_addr("xrDestroyHandTrackerEXT"));
 		xrLocateHandJointsEXT_ptr = reinterpret_cast<PFN_xrLocateHandJointsEXT>(api->get_instance_proc_addr("xrLocateHandJointsEXT"));
 	}
+	if (virtual_boundary_ext) {
+		xrSetVirtualBoundaryEnablePICO_ptr = reinterpret_cast<PFN_xrSetVirtualBoundaryEnablePICO>(api->get_instance_proc_addr("xrSetVirtualBoundaryEnablePICO"));
+		xrSetVirtualBoundaryVisiblePICO_ptr = reinterpret_cast<PFN_xrSetVirtualBoundaryVisiblePICO>(api->get_instance_proc_addr("xrSetVirtualBoundaryVisiblePICO"));
+		xrSetVirtualBoundarySeeThroughVisiblePICO_ptr = reinterpret_cast<PFN_xrSetVirtualBoundarySeeThroughVisiblePICO>(api->get_instance_proc_addr("xrSetVirtualBoundarySeeThroughVisiblePICO"));
+	}
+
 	// Core OpenXR reference-space + locate. Resolved unconditionally so the
 	// ad-hoc head-pose probe is always available.
 	xrCreateReferenceSpace_ptr = reinterpret_cast<PFN_xrCreateReferenceSpace>(api->get_instance_proc_addr("xrCreateReferenceSpace"));
@@ -1012,6 +1042,100 @@ bool PicoOpenXRExtension::resolve_functions() {
 	xrLocateSpace_ptr = reinterpret_cast<PFN_xrLocateSpace>(api->get_instance_proc_addr("xrLocateSpace"));
 
 	return true;
+}
+
+bool PicoOpenXRExtension::set_boundary_visible(bool visible) {
+	boundary_requested_visible = visible;
+	boundary_enable_applied = false;
+	boundary_visible_applied = false;
+	boundary_see_through_applied = false;
+	if (!virtual_boundary_ext) {
+		PICO_BOUNDARY_LOG("XR_PICO_virtual_boundary is not available on this runtime");
+		return false;
+	}
+	XrSession active_session = current_session();
+	if (active_session == nullptr) {
+		PICO_BOUNDARY_LOG("no active session; cannot change the safety boundary yet");
+		return false;
+	}
+	if (!xrSetVirtualBoundaryEnablePICO_ptr) {
+		PICO_BOUNDARY_LOG("xrSetVirtualBoundaryEnablePICO did not resolve");
+		return false;
+	}
+
+	const XrBool32 flag = visible ? XR_TRUE : XR_FALSE;
+
+	// The enable toggle is the one that actually stops the runtime from
+	// tracking and drawing the guardian; the two visibility calls only
+	// suppress what is rendered. Treat the first as required and the others
+	// as best effort so a runtime that ships a subset still turns the
+	// boundary off.
+	const XrResult enable_result = xrSetVirtualBoundaryEnablePICO_ptr(active_session, flag);
+	if (XR_FAILED(enable_result)) {
+		PICO_BOUNDARY_LOG("xrSetVirtualBoundaryEnablePICO(%s) failed: %d", visible ? "true" : "false", enable_result);
+		return false;
+	}
+	boundary_enable_applied = true;
+
+	if (xrSetVirtualBoundaryVisiblePICO_ptr) {
+		const XrResult result = xrSetVirtualBoundaryVisiblePICO_ptr(active_session, flag);
+		if (XR_FAILED(result)) {
+			PICO_BOUNDARY_LOG("xrSetVirtualBoundaryVisiblePICO(%s) failed: %d", visible ? "true" : "false", result);
+		} else {
+			boundary_visible_applied = true;
+		}
+	}
+	if (xrSetVirtualBoundarySeeThroughVisiblePICO_ptr) {
+		const XrResult result = xrSetVirtualBoundarySeeThroughVisiblePICO_ptr(active_session, flag);
+		if (XR_FAILED(result)) {
+			PICO_BOUNDARY_LOG("xrSetVirtualBoundarySeeThroughVisiblePICO(%s) failed: %d", visible ? "true" : "false", result);
+		} else {
+			boundary_see_through_applied = true;
+		}
+	}
+
+	// Never claim more than the runtime actually did: on a subset runtime the
+	// guardian is disabled but its mesh can still be drawn, and the operator
+	// needs logcat (and get_boundary_status()) to say so.
+	if (boundary_fully_applied()) {
+		PICO_BOUNDARY_LOG("PICO safety boundary visible=%s (enable+visible+see_through all applied)", visible ? "true" : "false");
+	} else {
+		PICO_BOUNDARY_LOG("PICO safety boundary enable=%s applied, but the visibility setters did not: visible=%s see_through=%s;"
+						  " the guardian mesh may still be drawn",
+				visible ? "true" : "false",
+				boundary_setter_state(boundary_visible_applied, xrSetVirtualBoundaryVisiblePICO_ptr != nullptr),
+				boundary_setter_state(boundary_see_through_applied, xrSetVirtualBoundarySeeThroughVisiblePICO_ptr != nullptr));
+	}
+	return true;
+}
+
+bool PicoOpenXRExtension::boundary_fully_applied() const {
+	return boundary_enable_applied && boundary_visible_applied && boundary_see_through_applied;
+}
+
+const char *PicoOpenXRExtension::boundary_setter_state(bool applied, bool resolved) {
+	if (applied) {
+		return "applied";
+	}
+	return resolved ? "failed" : "unavailable";
+}
+
+// Companion getter for set_boundary_visible(): lets GDScript tell "guardian
+// disabled, everything applied" from "guardian disabled but the best-effort
+// visibility setters are missing or failed" without parsing logcat.
+Dictionary PicoOpenXRExtension::get_boundary_status() const {
+	Dictionary status;
+	status["extension_available"] = virtual_boundary_ext;
+	status["session_active"] = current_session() != nullptr;
+	status["enable_resolved"] = xrSetVirtualBoundaryEnablePICO_ptr != nullptr;
+	status["visible_resolved"] = xrSetVirtualBoundaryVisiblePICO_ptr != nullptr;
+	status["see_through_resolved"] = xrSetVirtualBoundarySeeThroughVisiblePICO_ptr != nullptr;
+	status["requested_visible"] = boundary_requested_visible;
+	status["enable_applied"] = boundary_enable_applied;
+	status["visible_applied"] = boundary_visible_applied;
+	status["see_through_applied"] = boundary_see_through_applied;
+	status["complete"] = boundary_fully_applied();
+	return status;
 }
 
 bool PicoOpenXRExtension::has_camera_image_functions() const {
@@ -1845,6 +1969,10 @@ XrTime PicoOpenXRExtension::current_display_time() const {
 		return 0;
 	}
 	return static_cast<XrTime>(api->get_predicted_display_time());
+}
+
+int64_t PicoOpenXRExtension::get_predicted_display_time_ns() const {
+	return static_cast<int64_t>(current_display_time());
 }
 
 Transform3D PicoOpenXRExtension::transform_from_pose(const XrPosef &pose) const {
