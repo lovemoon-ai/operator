@@ -21,18 +21,3 @@ collision_mask = 0
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="DisplayMesh/StaticBody3D"]
 shape = SubResource("BoxShape3D_display")
-
-[node name="LatencyHud" type="Label3D" parent="DisplayMesh"]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.0, 0.85, 0.01)
-billboard = 0
-no_depth_test = true
-fixed_size = false
-render_priority = 1
-pixel_size = 0.002
-horizontal_alignment = 0
-vertical_alignment = 0
-text = "latency: --"
-font_size = 32
-outline_size = 4
-modulate = Color(1, 1, 0.4, 1)
-outline_modulate = Color(0, 0, 0, 1)

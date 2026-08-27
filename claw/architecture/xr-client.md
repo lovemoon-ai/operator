@@ -195,6 +195,16 @@ Video transport is descriptor-driven. TCP is the default and supports USB
 `adb reverse`; UDP is selected when the descriptor advertises a usable UDP
 port and `transport` is `udp` or `auto`.
 
+The Teleop settings surface also exposes an independent `Video` group. It can
+connect directly to Operator timed H.264 at a configured host/port, or select
+XRoboToolkit FPV compatibility. The compatibility path opens its own command
+connection and local reverse-video listener; it never passes XRT frames through
+the Operator 80-byte timed-video parser. Both paths converge on
+`LiveVideoView`, including mono/SBS display, controller-ray distance adjustment,
+and a separate performance bar above the video with reset-position control. The
+video `Connect` action temporarily forces the shared preview visible while
+preserving the saved visibility preference for the normal Teleop view.
+
 `XrStateSender` samples in `_process` after Godot advances OpenXR for the render
 frame. Head/controllers/input/hands are collected without yielding; body and
 motion trackers retain their own lower-rate sample timestamp. It is disabled

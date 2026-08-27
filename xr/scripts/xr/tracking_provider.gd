@@ -161,10 +161,10 @@ func get_controller_pose(hand: int) -> Dictionary:
 func get_controller_input(hand: int) -> Dictionary:
 	var controller: XRController3D = _left_controller if hand == 0 else _right_controller
 	if not controller:
-		return _get_cached_controller_input(hand)
+		return _apply_ui_input_capture(_get_cached_controller_input(hand))
 
 	if not is_controller_mode_active(hand):
-		return _get_cached_controller_input(hand)
+		return _apply_ui_input_capture(_get_cached_controller_input(hand))
 
 	var primary := controller.get_vector2("primary")
 	var input := {
@@ -184,9 +184,42 @@ func get_controller_input(hand: int) -> Dictionary:
 		"menu_button": controller.get_float("menu_button"),
 		"timestamp_ns": Time.get_ticks_usec() * 1000,
 	}
+	input = _apply_ui_input_capture(input)
 	_last_controller_inputs[hand] = input
 	_last_controller_input_msec[hand] = Time.get_ticks_msec()
 	return input
+
+
+func _apply_ui_input_capture(input: Dictionary) -> Dictionary:
+	if input.is_empty() or not _ui_captures_teleop_input():
+		return input
+	return _neutral_controller_input(input)
+
+
+func _ui_captures_teleop_input() -> bool:
+	if not is_inside_tree():
+		return false
+	var interaction := get_tree().root.get_node_or_null("OperatorInteraction")
+	return (
+		interaction != null
+		and interaction.has_method("is_teleop_input_captured")
+		and bool(interaction.call("is_teleop_input_captured"))
+	)
+
+
+static func _neutral_controller_input(input: Dictionary) -> Dictionary:
+	var neutral := input.duplicate(true)
+	for key in neutral.keys():
+		if str(key) == "timestamp_ns":
+			continue
+		var value: Variant = neutral[key]
+		if value is Vector2:
+			neutral[key] = Vector2.ZERO
+		elif typeof(value) == TYPE_BOOL:
+			neutral[key] = false
+		elif typeof(value) == TYPE_FLOAT or typeof(value) == TYPE_INT:
+			neutral[key] = 0.0
+	return neutral
 
 
 func _get_cached_controller_pose(hand: int) -> Dictionary:
