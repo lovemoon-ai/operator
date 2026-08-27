@@ -18,7 +18,7 @@ func _exit_tree() -> void:
 class PicoCaptureAndroidExportPlugin:
 	extends EditorExportPlugin
 
-	var _include_pico := false
+	var _include_pico_capture := false
 
 	func _supports_platform(platform: EditorExportPlatform) -> bool:
 		return platform is EditorExportPlatformAndroid
@@ -26,15 +26,18 @@ class PicoCaptureAndroidExportPlugin:
 	func _get_name() -> String:
 		return "PicoCapturePlugin"
 
-	func _export_begin(features: PackedStringArray, is_debug: bool, path: String, flags: int) -> void:
-		_include_pico = features.has("pico")
+	func _export_begin(
+		features: PackedStringArray, _is_debug: bool, _path: String, _flags: int
+	) -> void:
+		_include_pico_capture = features.has("pico") \
+			and features.has("operator_capture_stack")
 
 	func _export_end() -> void:
-		_include_pico = false
+		_include_pico_capture = false
 
 	func _get_android_libraries(platform: EditorExportPlatform, debug: bool) -> PackedStringArray:
 		var libraries := PackedStringArray()
-		if not _include_pico:
+		if not _include_pico_capture:
 			return libraries
 		var flavor := "debug" if debug else "release"
 		var addon_relative_path := "pico_capture_android/bin/picocapture-%s.aar" % flavor
@@ -45,11 +48,15 @@ class PicoCaptureAndroidExportPlugin:
 	func _export_file(path: String, type: String, features: PackedStringArray) -> void:
 		if features.has("pico"):
 			return
+		# This is only a safety net for files visited by export plugins. Godot
+		# builds .godot/extension_list.cfg from the preset's resource set before
+		# this callback can remove the descriptor, so every non-Pico preset must
+		# also exclude addons/pico_openxr/** at the resource-filter level.
 		if path.begins_with("res://addons/pico_openxr/"):
 			skip()
 
 	func _get_android_manifest_element_contents(platform: EditorExportPlatform, debug: bool) -> String:
-		if not _include_pico:
+		if not _include_pico_capture:
 			return ""
 		return """
 	<uses-permission android:name="com.picovr.permission.HEAD_TRACKER" />
