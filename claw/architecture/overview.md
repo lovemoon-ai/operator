@@ -66,7 +66,7 @@ target is hardware or a simulator.
 | Target | Robot embodiment | Robot metadata | Retargeting |
 | --- | --- | --- | --- |
 | Inside Robot | In the headset | Bundled XR profile | Native in XR, or remote solver via the pyoperator retargeting service |
-| Outside Robot | Behind `robot-service` | Dynamic device descriptor | Owned by `robot-service` and its downstream stack |
+| Outside Robot | Behind `robot-service` | Dynamic device descriptor, or local compatibility descriptor | Owned by `robot-service` and its downstream stack |
 
 Remote retargeting for Inside Robot moves only the solver. Tracking originates
 in XR and the returned joints are still rendered/simulated in XR. XR never
@@ -78,7 +78,14 @@ deployment may use such a service internally without exposing that topology.
 XR tracking/controllers |                                                   |
                          +-> Inside profile -> pyoperator retargeting svc --+-> in-headset embodiment
                          |
-                         +-> Outside target -> robot-service -> robot/adapter or outside simulator
+                         +-> Outside target -> Operator protocol -> robot-service -> robot/adapter or outside simulator
+                         |
+                         +-> Outside target -> XRoboToolkit v1 -> existing RoboticsService/HoloMotion
+
+optional XRoboToolkit FPV
+  -> PICO camera command client + reverse TCP listener
+  -> length-prefixed Annex-B H.264 access units
+  -> addons/live_video/live_video_view.gd
 
 robot-service xr-bridge component
   -> TCP or UDP timed H.264 packets
@@ -135,10 +142,23 @@ Python application
   -> Python Retargeter -> optional IKSolver -> user Robot
 ```
 
-The embedded path and the existing `robot-service` path are peers. SDK mode is
+The embedded path and the existing Operator `robot-service` path are peers. SDK mode is
 selected by the descriptor's optional `xr_stream` block; descriptors without
 that block continue to use `DeviceCommand`. The Python consumer receives one
 latest-wins frame and never assembles state from granular getters.
+
+Outside Robot can alternatively select `xrobot_toolkit_v1`. That target opens
+its own TCP connection and emits the legacy binary XRoboToolkit packets expected
+by existing HoloMotion deployments. It does not create an adapter gateway and
+does not alter the Operator session, descriptor, video, or robot-side protocol.
+The Operator, SDK, and XRoboToolkit senders are mutually exclusive. This mode
+covers the HoloMotion RoboticsService tracking ingress on TCP `63901`; Episode
+HTTP, discovery, and FPV remain separate integrations. An optional PICO device
+SN setting can reproduce the legacy `EQUIPMENT_SN` handshake identity when the
+deployed RoboticsService requires it. Video is selected independently in the
+Teleop `Video` group: Operator timed H.264 keeps the existing client path,
+while XRoboToolkit FPV uses `OPEN_CAMERA` plus a reverse TCP connection and
+feeds the resulting Annex-B access units into the same decoder and SBS display.
 
 Ego capture owns recording only. Robot profiles, retargeting solvers, and robot
 embodiments are Teleop responsibilities and must not be attached to Ego mode.
