@@ -299,6 +299,36 @@ platform capabilities. Quest, Pico, and generic OpenXR adapters report capture,
 QR, live-stream, and sensor capability availability. Device tests can use fake
 providers from `scripts/test_support/fakes/platform`.
 
+## XR Session Policy
+
+`scripts/xr/xr_session_policy.gd` is an autoload that applies session-wide XR
+policy independently of the active mode. Today it disables the safety boundary:
+it calls `PlatformRegistry.apply_boundary_policy(false)` once the OpenXR
+interface is initialized and re-applies on `session_begun` and
+`session_focussed`.
+
+The registry fans the request out to both adapters and aggregates the results
+into one of four states — `not_applicable`, `applied`, `partial`, `failed` —
+worst-wins, so one adapter's failure cannot be masked by the other's success.
+`partial` means PICO's required enable call succeeded but a best-effort
+visibility setter did not, so the guardian mesh may still be drawn.
+
+PICO uses the `XR_PICO_virtual_boundary` extension through the `pico_openxr`
+GDExtension, which also disables the boundary directly in `_on_session_created`
+so the policy holds before any mode script runs.
+
+Quest needs no runtime call. Its guardian is suppressed at install time by the
+`com.oculus.feature.BOUNDARYLESS_APP` manifest feature, injected with
+`android:required="true"` by `addons/quest_capture_android/export_plugin.gd`.
+The pinned vendor plugin (`addons/godotopenxrvendors`, upstream_tag
+`4.3.1-stable`) ships no `XR_META_boundary_visibility` wrapper, so the Quest
+adapter reports `not_applicable` and the policy logs that at info level instead
+of warning. The adapter still probes for the singleton as an optional upgrade
+path should a later vendor release add one.
+
+Operator runs a single XR session across all modes, so one call covers launcher,
+teleop, and capture. See `claw/lessons/007-pico-safety-boundary-openxr-virtual-boundary.md`.
+
 ## Test Harness
 
 `scripts/test_support/` is an in-app module test framework. It is activated by

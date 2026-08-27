@@ -62,6 +62,13 @@ public:
 	void stop_body_tracking();
 	bool start_body_tracking_calibration_app();
 	Dictionary sample_body_joints();
+	int64_t get_predicted_display_time_ns() const;
+	// Required call is xrSetVirtualBoundaryEnablePICO; the two visibility
+	// setters are best effort. Returns true when the guardian was disabled,
+	// which is NOT the same as "nothing of it is drawn" — query
+	// get_boundary_status()["complete"] to tell those apart.
+	bool set_boundary_visible(bool visible);
+	Dictionary get_boundary_status() const;
 
 	// Ad-hoc probe: returns the raw XR_REFERENCE_SPACE_TYPE_VIEW pose in
 	// the OpenXR runtime's play (LOCAL/STAGE) space, expressed as a Godot
@@ -168,6 +175,8 @@ private:
 	bool has_motion_tracker_id(XrMotionTrackerIdPICO tracker_id) const;
 	XrBodyBoneLengthPICO body_bone_length_from_dict(const Dictionary &bone_lengths) const;
 	bool has_nonzero_bone_length(const XrBodyBoneLengthPICO &bone_length) const;
+	bool boundary_fully_applied() const;
+	static const char *boundary_setter_state(bool applied, bool resolved);
 
 	HashMap<String, bool *> request_extensions;
 	bool external_camera_ext = false;
@@ -177,6 +186,15 @@ private:
 	bool pico_body_tracking2_ext = false;
 	bool bd_body_tracking_ext = false;
 	bool hand_tracking_ext = false;
+	bool virtual_boundary_ext = false;
+
+	// Last outcome of set_boundary_visible(). The enable call is required, the
+	// two visibility setters are best effort, so a runtime that ships only a
+	// subset leaves these partially false — see get_boundary_status().
+	bool boundary_requested_visible = true;
+	bool boundary_enable_applied = false;
+	bool boundary_visible_applied = false;
+	bool boundary_see_through_applied = false;
 
 	XrInstance instance = nullptr;
 	XrSession session = nullptr;
@@ -187,6 +205,9 @@ private:
 	};
 
 	PFN_xrGetExternalCameraInfoPICO xrGetExternalCameraInfoPICO_ptr = nullptr;
+	PFN_xrSetVirtualBoundaryEnablePICO xrSetVirtualBoundaryEnablePICO_ptr = nullptr;
+	PFN_xrSetVirtualBoundaryVisiblePICO xrSetVirtualBoundaryVisiblePICO_ptr = nullptr;
+	PFN_xrSetVirtualBoundarySeeThroughVisiblePICO xrSetVirtualBoundarySeeThroughVisiblePICO_ptr = nullptr;
 	PFN_xrPollFutureEXT xrPollFutureEXT_ptr = nullptr;
 	PFN_xrEnumerateAvailableCamerasPICO xrEnumerateAvailableCamerasPICO_ptr = nullptr;
 	PFN_xrEnumerateCameraPropertyTypesPICO xrEnumerateCameraPropertyTypesPICO_ptr = nullptr;
