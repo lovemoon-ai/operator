@@ -23,14 +23,26 @@ func _exit_tree() -> void:
 class QRScannerAndroidExportPlugin:
 	extends EditorExportPlugin
 
+	var _include_capture := false
+
 	func _supports_platform(platform: EditorExportPlatform) -> bool:
 		return platform is EditorExportPlatformAndroid
 
 	func _get_name() -> String:
 		return "QRScannerPlugin"
 
+	func _export_begin(
+		features: PackedStringArray, _is_debug: bool, _path: String, _flags: int
+	) -> void:
+		_include_capture = features.has("operator_capture_stack")
+
+	func _export_end() -> void:
+		_include_capture = false
+
 	func _get_android_libraries(platform: EditorExportPlatform, debug: bool) -> PackedStringArray:
 		var libraries := PackedStringArray()
+		if not _include_capture:
+			return libraries
 		var flavor := "debug" if debug else "release"
 		var addon_relative_path := "qr_scanner/bin/qrscanner-%s.aar" % flavor
 		if FileAccess.file_exists("res://addons/%s" % addon_relative_path):

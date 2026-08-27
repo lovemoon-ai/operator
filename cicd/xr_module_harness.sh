@@ -44,8 +44,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-ADB=(adb)
-if [[ -n "$SERIAL" ]]; then ADB=(adb -s "$SERIAL"); fi
+# Resolve adb the way xr/Makefile does, preferring the SDK's platform-tools.
+# This install needs --no-incremental, which only platform-tools >= 30 parses;
+# an older distro adb forwards the flag to the device's package manager, which
+# aborts with "Unknown option --no-incremental".
+ADB_BIN="${ADB:-}"
+if [[ -z "$ADB_BIN" ]]; then
+  for candidate in "$HOME/Library/Android/sdk/platform-tools/adb" \
+                   "$HOME/Android/Sdk/platform-tools/adb"; do
+    if [[ -x "$candidate" ]]; then ADB_BIN="$candidate"; break; fi
+  done
+fi
+ADB_BIN="${ADB_BIN:-adb}"
+ADB=("$ADB_BIN")
+if [[ -n "$SERIAL" ]]; then ADB=("$ADB_BIN" -s "$SERIAL"); fi
 
 echo "== xr_module_harness: suite=$SUITE case=${CASE_ID:-<all>}"
 
@@ -76,7 +88,7 @@ if [[ "$SKIP_INSTALL" -eq 0 ]]; then
   # --no-incremental: the APK's native libs are Stored (extractNativeLibs=false)
   # and mmap'd from the APK; adb's default incremental install can leave them at
   # a stale offset on reinstall, so MuJoCo fails to load with "bad ELF magic".
-  "${ADB[@]}" install -r -d --no-incremental "$APK"
+  "${ADB[@]}" install --no-incremental -r -d "$APK"
 fi
 
 echo "== launching test runner"
