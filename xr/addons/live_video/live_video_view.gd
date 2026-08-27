@@ -6,15 +6,28 @@ extends Node3D
 ## decoded output via AHB, YUV-plane, or RGBA texture paths.
 
 const VideoLatencyTracker = preload("res://addons/live_video/live_video_latency.gd")
+const VideoPanelSidecarScript = preload("res://scripts/ui/video_panel_sidecar.gd")
 const DEFAULT_VIDEO_DECODER_SINGLETON := "KotlinVideoDecoderPlugin"
+const TARGET_GROUP := "operator_interaction_target"
+const DEFAULT_PANEL_DISTANCE := 3.0
+const MIN_PANEL_DISTANCE := 2.0
+const MAX_PANEL_DISTANCE := 6.0
+const DISTANCE_METERS_PER_SCROLL_PIXEL := 0.0015
+const PERFORMANCE_PANEL_GAP_METERS := 0.10
+const SIDECAR_Z_OFFSET_METERS := 0.02
+const VIDEO_INTERACTION_PRIORITY := 10
 
 @onready var _display_mesh: MeshInstance3D = get_node_or_null("DisplayMesh") as MeshInstance3D
-@onready var _latency_hud: Label3D = get_node_or_null("DisplayMesh/LatencyHud") as Label3D
+var _panel_sidecar: Node3D
 
-# How often to refresh the latency HUD. Once every 200 ms keeps the numbers
+# How often to refresh the performance sidecar. Once every 200 ms keeps the numbers
 # legible while still being fresh enough to react to network blips.
 const _HUD_UPDATE_INTERVAL_NS: int = 200_000_000
 var _last_hud_update_ns: int = 0
+var _display_fps: float = 0.0
+var _fps_sample_ns: int = 0
+var _fps_sample_frames: int = 0
+var _presented_frame_count: int = 0
 # Source of UDP-level reassembly drops, injected by main.gd via
 # `set_packet_source`. Optional — the HUD just shows -- for udp drops if
 # no source is set (e.g. on the TCP path).
@@ -22,17 +35,10 @@ var _packet_source: Node = null
 var _clock_offset_ns: int = 0
 var _clock_samples: int = 0
 
-# EWMA-smoothed latency readings. The raw frame-to-frame numbers can be
-# briefly invalid (e.g. `decoded_ns` from the AHB texture is for frame
-# N-1 while `receive_ns` on the latest packet is already from frame N at
-# 30 fps + ~20 ms decode → `decoded_ns < receive_ns` half the time).
-# Smoothing + showing the cached value during gaps makes the HUD honest
-# about steady-state instead of flickering to "--" between frames.
+# EWMA-smoothed receive-to-display latency. Unlike source-to-headset latency,
+# this is available for both Operator timed frames and XRobotToolkit frames.
 const _LATENCY_EWMA_ALPHA: float = 0.2
-var _smoothed_net_ms: float = -1.0
-var _smoothed_decode_ms: float = -1.0
-var _smoothed_present_ms: float = -1.0
-var _smoothed_total_ms: float = -1.0
+var _smoothed_local_latency_ms: float = -1.0
 
 
 ## Called by main.gd whenever a new TCP/UDP video handler takes over.
@@ -75,7 +81,7 @@ var _last_ahb_frame_count: int = 0
 ## carefully position your headset before launch.
 @export var follow_camera: bool = true
 ## Distance in meters in front of the camera when follow_camera is enabled.
-@export var follow_distance: float = 3.0
+@export var follow_distance: float = DEFAULT_PANEL_DISTANCE
 ## Optional camera path. When empty, the view looks for `XRCamera3D` under its parent.
 @export var camera_path: NodePath
 ## Create the default quad, collision body, and HUD label if the scene did not provide them.
@@ -86,20 +92,26 @@ var _last_ahb_frame_count: int = 0
 @export var decoder_singleton_name: String = DEFAULT_VIDEO_DECODER_SINGLETON
 ## When false, the panel stays hidden even when the robot is sending frames —
 ## the user opted out of the video display entirely. When true, the panel
-## still only becomes visible AFTER `_receiving_video` flips on (i.e. a NAL
-## from the robot actually arrived). Default OFF so a fresh install doesn't
+## still only becomes visible AFTER `_receiving_video` flips on (i.e. a decoded
+## frame was presented). Default OFF so a fresh install doesn't
 ## park a placeholder quad in front of the operator before they've connected
 ## to anything.
 @export var show_video_panel: bool = false
 
 var _xr_camera: XRCamera3D = null
+var _default_panel_distance := DEFAULT_PANEL_DISTANCE
+var _panel_placement_initialized := false
+var _last_panel_hit_point := Vector3.ZERO
+var _has_panel_hit_point := false
 
 
 func _ready() -> void:
 	# Display starts hidden until XR is ready.
 	_ensure_display_nodes()
-	if _latency_hud:
-		_latency_hud.text = tr("UI_LATENCY_EMPTY")
+	_ensure_panel_sidecar()
+	_default_panel_distance = clampf(follow_distance, MIN_PANEL_DISTANCE, MAX_PANEL_DISTANCE)
+	add_to_group(TARGET_GROUP)
+	_set_performance_metrics(0.0, 0.0, 0, 0)
 	visible = false
 
 
@@ -128,20 +140,17 @@ func _ensure_display_nodes() -> void:
 	collision.shape = shape
 	body.add_child(collision)
 
-	_latency_hud = Label3D.new()
-	_latency_hud.name = "LatencyHud"
-	_latency_hud.transform.origin = Vector3(display_size.x * 0.3125, display_size.y * 0.4722, 0.01)
-	_latency_hud.no_depth_test = true
-	_latency_hud.render_priority = 1
-	_latency_hud.pixel_size = 0.002
-	_latency_hud.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	_latency_hud.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-	_latency_hud.text = tr("UI_LATENCY_EMPTY")
-	_latency_hud.font_size = 32
-	_latency_hud.outline_size = 4
-	_latency_hud.modulate = Color(1, 1, 0.4, 1)
-	_latency_hud.outline_modulate = Color(0, 0, 0, 1)
-	_display_mesh.add_child(_latency_hud)
+
+
+func _ensure_panel_sidecar() -> void:
+	if _panel_sidecar != null:
+		return
+	_panel_sidecar = VideoPanelSidecarScript.new()
+	_panel_sidecar.name = "VideoPanelSidecar"
+	if _panel_sidecar.has_signal("reset_requested"):
+		_panel_sidecar.connect("reset_requested", reset_panel_position)
+	add_child(_panel_sidecar)
+	_sync_sidecar_transform()
 
 
 ## Initialize the display after XR is started.
@@ -156,6 +165,9 @@ func initialize() -> void:
 	_initialized = true
 	# Cache XRCamera3D so _process can keep the panel in front of the user.
 	_resolve_camera()
+	# World-locked mode still needs one camera-relative placement. After this
+	# initial placement it stays in world space until the user adjusts or resets.
+	_place_panel_in_front_of_camera(follow_distance)
 	# Defer visibility to `_update_panel_visibility`: even when the user has
 	# opted in via `show_video_panel`, we only un-hide once the robot is
 	# actually sending frames — otherwise the operator sees the blue
@@ -183,8 +195,13 @@ func set_show_video_panel(value: bool) -> void:
 ## every state mutation site.
 func _update_panel_visibility() -> void:
 	var want_visible := _initialized and show_video_panel and _receiving_video
+	var became_visible := want_visible and not visible
 	if visible != want_visible:
 		visible = want_visible
+	if _panel_sidecar != null:
+		_panel_sidecar.visible = want_visible
+	if became_visible and not follow_camera:
+		_place_panel_in_front_of_camera(follow_distance)
 
 
 func _resolve_camera() -> void:
@@ -196,6 +213,194 @@ func _resolve_camera() -> void:
 	var origin := get_parent()
 	if origin:
 		_xr_camera = origin.get_node_or_null("XRCamera3D") as XRCamera3D
+
+
+func get_interaction_priority() -> int:
+	return VIDEO_INTERACTION_PRIORITY
+
+
+func is_interaction_target_visible() -> bool:
+	return is_inside_tree() and visible and _display_mesh != null
+
+
+func captures_teleop_input() -> bool:
+	return true
+
+
+## The video panel is a passive display: set_pointer_pressed() is a no-op and
+## the only input it consumes is the scroll axis used to adjust its distance.
+## Reporting press capture here would zero every controller key -- the grip
+## deadman included -- whenever the operator's ray crossed the panel while
+## squeezing the trigger, which is the ordinary teleop pointing case because
+## this target has the lowest interaction priority and sits in view centre.
+func captures_teleop_press() -> bool:
+	return false
+
+
+func update_pointer_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> bool:
+	if _display_mesh == null or not visible:
+		clear_pointer()
+		return false
+	var direction := ray_direction.normalized()
+	if direction.length_squared() < 0.000001:
+		clear_pointer()
+		return false
+	var normal := _display_mesh.global_transform.basis.z.normalized()
+	var denominator := normal.dot(direction)
+	if absf(denominator) < 0.0001:
+		clear_pointer()
+		return false
+	var distance_m := normal.dot(_display_mesh.global_transform.origin - ray_origin) / denominator
+	if distance_m <= 0.0:
+		clear_pointer()
+		return false
+	var hit_point := ray_origin + direction * distance_m
+	var local_hit := _display_mesh.to_local(hit_point)
+	var half_size := _display_dimensions() * 0.5
+	if absf(local_hit.x) > half_size.x or absf(local_hit.y) > half_size.y:
+		clear_pointer()
+		return false
+	_last_panel_hit_point = hit_point
+	_has_panel_hit_point = true
+	return true
+
+
+func set_pointer_pressed(_pressed: bool) -> void:
+	pass
+
+
+func clear_pointer() -> void:
+	_has_panel_hit_point = false
+
+
+func get_ray_hit_point(ray_origin: Vector3, ray_direction: Vector3) -> Vector3:
+	if _has_panel_hit_point:
+		return _last_panel_hit_point
+	var direction := ray_direction.normalized()
+	return ray_origin + direction * 0.25 if direction.length_squared() > 0.000001 else ray_origin
+
+
+func scroll_by_pixels(delta_pixels: float) -> void:
+	adjust_panel_distance_from_scroll(delta_pixels)
+
+
+func adjust_panel_distance_from_scroll(delta_pixels: float) -> void:
+	if absf(delta_pixels) < 0.001:
+		return
+	var current_distance := _current_panel_distance()
+	set_panel_distance(current_distance + delta_pixels * DISTANCE_METERS_PER_SCROLL_PIXEL)
+
+
+func set_panel_distance(distance_m: float) -> void:
+	follow_distance = clampf(distance_m, MIN_PANEL_DISTANCE, MAX_PANEL_DISTANCE)
+	if follow_camera or not _panel_placement_initialized:
+		_place_panel_in_front_of_camera(follow_distance)
+	else:
+		_move_world_locked_panel_to_distance(follow_distance)
+
+
+func reset_panel_position() -> void:
+	follow_distance = _default_panel_distance
+	_place_panel_in_front_of_camera(follow_distance)
+
+
+## The panel's true distance from the camera, unclamped.
+##
+## Callers feed this into set_panel_distance(), which applies the single
+## authoritative clamp. Clamping here as well would double-clamp: in
+## world-locked mode the operator can walk until the panel sits outside
+## [MIN_PANEL_DISTANCE, MAX_PANEL_DISTANCE], and a pre-clamped reading would
+## then let one scroll tick push the panel past the limit it was supposed to
+## stop at (8.0 m reads as 6.0, minus a tick lands on 5.85 -- inside the range
+## the operator never scrolled into). Returning the real distance keeps the
+## limits absolute: an out-of-range panel snaps to the boundary and stays.
+func _current_panel_distance() -> float:
+	if _xr_camera == null:
+		_resolve_camera()
+	if _xr_camera == null or _display_mesh == null:
+		return follow_distance
+	var camera_origin := _xr_camera.global_transform.origin
+	var distance_m := camera_origin.distance_to(_display_mesh.global_transform.origin)
+	if distance_m <= 0.0:
+		return follow_distance
+	return distance_m
+
+
+func _place_panel_in_front_of_camera(distance_m: float) -> void:
+	if _xr_camera == null:
+		_resolve_camera()
+	if _xr_camera == null or _display_mesh == null:
+		return
+	var camera_transform := _xr_camera.global_transform
+	var panel_transform := Transform3D(camera_transform.basis, camera_transform.origin)
+	panel_transform.origin += -camera_transform.basis.z.normalized() * distance_m
+	_display_mesh.global_transform = panel_transform
+	_panel_placement_initialized = true
+	_sync_sidecar_transform()
+
+
+func _move_world_locked_panel_to_distance(distance_m: float) -> void:
+	if _xr_camera == null:
+		_resolve_camera()
+	if _xr_camera == null or _display_mesh == null:
+		return
+	var camera_origin := _xr_camera.global_transform.origin
+	var direction := _display_mesh.global_transform.origin - camera_origin
+	if direction.length_squared() < 0.000001:
+		direction = -_xr_camera.global_transform.basis.z
+	var panel_transform := _display_mesh.global_transform
+	panel_transform.origin = camera_origin + direction.normalized() * distance_m
+	_display_mesh.global_transform = panel_transform
+	_panel_placement_initialized = true
+	_sync_sidecar_transform()
+
+
+func _display_dimensions() -> Vector2:
+	if _display_mesh != null and _display_mesh.mesh is QuadMesh:
+		return (_display_mesh.mesh as QuadMesh).size
+	return display_size
+
+
+func _sync_sidecar_transform() -> void:
+	if _panel_sidecar == null or _display_mesh == null:
+		return
+	var sidecar_size_value: Variant = _panel_sidecar.get("quad_size")
+	var sidecar_size := Vector2(3.2, 0.45)
+	if sidecar_size_value is Vector2:
+		sidecar_size = sidecar_size_value
+	_panel_sidecar.global_transform = _display_mesh.global_transform * Transform3D(
+		Basis.IDENTITY, _performance_panel_local_offset(_display_dimensions(), sidecar_size)
+	)
+
+
+static func _performance_panel_local_offset(
+		video_size: Vector2, performance_panel_size: Vector2
+) -> Vector3:
+	return Vector3(
+		0.0,
+		video_size.y * 0.5 + PERFORMANCE_PANEL_GAP_METERS + performance_panel_size.y * 0.5,
+		SIDECAR_Z_OFFSET_METERS,
+	)
+
+
+func get_panel_anchor_transform(local_offset: Vector3) -> Transform3D:
+	if _display_mesh == null:
+		return global_transform
+	return _display_mesh.global_transform * Transform3D(Basis.IDENTITY, local_offset)
+
+
+func _set_performance_text(text: String) -> void:
+	if _panel_sidecar != null and _panel_sidecar.has_method("set_performance_text"):
+		_panel_sidecar.call("set_performance_text", text)
+
+
+func _set_performance_metrics(fps: float, latency_ms: float, drops: int, frames: int) -> void:
+	_set_performance_text(tr("UI_VIDEO_PERFORMANCE_FORMAT") % [
+		_fmt_compact_fps(fps),
+		_fmt_compact_ms(latency_ms),
+		str(maxi(drops, 0)),
+		str(maxi(frames, 0)),
+	])
 
 
 ## [opt 10] Try to instantiate the AhbVideoTexture from the
@@ -229,6 +434,7 @@ func _process(_delta: float) -> void:
 			_shader_material.set_shader_parameter("use_yuv", false)
 			_shader_material.set_shader_parameter("video_texture", _ahb_texture)
 			_ahb_bound_to_shader = true
+			_receiving_video = true
 			print("[LiveVideo] AhbVideoTexture bound; AHB zero-copy path is now live")
 	# The two YUV-mode call sites apply the stereo layout (Plan B's GPU YUV
 	# path + the legacy image-update path); the AHB path bypasses both, so
@@ -287,93 +493,81 @@ func _process(_delta: float) -> void:
 					timing_map,
 				])
 
-	if not follow_camera or not _initialized or not _display_mesh or not _xr_camera:
-		return
-	# Place the panel in front of the camera, facing the camera.
-	var cam_xform := _xr_camera.global_transform
-	var forward := -cam_xform.basis.z.normalized()
-	var target_pos := cam_xform.origin + forward * follow_distance
-	var t := Transform3D()
-	t.origin = target_pos
-	t.basis = cam_xform.basis  # Mesh quad faces -Z, camera looks -Z; same basis works.
-	_display_mesh.global_transform = t
+	if _initialized and _display_mesh and _xr_camera:
+		if follow_camera or not _panel_placement_initialized:
+			_place_panel_in_front_of_camera(follow_distance)
+		else:
+			_sync_sidecar_transform()
+	else:
+		_sync_sidecar_transform()
 
 
-## Refresh the top-right latency HUD. Pulls `send_ns`/`receive_ns` from the
-## last received packet (set in report_video_packet) and `decoded_ns` from
-## the AHB texture's native side. Network latency requires callers to supply
-## a source-clock offset via set_clock_offset().
+## Refresh the compact performance sidecar. It intentionally reports only
+## values available for every supported transport: displayed FPS, local
+## receive-to-display latency, local/transport drops, and displayed frames.
 func _update_latency_hud() -> void:
-	if not _latency_hud:
+	if _panel_sidecar == null:
 		return
 	var now_ns := VideoLatencyTracker.now_ns()
 	if now_ns - _last_hud_update_ns < _HUD_UPDATE_INTERVAL_NS:
 		return
 	_last_hud_update_ns = now_ns
 
-	if not _receiving_video or _last_video_packet.is_empty():
-		_latency_hud.text = tr("UI_LATENCY_WAITING")
+	if not _receiving_video:
+		_fps_sample_ns = 0
+		_fps_sample_frames = 0
+		_set_performance_metrics(0.0, 0.0, _total_drop_count(), 0)
 		return
 
-	# send_ns is robot-stamped. Clock-sync offset = robot_clock - xr_clock,
-	# subtract to bring into XR clock domain.
-	var send_ns: int = int(_last_video_packet.get("send_ns", 0))
-	var receive_ns: int = int(_last_video_packet.get("receive_ns", 0))
-	var send_ns_xr: int = send_ns
-	if _clock_samples > 0 and send_ns > 0:
-		send_ns_xr = send_ns - _clock_offset_ns
-
-	# Decoded-ns + frame count from the AHB texture (native side). The
-	# value is from `Time.get_unix_time_from_system() * 1e9` analog stamped
-	# in Kotlin's `nowNs()` — compares directly against now_ns above.
-	var decoded_ns: int = 0
-	var fps_frames: int = 0
-	if _ahb_texture and _ahb_texture.has_method("get_latest_info"):
+	var displayed_frames: int = _presented_frame_count
+	if _ahb_bound_to_shader and _ahb_texture and _ahb_texture.has_method("get_latest_info"):
 		var info: Dictionary = _ahb_texture.call("get_latest_info")
-		decoded_ns = int(info.get("decoded_ns", 0))
-		fps_frames = int(info.get("frames", 0))
+		displayed_frames = int(info.get("frames", displayed_frames))
+		var decoded_ns := int(info.get("decoded_ns", 0))
+		if displayed_frames > _last_ahb_frame_count:
+			_record_local_latency(_take_latest_ahb_packet(displayed_frames), decoded_ns)
+	_update_display_fps(now_ns, displayed_frames)
 
-	# Fold each stage into the EWMA when the raw sample is valid; otherwise
-	# fall through to display the smoothed history. _LATENCY_EWMA_ALPHA=0.2
-	# means a spike fades over ~5 HUD-ticks (~1s at 200 ms refresh).
-	if _clock_samples > 0 and send_ns_xr > 0 and receive_ns > 0 and receive_ns >= send_ns_xr:
-		var net_raw_ms := float(receive_ns - send_ns_xr) / 1_000_000.0
-		_smoothed_net_ms = net_raw_ms if _smoothed_net_ms < 0.0 else _ewma(_smoothed_net_ms, net_raw_ms)
-	if decoded_ns > 0 and receive_ns > 0 and decoded_ns >= receive_ns:
-		var decode_raw_ms := float(decoded_ns - receive_ns) / 1_000_000.0
-		_smoothed_decode_ms = decode_raw_ms if _smoothed_decode_ms < 0.0 else _ewma(_smoothed_decode_ms, decode_raw_ms)
-	if decoded_ns > 0 and now_ns >= decoded_ns:
-		var present_raw_ms := float(now_ns - decoded_ns) / 1_000_000.0
-		_smoothed_present_ms = present_raw_ms if _smoothed_present_ms < 0.0 else _ewma(_smoothed_present_ms, present_raw_ms)
-	# Total = sum of the three smoothed stages so the breakdown is
-	# internally consistent. Computing it directly as `now_ns - send_ns_xr`
-	# would mix different frames: _last_video_packet is whichever NAL
-	# arrived most recently (frame N), AHB's decoded_ns is whichever
-	# frame finished decoding most recently (frame N-1 if decode is
-	# pipelined behind reception), and the gap between those two frames
-	# could make present > total — which is correct math for two
-	# different frames but extremely confusing on a HUD that presents
-	# them as a single timeline.
-	if _smoothed_net_ms >= 0.0 and _smoothed_decode_ms >= 0.0 and _smoothed_present_ms >= 0.0:
-		_smoothed_total_ms = _smoothed_net_ms + _smoothed_decode_ms + _smoothed_present_ms
+	_set_performance_metrics(
+		_display_fps,
+		_smoothed_local_latency_ms,
+		_total_drop_count(),
+		displayed_frames,
+	)
 
-	var udp_drops_str := "--"
-	if _packet_source and _packet_source.has_method("get_drop_count"):
-		udp_drops_str = str(int(_packet_source.call("get_drop_count")))
 
-	# Every value column is 9 chars wide so the labels on the left don't
-	# jump as values change width. `_fmt_ms` produces strings like " 12.3 ms"
-	# / "100.5 ms" / "   -- ms" — same fixed width.
-	_latency_hud.text = tr("UI_LATENCY_FORMAT") % [
-		_fmt_ms(_smoothed_net_ms),
-		_fmt_ms(_smoothed_decode_ms),
-		_fmt_ms(_smoothed_present_ms),
-		_fmt_ms(_smoothed_total_ms),
-		_fmt_int(fps_frames),
-		_fmt_int(_stale_dropped_count),
-		_fmt_int(_decoder_busy_count),
-		udp_drops_str.lpad(8),
-	]
+func _record_local_latency(packet: Dictionary, completed_ns: int) -> void:
+	var receive_ns := int(packet.get("receive_ns", 0))
+	if receive_ns <= 0 or completed_ns < receive_ns:
+		return
+	var sample_ms := float(completed_ns - receive_ns) / 1_000_000.0
+	_smoothed_local_latency_ms = sample_ms if _smoothed_local_latency_ms < 0.0 else _ewma(
+		_smoothed_local_latency_ms, sample_ms
+	)
+
+
+func _total_drop_count() -> int:
+	var drops := _stale_dropped_count + _decoder_busy_count
+	if (
+		bool(_last_video_packet.get("transport_loss_available", true))
+		and _packet_source != null
+		and _packet_source.has_method("get_drop_count")
+	):
+		drops += maxi(0, int(_packet_source.call("get_drop_count")))
+	return drops
+
+
+func _update_display_fps(now_ns: int, displayed_frames: int) -> void:
+	if _fps_sample_ns == 0 or displayed_frames < _fps_sample_frames:
+		_fps_sample_ns = now_ns
+		_fps_sample_frames = displayed_frames
+		return
+	var elapsed_ns := now_ns - _fps_sample_ns
+	if elapsed_ns < 1_000_000_000:
+		return
+	_display_fps = float(displayed_frames - _fps_sample_frames) / (float(elapsed_ns) / 1_000_000_000.0)
+	_fps_sample_ns = now_ns
+	_fps_sample_frames = displayed_frames
 
 
 static func _ewma(prev: float, sample: float) -> float:
@@ -393,6 +587,18 @@ static func _fmt_fps(v: float) -> String:
 	return "%.1f" % v
 
 
+static func _fmt_compact_fps(v: float) -> String:
+	if v < 0.0 or is_nan(v) or is_inf(v):
+		return "0.0"
+	return "%.1f" % v
+
+
+static func _fmt_compact_ms(v: float) -> String:
+	if v < 0.0 or is_nan(v) or is_inf(v):
+		return "0.0 ms"
+	return "%.1f ms" % v
+
+
 static func _stat_ms(stats: Dictionary, value_key: String, count_key: String) -> float:
 	if int(stats.get(count_key, 0)) <= 0:
 		return -1.0
@@ -400,11 +606,6 @@ static func _stat_ms(stats: Dictionary, value_key: String, count_key: String) ->
 	if is_nan(v) or is_inf(v):
 		return -1.0
 	return v
-
-
-static func _fmt_int(v: int) -> String:
-	# Right-pad to 8 chars so integers line up with the " 12.3 ms" column.
-	return ("%d" % v).lpad(8)
 
 
 ## Configure the incoming video stream and start the decoder plugin if it exists.
@@ -583,6 +784,40 @@ func _on_video_decoder_error(message: String) -> void:
 	print("[LiveVideo] Video decoder error: %s" % message)
 
 
+func _exit_tree() -> void:
+	# The decoder is an Engine singleton, so it outlives this node. Dropping
+	# the view on a mode switch would otherwise leave MediaCodec holding a
+	# hardware decoder instance and keep our deferred callbacks wired to a
+	# node that is no longer in the tree. Godot only auto-disconnects signals
+	# when a node is *freed*, not when it merely leaves the tree, so release
+	# both explicitly. _ensure_video_decoder() re-arms everything the next
+	# time a stream is configured.
+	_release_video_decoder()
+
+
+func _release_video_decoder() -> void:
+	if _video_decoder == null:
+		return
+	if _decoder_is_running():
+		_decoder_call_void("stop_decoder")
+	if _video_decoder_connected:
+		_disconnect_decoder_signal("frame_ready", "_on_video_frame_ready")
+		_disconnect_decoder_signal("yuv_frame_ready", "_on_video_yuv_frame_ready")
+		_disconnect_decoder_signal("decoder_error", "_on_video_decoder_error")
+		_video_decoder_connected = false
+	_video_decoder = null
+	# The next view to bind this singleton starts from an unbound shader.
+	_ahb_bound_to_shader = false
+
+
+func _disconnect_decoder_signal(signal_name: String, method_name: String) -> void:
+	if _video_decoder == null or not _video_decoder.has_signal(signal_name):
+		return
+	var callable := Callable(self, method_name)
+	if _video_decoder.is_connected(signal_name, callable):
+		_video_decoder.disconnect(signal_name, callable)
+
+
 var _frame_diag_count: int = 0
 var _shader_video_bound_logged: bool = false
 
@@ -715,6 +950,7 @@ func _on_video_yuv_frame_ready(
 		_apply_video_layout(_desired_stereo_layout)
 
 	_receiving_video = true
+	_presented_frame_count += 1
 
 	# [plan C] Latency log was per-frame. At 30 fps that's 30
 	# print()-to-logcat calls per second, each requiring a string
@@ -735,6 +971,7 @@ func _on_video_yuv_frame_ready(
 		_last_video_packet["decoded_ns"] = decoded_ns
 	var present_ns := VideoLatencyTracker.now_ns()
 	_last_video_packet["present_ns"] = present_ns
+	_record_local_latency(_last_video_packet, present_ns)
 
 	# Update per-second running stats so we can summarise fps + median
 	# latency even when the verbose per-frame log is throttled.
@@ -884,6 +1121,7 @@ func update_video_texture(image: Image, packet: Dictionary = {}, decoded_ns: int
 		_shader_material.set_shader_parameter("use_yuv", false)
 		_shader_material.set_shader_parameter("video_texture", texture)
 		_receiving_video = true
+		_presented_frame_count += 1
 		# One-shot confirmation that the shader is actually sampling the
 		# video texture, not the placeholder.
 		if not _shader_video_bound_logged:
@@ -904,7 +1142,9 @@ func update_video_texture(image: Image, packet: Dictionary = {}, decoded_ns: int
 		_last_video_packet["decoded_ns"] = decoded_ns
 	elif int(_last_video_packet.get("decoded_ns", 0)) <= 0:
 		_last_video_packet["decoded_ns"] = VideoLatencyTracker.now_ns()
-	_last_video_packet["present_ns"] = VideoLatencyTracker.now_ns()
+	var present_ns := VideoLatencyTracker.now_ns()
+	_last_video_packet["present_ns"] = present_ns
+	_record_local_latency(_last_video_packet, present_ns)
 	print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(_last_video_packet, _clock_offset_ns, _clock_samples))
 
 
@@ -1047,7 +1287,6 @@ func submit_h264_access_unit(access_unit: PackedByteArray, packet: Dictionary = 
 		packet["receive_ns"] = VideoLatencyTracker.now_ns()
 
 	_last_video_packet = packet
-	_receiving_video = true
 	return _submit_video_access_unit(access_unit, packet)
 
 
@@ -1072,7 +1311,6 @@ func report_video_packet(packet: Dictionary) -> void:
 		return
 
 	_last_video_packet = packet.duplicate(true)
-	_receiving_video = true
 
 	var nal_index: int = int(_last_video_packet.get("nal_index", 0))
 	var nal_count: int = int(_last_video_packet.get("nal_count", 1))
@@ -1135,6 +1373,14 @@ func clear_video_stream() -> void:
 	_pending_access_unit = PackedByteArray()
 	_submitted_video_packets.clear()
 	_last_ahb_frame_count = 0
+	_display_fps = 0.0
+	_fps_sample_ns = 0
+	_fps_sample_frames = 0
+	_presented_frame_count = 0
+	_smoothed_local_latency_ms = -1.0
+	_stale_dropped_count = 0
+	_stale_dropped_log_at = 0
+	_decoder_busy_count = 0
 	_last_video_packet.clear()
 	_receiving_video = false
 	_configured_width = 0
@@ -1150,6 +1396,14 @@ func clear_video_stream() -> void:
 	_v_texture = null
 	_yuv_size = Vector2i.ZERO
 	_yuv_path_logged = false
+	# The shader parameter below is reset to the placeholder, so the AHB
+	# texture is no longer what the panel samples -- drop the bound flag to
+	# match. Leaving it true wedges the view permanently: _process() only
+	# rebinds the AHB texture while `not _ahb_bound_to_shader`, and
+	# _on_video_yuv_frame_ready() returns early while it is true, so after any
+	# disconnect/reconnect neither the zero-copy path nor the Plan B YUV
+	# fallback could ever draw again and the panel would stay on placeholder.
+	_ahb_bound_to_shader = false
 
 	if _video_decoder:
 		_decoder_call_void("stop_decoder")
@@ -1157,6 +1411,7 @@ func clear_video_stream() -> void:
 	if _shader_material and _placeholder_texture:
 		_shader_material.set_shader_parameter("use_yuv", false)
 		_shader_material.set_shader_parameter("video_texture", _placeholder_texture)
+	_update_panel_visibility()
 
 
 ## Set the content ratio (how much of width each eye uses).

@@ -3,6 +3,8 @@ class_name TeleopSettingsPanel
 
 signal settings_applied(options: Dictionary)
 signal close_requested
+signal pico_body_calibration_requested
+signal video_connect_requested(options: Dictionary)
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
 const SECTION := "settings"
@@ -13,9 +15,19 @@ const RobotProfileRegistryScript := preload(
 const DEFAULT_IP: String = "127.0.0.1"
 const DEFAULT_PORT: int = 63901
 const DEFAULT_TARGET_SCOPE := "outside"
+const DEFAULT_PROTOCOL := "operator"
+const DEFAULT_XROBOT_TOOLKIT_DEVICE_SN := ""
+const PROTOCOL_OPERATOR := "operator"
+const PROTOCOL_XROBOT_TOOLKIT_V1 := "xrobot_toolkit_v1"
 const DEFAULT_RETARGETING_BACKEND := "native"
 const DEFAULT_RETARGETING_HOST := "127.0.0.1"
 const DEFAULT_RETARGETING_PORT := 8000
+const VIDEO_PROTOCOL_OPERATOR := "operator_timed_h264"
+const VIDEO_PROTOCOL_XROBOT_TOOLKIT := "xrobot_toolkit_fpv"
+const DEFAULT_VIDEO_PROTOCOL := VIDEO_PROTOCOL_OPERATOR
+const DEFAULT_VIDEO_IP := "127.0.0.1"
+const DEFAULT_OPERATOR_VIDEO_PORT := 12345
+const DEFAULT_XROBOT_TOOLKIT_COMMAND_PORT := 13579
 const DEFAULT_FACE_LOCKED: bool = true
 # Default OFF so a freshly installed app doesn't blast a placeholder quad in
 # front of the user. Showing the panel requires both this opt-in AND the robot
@@ -70,6 +82,9 @@ var _inside_scope_button: Button
 var _outside_scope_button: Button
 var _target_scope := DEFAULT_TARGET_SCOPE
 var _outside_box: VBoxContainer
+var _protocol_row: HBoxContainer
+var _protocol_buttons: Dictionary = {}
+var _selected_protocol := DEFAULT_PROTOCOL
 var _inside_box: VBoxContainer
 var _inside_missing_label: Label
 var _inside_profile_row: VBoxContainer
@@ -88,6 +103,17 @@ var _ip_test_peer: StreamPeerTCP
 var _ip_test_deadline_msec := 0
 var _ip_test_token := 0
 var _port_input: LineEdit
+var _xrobot_toolkit_device_sn_input: LineEdit
+var _pico_body_calibration_button: Button
+var _video_protocol_row: HBoxContainer
+var _video_protocol_buttons: Dictionary = {}
+var _selected_video_protocol := DEFAULT_VIDEO_PROTOCOL
+var _video_ip_input: LineEdit
+var _video_port_label: Label
+var _video_port_input: LineEdit
+var _video_sbs_toggle: CheckButton
+var _video_connect_button: Button
+var _video_status_label: Label
 var _video_face_toggle: CheckButton
 var _show_video_panel_toggle: CheckButton
 var _show_operation_trajectory_toggle: CheckButton
@@ -167,6 +193,27 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	robot.add_child(connection)
 	_outside_box = connection
 
+	var protocol_label := Label.new()
+	protocol_label.text = tr("UI_PROTOCOL")
+	protocol_label.add_theme_font_size_override("font_size", 19)
+	protocol_label.add_theme_color_override("font_color", COL_SECTION)
+	connection.add_child(protocol_label)
+
+	_protocol_row = HBoxContainer.new()
+	_protocol_row.add_theme_constant_override("separation", 10)
+	_protocol_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	connection.add_child(_protocol_row)
+	for protocol in [
+		[PROTOCOL_OPERATOR, tr("UI_PROTOCOL_OPERATOR")],
+		[PROTOCOL_XROBOT_TOOLKIT_V1, tr("UI_PROTOCOL_XROBOT_TOOLKIT_V1")],
+	]:
+		var protocol_id := str(protocol[0])
+		_protocol_buttons[protocol_id] = _add_choice_button(
+			_protocol_row,
+			str(protocol[1]),
+			_on_protocol_pressed.bind(protocol_id)
+		)
+
 	_discovery_option = OptionButton.new()
 	_discovery_option.custom_minimum_size.y = 55
 	# Robot names and types come from the service descriptor and are not
@@ -207,6 +254,22 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_port_input.custom_minimum_size.y = 55
 	_port_input.add_theme_font_size_override("font_size", 21)
 	add_interactive(connection, _port_input)
+
+	_xrobot_toolkit_device_sn_input = LineEdit.new()
+	_xrobot_toolkit_device_sn_input.placeholder_text = tr("UI_XROBOT_TOOLKIT_DEVICE_SN")
+	_xrobot_toolkit_device_sn_input.custom_minimum_size.y = 55
+	_xrobot_toolkit_device_sn_input.add_theme_font_size_override("font_size", 21)
+	_xrobot_toolkit_device_sn_input.tooltip_text = tr("UI_XROBOT_TOOLKIT_DEVICE_SN_TOOLTIP")
+	add_interactive(connection, _xrobot_toolkit_device_sn_input)
+
+	_pico_body_calibration_button = Button.new()
+	_pico_body_calibration_button.text = tr("UI_PICO_BODY_CALIBRATION")
+	_pico_body_calibration_button.focus_mode = Control.FOCUS_NONE
+	_pico_body_calibration_button.custom_minimum_size.y = 55
+	_pico_body_calibration_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_pico_body_calibration_button.add_theme_font_size_override("font_size", 21)
+	_pico_body_calibration_button.pressed.connect(_on_pico_body_calibration_pressed)
+	add_interactive(connection, _pico_body_calibration_button)
 
 	var status_row := HBoxContainer.new()
 	status_row.add_theme_constant_override("separation", 10)
@@ -293,10 +356,80 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_retargeting_status_label.add_theme_color_override("font_color", COL_STATUS)
 	inside.add_child(_retargeting_status_label)
 
+	# --- Video group -------------------------------------------------------
+	var video := register_group("video", "UI_GROUP_VIDEO", "camera")
+
+	var video_protocol_label := Label.new()
+	video_protocol_label.text = tr("UI_VIDEO_PROTOCOL")
+	video_protocol_label.add_theme_font_size_override("font_size", 19)
+	video_protocol_label.add_theme_color_override("font_color", COL_SECTION)
+	video.add_child(video_protocol_label)
+
+	_video_protocol_row = HBoxContainer.new()
+	_video_protocol_row.add_theme_constant_override("separation", 10)
+	_video_protocol_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	video.add_child(_video_protocol_row)
+	for protocol in [
+		[VIDEO_PROTOCOL_OPERATOR, "UI_VIDEO_PROTOCOL_OPERATOR"],
+		[VIDEO_PROTOCOL_XROBOT_TOOLKIT, "UI_VIDEO_PROTOCOL_XROBOT_TOOLKIT"],
+	]:
+		var protocol_id := str(protocol[0])
+		_video_protocol_buttons[protocol_id] = _add_choice_button(
+			_video_protocol_row,
+			tr(str(protocol[1])),
+			_on_video_protocol_pressed.bind(protocol_id)
+		)
+
+	var video_ip_label := Label.new()
+	video_ip_label.text = tr("UI_VIDEO_IP")
+	video_ip_label.add_theme_font_size_override("font_size", 19)
+	video_ip_label.add_theme_color_override("font_color", COL_SECTION)
+	video.add_child(video_ip_label)
+
+	var video_ip_row := HBoxContainer.new()
+	video_ip_row.add_theme_constant_override("separation", 10)
+	video_ip_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	video.add_child(video_ip_row)
+
+	_video_ip_input = LineEdit.new()
+	_video_ip_input.placeholder_text = tr("UI_VIDEO_IP")
+	_video_ip_input.text = DEFAULT_VIDEO_IP
+	_video_ip_input.custom_minimum_size.y = 55
+	_video_ip_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_video_ip_input.add_theme_font_size_override("font_size", 21)
+	add_interactive(video_ip_row, _video_ip_input)
+
+	_video_connect_button = Button.new()
+	_video_connect_button.text = tr("UI_CONNECT")
+	_video_connect_button.focus_mode = Control.FOCUS_NONE
+	_video_connect_button.custom_minimum_size = Vector2(112, 55)
+	_video_connect_button.add_theme_font_size_override("font_size", 21)
+	_video_connect_button.pressed.connect(_on_video_connect_pressed)
+	video_ip_row.add_child(_video_connect_button)
+
+	_video_port_label = Label.new()
+	_video_port_label.add_theme_font_size_override("font_size", 19)
+	_video_port_label.add_theme_color_override("font_color", COL_SECTION)
+	video.add_child(_video_port_label)
+
+	_video_port_input = LineEdit.new()
+	_video_port_input.text = str(DEFAULT_OPERATOR_VIDEO_PORT)
+	_video_port_input.custom_minimum_size.y = 55
+	_video_port_input.add_theme_font_size_override("font_size", 21)
+	add_interactive(video, _video_port_input)
+
+	_video_sbs_toggle = add_toggle(video, tr("UI_VIDEO_SBS"), false, 22)
+	_video_face_toggle = add_toggle(video, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
+	_show_video_panel_toggle = add_toggle(video, tr("UI_SHOW_VIDEO_PANEL"), DEFAULT_SHOW_VIDEO_PANEL, 22)
+
+	_video_status_label = Label.new()
+	_video_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_video_status_label.add_theme_font_size_override("font_size", 18)
+	_video_status_label.add_theme_color_override("font_color", COL_STATUS)
+	video.add_child(_video_status_label)
+
 	# --- Display group -----------------------------------------------------
 	var display := register_group("display", "UI_GROUP_DISPLAY", "settings")
-	_video_face_toggle = add_toggle(display, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
-	_show_video_panel_toggle = add_toggle(display, tr("UI_SHOW_VIDEO_PANEL"), DEFAULT_SHOW_VIDEO_PANEL, 22)
 	_show_operation_trajectory_toggle = add_toggle(
 		display,
 		tr("UI_SHOW_OPERATION_TRAJECTORY"),
@@ -313,6 +446,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	# The robot group is shown by default (first registered).
 	call_deferred("_refresh_scope_ui")
+	call_deferred("_refresh_video_protocol_ui")
 
 
 ## One always-visible choice button. Every selection on this page uses these
@@ -429,13 +563,19 @@ func set_discovering(active: bool, text: String = "") -> void:
 func get_options() -> Dictionary:
 	return {
 		"target_scope": _target_scope,
+		"protocol": _selected_protocol,
 		"ip": _ip_input.text.strip_edges(),
 		"port": _port_input.text.strip_edges().to_int(),
+		"xrobot_toolkit_device_sn": _xrobot_toolkit_device_sn_input.text.strip_edges(),
 		"inside_profile": _selected_profile,
 		"retargeting_backend": _selected_backend,
 		"retargeting_host": _retargeting_host_input.text.strip_edges(),
 		"retargeting_port": _retargeting_port_input.text.strip_edges().to_int(),
 		"retargeting_tls": _retargeting_tls_toggle.button_pressed,
+		"video_protocol": _selected_video_protocol,
+		"video_ip": _video_ip_input.text.strip_edges(),
+		"video_port": _video_port_input.text.strip_edges().to_int(),
+		"video_sbs": _video_sbs_toggle.button_pressed,
 		"video_face_locked": _video_face_toggle.button_pressed,
 		"show_video_panel": _show_video_panel_toggle.button_pressed,
 		"show_operation_trajectory": _show_operation_trajectory_toggle.button_pressed,
@@ -448,13 +588,25 @@ func set_options(options: Dictionary) -> void:
 	_target_scope = str(options.get("target_scope", DEFAULT_TARGET_SCOPE))
 	if _target_scope != "inside":
 		_target_scope = "outside"
+	_selected_protocol = _normalized_protocol(str(options.get("protocol", DEFAULT_PROTOCOL)))
 	_ip_input.text = str(options.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(options.get("port", DEFAULT_PORT)))
+	_xrobot_toolkit_device_sn_input.text = str(
+		options.get("xrobot_toolkit_device_sn", DEFAULT_XROBOT_TOOLKIT_DEVICE_SN)
+	).strip_edges()
 	_selected_profile = str(options.get("inside_profile", _default_inside_profile()))
 	_refresh_backend_options(str(options.get("retargeting_backend", DEFAULT_RETARGETING_BACKEND)))
 	_retargeting_host_input.text = str(options.get("retargeting_host", DEFAULT_RETARGETING_HOST))
 	_retargeting_port_input.text = str(int(options.get("retargeting_port", DEFAULT_RETARGETING_PORT)))
 	_retargeting_tls_toggle.button_pressed = bool(options.get("retargeting_tls", false))
+	_selected_video_protocol = _normalized_video_protocol(
+		str(options.get("video_protocol", DEFAULT_VIDEO_PROTOCOL))
+	)
+	_video_ip_input.text = str(options.get("video_ip", DEFAULT_VIDEO_IP))
+	_video_port_input.text = str(
+		int(options.get("video_port", _default_video_port(_selected_video_protocol)))
+	)
+	_video_sbs_toggle.button_pressed = bool(options.get("video_sbs", false))
 	_video_face_toggle.button_pressed = bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED))
 	_show_video_panel_toggle.button_pressed = bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL))
 	_show_operation_trajectory_toggle.button_pressed = bool(
@@ -462,6 +614,8 @@ func set_options(options: Dictionary) -> void:
 	)
 	_show_vr_pose_toggle.button_pressed = bool(options.get("show_vr_pose", DEFAULT_SHOW_VR_POSE))
 	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
+	_refresh_protocol_buttons()
+	_refresh_video_protocol_ui()
 	_refresh_scope_ui()
 
 
@@ -636,13 +790,19 @@ static func _default_inside_profile() -> String:
 static func _default_options() -> Dictionary:
 	return {
 		"target_scope": DEFAULT_TARGET_SCOPE,
+		"protocol": DEFAULT_PROTOCOL,
 		"ip": DEFAULT_IP,
 		"port": DEFAULT_PORT,
+		"xrobot_toolkit_device_sn": DEFAULT_XROBOT_TOOLKIT_DEVICE_SN,
 		"inside_profile": _default_inside_profile(),
 		"retargeting_backend": DEFAULT_RETARGETING_BACKEND,
 		"retargeting_host": DEFAULT_RETARGETING_HOST,
 		"retargeting_port": DEFAULT_RETARGETING_PORT,
 		"retargeting_tls": false,
+		"video_protocol": DEFAULT_VIDEO_PROTOCOL,
+		"video_ip": DEFAULT_VIDEO_IP,
+		"video_port": DEFAULT_OPERATOR_VIDEO_PORT,
+		"video_sbs": false,
 		"video_face_locked": DEFAULT_FACE_LOCKED,
 		"show_video_panel": DEFAULT_SHOW_VIDEO_PANEL,
 		"show_operation_trajectory": DEFAULT_SHOW_OPERATION_TRAJECTORY,
@@ -654,6 +814,119 @@ static func _default_options() -> Dictionary:
 func _on_scope_button_pressed(scope: String) -> void:
 	_target_scope = scope
 	_refresh_scope_ui()
+
+
+func _on_protocol_pressed(protocol: String) -> void:
+	_selected_protocol = _normalized_protocol(protocol)
+	_refresh_protocol_buttons()
+
+
+func _on_pico_body_calibration_pressed() -> void:
+	pico_body_calibration_requested.emit()
+
+
+func _on_video_protocol_pressed(protocol: String) -> void:
+	var previous_protocol := _selected_video_protocol
+	_selected_video_protocol = _normalized_video_protocol(protocol)
+	if _selected_video_protocol != previous_protocol:
+		var current_port := _video_port_input.text.strip_edges().to_int()
+		if _video_port_input.text.strip_edges().is_empty() \
+				or current_port == _default_video_port(previous_protocol):
+			_video_port_input.text = str(_default_video_port(_selected_video_protocol))
+	_refresh_video_protocol_ui()
+
+
+func _on_video_connect_pressed() -> void:
+	var options := _validated_video_options()
+	if options.is_empty():
+		return
+	set_video_status(tr("UI_VIDEO_CONNECT_REQUESTED"))
+	video_connect_requested.emit(options)
+
+
+func _validated_video_options() -> Dictionary:
+	var options := get_options()
+	if str(options.get("video_ip", "")).strip_edges().is_empty():
+		set_video_status(tr("UI_VIDEO_IP_REQUIRED"))
+		return {}
+	var port := int(options.get("video_port", 0))
+	if port <= 0 or port > 65535:
+		set_video_status(tr("UI_VIDEO_INVALID_PORT"))
+		return {}
+	return options
+
+
+func set_video_status(text: String) -> void:
+	if _video_status_label != null:
+		_video_status_label.text = text
+
+
+## Switch the "show video panel" preference on from outside the panel.
+##
+## The video test button exists to prove an endpoint works, so a test that
+## actually decodes frames turns the preference on rather than leaving the
+## operator to discover a separate checkbox. Driving the real toggle (instead
+## of forcing the value at confirm time) keeps the form honest: the operator
+## sees it flip, it is saved with everything else on Confirm, and it can still
+## be turned back off before confirming.
+func set_show_video_panel_enabled(enabled: bool) -> void:
+	if _show_video_panel_toggle != null:
+		_show_video_panel_toggle.button_pressed = enabled
+
+
+func _refresh_video_protocol_ui() -> void:
+	for protocol in _video_protocol_buttons:
+		_set_choice_selected(
+			_video_protocol_buttons[protocol],
+			protocol == _selected_video_protocol
+		)
+	var xrobot_toolkit := _selected_video_protocol == VIDEO_PROTOCOL_XROBOT_TOOLKIT
+	if _video_port_label != null:
+		_video_port_label.text = tr(
+			"UI_VIDEO_COMMAND_PORT" if xrobot_toolkit else "UI_VIDEO_STREAM_PORT"
+		)
+	if _video_port_input != null:
+		_video_port_input.placeholder_text = _video_port_label.text
+	refresh_keyboard()
+
+
+func _refresh_protocol_buttons() -> void:
+	for protocol in _protocol_buttons:
+		_set_choice_selected(_protocol_buttons[protocol], protocol == _selected_protocol)
+	_refresh_xrobot_toolkit_controls()
+	refresh_keyboard()
+
+
+func _refresh_xrobot_toolkit_controls() -> void:
+	var show_xrobot_controls := (
+		_target_scope == DEFAULT_TARGET_SCOPE
+		and _selected_protocol == PROTOCOL_XROBOT_TOOLKIT_V1
+	)
+	if _xrobot_toolkit_device_sn_input != null:
+		_xrobot_toolkit_device_sn_input.visible = show_xrobot_controls
+	if _pico_body_calibration_button != null:
+		_pico_body_calibration_button.visible = show_xrobot_controls
+		var slot := _pico_body_calibration_button.get_parent() as Control
+		if slot != null:
+			slot.visible = show_xrobot_controls
+
+
+static func _normalized_protocol(protocol: String) -> String:
+	if protocol == PROTOCOL_XROBOT_TOOLKIT_V1:
+		return PROTOCOL_XROBOT_TOOLKIT_V1
+	return PROTOCOL_OPERATOR
+
+
+static func _normalized_video_protocol(protocol: String) -> String:
+	if protocol == VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+		return VIDEO_PROTOCOL_XROBOT_TOOLKIT
+	return VIDEO_PROTOCOL_OPERATOR
+
+
+static func _default_video_port(protocol: String) -> int:
+	if protocol == VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+		return DEFAULT_XROBOT_TOOLKIT_COMMAND_PORT
+	return DEFAULT_OPERATOR_VIDEO_PORT
 
 
 ## The pressed state alone is easy to miss on a panel seen from a metre away,
@@ -707,6 +980,7 @@ func _refresh_scope_ui() -> void:
 		_inside_box.visible = inside
 	if _outside_box != null:
 		_outside_box.visible = not inside
+	_refresh_xrobot_toolkit_controls()
 	if _inside_missing_label != null:
 		var unavailable := RobotProfileRegistryScript.unavailable()
 		_inside_missing_label.visible = inside and not unavailable.is_empty()

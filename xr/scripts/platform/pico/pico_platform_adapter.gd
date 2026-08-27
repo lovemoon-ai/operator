@@ -75,6 +75,13 @@ func instantiate_openxr_bridge() -> Object:
 	return ClassDB.instantiate(OPENXR_BRIDGE_CLASS)
 
 
+func set_boundary_visible(visible: bool) -> bool:
+	var bridge := openxr_bridge_native()
+	if bridge == null or not bridge.has_method("set_boundary_visible"):
+		return false
+	return bool(bridge.call("set_boundary_visible", visible))
+
+
 func capabilities() -> Array:
 	var caps: Array = []
 	var present := is_present()
@@ -85,6 +92,11 @@ func capabilities() -> Array:
 	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.MOTION_TRACKERS, PROVIDER_ID, body_state))
 	var mux_state := CapabilityStateScript.AVAILABLE if muxer_plugin() != null else CapabilityStateScript.UNAVAILABLE
 	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.SPATIAL_MP4_MUX, PROVIDER_ID, mux_state))
+	var boundary_bridge := openxr_bridge_native()
+	var boundary_state := CapabilityStateScript.AVAILABLE \
+			if boundary_bridge != null and boundary_bridge.has_method("set_boundary_visible") \
+			else CapabilityStateScript.UNAVAILABLE
+	caps.append(CapabilityInfoScript.create(SensorCapabilityScript.BOUNDARY, PROVIDER_ID, boundary_state))
 	# Environment depth is contributed by GenericOpenXRPlatformAdapter after a
 	# live extension probe; it must not be inferred from the PICO camera plugin
 	# or from a headset identity.

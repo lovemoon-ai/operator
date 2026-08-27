@@ -18,6 +18,7 @@ xr/
     ui/                    UI controls and XR panels
     teleop/                Inside/Outside targets, profiles, retargeting clients
     network/               teleop protocol clients
+    compat/                third-party wire-protocol compatibility layers
     platform/              Quest/Pico/OpenXR capability registry
     xr/                    OpenXR helpers and capture provider registry
     test_support/          on-device test framework
@@ -190,6 +191,8 @@ The Outside target creates the v2 network stack at runtime:
 - `RobotControlSink` as the mode-facing command output.
 - `TcpHandler` for command and TCP video streams.
 - `UdpVideoHandler` for UDP timed video packets.
+- `XrtVideoSession` for the optional XRoboToolkit camera-command and reverse
+  FPV TCP flow.
 - `RobotClockSync` for latency reporting.
 - settings and controller overlays from `scripts/ui`.
 - `EEPoseTrajectory` for the optional descriptor-driven operation trail. It
@@ -203,15 +206,69 @@ Video transport is descriptor-driven. TCP is the default and supports USB
 `adb reverse`; UDP is selected when the descriptor advertises a usable UDP
 port and `transport` is `udp` or `auto`.
 
+The Teleop settings surface also exposes an independent `Video` group. It can
+connect directly to Operator timed H.264 at a configured host/port, or select
+XRoboToolkit FPV compatibility. The compatibility path opens its own command
+connection and local reverse-video listener; it never passes XRT frames through
+the Operator 80-byte timed-video parser. Both paths converge on
+`LiveVideoView`, including mono/SBS display, controller-ray distance adjustment,
+and a separate performance bar above the video with reset-position control. The
+video `Connect` action temporarily forces the shared preview visible while
+preserving the saved visibility preference for the normal Teleop view.
+
 `XrStateSender` samples in `_process` after Godot advances OpenXR for the render
 frame. Head/controllers/input/hands are collected without yielding; body and
 motion trackers retain their own lower-rate sample timestamp. It is disabled
 for normal robot descriptors, so `CommandSender` behavior and bandwidth are
 unchanged outside Python SDK mode.
 
+`XrTrackingSampler` owns that atomic sampling independently of serialization.
+The normal `XrStateSender` filters its output back to the unchanged v1 schema;
+the optional `XrtSender` converts the same snapshot to XRoboToolkit Tracking
+JSON and frames it with the legacy byte-command envelope. Selecting
+`xrobot_toolkit_v1` creates a separate outside target with its own TCP client,
+handshake, heartbeat, reconnect, and neutral-frame safety behavior. It bypasses
+Operator `Session`, `DeviceDescriptor`, video, and clock sync. The composition
+root enforces `CommandSender XOR XrStateSender XOR XrtSender`. The compatibility
+sampler starts PICO full-body tracking only when XRT transmission becomes
+active, so merely constructing the optional target cannot perturb the normal
+Operator path. It deliberately does not request the
+independent motion-tracker mode: PICO exposes those as mutually disruptive
+runtime modes, and Body is the HoloMotion P0 input. The legacy `predictTime`
+keeps the OpenXR predicted-display clock, while top-level and Body timestamps
+are converted to Unix nanoseconds at the sender boundary. The encoder removes
+Godot's hand-joint bone-axis adjustment to recover the raw legacy PICO hand
+quaternion and maps PICO's right system/select action to legacy `menuButton`.
+
 The Inside profile registry is deliberately not consulted by Outside Robot.
 This prevents a headset release from becoming the compatibility gate for a new
 real robot or outside simulator.
+
+## Compatibility Layers
+
+`scripts/compat/` holds adapters that speak a third party's wire protocol so
+Operator can drop into an existing deployment without changing the peer. They
+are deliberately separate from `scripts/network/`, which owns Operator's own
+protocol: nothing under `compat/` is a dependency of the native path, so
+deleting a subdirectory removes exactly one interop story and nothing else.
+
+`scripts/compat/xrobot_toolkit/` implements the legacy XRoboToolkit TCP
+protocol, letting Operator drive hosts that still run the old PICO app's
+`RoboticsService`.
+
+| Script | Responsibility |
+| --- | --- |
+| `xrt_protocol.gd` | Byte-command envelope framing and shared constants. |
+| `xrt_client.gd` | TCP connection, heartbeat, and receive-buffer framing/resync. |
+| `xrt_tracking_encoder.gd` | Builds the Tracking JSON payload (head, controllers, hands, body). |
+| `xrt_sender.gd` | Per-frame send loop, `appState.focus`, and neutral frames. |
+| `xrt_camera_protocol.gd` | FPV camera command and response encoding. |
+| `xrt_video_session.gd` | FPV video stream lifecycle feeding the shared video panel. |
+
+Safety note: the sender emits an explicit neutral frame — every tracking
+section present and zeroed, not merely omitted — whenever the app loses focus
+or is paused. The legacy peer holds the last frame it received, so an omitted
+section would leave the robot parked at the operator's final pose.
 
 ## Capture Runtime
 
@@ -309,6 +366,36 @@ remain local diagnostics and are not part of the upload artifact contract.
 platform capabilities. Quest, Pico, and generic OpenXR adapters report capture,
 QR, live-stream, and sensor capability availability. Device tests can use fake
 providers from `scripts/test_support/fakes/platform`.
+
+## XR Session Policy
+
+`scripts/xr/xr_session_policy.gd` is an autoload that applies session-wide XR
+policy independently of the active mode. Today it disables the safety boundary:
+it calls `PlatformRegistry.apply_boundary_policy(false)` once the OpenXR
+interface is initialized and re-applies on `session_begun` and
+`session_focussed`.
+
+The registry fans the request out to both adapters and aggregates the results
+into one of four states — `not_applicable`, `applied`, `partial`, `failed` —
+worst-wins, so one adapter's failure cannot be masked by the other's success.
+`partial` means PICO's required enable call succeeded but a best-effort
+visibility setter did not, so the guardian mesh may still be drawn.
+
+PICO uses the `XR_PICO_virtual_boundary` extension through the `pico_openxr`
+GDExtension, which also disables the boundary directly in `_on_session_created`
+so the policy holds before any mode script runs.
+
+Quest needs no runtime call. Its guardian is suppressed at install time by the
+`com.oculus.feature.BOUNDARYLESS_APP` manifest feature, injected with
+`android:required="true"` by `addons/quest_capture_android/export_plugin.gd`.
+The pinned vendor plugin (`addons/godotopenxrvendors`, upstream_tag
+`4.3.1-stable`) ships no `XR_META_boundary_visibility` wrapper, so the Quest
+adapter reports `not_applicable` and the policy logs that at info level instead
+of warning. The adapter still probes for the singleton as an optional upgrade
+path should a later vendor release add one.
+
+Operator runs a single XR session across all modes, so one call covers launcher,
+teleop, and capture. See `claw/lessons/007-pico-safety-boundary-openxr-virtual-boundary.md`.
 
 ## Test Harness
 
