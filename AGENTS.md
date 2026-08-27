@@ -75,6 +75,9 @@ See `claw/architecture/overview.md`. Historical RFC, issue, lesson, and v2
 planning documents have been removed from the repo; keep architecture docs
 current instead of adding new history logs.
 
+Whenever adding a TODO document, also use the Conductor CLI to create an Issue
+card in the current project's Issue board with the document path and a brief summary.
+
 ## Tests
 
 Run device tests only on target devices. Do not create local fixtures to
