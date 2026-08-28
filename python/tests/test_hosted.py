@@ -10,6 +10,7 @@ from pyoperator.hosted import (
     _client,
     _read_frame,
     _write_frame,
+    create_server,
     make_descriptor,
     serve,
     serve_async,
@@ -83,6 +84,16 @@ class MemoryWriter:
         pass
 
 
+class ResetAfterHelloReader:
+    def __init__(self) -> None:
+        self.parts = [struct.pack("<I", len(b'{"type":"Hello"}')), b'{"type":"Hello"}']
+
+    async def readexactly(self, _size: int) -> bytes:
+        if self.parts:
+            return self.parts.pop(0)
+        raise ConnectionResetError("peer reset")
+
+
 def reader_with(payload: bytes) -> asyncio.StreamReader:
     reader = asyncio.StreamReader()
     reader.feed_data(payload)
@@ -94,10 +105,12 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_adapter_wire_protocol(self) -> None:
         adapter = FakeAdapter()
         descriptor = make_descriptor(name="Python Bot")
-        server = await asyncio.start_server(
-            lambda reader, writer: _client(reader, writer, adapter, descriptor, 100.0),
-            "127.0.0.1",
-            0,
+        server = await create_server(
+            adapter,
+            descriptor,
+            host="127.0.0.1",
+            port=0,
+            telemetry_hz=100.0,
         )
         address = server.sockets[0].getsockname()
         reader, writer = await asyncio.open_connection(*address)
@@ -165,6 +178,19 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
                 make_descriptor(name="Bot"),
                 10.0,
             )
+        self.assertFalse(adapter.connected)
+        self.assertTrue(writer.closed)
+
+    async def test_peer_reset_is_a_clean_disconnect(self) -> None:
+        adapter = FakeAdapter()
+        writer = MemoryWriter()
+        await _client(
+            ResetAfterHelloReader(),
+            writer,
+            adapter,
+            make_descriptor(name="Bot"),
+            100.0,
+        )
         self.assertFalse(adapter.connected)
         self.assertTrue(writer.closed)
 

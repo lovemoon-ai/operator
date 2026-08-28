@@ -266,7 +266,12 @@ func is_hand_control_unlocked() -> bool:
 	return _hand_control_unlocked
 
 
-func get_hand_control_state(hand: int) -> Dictionary:
+func refresh_hand_tracking(tracking: TrackingProvider) -> void:
+	_hand_joint_cache[HAND_LEFT] = tracking.get_hand_joints(HAND_LEFT)
+	_hand_joint_cache[HAND_RIGHT] = tracking.get_hand_joints(HAND_RIGHT)
+
+
+func get_hand_control_state(hand: int, head_position: Variant = null) -> Dictionary:
 	var joints_v: Variant = _hand_joint_cache.get(hand, [])
 	var joints: Array = joints_v if joints_v is Array else []
 	var wrist_position: Variant = HandGestureMapperScript.wrist_position(joints)
@@ -274,7 +279,7 @@ func get_hand_control_state(hand: int) -> Dictionary:
 		"tracked": wrist_position is Vector3,
 		"position": wrist_position,
 		"index_tip": HandGestureMapperScript.index_tip_position(joints),
-		"wrist_button_transform": HandGestureMapperScript.wrist_button_transform(joints),
+		"palm_menu": HandGestureMapperScript.palm_menu_state(joints, head_position, hand),
 		"control_enabled": is_deadman_engaged_for_hand(hand),
 	}
 

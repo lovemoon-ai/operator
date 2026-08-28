@@ -252,7 +252,11 @@ func get_hand_joints(hand: int) -> Array[Dictionary]:
 	# XRHandTracker has 26 joints (0-25) per the OpenXR spec
 	for joint_idx in range(26):
 		var flags := hand_tracker.get_hand_joint_flags(joint_idx)
-		if flags == 0:
+		var required_flags := (
+			XRHandTracker.HAND_JOINT_FLAG_POSITION_VALID
+			| XRHandTracker.HAND_JOINT_FLAG_POSITION_TRACKED
+		)
+		if (flags & required_flags) != required_flags:
 			# Joint not tracked
 			joints.append({"tracked": false})
 			continue

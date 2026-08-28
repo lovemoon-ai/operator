@@ -20,6 +20,9 @@ const CHANNEL_NAMES := [
 	"pinky_flex",
 ]
 
+const HAND_LEFT := 0
+const HAND_RIGHT := 1
+const JOINT_PALM := 0
 const JOINT_WRIST := 1
 const JOINT_THUMB_METACARPAL := 2
 const JOINT_THUMB_PROXIMAL := 3
@@ -45,6 +48,8 @@ const JOINT_PINKY_PROXIMAL := 22
 const JOINT_PINKY_INTERMEDIATE := 23
 const JOINT_PINKY_DISTAL := 24
 const JOINT_PINKY_TIP := 25
+const PALM_MENU_FOREARM_OFFSET_M := 0.055
+const PALM_MENU_HEAD_OFFSET_M := 0.018
 
 const _SOURCE_TO_CHANNEL := {
 	"left_hand_thumb_flex": [0, 0],
@@ -84,28 +89,90 @@ static func index_tip_position(joints: Array) -> Variant:
 	return _joint_position(joints, JOINT_INDEX_TIP)
 
 
-static func wrist_button_transform(joints: Array) -> Variant:
+static func palm_menu_state(
+	joints: Array,
+	head_position: Variant,
+	hand: int = HAND_LEFT,
+) -> Dictionary:
+	if not _has_required_joints(joints) or not head_position is Vector3:
+		return {"tracked": false}
+	var palm_v: Variant = _joint_position(joints, JOINT_PALM)
 	var wrist_v: Variant = _joint_position(joints, JOINT_WRIST)
 	var index_v: Variant = _joint_position(joints, JOINT_INDEX_METACARPAL)
-	var middle_v: Variant = _joint_position(joints, JOINT_MIDDLE_METACARPAL)
+	var middle_v: Variant = _joint_position(joints, JOINT_MIDDLE_PROXIMAL)
 	var pinky_v: Variant = _joint_position(joints, JOINT_PINKY_METACARPAL)
-	if not wrist_v is Vector3 or not index_v is Vector3 or not middle_v is Vector3 \
-			or not pinky_v is Vector3:
-		return null
+	if not palm_v is Vector3 or not wrist_v is Vector3 or not index_v is Vector3 \
+			or not middle_v is Vector3 or not pinky_v is Vector3:
+		return {"tracked": false}
+
+	var palm := palm_v as Vector3
 	var wrist := wrist_v as Vector3
-	var arm_axis := wrist - (middle_v as Vector3)
-	var across_axis := (pinky_v as Vector3) - (index_v as Vector3)
-	if arm_axis.length_squared() <= 0.000001 or across_axis.length_squared() <= 0.000001:
-		return null
-	var y_axis := arm_axis.normalized()
-	var x_axis := across_axis.normalized()
-	var z_axis := x_axis.cross(y_axis)
-	if z_axis.length_squared() <= 0.000001:
-		return null
-	z_axis = z_axis.normalized()
-	x_axis = y_axis.cross(z_axis).normalized()
-	var center := wrist + y_axis * 0.052 + z_axis * 0.020
-	return Transform3D(Basis(x_axis, y_axis, z_axis).orthonormalized(), center)
+	var finger_axis := (middle_v as Vector3) - wrist
+	var thumbward_axis := (index_v as Vector3) - (pinky_v as Vector3)
+	var toward_head := (head_position as Vector3) - palm
+	var toward_forearm := wrist - palm
+	if finger_axis.length_squared() <= 0.000001 \
+			or thumbward_axis.length_squared() <= 0.000001 \
+			or toward_head.length_squared() <= 0.000001 \
+			or toward_forearm.length_squared() <= 0.000001:
+		return {"tracked": false}
+
+	var palm_normal := thumbward_axis.cross(finger_axis)
+	if hand == HAND_RIGHT:
+		palm_normal = -palm_normal
+	if palm_normal.length_squared() <= 0.000001:
+		return {"tracked": false}
+	palm_normal = palm_normal.normalized()
+	toward_head = toward_head.normalized()
+	var anchor := (
+		wrist
+		+ toward_forearm.normalized() * PALM_MENU_FOREARM_OFFSET_M
+		+ toward_head * PALM_MENU_HEAD_OFFSET_M
+	)
+	return {
+		"tracked": true,
+		"anchor_position": anchor,
+		"facing": palm_normal.dot(toward_head),
+		"openness": hand_openness(joints),
+	}
+
+
+static func hand_openness(joints: Array) -> float:
+	if not _has_required_joints(joints):
+		return 0.0
+	var maximum_curl := maxf(_thumb_flexion(joints), _thumb_abduction(joints))
+	for indices in [
+		[
+			JOINT_INDEX_METACARPAL,
+			JOINT_INDEX_PROXIMAL,
+			JOINT_INDEX_INTERMEDIATE,
+			JOINT_INDEX_DISTAL,
+			JOINT_INDEX_TIP,
+		],
+		[
+			JOINT_MIDDLE_METACARPAL,
+			JOINT_MIDDLE_PROXIMAL,
+			JOINT_MIDDLE_INTERMEDIATE,
+			JOINT_MIDDLE_DISTAL,
+			JOINT_MIDDLE_TIP,
+		],
+		[
+			JOINT_RING_METACARPAL,
+			JOINT_RING_PROXIMAL,
+			JOINT_RING_INTERMEDIATE,
+			JOINT_RING_DISTAL,
+			JOINT_RING_TIP,
+		],
+		[
+			JOINT_PINKY_METACARPAL,
+			JOINT_PINKY_PROXIMAL,
+			JOINT_PINKY_INTERMEDIATE,
+			JOINT_PINKY_DISTAL,
+			JOINT_PINKY_TIP,
+		],
+	]:
+		maximum_curl = maxf(maximum_curl, _chain_curl(joints, indices))
+	return 1.0 - clampf(maximum_curl, 0.0, 1.0)
 
 
 static func _targets_from_joints(joints: Array) -> PackedFloat64Array:
@@ -242,6 +309,7 @@ static func _has_required_joints(joints: Array) -> bool:
 	if joints.size() < 26:
 		return false
 	for joint_index in [
+		JOINT_PALM,
 		JOINT_WRIST,
 		JOINT_THUMB_METACARPAL,
 		JOINT_THUMB_PROXIMAL,

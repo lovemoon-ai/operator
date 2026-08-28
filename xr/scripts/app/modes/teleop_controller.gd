@@ -18,7 +18,7 @@ extends Node3D
 
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
-const HandUnlockButtonScript = preload("res://scripts/ui/hand_unlock_button.gd")
+const HandPalmMenuScript = preload("res://scripts/ui/hand_unlock_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
 const OUTSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/outside_robot_target.gd"
 const XROBOT_TOOLKIT_TARGET_PATH := "res://scripts/teleop/targets/xrobot_toolkit_target.gd"
@@ -40,6 +40,7 @@ const DEFAULT_TELEMETRY_PORT := 63903
 const TELEMETRY_PORT_OFFSET := 2
 const TELEMETRY_RETRY_DELAY_SEC := 1.0
 const REVO2_DEVICE_TYPE := "revo2_dual_hand"
+const PASSTHROUGH_BACKGROUND_MODE := Environment.BG_COLOR
 const REVO2_HAND_CHANNELS := [
 	"thumb_flex",
 	"thumb_aux",
@@ -119,7 +120,7 @@ var _active_target: Node
 
 var _settings_panel: Node3D
 var _settings_button: Node3D
-var _hand_unlock_button: Node3D
+var _hand_palm_menu: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
 var _manual_video_protocol := ""
@@ -269,7 +270,7 @@ func _ready() -> void:
 	# instead of waiting for discovery to finish.
 	_settings_panel.visible = false
 	_settings_button.visible = false
-	_hand_unlock_button.visible = false
+	_hand_palm_menu.visible = false
 
 	# Apply persisted runtime options immediately. The settings page's Test
 	# actions are previews only; the confirmed options own the working page.
@@ -313,7 +314,7 @@ func _process(_delta: float) -> void:
 				_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
-	_update_hand_unlock_button(_delta)
+	_update_hand_palm_menu(_delta)
 	_tick_telemetry_reconnect(_delta)
 	# Position refreshes every frame so the gizmo tracks the controller smoothly;
 	# its orientation only changes when telemetry reports a new captured frame.
@@ -336,8 +337,8 @@ func _apply_settings_input_indicator(mode: String) -> void:
 	var controller := _right_controller if mode == "controllers" else null
 	if _settings_button and _settings_button.has_method("set_feedback_input_mode"):
 		_settings_button.call("set_feedback_input_mode", mode, controller)
-	if _hand_unlock_button and _hand_unlock_button.has_method("set_feedback_input_mode"):
-		_hand_unlock_button.call("set_feedback_input_mode", mode, controller)
+	if _hand_palm_menu and _hand_palm_menu.has_method("set_feedback_input_mode"):
+		_hand_palm_menu.call("set_feedback_input_mode", mode, controller)
 
 
 func _bind_operator_interaction() -> void:
@@ -520,10 +521,10 @@ func _create_settings_ui_nodes() -> void:
 	_settings_button.pressed.connect(_on_settings_button_pressed)
 	_origin.add_child(_settings_button)
 
-	_hand_unlock_button = HandUnlockButtonScript.new()
-	_hand_unlock_button.name = "HandUnlockButton"
-	_hand_unlock_button.toggled.connect(_on_hand_unlock_toggled)
-	_origin.add_child(_hand_unlock_button)
+	_hand_palm_menu = HandPalmMenuScript.new()
+	_hand_palm_menu.name = "HandPalmMenu"
+	_hand_palm_menu.toggled.connect(_on_hand_unlock_toggled)
+	_origin.add_child(_hand_palm_menu)
 
 	_teleop_controller_panel = TeleopControllerPanelScript.new()
 	_teleop_controller_panel.name = "TeleopControllerPanel"
@@ -665,7 +666,7 @@ func _configure_passthrough() -> void:
 		viewport.physics_object_picking = false
 		var world := viewport.get_world_3d()
 		if world and world.environment:
-			world.environment.background_mode = Environment.BG_CLEAR_COLOR
+			world.environment.background_mode = PASSTHROUGH_BACKGROUND_MODE
 			world.environment.background_color = Color(0, 0, 0, 0)
 
 	if _start_xr and _start_xr.xr_interface:
@@ -770,10 +771,16 @@ func _set_revo2_hand_control_unlocked(unlocked: bool) -> void:
 		and _tcp_handler != null
 		and _tcp_handler.is_connected_to_robot()
 	)
+	var target_ready: bool = (
+		_outside_target != null
+		and _outside_target.has_method("is_ready")
+		and _outside_target.is_ready()
+	)
 	_revo2_hand_control_unlocked = (
 		unlocked
 		and _revo2_hand_runtime_enabled
 		and transport_connected
+		and target_ready
 		and not _teleop_suspended
 	)
 	var mode = _active_control_mode()
@@ -781,39 +788,51 @@ func _set_revo2_hand_control_unlocked(unlocked: bool) -> void:
 		mode.call("set_hand_control_unlocked", _revo2_hand_control_unlocked)
 	if was_unlocked and not _revo2_hand_control_unlocked and _command_sender != null:
 		_command_sender.send_immediate_command()
-	_update_hand_unlock_button()
+	_update_hand_palm_menu()
 	print("[Operator] Revo2 hand control unlocked=%s" % str(_revo2_hand_control_unlocked))
 
 
-func _update_hand_unlock_button(delta: float = 0.0) -> void:
-	if _hand_unlock_button == null:
+func _update_hand_palm_menu(delta: float = 0.0) -> void:
+	if _hand_palm_menu == null:
 		return
-	var show_button: bool = (
+	var show_menu: bool = (
 		_revo2_hand_runtime_enabled
 		and _active_target == _outside_target
 		and not _synthetic
+		and _current_interaction_mode() == "hands"
 		and (_settings_panel == null or not _settings_panel.visible)
 	)
 	var available: bool = (
-		show_button
+		show_menu
 		and not _teleop_suspended
 		and _tcp_handler != null
 		and _tcp_handler.is_connected_to_robot()
+		and _outside_target != null
+		and _outside_target.has_method("is_ready")
+		and _outside_target.is_ready()
 	)
 	var mode = _active_control_mode()
-	if not show_button or mode == null or not mode.has_method("get_hand_control_state"):
-		_hand_unlock_button.call(
-			"update_direct_touch", null, null, false, false, delta
+	if not show_menu or mode == null or not mode.has_method("get_hand_control_state"):
+		_hand_palm_menu.call(
+			"update_palm_menu", {}, null, null, false, false, false, delta
 		)
 		return
-	var left_state: Dictionary = mode.get_hand_control_state(HAND_LEFT)
+	if mode.has_method("refresh_hand_tracking") and _tracking_provider != null:
+		mode.call("refresh_hand_tracking", _tracking_provider)
+	var head_transform_v: Variant = _camera.transform if _camera != null else null
+	var head_position_v: Variant = (
+		(head_transform_v as Transform3D).origin if head_transform_v is Transform3D else null
+	)
+	var left_state: Dictionary = mode.get_hand_control_state(HAND_LEFT, head_position_v)
 	var right_state: Dictionary = mode.get_hand_control_state(HAND_RIGHT)
-	_hand_unlock_button.call(
-		"update_direct_touch",
-		left_state.get("wrist_button_transform", null),
+	_hand_palm_menu.call(
+		"update_palm_menu",
+		left_state.get("palm_menu", {}),
+		head_transform_v,
 		right_state.get("index_tip", null),
 		_revo2_hand_control_unlocked,
 		available,
+		show_menu,
 		delta
 	)
 
@@ -831,7 +850,7 @@ func _set_revo2_hand_runtime_enabled(enabled: bool) -> void:
 			var indicator = indicator_v
 			if indicator != null:
 				indicator.update_state(null, false, false, false)
-	_update_hand_unlock_button()
+	_update_hand_palm_menu()
 
 
 func _prepare_outside_runtime_features(ip: String) -> void:
@@ -987,8 +1006,8 @@ func _show_settings_panel() -> void:
 		_settings_ui.set_discovering(false)
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
-	if _hand_unlock_button and _hand_unlock_button.has_method("cancel_touch"):
-		_hand_unlock_button.call("cancel_touch")
+	if _hand_palm_menu and _hand_palm_menu.has_method("reset_menu"):
+		_hand_palm_menu.call("reset_menu")
 	if _settings_panel and _settings_panel.has_method("set_feedback_input_mode"):
 		var mode := _current_interaction_mode()
 		_settings_panel.set_feedback_input_mode(
@@ -999,7 +1018,7 @@ func _show_settings_panel() -> void:
 	else:
 		_settings_panel.visible = true
 	_settings_button.visible = false
-	_hand_unlock_button.visible = false
+	_hand_palm_menu.visible = false
 
 
 func _hide_settings_panel() -> void:
@@ -1010,7 +1029,7 @@ func _hide_settings_panel() -> void:
 		_settings_panel.visible = false
 	_settings_button.visible = true
 	_set_teleop_suspended(false)
-	_update_hand_unlock_button()
+	_update_hand_palm_menu()
 	_resume_inside_embodiment()
 
 
@@ -1290,6 +1309,7 @@ func _start_outside_with_options(options: Dictionary) -> bool:
 
 
 func _on_connected() -> void:
+	_set_revo2_hand_control_unlocked(false)
 	_set_status(tr("UI_CONNECTED_HANDSHAKE"))
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", true)

@@ -3,9 +3,27 @@ extends RefCounted
 const CaptureAppBaseScript := preload("res://scripts/app/modes/capture_app_base.gd")
 const ModeSelectScript := preload("res://scripts/app/launcher/mode_select.gd")
 const QuickEntryConfigScript := preload("res://scripts/app/launcher/quick_entry_config.gd")
+const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
+	t.eq(
+		ModeSelectScript.PASSTHROUGH_BACKGROUND_MODE,
+		Environment.BG_COLOR,
+		"launcher passthrough must use its transparent color instead of the default gray clear color"
+	)
+	var viewport_quad := ViewportTemplate.instantiate()
+	var viewport := viewport_quad.get_node("Viewport") as SubViewport
+	var screen := viewport_quad.get_node("Screen") as MeshInstance3D
+	t.is_true(
+		viewport != null and viewport.transparent_bg,
+		"launcher card viewports must preserve transparent pixels"
+	)
+	t.is_true(
+		screen != null and screen.material_override == null,
+		"launcher card meshes must allow XR Tools to bind the runtime viewport texture"
+	)
+	viewport_quad.free()
 	var capture := CaptureAppBaseScript.new()
 	capture.keep_passthrough_visible = true
 	capture._passthrough_active = true
