@@ -159,7 +159,10 @@ async def _client(
         # Await every completed task so telemetry/serialization/socket errors
         # propagate through _client instead of leaving the reader hung forever.
         for task in done:
-            await task
+            try:
+                await task
+            except (BrokenPipeError, ConnectionResetError, asyncio.IncompleteReadError):
+                pass
     finally:
         primary_error = sys.exc_info()[1]
         cleanup_errors: list[BaseException] = []
@@ -180,6 +183,8 @@ async def _client(
         try:
             writer.close()
             await writer.wait_closed()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except BaseException as error:
             cleanup_errors.append(error)
 
@@ -192,6 +197,25 @@ async def _client(
                     add_note(f"pyoperator hosted cleanup also failed: {error!r}")
 
 
+async def create_server(
+    adapter: HostedAdapter,
+    descriptor: Mapping[str, Any],
+    *,
+    host: str = "127.0.0.1",
+    port: int = 63910,
+    telemetry_hz: float = 10.0,
+) -> asyncio.AbstractServer:
+    if telemetry_hz <= 0:
+        raise ValueError("telemetry_hz must be positive")
+    return await asyncio.start_server(
+        lambda reader, writer: _client(
+            reader, writer, adapter, descriptor, telemetry_hz
+        ),
+        host,
+        port,
+    )
+
+
 async def serve_async(
     adapter: HostedAdapter,
     descriptor: Mapping[str, Any],
@@ -200,14 +224,12 @@ async def serve_async(
     port: int = 63910,
     telemetry_hz: float = 10.0,
 ) -> None:
-    if telemetry_hz <= 0:
-        raise ValueError("telemetry_hz must be positive")
-    server = await asyncio.start_server(
-        lambda reader, writer: _client(
-            reader, writer, adapter, descriptor, telemetry_hz
-        ),
-        host,
-        port,
+    server = await create_server(
+        adapter,
+        descriptor,
+        host=host,
+        port=port,
+        telemetry_hz=telemetry_hz,
     )
     async with server:
         await server.serve_forever()

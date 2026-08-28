@@ -24,6 +24,7 @@ const MODE_EXIT := "exit"
 const MODE_PANEL_FALLBACK_DELAY_SEC := 2.0
 const HEAD_TRACKING_WAIT_FRAMES := 30
 const FALLBACK_EYE_HEIGHT := 1.5
+const PASSTHROUGH_BACKGROUND_MODE := Environment.BG_COLOR
 
 const ViewportTemplate := preload("res://scenes/ui/viewport_2d_in_3d_clean.tscn")
 const CardSceneTemplate := preload("res://scenes/ui/mode_select_ui.tscn")
@@ -637,7 +638,7 @@ func _configure_passthrough() -> void:
 		viewport.physics_object_picking = false
 		var world := viewport.get_world_3d()
 		if world and world.environment:
-			world.environment.background_mode = Environment.BG_CLEAR_COLOR
+			world.environment.background_mode = PASSTHROUGH_BACKGROUND_MODE
 			world.environment.background_color = Color(0, 0, 0, 0)
 
 	var xr_interface := XRServer.find_interface("OpenXR")

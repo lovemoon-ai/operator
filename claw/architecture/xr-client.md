@@ -158,6 +158,19 @@ suspends those features without destroying their configuration; closing or
 confirming resumes the configured runtime, while safety-sensitive controls
 return locked.
 
+For descriptor-driven dual-hand control, the left bare hand owns a palm menu.
+The menu appears only after the tracked palm faces the headset with all five
+fingers open for a stable interval, uses wider exit thresholds to avoid pose
+jitter, follows below the hand with filtered motion, and billboards toward the
+head so its text remains readable. Only the tracked right index fingertip can
+press its controls; it is not registered as a ray target. A touch must be armed
+outside the press volume before entry, remains latched until release, and never
+unlocks merely because the menu appeared. Disconnect, reconnect, settings-open,
+and Teleop-exit boundaries restore the locked state. Per-hand joint validity
+continues to gate each hand independently, so losing one hand stops only that
+side. The implementation uses the shared OpenXR joint path for identical Quest
+and Pico behavior.
+
 How an Inside robot is drawn depends on what its profile declares. A profile
 with an `overlay_script` uses that bespoke, retargeting-aware overlay
 (the humanoids). Otherwise a `visual_model` GLB is rendered by
