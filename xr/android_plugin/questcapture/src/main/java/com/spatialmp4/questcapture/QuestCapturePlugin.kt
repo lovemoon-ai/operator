@@ -104,6 +104,8 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     private var rgbCodec = RgbVideoCodec.HEVC.tag
     private var rgbWidth = 0
     private var rgbHeight = 0
+    private var headsetCameraPermissionDefined: Boolean? = null
+    private val horizonOsVersion: Int by lazy { readHorizonOsVersion() }
     @Volatile private var exportCoordinateSpace = "openxr_stage"
     // depthStreamConfigured + lastDepthPtsUs migrated to SpatialMp4MuxerPlugin
     // alongside the writer handle (Stage 2b).
@@ -147,6 +149,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             else -> 5
         }
     }
+
+    @UsedByGodot
+    fun getCapturePlatformVersion(): Int = horizonOsVersion
 
     @UsedByGodot
     fun isDepthCaptureSupported(): Boolean = true
@@ -585,7 +590,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     @UsedByGodot
     fun requestCameraPermission() {
         val activity = mainActivity ?: return
-        val missing = requiredPermissions().filter {
+        val missing = requiredPermissions(activity).filter {
             ContextCompat.checkSelfPermission(activity, it) != PackageManager.PERMISSION_GRANTED
         }
 
@@ -597,7 +602,7 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     @UsedByGodot
     fun hasCameraPermission(): Boolean {
         val activity = mainActivity ?: return false
-        return requiredPermissions().all {
+        return requiredPermissions(activity).all {
             ContextCompat.checkSelfPermission(activity, it) == PackageManager.PERMISSION_GRANTED
         }
     }
@@ -644,7 +649,13 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         Log.i(TAG, "passthrough cameras found=${cameras.keys.sorted()}")
         if (!cameras.containsKey("left") || (stereoRgb && !cameras.containsKey("right"))) {
             val requiredEyes = if (stereoRgb) "left/right" else "left"
-            emitSignal("camera_error", "Quest passthrough $requiredEyes cameras were not found")
+            val message = if (!isHeadsetCameraPermissionDefined(activity)) {
+                "Quest passthrough Camera2 is unavailable on this Horizon OS build; " +
+                    "update the headset to Horizon OS v76 or newer"
+            } else {
+                "Quest passthrough $requiredEyes cameras were not found"
+            }
+            emitSignal("camera_error", message)
             return false
         }
 
@@ -1489,10 +1500,59 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         return mainActivity ?: throw IllegalStateException("Godot activity is not available")
     }
 
-    private fun requiredPermissions(): List<String> = listOf(
-        Manifest.permission.CAMERA,
-        "horizonos.permission.HEADSET_CAMERA"
-    )
+    private fun requiredPermissions(activity: Activity): List<String> {
+        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        if (isHeadsetCameraPermissionDefined(activity)) {
+            permissions.add(PERM_HEADSET_CAMERA)
+        }
+        return permissions
+    }
+
+    private fun isHeadsetCameraPermissionDefined(activity: Activity): Boolean {
+        headsetCameraPermissionDefined?.let { return it }
+        val defined = try {
+            activity.packageManager.getPermissionInfo(PERM_HEADSET_CAMERA, 0)
+            true
+        } catch (_: PackageManager.NameNotFoundException) {
+            false
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "Unable to query $PERM_HEADSET_CAMERA; treating it as unavailable", error)
+            false
+        }
+        headsetCameraPermissionDefined = defined
+        if (!defined) {
+            Log.i(
+                TAG,
+                "$PERM_HEADSET_CAMERA is not defined by this Horizon OS build; using android.permission.CAMERA only"
+            )
+        }
+        return defined
+    }
+
+    private fun readHorizonOsVersion(): Int {
+        var process: Process? = null
+        return try {
+            process = ProcessBuilder(GETPROP_PATH, HORIZON_OS_VERSION_PROPERTY)
+                .redirectErrorStream(true)
+                .start()
+            if (!process.waitFor(1, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                Log.w(TAG, "Timed out reading $HORIZON_OS_VERSION_PROPERTY")
+                UNKNOWN_PLATFORM_VERSION
+            } else {
+                val raw = process.inputStream.bufferedReader().use { it.readText() }.trim()
+                val version = Regex("\\d+").find(raw)?.value?.toIntOrNull()
+                    ?: UNKNOWN_PLATFORM_VERSION
+                Log.i(TAG, "Horizon OS version property: raw='$raw' parsed=$version")
+                version
+            }
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to read $HORIZON_OS_VERSION_PROPERTY", error)
+            UNKNOWN_PLATFORM_VERSION
+        } finally {
+            process?.destroy()
+        }
+    }
 
     private fun ensureDirectory(path: File): Boolean {
         return path.isDirectory || path.mkdirs()
@@ -1535,6 +1595,10 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         private const val META_CAMERA_SOURCE_PASSTHROUGH = 0
         private const val META_CAMERA_POSITION_LEFT = 0
         private const val META_CAMERA_POSITION_RIGHT = 1
+        private const val PERM_HEADSET_CAMERA = "horizonos.permission.HEADSET_CAMERA"
+        private const val GETPROP_PATH = "/system/bin/getprop"
+        private const val HORIZON_OS_VERSION_PROPERTY = "ro.vros.build.version"
+        private const val UNKNOWN_PLATFORM_VERSION = -1
         private const val TRACK_HEAD_POSE = 0
         private const val TRACK_LEFT_CONTROLLER_POSE = 1
         private const val TRACK_RIGHT_CONTROLLER_POSE = 2

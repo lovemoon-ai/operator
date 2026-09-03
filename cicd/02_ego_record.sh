@@ -57,6 +57,16 @@ XR_DIR="$ROOT/xr"
 PKG="com.lovemoon.operator"
 ACT="com.godot.game.GodotApp"
 
+ADB="${ADB:-}"
+if [ -z "$ADB" ]; then
+  for candidate in "$HOME/Library/Android/sdk/platform-tools/adb" \
+                   "$HOME/Android/Sdk/platform-tools/adb"; do
+    if [ -x "$candidate" ]; then
+      ADB="$candidate"
+      break
+    fi
+  done
+fi
 ADB="${ADB:-adb}"
 PYTHON="${PYTHON:-python3}"
 MAKE="${MAKE:-make}"
@@ -591,7 +601,11 @@ build_ci_apk() {
 
 install_ci_apk() {
   step "Install CI APK"
-  run_adb install -r -d "$CI_APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-install.log"
+  # Native libraries are stored uncompressed and mmap'd directly from the APK.
+  # A streamed/incremental reinstall over the same versionCode can leave their
+  # offsets stale, making libspatialmp4_writer.so unloadable and preventing MP4
+  # creation. Match xr/Makefile and always force a full APK push.
+  run_adb install --no-incremental -r -d "$CI_APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-install.log"
   DEVICE_NEEDS_CLEAN=1
   ok "installed $PKG (CI) on $SERIAL"
 }
@@ -615,7 +629,7 @@ reinstall_clean_apk() {
     return 0
   fi
   step "Reinstall clean APK"
-  if run_adb install -r -d "$CLEAN_APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-reinstall-clean.log"; then
+  if run_adb install --no-incremental -r -d "$CLEAN_APK_PATH" 2>&1 | tee "$OUTPUT_DIR/adb-reinstall-clean.log"; then
     DEVICE_NEEDS_CLEAN=0
     ok "device restored to clean APK"
   else
@@ -689,8 +703,9 @@ prepare_device() {
   fi
   grant_permissions
   run_adb shell "rm -rf /sdcard/Movies/SpatialMP4 /sdcard/DCIM/SpatialMP4" >/dev/null 2>&1 || true
-  run_adb shell am force-stop com.oculus.guardian >/dev/null 2>&1 || true
-  run_adb shell am force-stop com.android.permissioncontroller >/dev/null 2>&1 || true
+  # Keep the headset's Guardian and permission services alive. Force-stopping
+  # them leaves current Horizon OS builds in GuardianSetupFlow, where
+  # ClearActivity covers the app before Godot can start the capture scene.
   ensure_screen_awake
   run_adb shell am broadcast -a com.oculus.vrpowermanager.prox_close >/dev/null 2>&1 || true
   dismiss_system_dialogs
@@ -700,7 +715,13 @@ prepare_device() {
 
 start_ego_activity() {
   run_adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
-  run_adb shell am start -n "$PKG/$ACT" --es operator.mode ego >/dev/null
+  if [ "$DEVICE_KIND" = "quest" ]; then
+    # Explicit display 0 avoids Horizon OS's asynchronous VR display resolver,
+    # which can otherwise leave adb launches pending until its 10s timeout.
+    run_adb shell am start --display 0 -n "$PKG/$ACT" --es operator.mode ego >/dev/null
+  else
+    run_adb shell am start -n "$PKG/$ACT" --es operator.mode ego >/dev/null
+  fi
 }
 
 launch_app() {
@@ -774,10 +795,19 @@ wait_for_session_start() {
     fi
     if logcat_contains "Launch is blocked because:"; then
       warn "system dialog blocking launch; dismissing and retrying"
-      run_adb shell am force-stop com.oculus.guardian >/dev/null 2>&1 || true
       run_adb shell am broadcast -a com.oculus.vrpowermanager.prox_close >/dev/null 2>&1 || true
       dismiss_system_dialogs
       start_ego_activity || true
+    fi
+    if logcat_contains "Quest passthrough Camera2 is unavailable on this Horizon OS build"; then
+      err "Quest passthrough Camera2 is unavailable; update the headset to Horizon OS v76 or newer"
+      logcat_dump > "$OUTPUT_DIR/logcat-start-failed.log"
+      exit 3
+    fi
+    if logcat_contains "QuestCapturePlugin camera start failed"; then
+      err "Quest camera capture failed before the MP4 writer could start"
+      logcat_dump > "$OUTPUT_DIR/logcat-start-failed.log"
+      exit 3
     fi
     sleep 1
   done
