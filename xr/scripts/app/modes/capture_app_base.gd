@@ -48,6 +48,8 @@ const XR_TRACKING_STABLE_SECONDS := 0.75
 const XR_TRACKING_WAIT_TIMEOUT_SECONDS := 15.0
 const XR_TRACKING_POLL_SECONDS := 0.1
 const EXPORT_SPACE_APPLY_TIMEOUT_SECONDS := 2.0
+const MIN_QUEST_HORIZON_OS_VERSION := 76
+const QUEST_OS_UPGRADE_WARNING_SECONDS := 10.0
 const RUNTIME_DISPLAY_OPTION_KEYS := [
 	"show_hand_skeleton_overlay",
 ]
@@ -249,6 +251,8 @@ var _quit_after_rgb_capability_probe := false
 # operator wouldn't see it until they tapped Start, by which point a denied
 # prompt would silently produce a video-only recording with no warning.
 var _audio_permission_prompt_fired := false
+var _quest_os_upgrade_warning_shown := false
+var _quest_os_upgrade_warning_pending := false
 # Per-stage main-thread budgets so we can attribute the engine_fps drop to a
 # specific subsystem (panel update vs pointer raycast vs pose loop vs metrics
 # overhead). Microsecond accumulators; pop_metrics-style reset each second.
@@ -1454,6 +1458,9 @@ func _bind_android_plugin() -> void:
 		camera_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
 		_camera_bind_warned = false
 		print("Capture provider singleton bound: %s" % _provider_label())
+		if not _is_live_feed_mode() and _capture_provider_name == "quest" and not _quest_os_upgrade_warning_pending:
+			_quest_os_upgrade_warning_pending = true
+			call_deferred("_show_quest_os_upgrade_warning")
 
 	if _is_live_feed_mode():
 		if live_server_plugin == null:
@@ -2322,6 +2329,31 @@ func _effective_capture_options(options: Dictionary) -> Dictionary:
 
 func _provider_label() -> String:
 	return "%sCapturePlugin" % _capture_provider_name.capitalize() if not _capture_provider_name.is_empty() else "CaptureProvider"
+
+
+func _show_quest_os_upgrade_warning() -> void:
+	_quest_os_upgrade_warning_pending = false
+	if _quest_os_upgrade_warning_shown or _is_live_feed_mode() or camera_plugin == null or _capture_provider_name != "quest":
+		return
+	var version := int(camera_plugin.call("getCapturePlatformVersion"))
+	if version <= 0:
+		push_warning("Unable to detect Horizon OS version; skipping the Quest upgrade prompt")
+		return
+	if version >= MIN_QUEST_HORIZON_OS_VERSION:
+		return
+	_quest_os_upgrade_warning_shown = true
+	var title := tr("UI_QUEST_OS_UPDATE_REQUIRED_TITLE")
+	var detail := tr("UI_QUEST_OS_UPDATE_REQUIRED_DETAIL") % [version, MIN_QUEST_HORIZON_OS_VERSION]
+	push_warning("%s: %s" % [title, detail])
+	if status_popup and status_popup.has_method("show_upload_progress"):
+		status_popup.show_upload_progress(
+			title,
+			detail,
+			-1.0,
+			"warning",
+			QUEST_OS_UPGRADE_WARNING_SECONDS,
+			false
+		)
 
 
 func _start_pico_openxr_camera_image_capture() -> bool:
