@@ -631,6 +631,13 @@ func _on_discovery_selected(idx: int) -> void:
 	var info: Dictionary = _discovered[rname]
 	_ip_input.text = String(info.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(info.get("pose_port", DEFAULT_PORT)))
+	# A host found on the XRoboToolkit beacon speaks only that protocol, and the
+	# beacon says so. Selecting it while the radio still reads "operator" would
+	# hand the user a row that cannot connect and no hint as to why.
+	var announced_protocol := String(info.get("protocol", ""))
+	if not announced_protocol.is_empty():
+		_selected_protocol = _normalized_protocol(announced_protocol)
+		_refresh_protocol_buttons()
 	_apply_mode_lock()
 	set_status(tr("UI_WILL_CONNECT_TO") % _format_robot_label(rname, info))
 
@@ -752,6 +759,8 @@ func _robot_type_display(robot_type: String) -> String:
 			return tr("UI_DEVICE_TYPE_ROBOT_ARM")
 		"rc_car":
 			return tr("UI_DEVICE_TYPE_RC_CAR")
+		"xrobot_toolkit":
+			return tr("UI_DEVICE_TYPE_XROBOT_TOOLKIT")
 		_:
 			return robot_type
 

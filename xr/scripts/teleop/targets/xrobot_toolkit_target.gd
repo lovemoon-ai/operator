@@ -71,6 +71,14 @@ func set_control_enabled(enabled: bool) -> void:
 		sender.call("set_sending", effective)
 
 
+## Mirrors the Android app lifecycle onto the wire so a paused or unfocused
+## headset stops looking like a live operator to the receiver. Safe to call
+## before configure(); the sender latches the state and repeats are no-ops.
+func set_app_focused(focused: bool) -> void:
+	if sender != null and sender.has_method("set_app_focused"):
+		sender.call("set_app_focused", focused)
+
+
 func stop() -> void:
 	_stopping = true
 	if sender != null and sender.has_method("shutdown"):

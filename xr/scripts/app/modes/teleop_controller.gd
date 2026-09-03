@@ -25,6 +25,10 @@ const XROBOT_TOOLKIT_TARGET_PATH := "res://scripts/teleop/targets/xrobot_toolkit
 const XROBOT_TOOLKIT_VIDEO_SESSION_PATH := (
 	"res://scripts/compat/xrobot_toolkit/xrt_video_session.gd"
 )
+const XROBOT_TOOLKIT_DISCOVERY_PATH := (
+	"res://scripts/compat/xrobot_toolkit/xrt_discovery.gd"
+)
+const XROBOT_TOOLKIT_DEVICE_TYPE := "xrobot_toolkit"
 const INSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/inside_robot_target.gd"
 
 const VIDEO_PROTOCOL_OPERATOR := "operator_timed_h264"
@@ -113,6 +117,10 @@ var _active_telemetry_port := DEFAULT_TELEMETRY_PORT
 var _telemetry_retry_remaining := 0.0
 var _clock_sync: RobotClockSync
 var _known_robots: Dictionary = {}
+## Node listening for XRoboToolkit's own 1 Hz robot beacon. Separate port and
+## separate wire format from `_discovery`, so it is a separate listener that
+## merges into the same `_known_robots` map.
+var _xrt_discovery: Node = null
 var _outside_target: Node
 var _xrt_target: Node
 var _inside_target: Node
@@ -134,6 +142,11 @@ var _video_test_generation := 0
 # XrStateFrame, and XRoboToolkit Tracking are all disabled, and the controller
 # overlay is hidden — so the panel owns the controllers exclusively.
 var _teleop_suspended := false
+# Android lifecycle, tracked separately from _teleop_suspended: the panel being
+# open is a local UI state, while these two mean the headset itself is no longer
+# driving. Only the XRoboToolkit stream carries this on the wire (appState.focus).
+var _app_paused := false
+var _app_unfocused := false
 # Persisted from the active descriptor. SDK mode and robot-control mode are
 # mutually exclusive across every suspend/resume transition.
 var _sdk_mode := false
@@ -248,6 +261,7 @@ func _ready() -> void:
 
 	_discovery.robot_found.connect(_on_robot_found)
 	_discovery.robot_lost.connect(_on_robot_lost)
+	_start_xrt_discovery()
 
 	# Wire up Session signals
 	_session.device_connected.connect(_on_device_connected)
@@ -409,6 +423,10 @@ func _create_v2_nodes() -> void:
 		_xrt_target.configure(_tracking_provider)
 		_bind_target_signals(_xrt_target)
 		add_child(_xrt_target)
+		# The target can be built after a pause/focus notification has already
+		# landed, so hand it the current lifecycle state instead of letting it
+		# assume focus until the next transition.
+		_sync_app_focus()
 
 	var inside_script := load(INSIDE_ROBOT_TARGET_PATH)
 	if inside_script == null:
@@ -934,6 +952,8 @@ func _on_settings_exit_requested() -> void:
 		_clock_sync.stop()
 	if _discovery and _discovery.has_method("stop_scan"):
 		_discovery.stop_scan()
+	if _xrt_discovery != null and _xrt_discovery.has_method("stop_scan"):
+		_xrt_discovery.call("stop_scan")
 	if _tcp_handler:
 		_tcp_handler.disconnect_from_robot()
 	if _video_tcp_handler:
@@ -943,6 +963,31 @@ func _on_settings_exit_requested() -> void:
 	if _xrt_video_session:
 		_xrt_video_session.call("stop")
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
+
+
+## Mirrors the Android app lifecycle onto the XRoboToolkit stream. The reference
+## client reports focus on every frame and the receiver uses it to tell "the
+## operator let go" from "the headset went away", so a doffed or backgrounded
+## headset must stop reading as a live operator. Pause and focus arrive as
+## separate notifications and either one alone means not-live, so both are
+## tracked and the sender sees their conjunction.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_PAUSED:
+		_app_paused = true
+	elif what == NOTIFICATION_APPLICATION_RESUMED:
+		_app_paused = false
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		_app_unfocused = true
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		_app_unfocused = false
+	else:
+		return
+	_sync_app_focus()
+
+
+func _sync_app_focus() -> void:
+	if _xrt_target != null and _xrt_target.has_method("set_app_focused"):
+		_xrt_target.call("set_app_focused", not _app_paused and not _app_unfocused)
 
 
 ## Pause/resume teleop around the settings panel. While suspended neither
@@ -1235,6 +1280,10 @@ func _push_discovery_to_settings_ui() -> void:
 			"device_type": raw.get("device_type", ""),
 			"device_name": raw.get("device_name", ""),
 		}
+		# Only beacon-sourced entries carry this. It tells the panel which
+		# protocol the discovered host actually speaks.
+		if raw.has("protocol"):
+			info["protocol"] = raw.get("protocol")
 		var rname: String = String(raw.get("name", ip))
 		by_name[rname] = info
 	var persisted: Dictionary = SettingsUI.load_settings()
@@ -1984,6 +2033,9 @@ func _on_robot_found(
 		"telemetry_port": telemetry_port,
 		"device_type": device_type,
 		"device_name": device_name,
+		# Marks which listener owns this entry. The XRoboToolkit beacon defers to
+		# native announcements because it carries strictly less information.
+		"source": "operator",
 	}
 	# Push live update to the panel iff it's currently visible — when the
 	# panel is open, the dropdown should mirror discovery in real time.
@@ -2011,6 +2063,78 @@ func _on_robot_found(
 		_active_telemetry_port = telemetry_port
 		_connect_telemetry_stream(ip)
 		_connect_video_stream(ip)
+
+
+## XRoboToolkit's beacon carries only an address and a clock reading — no name,
+## no ports, no device type. Everything else is filled from the protocol's fixed
+## service port so the entry can sit in the same dropdown as native robots.
+func _start_xrt_discovery() -> void:
+	var script: Variant = load(XROBOT_TOOLKIT_DISCOVERY_PATH)
+	if script == null:
+		push_warning("[Operator] Cannot load the XRoboToolkit discovery listener")
+		return
+	var instance: Variant = script.new()
+	if not (instance is Node):
+		push_warning("[Operator] Cannot instantiate the XRoboToolkit discovery listener")
+		return
+	_xrt_discovery = instance
+	_xrt_discovery.name = "XRobotToolkitDiscovery"
+	_xrt_discovery.connect("host_found", Callable(self, "_on_xrt_host_found"))
+	_xrt_discovery.connect("host_lost", Callable(self, "_on_xrt_host_lost"))
+	add_child(_xrt_discovery)
+	_xrt_discovery.call("start_scan")
+
+
+func _xrt_robot_name(ip: String) -> String:
+	return "XRoboToolkit %s" % ip
+
+
+func _on_xrt_host_found(ip: String, port: int, _timestamp_ms: int) -> void:
+	# A robot that answers on both discovery channels is one robot. The native
+	# announcement carries a name, real ports and a device type, so it always
+	# wins; overwriting it with the beacon's placeholders would downgrade the
+	# entry every second.
+	var existing: Dictionary = _known_robots.get(ip, {})
+	if not existing.is_empty() and str(existing.get("source", "")) != XROBOT_TOOLKIT_DEVICE_TYPE:
+		return
+	var robot_name := _xrt_robot_name(ip)
+	var info := {
+		"name": robot_name,
+		"pose_port": port,
+		"video_port": 0,
+		"telemetry_port": 0,
+		"device_type": XROBOT_TOOLKIT_DEVICE_TYPE,
+		"device_name": "",
+		"source": XROBOT_TOOLKIT_DEVICE_TYPE,
+		# Consumed by the settings panel to preselect the matching protocol, so
+		# picking a beacon from the dropdown connects without a second manual
+		# choice the user has no way to know they need to make.
+		"protocol": "xrobot_toolkit_v1",
+	}
+	_known_robots[ip] = info
+	if (
+		_settings_panel
+		and _settings_panel.visible
+		and _settings_ui
+		and _settings_ui.has_method("add_discovered")
+	):
+		var entry := info.duplicate(true)
+		entry["ip"] = ip
+		_settings_ui.add_discovered(robot_name, entry)
+
+
+func _on_xrt_host_lost(ip: String) -> void:
+	var existing: Dictionary = _known_robots.get(ip, {})
+	if str(existing.get("source", "")) != XROBOT_TOOLKIT_DEVICE_TYPE:
+		return
+	_known_robots.erase(ip)
+	if (
+		_settings_panel
+		and _settings_panel.visible
+		and _settings_ui
+		and _settings_ui.has_method("remove_discovered")
+	):
+		_settings_ui.remove_discovered(_xrt_robot_name(ip))
 
 
 func _on_robot_lost(robot_name: String) -> void:

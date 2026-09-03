@@ -84,7 +84,30 @@ The client sends connect (`0x19`), version (`0x6c`), ten-second heartbeat
 (`0x23`), and Tracking (`0x6d`) packets. Tracking uses the legacy outer JSON
 object with `functionName="Tracking"` and a JSON string in `value`. Controller
 fields are always complete. Body is included only for a complete, valid
-24-joint `pico_bd_24` sample; incomplete data is omitted rather than replayed.
+24-joint `pico_bd_24` sample; incomplete data is omitted rather than replayed,
+and it ships on every tracking frame rather than on a slower sub-cadence — the
+legacy consumer re-reads Body on its own ~70 Hz timer, so a slower sender only
+feeds it duplicates.
+
+Thumbsticks, triggers and grips pass through a `0.05` deadzone before encoding.
+The receiving stack feeds these straight into a base-velocity command and has no
+deadzone of its own, so an untouched controller's few-thousandths of rest noise
+would otherwise become a slow unattended drift. The thumbstick band is radial,
+not per-axis, and values outside the band are not rescaled.
+
+Section presence is the protocol's stop signal, and the three sections are not
+symmetric:
+
+- `Controller` and `Hand` are **sent and neutralized**. The peer latches the last
+  section it saw and only clears it when a new one arrives, so omitting them
+  leaves a held trigger held and the fingers driving from the last grasp.
+- `Body` is **omitted**. An absent `Body` reads as "no body this frame" and
+  stops; 24 identity poses do not — they are a valid skeleton that retargets to a
+  rest pose, and a humanoid told to hold a rest pose walks its limbs there.
+
+`Hand` is additionally all-or-nothing: both `leftHand` and `rightHand`, or no
+section. The peer indexes them without checking they exist, and one unguarded
+throw discards the whole frame, `Body` included.
 Top-level and Body timestamps use Unix nanoseconds, joint `t` retains the
 OpenXR/PICO source timestamp, and `predictTime` is predicted-display time in
 microseconds. Body poses remain in the raw OpenXR values because the legacy
@@ -103,7 +126,8 @@ The receive path accepts server frames headed by `0xcf`; the legacy `0x5f`
 `timeTest` probe is answered with the same raw `timeTest` payload on `0x6d`.
 The implementation lives under `xr/scripts/compat/xrobot_toolkit/` and requires
 no robot-side changes or gateway process. This compatibility target covers TCP
-`63901`; Episode HTTP and UDP discovery remain independent scopes.
+`63901` and the UDP `29888` robot beacon below; Episode HTTP remains an
+independent scope.
 
 XRoboToolkit FPV is a second, independently selectable video transport. It is
 not sent through the Tracking connection. XR automatically binds the first
@@ -277,6 +301,32 @@ Default port: `63900`.
 The bridge advertises itself by UDP broadcast. XR listens with
 `xr/scripts/network/discovery.gd`, fills the settings UI, and can still use
 manual host entry or `adb reverse` loopback workflows.
+
+### XRoboToolkit robot beacon
+
+Default port: `29888`.
+
+A separate, non-overlapping broadcast domain: XRoboToolkit hosts announce
+themselves in their own binary format on their own port, so Operator has to
+listen for both to populate one settings list.
+
+```text
+u8      0xCF
+u8      0x7E
+i32_le  ip_length
+bytes   ip                       # ASCII dotted quad
+i64_le  unix_timestamp_ms
+u8      0xA5
+```
+
+`xr/scripts/compat/xrobot_toolkit/xrt_discovery.gd` listens, and a parsed
+beacon is offered as an `xrobot_toolkit_v1` peer on TCP `63901`. Because `29888`
+is a shared LAN broadcast port, the parser validates magic bytes, exact total
+length, trailer, and that the address field is a real IP before anything reaches
+the connect path. The payload address wins over the datagram's sender address so
+a multi-homed host advertises the interface it wants used. A host that stops
+broadcasting for ten seconds is dropped. Entries discovered on Operator's own
+`63900` protocol always take precedence over a beacon for the same address.
 
 ## Pose UDP
 

@@ -41,6 +41,79 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_hand_contract_and_invalid_omission(t)
 	_test_hand_quaternion_removes_godot_bone_adjustment(t)
 	_test_motion_vectors_are_finite(t)
+	_test_idle_analog_noise_is_deadzoned(t)
+	_test_neutral_frame_omits_body(t)
+
+
+## Receivers feed these values straight into a base-velocity command without a
+## deadzone of their own, so resting-stick noise would show up as a robot that
+## drifts while nobody is touching it.
+func _test_idle_analog_noise_is_deadzoned(t: OperatorTestAssertions) -> void:
+	var encoder = XrtTrackingEncoderScript.new()
+	var snapshot := _base_snapshot()
+	snapshot["controllers"] = {
+		"left": {"input": {"values": {
+			"primary_x": 0.02,
+			"primary_y": -0.03,
+			"trigger": 0.011,
+			"grip": 0.049,
+		}}},
+		"right": {"input": {"values": {
+			"primary_x": 0.9,
+			"primary_y": -0.04,
+			"trigger": 0.6,
+			"grip": 0.2,
+		}}},
+	}
+	var controllers: Dictionary = encoder.encode(snapshot, false).get("Controller", {})
+	var left: Dictionary = controllers.get("left", {})
+	t.eq(left.get("axisX"), 0.0, "idle thumbstick noise on X is zeroed")
+	t.eq(left.get("axisY"), 0.0, "idle thumbstick noise on Y is zeroed")
+	t.eq(left.get("trigger"), 0.0, "idle trigger noise is zeroed")
+	t.eq(left.get("grip"), 0.0, "idle grip noise is zeroed")
+
+	# Deliberately not rescaled. Everything past the deadzone has to reach the
+	# receiver with the exact magnitude the reference client would have sent,
+	# including the small axis riding alongside a large one.
+	var right: Dictionary = controllers.get("right", {})
+	t.eq(right.get("axisX"), 0.9, "a deflected thumbstick passes through unscaled")
+	t.eq(right.get("axisY"), -0.04,
+		"a small axis outside the radial deadzone is not snapped to the pure axis")
+	t.eq(right.get("trigger"), 0.6, "a squeezed trigger passes through unscaled")
+	t.eq(right.get("grip"), 0.2, "a squeezed grip passes through unscaled")
+
+
+## Body is the one section that must be ABSENT rather than zeroed. A receiver
+## reads a missing Body as "no body this frame" and stops; it reads 24 identity
+## poses as a valid skeleton in its rest pose and walks the robot's limbs there.
+## Head, Controller and Hand are the opposite: receivers latch them until a new
+## section arrives, so omitting those leaves a held trigger held.
+func _test_neutral_frame_omits_body(t: OperatorTestAssertions) -> void:
+	var encoder = XrtTrackingEncoderScript.new()
+	var neutral: Dictionary = encoder.neutral(TOP_TIMESTAMP_NS, PREDICTED_DISPLAY_TIME_NS, false)
+
+	t.is_false(neutral.has("Body"), "the stop frame omits Body entirely")
+	t.contains(neutral, "Head", "the stop frame still carries Head")
+	t.contains(neutral, "Controller", "the stop frame still carries Controller")
+	t.contains(neutral, "Hand", "the stop frame still carries Hand")
+	t.eq(neutral.get("appState", {}).get("focus"), false,
+		"the stop frame reports the requested focus state")
+	t.eq(neutral.get("timeStampNs"), TOP_TIMESTAMP_NS,
+		"the stop frame carries the requested timestamp")
+
+	for side in ["leftHand", "rightHand"]:
+		var hand: Dictionary = neutral.get("Hand", {}).get(side, {})
+		t.eq(int(hand.get("isActive", -1)), 0, "the stop frame marks %s inactive" % side)
+		t.eq(int(hand.get("count", -1)), XrtTrackingEncoderScript.HAND_JOINT_COUNT,
+			"the stop frame still declares every %s joint" % side)
+	for side in ["left", "right"]:
+		var controller: Dictionary = neutral.get("Controller", {}).get(side, {})
+		t.eq(controller.get("axisX"), 0.0, "the stop frame zeroes the %s stick" % side)
+		t.eq(controller.get("trigger"), 0.0, "the stop frame releases the %s trigger" % side)
+		t.eq(controller.get("grip"), 0.0, "the stop frame releases the %s grip" % side)
+		t.eq(controller.get("primaryButton"), false,
+			"the stop frame releases the %s primary button" % side)
+	t.eq(neutral.get("Head", {}).get("status"), 0, "the stop frame marks Head untracked")
 
 
 func _test_head_and_controllers(t: OperatorTestAssertions) -> void:
@@ -367,8 +440,18 @@ func _test_hand_contract_and_invalid_omission(t: OperatorTestAssertions) -> void
 	snapshot["hands"] = {"left": _complete_hand()}
 
 	var encoded: Dictionary = encoder.encode(snapshot, false)
-	var left: Dictionary = encoded.get("Hand", {}).get("leftHand", {})
+	var hands: Dictionary = encoded.get("Hand", {})
+	# Both-or-neither. Receivers index leftHand/rightHand without checking they
+	# exist, and a throw there takes the whole frame down with it — including
+	# Body, which is the section that actually drives the robot.
+	t.contains(hands, "leftHand", "a tracked left hand is present")
+	t.contains(hands, "rightHand",
+		"an untracked right hand still ships, as an inactive hand rather than a missing key")
+	t.eq(int(hands.get("rightHand", {}).get("isActive", -1)), 0,
+		"the substituted hand is marked not tracking")
+	var left: Dictionary = hands.get("leftHand", {})
 	t.eq(left.get("count"), 26, "Hand declares exactly 26 joints")
+	t.eq(int(left.get("isActive", -1)), 1, "a tracked hand is marked active")
 	t.eq(left.get("scale"), 0.95, "finite Hand scale is preserved")
 	var encoded_joints: Array = left.get("HandJointLocations", [])
 	t.eq(encoded_joints.size(), 26, "Hand emits exactly 26 joint locations")

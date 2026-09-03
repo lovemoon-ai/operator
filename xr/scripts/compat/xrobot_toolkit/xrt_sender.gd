@@ -8,7 +8,11 @@ const XrtTrackingEncoderScript = preload("res://scripts/compat/xrobot_toolkit/xr
 const XrTrackingSamplerScript = preload("res://scripts/input/xr_tracking_sampler.gd")
 
 const TRACKING_RATE_HZ := 72
-const BODY_RATE_HZ := 50
+## Matches TRACKING_RATE_HZ so Body ships on every frame, like the reference
+## client, which samples body once per rendered frame. The old 50 Hz sat *below*
+## the reference consumer's own 55 Hz loop, so it re-read a stale body sample
+## several times a second even though the link had headroom.
+const BODY_RATE_HZ := TRACKING_RATE_HZ
 const HEARTBEAT_INTERVAL_SEC := 10.0
 ## A wall clock that lands further behind than this is treated as a step (NTP),
 ## not as jitter, and the top timestamp re-baselines onto the new clock.
@@ -83,14 +87,19 @@ func is_sending() -> bool:
 
 
 ## Mirrors the Android APPLICATION_PAUSED/APPLICATION_RESUMED lifecycle onto the
-## wire. Losing focus while sending immediately emits one neutral frame so a
-## paused headset never leaves a live grasp pose as the last thing a receiver
-## saw. Idempotent: repeating the same value sends nothing further.
+## wire. Losing focus emits one neutral frame and then holds the stream: a
+## receiver that stops hearing from us falls back to a held, zero-velocity
+## stance, which is exactly the state a doffed headset should leave the robot
+## in. Streaming live poses from a headset the operator is not wearing is not.
+## Idempotent: repeating the same value sends nothing further.
 func set_app_focused(focused: bool) -> void:
 	if _app_focused == focused:
 		return
 	_app_focused = focused
 	if focused:
+		# Neutral -> live is the safe direction, so resuming needs no second
+		# neutral frame. Only the pacing accumulator is rewound.
+		_send_elapsed = 0.0
 		return
 	if _sending and _protocol_ready and _client_connected():
 		_send_neutral()
@@ -126,6 +135,10 @@ func _process(delta: float) -> void:
 		_heartbeat_elapsed = fmod(_heartbeat_elapsed, HEARTBEAT_INTERVAL_SEC)
 		_send_packet(XrtProtocolScript.pack_text(XrtProtocolScript.CMD_HEARTBEAT, device_sn))
 	if not _sending or sampler == null:
+		return
+	# Heartbeats above keep the connection up while the app is backgrounded;
+	# tracking below does not resume until the operator is back.
+	if not _app_focused:
 		return
 	if _live_neutral_required:
 		if _send_neutral() == OK:
@@ -180,9 +193,11 @@ func _complete_protocol_setup() -> void:
 	protocol_ready.emit()
 
 
-## The stop frame. It carries explicit neutral Hand and Body sections, not empty
-## ones: a receiver that holds last-known state would otherwise keep driving the
-## fingers from the last live grasp pose.
+## The stop frame. It overwrites Head, Controller and Hand with neutral values
+## rather than omitting them — a receiver latches those sections and only clears
+## them when a new one arrives, so an omitted Controller leaves a held trigger
+## held. Body is the opposite case and the encoder leaves it out; see
+## XrtTrackingEncoder.neutral().
 func _send_neutral() -> Error:
 	var timestamp_ns := _next_top_timestamp_ns()
 	var predicted_display_time_ns := _monotonic_time_ns()

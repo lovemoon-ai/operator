@@ -7,8 +7,15 @@ const BODY_JOINT_SET := "pico_bd_24"
 const BODY_JOINT_COUNT := 24
 const HAND_JOINT_COUNT := 26
 const MOTION_TRACKER_LIMIT := 3
+## Thumbsticks and triggers rest a few thousandths off center. Receivers on this
+## protocol feed the analog values straight into a base-velocity command — the
+## reference consumer even ships a 0.05 deadzone helper but never calls it — so
+## that idle noise becomes a slow unattended drift in a robot nobody is
+## touching. The sender is the only place in the chain that can hold the line,
+## so hold it here. Values past the band are not rescaled: the response curve
+## outside the deadzone stays identical to the reference client's.
+const ANALOG_DEADZONE := 0.05
 const IDENTITY_POSE := "0.0,0.0,0.0,0.0,0.0,0.0,1.0"
-const ZERO_SIX := "0.0,0.0,0.0,0.0,0.0,0.0"
 const GODOT_HAND_BONE_ADJUSTMENT_INVERSE := Quaternion(
 	0.0, 0.7071067811865476, -0.7071067811865476, 0.0
 )
@@ -44,9 +51,23 @@ func encode(snapshot: Dictionary, include_body := true) -> Dictionary:
 	return tracking
 
 
-## Builds the explicit "stop" frame. Every section a receiver could latch onto
-## is present and neutral: an empty Hand/Body section would let a peer that
-## holds last-known state keep driving the fingers from the live grasp pose.
+## Builds the explicit "stop" frame.
+##
+## Section-by-section, because the three behave differently on the receiving
+## end and the difference is the whole point of this frame:
+##
+##   Controller — sent, zeroed. Receivers latch the last button and trigger
+##     values and only clear them on a new Controller section, so omitting it
+##     leaves a held trigger held.
+##   Hand       — sent, `isActive: 0`. Same latching problem, and a receiver
+##     holding last-known state would otherwise keep driving the fingers from
+##     the live grasp pose.
+##   Body       — OMITTED, and this is load-bearing. A receiver reads an absent
+##     Body as "no body this frame" and stops. It does not read 24 identity
+##     poses that way: identity rotations are a valid skeleton, they retarget to
+##     a rest pose, and a humanoid told to hold a rest pose walks its limbs
+##     there. The stop frame used to send exactly that, which turned every
+##     pause, focus loss and disarm into a commanded T-pose.
 func neutral(timestamp_ns := -1, predicted_display_time_ns := -1, focus := true) -> Dictionary:
 	var resolved_timestamp := timestamp_ns
 	if resolved_timestamp < 0:
@@ -65,7 +86,7 @@ func neutral(timestamp_ns := -1, predicted_display_time_ns := -1, focus := true)
 		"focus": focus,
 	}, false)
 	tracking["Hand"] = neutral_hands()
-	tracking["Body"] = neutral_body(int(tracking.get("timeStampNs", resolved_timestamp)))
+	tracking.erase("Body")
 	return tracking
 
 
@@ -82,23 +103,6 @@ func neutral_hand() -> Dictionary:
 		"count": HAND_JOINT_COUNT,
 		"scale": 1.0,
 		"HandJointLocations": joints,
-	}
-
-
-func neutral_body(timestamp_ns: int) -> Dictionary:
-	var resolved_timestamp := maxi(1, timestamp_ns)
-	var joints: Array = []
-	for _index in range(BODY_JOINT_COUNT):
-		joints.append({
-			"p": IDENTITY_POSE,
-			"t": resolved_timestamp,
-			"va": ZERO_SIX,
-			"wva": ZERO_SIX,
-		})
-	return {
-		"len": BODY_JOINT_COUNT,
-		"timeStampNs": resolved_timestamp,
-		"joints": joints,
 	}
 
 
@@ -124,29 +128,55 @@ func _controller(value: Variant, right_menu_fallback: bool) -> Dictionary:
 	var menu_pressed := _button(values.get("menu_button", false))
 	if right_menu_fallback:
 		menu_pressed = menu_pressed or _button(values.get("select_button", false))
+	# The thumbstick deadzone is radial, not per-axis: a per-axis cut snaps
+	# near-center diagonals onto the pure axes, which a receiver reads as a real
+	# flick.
+	var axis_x := _clamped_number(values.get("primary_x", 0.0), -1.0, 1.0)
+	var axis_y := _clamped_number(values.get("primary_y", 0.0), -1.0, 1.0)
+	if _within_radial_deadzone(axis_x, axis_y):
+		axis_x = 0.0
+		axis_y = 0.0
 	return {
 		"pose": _pose_string(pose) if _pose_valid(pose) else IDENTITY_POSE,
-		"axisX": _clamped_number(values.get("primary_x", 0.0), -1.0, 1.0),
-		"axisY": _clamped_number(values.get("primary_y", 0.0), -1.0, 1.0),
+		"axisX": axis_x,
+		"axisY": axis_y,
 		"axisClick": _button(values.get("primary_click", false)),
-		"grip": _clamped_number(values.get("grip", 0.0), 0.0, 1.0),
-		"trigger": _clamped_number(values.get("trigger", 0.0), 0.0, 1.0),
+		"grip": _deadzoned(_clamped_number(values.get("grip", 0.0), 0.0, 1.0)),
+		"trigger": _deadzoned(_clamped_number(values.get("trigger", 0.0), 0.0, 1.0)),
 		"primaryButton": _button(values.get("ax_button", false)),
 		"secondaryButton": _button(values.get("by_button", false)),
 		"menuButton": menu_pressed,
 	}
 
 
+## Zeroes a scalar axis that rests inside the neutral band. No rescaling: a
+## value past the band keeps its exact magnitude, so live values pass through
+## bit-for-bit rather than round-tripping through a curve.
+func _deadzoned(value: float) -> float:
+	return 0.0 if absf(value) <= ANALOG_DEADZONE else value
+
+
+## Kept in doubles on purpose. Routing the pair through Vector2 would truncate
+## every live axis value to 32-bit float, since Godot's vector types use real_t.
+func _within_radial_deadzone(x: float, y: float) -> bool:
+	return (x * x + y * y) <= (ANALOG_DEADZONE * ANALOG_DEADZONE)
+
+
+## The Hand section is all-or-nothing: either both hands or no section at all.
+## Receivers index `leftHand`/`rightHand` without checking they exist, and a
+## throw there takes the whole frame down — including Body, which is the one
+## section that matters. A side that is not tracked ships as an inactive hand
+## rather than as a missing key.
 func _hands(value: Variant) -> Dictionary:
 	var source: Dictionary = value if value is Dictionary else {}
-	var result := {}
 	var left := _hand(source.get("left", {}))
-	if not left.is_empty():
-		result["leftHand"] = left
 	var right := _hand(source.get("right", {}))
-	if not right.is_empty():
-		result["rightHand"] = right
-	return result
+	if left.is_empty() and right.is_empty():
+		return {}
+	return {
+		"leftHand": left if not left.is_empty() else neutral_hand(),
+		"rightHand": right if not right.is_empty() else neutral_hand(),
+	}
 
 
 func _hand(value: Variant) -> Dictionary:
