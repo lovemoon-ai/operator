@@ -152,8 +152,10 @@ its own TCP connection and emits the legacy binary XRoboToolkit packets expected
 by existing HoloMotion deployments. It does not create an adapter gateway and
 does not alter the Operator session, descriptor, video, or robot-side protocol.
 The Operator, SDK, and XRoboToolkit senders are mutually exclusive. This mode
-covers the HoloMotion RoboticsService tracking ingress on TCP `63901`; Episode
-HTTP, discovery, and FPV remain separate integrations. An optional PICO device
+covers the HoloMotion RoboticsService tracking ingress on TCP `63901` and the
+XRoboToolkit robot beacon on UDP `29888`, which populates the same settings list
+as Operator's own `63900` discovery; Episode HTTP and FPV remain separate
+integrations. An optional PICO device
 SN setting can reproduce the legacy `EQUIPMENT_SN` handshake identity when the
 deployed RoboticsService requires it. Video is selected independently in the
 Teleop `Video` group: Operator timed H.264 keeps the existing client path,

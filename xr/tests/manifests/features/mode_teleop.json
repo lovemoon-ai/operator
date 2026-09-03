@@ -78,6 +78,13 @@
       "script": "res://tests/unit/teleop/xrt_client_test.gd"
     },
     {
+      "id": "teleop.xrt_discovery",
+      "level": "unit",
+      "suite": "teleop.compatibility",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/xrt_discovery_test.gd"
+    },
+    {
       "id": "teleop.xr_tracking_sampler",
       "level": "unit",
       "suite": "teleop.compatibility",

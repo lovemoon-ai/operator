@@ -273,15 +273,19 @@ protocol, letting Operator drive hosts that still run the old PICO app's
 | --- | --- |
 | `xrt_protocol.gd` | Byte-command envelope framing and shared constants. |
 | `xrt_client.gd` | TCP connection, heartbeat, and receive-buffer framing/resync. |
+| `xrt_discovery.gd` | UDP `29888` robot-beacon listener and beacon parser. |
 | `xrt_tracking_encoder.gd` | Builds the Tracking JSON payload (head, controllers, hands, body). |
 | `xrt_sender.gd` | Per-frame send loop, `appState.focus`, and neutral frames. |
 | `xrt_camera_protocol.gd` | FPV camera command and response encoding. |
 | `xrt_video_session.gd` | FPV video stream lifecycle feeding the shared video panel. |
 
-Safety note: the sender emits an explicit neutral frame — every tracking
-section present and zeroed, not merely omitted — whenever the app loses focus
-or is paused. The legacy peer holds the last frame it received, so an omitted
-section would leave the robot parked at the operator's final pose.
+Safety note: the sender emits an explicit neutral frame whenever the app loses
+focus or is paused, and then holds the stream — heartbeats continue so the
+connection stays up, but no live pose leaves a headset nobody is wearing. The
+legacy peer holds the last frame it received, so `Head`, `Controller` and `Hand`
+are sent neutralized rather than omitted; `Body` is the inverse case and is
+omitted, because a receiver stops on an absent body but retargets 24 identity
+poses into a commanded rest pose. See `XrtTrackingEncoder.neutral()`.
 
 ## Capture Runtime
 

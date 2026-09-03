@@ -173,7 +173,9 @@ func _test_handshake_neutral_then_live_and_disable(t: OperatorTestAssertions) ->
 	sender.set_sending(true)
 	t.eq(sampler.configure_calls, 1, "enabling the sender configures the injected sampler")
 	t.eq(sampler.configured.get("rate_hz"), 72, "sender configures 72 Hz tracking")
-	t.eq(sampler.configured.get("body_rate_hz"), 50, "sender configures 50 Hz body")
+	t.eq(sampler.configured.get("body_rate_hz"), 72,
+		"body ships on every frame, matching the reference client and staying above "
+		+ "the receiver's own retargeting loop")
 	t.eq(sampler.configured.get("strict_pico_body_validation"), true,
 		"compatibility sampling rejects invalid or collapsed PICO body frames")
 	t.eq(sampler.configured.get("include_predicted_display_time"), true,
@@ -382,6 +384,17 @@ func _test_focus_loss_sends_one_neutral(t: OperatorTestAssertions) -> void:
 
 	sender.set_app_focused(false)
 	t.eq(client.packets.size(), 1, "repeating the same focus state sends nothing more")
+
+	# A headset the operator is not wearing must not keep streaming live poses.
+	# Going quiet is the safe state: receivers fall back to a held, zero-velocity
+	# stance when frames stop arriving.
+	var sampled_before := sampler.sample_calls
+	sender._process(0.02)
+	sender._process(0.02)
+	t.eq(client.packets.size(), 1, "an unfocused session streams no further frames")
+	t.eq(sampler.sample_calls, sampled_before,
+		"an unfocused session does not even sample tracking")
+
 	sender.set_app_focused(true)
 	t.eq(client.packets.size(), 1, "regaining focus sends no extra frame")
 
@@ -580,9 +593,10 @@ func _assert_neutral(
 	_assert_neutral_body(t, tracking, label)
 
 
-## The stop frame has to overwrite Hand and Body, not omit them. A receiver that
-## holds last-known state keeps driving physical fingers from the last live grasp
-## pose when the section is simply missing.
+## The stop frame has to overwrite Hand, Head and Controller, not omit them: a
+## receiver latches those sections and only clears them when a new one arrives,
+## so a missing Hand keeps driving physical fingers from the last live grasp
+## pose. Body is the exact opposite and is asserted absent below.
 func _assert_neutral_hands(
 		t: OperatorTestAssertions,
 		tracking: Dictionary,
@@ -609,28 +623,17 @@ func _assert_neutral_hands(
 		t.eq(live_joints, 0, "%s zeroes every %s joint pose and status" % [label, side])
 
 
+## Body must be ABSENT from a stop frame, not zeroed. A receiver reads a missing
+## Body as "no body this frame" and stops; it reads 24 identity poses as a valid
+## skeleton in its rest pose and walks the robot's limbs there. Sending a zeroed
+## Body turned every pause, focus loss and disarm into a commanded T-pose.
 func _assert_neutral_body(
 		t: OperatorTestAssertions,
 		tracking: Dictionary,
 		label: String,
 	) -> void:
-	var body: Dictionary = tracking.get("Body", {})
-	t.eq(int(body.get("len", -1)), XrtTrackingEncoderScript.BODY_JOINT_COUNT,
-		"%s declares the full legacy body joint set" % label)
-	t.is_true(int(body.get("timeStampNs", 0)) > 0, "%s stamps the neutral Body" % label)
-	var joints: Array = body.get("joints", [])
-	t.eq(joints.size(), XrtTrackingEncoderScript.BODY_JOINT_COUNT,
-		"%s carries every body joint" % label)
-	var live_joints := 0
-	for joint_v in joints:
-		var joint: Dictionary = joint_v if joint_v is Dictionary else {}
-		if str(joint.get("p", "")) != XrtTrackingEncoderScript.IDENTITY_POSE:
-			live_joints += 1
-		elif str(joint.get("va", "")) != XrtTrackingEncoderScript.ZERO_SIX:
-			live_joints += 1
-		elif str(joint.get("wva", "")) != XrtTrackingEncoderScript.ZERO_SIX:
-			live_joints += 1
-	t.eq(live_joints, 0, "%s zeroes every body pose and motion vector" % label)
+	t.is_false(tracking.has("Body"),
+		"%s omits Body entirely rather than commanding a rest pose" % label)
 
 
 func _free_fixture(sender: Node, provider: Node, client: Node) -> void:
