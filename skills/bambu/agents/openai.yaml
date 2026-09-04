@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bambu CLI"
+  short_description: "安全配置、切片、监控和控制 Bambu Lab 3D 打印机"
+  default_prompt: "使用 $bambu 通过 bambu-cli 安全检查并操作我的 Bambu Lab 打印机。"
+
+policy:
+  allow_implicit_invocation: true
