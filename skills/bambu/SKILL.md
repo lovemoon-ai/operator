@@ -10,7 +10,7 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、审核、监�
 当前功能源码使用：
 
 - 仓库：`https://github.com/DuinoDu/bambu-cli.git`
-- 云打印功能分支：`feat/cloud-printing-and-headless-slicing`
+- 分支：`main`
 
 需要安装、更新、完整参数或排障时，读取 `references/cli-reference.md`。用户要求从模型文件
 准备并实际打印时，**必须先读取并完整执行 `references/print-sop.md`**，再读取

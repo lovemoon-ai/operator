@@ -22,6 +22,7 @@
 | --- | --- | --- |
 | [`2026-09-04-mirrored-shell-orientation.md`](2026-09-04-mirrored-shell-orientation.md) | 左右镜像件、盒体、罩壳、杯状件、复制旋转、关闭支撑 | 开口方向错误；床面接触异常；内腔上方出现无支撑大跨度挤出 |
 | [`2026-09-04-machine-service-paths.md`](2026-09-04-machine-service-paths.md) | 用 G-code 坐标检查越界 | 未区分机器维护轨迹与模型打印轨迹 |
+| [`2026-09-08-cloud-submit-false-positive.md`](2026-09-08-cloud-submit-false-positive.md) | Cloud/PIN 打印、云接口返回成功、异地网络打印 | 未观察到 `PREPARE/RUNNING`；把上传成功误报为打印开始；状态未知时重复提交 |
 
 ## 新增 lesson 格式
 
@@ -38,4 +39,3 @@
 - Recovery/remediation。
 
 文件名使用 `YYYY-MM-DD-short-topic.md`。一个独立问题一篇，不把多次无关事故合并。
-
