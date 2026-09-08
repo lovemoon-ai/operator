@@ -1,5 +1,9 @@
 # bambu-cli 参考
 
+从 STL/3MF 准备并实际打印前，必须同时读取并执行 `print-sop.md`，并按
+`lessons/README.md` 完成 Lesson Gate。本文件说明命令本身，不能替代几何、支撑、预览和
+发布审核。
+
 ## 安装与更新
 
 优先使用已经安装的功能版二进制：
@@ -161,6 +165,10 @@ bambu-cli --json print validate --plate 1 ./part.gcode.3mf
 不用 AMS 时显式加 `--no-ams`。校验会检查可打印层、挤出、耗材密度/用量、打印机模型 ID
 以及 AMS 装载序列。不要绕过失败的校验。
 
+当前 `bambu-cli slice` 只接受一个输入文件，也没有暴露逐对象朝向、支撑、brim 和预览导出。
+多文件任务不要通过合并成一个 STL 来绕过限制；应先生成保留独立对象的项目 3MF，或者停止
+并向用户说明当前工具能力不足。完整要求见 `print-sop.md`。
+
 ## AMS 材料选择
 
 读取实际 tray：
@@ -176,8 +184,9 @@ RGBA 十六进制，例如红色可能接近 `FF0000FF`，但必须同时核对 
 
 ## 启动打印
 
-执行前确认：目标打印机、盘号、打印盘已清理、模型尺寸与位置、bed type、材料、AMS tray。
-先预演，再在取得本次打印授权后执行。
+只有 `print-sop.md` 的需求、几何、切片和发布关卡全部通过，且用户已批准最终 artifact 的
+SHA-256 后才能进入本节。执行前再次确认目标打印机、盘号、打印盘已清理、bed type、材料和
+AMS tray。先预演，再执行一次；失败时不要自动重复提交。
 
 LAN：
 
@@ -214,8 +223,15 @@ bambu-cli --printer lab --json status
 bambu-cli --printer lab watch --interval 5
 ```
 
-不要仅凭 `print start` 退出码宣称已开始或完成。Cloud-only 场景当前不能从 CLI 持续读取完整
-打印状态，只能报告“任务提交成功”，并请用户从打印机屏幕确认状态。
+Cloud 状态快照：
+
+```bash
+bambu-cli --printer lab --json cloud doctor
+```
+
+不要仅凭 `print start` 退出码宣称已开始或完成。Cloud-only 场景用 `cloud doctor` 观察
+`printer_state`：先出现 `PREPARE`、随后出现 `RUNNING` 才能报告已开始；`FINISH` 才能报告
+完成。当前没有 Cloud `watch`，状态字段也不能替代首层或外观检查。
 
 停止 LAN 打印：
 
@@ -262,4 +278,3 @@ LAN `print start`、`home`、`move z`、`temps set`、`fans set`、`light on/off
 - `confirmation required`：使用正确 token，不要默认改用 `--force`。
 - AMS mapping 数量错误：重新运行 `print validate` 和 `cloud ams`，按 filament 数重新映射。
 - 上一次打印状态不明：停止自动流程，要求用户确认屏幕状态和打印盘，之后再决定 stop/reset/home。
-

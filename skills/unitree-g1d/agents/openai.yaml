@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unitree G1-D 实机控制"
+  short_description: "通过远程 Ubuntu 调试 G1-D 底盘、双臂、腰部、升降及相机"
+  default_prompt: "使用 $unitree-g1d 检查远程机器人当前状态，并按实机验证流程完成我指定的操作。"

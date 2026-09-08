@@ -1,6 +1,6 @@
 ---
 name: bambu
-description: 使用 bambu-cli 安装、配置、诊断、切片、校验、监控和控制 Bambu Lab 3D 打印机。用户要求通过局域网访问码或跨局域网匹配 PIN 操作打印机、选择 AMS 材料、启动/停止打印、复位设备，或排查 bambu-cli/Bambu Studio 云连接时使用。
+description: 使用 bambu-cli 安装、配置、诊断、切片、审核、监控和控制 Bambu Lab 3D 打印机。用户要求通过局域网访问码或跨局域网匹配 PIN 操作打印机、选择 AMS 材料、准备并审核模型、启动/停止打印、复位设备，或排查 bambu-cli/Bambu Studio 云连接时使用。
 ---
 
 # Bambu CLI
@@ -12,9 +12,12 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、校验、监�
 - 仓库：`https://github.com/DuinoDu/bambu-cli.git`
 - 云打印功能分支：`feat/cloud-printing-and-headless-slicing`
 
-需要安装、更新、完整参数或排障时，读取 `references/cli-reference.md`。先运行
-`scripts/find_bambu_cli.sh` 定位支持 `slice` 和 `cloud` 的二进制；不要假定 `bambu-cli`
-已经在 `PATH` 中。
+需要安装、更新、完整参数或排障时，读取 `references/cli-reference.md`。用户要求从模型文件
+准备并实际打印时，**必须先读取并完整执行 `references/print-sop.md`**，再读取
+`references/lessons/README.md`，运行 `scripts/list_bambu_lessons.sh` 并逐篇完成 Lesson Gate；
+只读状态查询、配置查看和单纯排障不需要执行整套打印 SOP。先运行
+`scripts/find_bambu_cli.sh` 定位支持 `slice` 和 `cloud` 的二进制；不要假定 `bambu-cli` 已经
+在 `PATH` 中。
 
 ## 选择连接方式
 
@@ -24,18 +27,21 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、校验、监�
   Studio，且存在官方 `libbambu_networking.so`。使用 `cloud doctor`、`cloud bind`、
   `cloud ams` 和 `print start --cloud`。
 - Cloud 模式只需要目标打印机序列号，不应为了云打印索要 LAN IP 或 Access Code。
-- 当前 Cloud 命令没有持续打印状态接口。云端启动命令成功只表示任务已提交；不能据此宣称
-  “正在打印”或“打印完成”。只有能通过 LAN 执行 `status`/`watch` 时才报告实时状态。
+- `cloud doctor` 可以读取云端状态快照，包括 `printer_state`、`progress` 和
+  `remaining_minutes`，但当前没有 Cloud `watch`。上传成功只表示任务已提交；观察到
+  `PREPARE` 后再到 `RUNNING` 才能宣称已经开始，观察到 `FINISH` 才能宣称完成。
 
 ## 默认工作流
 
 1. 定位二进制并运行 `--version`、`--help`，确认当前构建支持所需命令。
 2. 先做只读检查：配置列表、`doctor`/`cloud doctor`、状态和 AMS。
-3. 明确目标打印机、连接方式、盘号、热床类型、材料及 AMS tray 映射。
-4. 对模型先切片，再运行 `print validate`；不要手工伪造可打印 `.3mf`。
-5. 向用户汇报将执行的物理动作，并在动作发生前取得明确授权。
-6. 能用 `--dry-run` 时先预演，然后执行一次真实命令；不要自动重试物理动作。
-7. 执行后检查命令结果；LAN 可用时再查 `status`。区分“已提交”“已开始”和“已完成”。
+3. 若任务涉及模型准备或打印，执行 `references/print-sop.md`，并对 lessons 索引中的每篇
+   lesson 给出适用性、已采取控制和检查证据。
+4. 保留独立对象；不要为了绕过单输入限制把多个零件静默合并成一个 STL。
+5. 对最终 `gcode.3mf` 运行自动校验，并输出布局、首层、支撑、悬垂和风险层审核结果。
+6. 向用户提交最终打印报告；授权必须绑定到已审核文件的 SHA-256。
+7. 能用 `--dry-run` 时先预演，然后只提交一次真实命令；不要自动重试物理动作。
+8. 执行后查询状态。区分“已提交”“PREPARE”“RUNNING”和“FINISH”。
 
 ## 物理安全
 
@@ -67,6 +73,8 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、校验、监�
   `bambu-cli print start --cloud --plate 1 ./part.gcode.3mf`。
 - Cloud AMS 映射必须来自 `cloud ams` 的实际 tray ID；按颜色和材料共同匹配。
   多个 tray 都满足时询问用户，不按视觉位置或历史槽位猜测。
+- 多文件任务必须保留为独立对象，以便分别审核朝向、支撑、brim、接缝和材料。现有工具无法
+  做到时停止并说明能力缺口，不把文件合并后直接打印。
 - 尺寸使用毫米。用户要求 `1 cm` 立方体时，建模尺寸应为 `10 mm × 10 mm × 10 mm`；
   `slice` 会将模型放到打印盘中心。
 
@@ -74,8 +82,7 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、校验、监�
 
 - 命令失败时先保存退出码和 stderr，再做一次只读诊断；不要循环重试打印、复位或 G-code。
 - 上次任务状态不明时，先确认打印机实际状态和打印盘是否清理，不能直接发起下一次打印。
-- Cloud-only 场景无法通过当前 CLI 读取完整实时打印状态时，明确说明能力边界，要求用户从
-  打印机屏幕确认，而不是改用桌面 UI 冒充 CLI 结果。
+- Cloud-only 场景可以用 `cloud doctor` 轮询状态快照，但不能假装有持续流式监控或摄像头
+  证据。状态字段不足以判断首层外观、翘边、拉丝或支撑质量时，要求用户从打印机屏幕确认。
 - 喷头停在角落不等于故障。只有用户确认机构区域安全后，才可执行 LAN `home` 或 Cloud
   `cloud reset`；Cloud reset 会停止任务、降温并回零。
-
