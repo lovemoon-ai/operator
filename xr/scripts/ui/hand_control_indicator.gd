@@ -6,6 +6,7 @@ const DISCONNECTED_COLOR := Color(0.32, 0.34, 0.38, 0.95)
 const CONNECTED_COLOR := Color(0.08, 1.0, 0.28, 1.0)
 const CONTROL_ENABLED_COLOR := Color(1.0, 0.48, 0.06, 1.0)
 const LAMP_RADIUS := 0.012
+const MAX_TRACKED_POSITION_SQUARED := 1_000_000.0
 
 var _material: StandardMaterial3D
 
@@ -38,7 +39,9 @@ func update_state(
 	control_enabled: bool,
 	shown: bool
 ) -> void:
-	if not shown or not wrist_position is Vector3:
+	if not shown \
+		or not wrist_position is Vector3 \
+		or not position_is_safe(wrist_position as Vector3):
 		visible = false
 		return
 	position = wrist_position as Vector3
@@ -58,3 +61,10 @@ static func status_color(connected: bool, control_enabled: bool) -> Color:
 	if not connected:
 		return DISCONNECTED_COLOR
 	return CONTROL_ENABLED_COLOR if control_enabled else CONNECTED_COLOR
+
+
+static func position_is_safe(value: Vector3) -> bool:
+	if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z):
+		return false
+	var length_squared := value.length_squared()
+	return is_finite(length_squared) and length_squared <= MAX_TRACKED_POSITION_SQUARED

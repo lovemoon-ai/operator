@@ -1,6 +1,9 @@
 import asyncio
 import importlib.util
+import json
+import math
 from pathlib import Path
+import socket
 import stat
 import struct
 import sys
@@ -43,6 +46,8 @@ class Revo2ThorServiceTests(unittest.TestCase):
         self.assertEqual(runtime.max_current_ma, 500)
         self.assertEqual(runtime.protected_current_ma, 400)
         self.assertEqual(runtime.watchdog_ms, 1000.0)
+        self.assertEqual(runtime.touch_rate, 20.0)
+        self.assertEqual(runtime.touch_timeout_ms, 15.0)
 
     def test_allow_commands_requires_explicit_flag(self) -> None:
         args = service.build_parser().parse_args(["--allow-commands"])
@@ -65,6 +70,22 @@ class Revo2ThorServiceTests(unittest.TestCase):
                 "tcp:127.0.0.1:64010",
             ],
         )
+
+    def test_bridge_readiness_uses_a_real_loopback_connection(self) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        try:
+            self.assertTrue(service._tcp_port_listening(port))
+        finally:
+            listener.close()
+        self.assertFalse(service._tcp_port_listening(port))
+
+    def test_protocol_version_mismatch_fails_fast(self) -> None:
+        service.validate_protocol_version(service.VERSION)
+        with self.assertRaisesRegex(RuntimeError, "redeploy the complete"):
+            service.validate_protocol_version(service.VERSION - 1)
 
     def test_auto_discovers_hands_by_id_and_serial(self) -> None:
         class FakeSdk:
@@ -107,7 +128,7 @@ class Revo2ThorServiceTests(unittest.TestCase):
         payload = struct.pack(
             "<4sBBHIQ12f",
             b"BCH2",
-            2,
+            3,
             1,
             service.FLAG_HOLD,
             12,
@@ -122,6 +143,138 @@ class Revo2ThorServiceTests(unittest.TestCase):
         self.assertEqual(decoded["q"], (0.25,) * 6)
         self.assertIsNone(service.decode_packet(payload[:-1]))
         self.assertIsNone(service.decode_packet(b"BAD!" + payload[4:]))
+        legacy = bytearray(payload)
+        legacy[4] = 2
+        self.assertIsNone(service.decode_packet(bytes(legacy)))
+
+    def test_touch_payload_requires_complete_finite_samples(self) -> None:
+        def item(index: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                normal_force1=index + 1,
+                normal_force2=(index + 1) * 10,
+                normal_force3=0,
+                tangential_force1=1,
+                tangential_force2=(index + 1) * 5,
+                tangential_force3=2,
+                tangential_direction1=10,
+                tangential_direction2=20 + index,
+                tangential_direction3=30,
+                self_proximity1=100,
+                self_proximity2=200 + index,
+                mutual_proximity=150,
+                status=0,
+            )
+
+        items = [item(index) for index in range(5)]
+        values = service.tactile_values(SimpleNamespace(items=items))
+        self.assertEqual(values["touch_normal"], [10, 20, 30, 40, 50])
+        self.assertEqual(values["touch_direction"], [20, 21, 22, 23, 24])
+        del items[2].normal_force2
+        with self.assertRaises(ValueError):
+            service.tactile_values(SimpleNamespace(items=items))
+        items[2].normal_force2 = math.inf
+        with self.assertRaises(ValueError):
+            service.tactile_values(SimpleNamespace(items=items))
+
+    def test_touch_capability_uses_hardware_and_serial_hints(self) -> None:
+        self.assertTrue(service._supports_touch(SimpleNamespace(hardware_type=6), "x"))
+        self.assertTrue(service._supports_touch(SimpleNamespace(hardware_type=7), "x"))
+        self.assertTrue(
+            service._supports_touch(SimpleNamespace(hardware_type=5), "BCXTL-test")
+        )
+        self.assertFalse(
+            service._supports_touch(SimpleNamespace(hardware_type=5), "BCXRL-test")
+        )
+
+    def test_background_touch_timeout_does_not_overlap_serial_io(self) -> None:
+        class FakeContext:
+            def __init__(self) -> None:
+                self.active = 0
+                self.max_active = 0
+                self.motor_calls = 0
+                self.touch_calls = 0
+
+            async def get_motor_status(self, _slave_id):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                self.motor_calls += 1
+                try:
+                    await asyncio.sleep(0)
+                    return SimpleNamespace(
+                        positions=[0] * 6,
+                        currents=[0] * 6,
+                        states=[0] * 6,
+                    )
+                finally:
+                    self.active -= 1
+
+            async def get_touch_sensor_status(self, _slave_id):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                self.touch_calls += 1
+                try:
+                    await asyncio.sleep(1.0)
+                finally:
+                    self.active -= 1
+
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.payloads = []
+
+            def sendto(self, payload, _address):
+                self.payloads.append(json.loads(payload))
+
+        async def exercise() -> tuple[FakeContext, FakeSocket]:
+            context = FakeContext()
+            output = FakeSocket()
+            worker = service.HandWorker(
+                sdk=SimpleNamespace(),
+                config=service.HandConfig("left", 0, "/dev/null", 126, "BCXTL-test"),
+                receiver=SimpleNamespace(commands={}),
+                telemetry_socket=output,
+                telemetry_address=("127.0.0.1", 19092),
+                allow_commands=False,
+                watchdog_ns=1_000_000_000,
+                max_step=160.0,
+                max_speed=1000,
+                max_current_ma=500,
+                protected_current_ma=400,
+                command_channels=(True,) * 6,
+                current_alpha=0.35,
+                rate_hz=100.0,
+                touch_rate_hz=50.0,
+                touch_timeout_seconds=0.005,
+            )
+            worker.context = context
+            worker.touch_supported = True
+            stopping = asyncio.Event()
+            task = asyncio.create_task(worker.run(stopping, connected=True))
+            await asyncio.sleep(0.065)
+            stopping.set()
+            await asyncio.wait_for(task, timeout=0.1)
+            return context, output
+
+        context, output = asyncio.run(exercise())
+        self.assertGreaterEqual(context.motor_calls, 4)
+        self.assertGreaterEqual(context.touch_calls, 2)
+        self.assertEqual(context.max_active, 1)
+        self.assertTrue(output.payloads)
+        self.assertNotIn(
+            "revo2_left_touch_normal", output.payloads[-1]["values"]
+        )
+
+    def test_touch_cli_rate_and_timeout_are_bounded(self) -> None:
+        parser = service.build_parser()
+        with self.assertRaises(SystemExit):
+            service.validate_args(
+                parser,
+                parser.parse_args(["--rate", "20", "--touch-rate", "21"]),
+            )
+        with self.assertRaises(SystemExit):
+            service.validate_args(
+                parser,
+                parser.parse_args(["--rate", "100", "--touch-timeout-ms", "11"]),
+            )
 
     def test_slew_targets_limits_every_motor(self) -> None:
         self.assertEqual(

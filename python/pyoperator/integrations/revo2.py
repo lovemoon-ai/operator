@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from math import acos, atan2, dist, sqrt
+from math import acos, atan2, dist, isfinite, sqrt
 import struct
 import time
 from typing import Any, Mapping, Sequence
@@ -17,6 +17,14 @@ from typing import Any, Mapping, Sequence
 from ..models import ControllerState, HandState
 
 CHANNELS = (
+    "thumb_aux",
+    "thumb_flex",
+    "index_flex",
+    "middle_flex",
+    "ring_flex",
+    "pinky_flex",
+)
+LEGACY_V2_CHANNELS = (
     "thumb_flex",
     "thumb_aux",
     "index_flex",
@@ -24,9 +32,12 @@ CHANNELS = (
     "ring_flex",
     "pinky_flex",
 )
+TACTILE_FINGERS = ("thumb", "index", "middle", "ring", "pinky")
+TACTILE_FIELDS = ("normal", "tangential", "direction", "proximity", "status")
 SIDES = ("left", "right")
 COMMAND_PACKET_MAGIC = b"BCH2"
-COMMAND_PACKET_VERSION = 2
+COMMAND_PACKET_VERSION_V2 = 2
+COMMAND_PACKET_VERSION = 3
 COMMAND_PACKET_FORMAT = "<4sBBHIQ12f"
 COMMAND_FLAG_HOLD = 1 << 0
 
@@ -43,12 +54,15 @@ _REQUIRED_HAND_JOINTS = frozenset(
     (1,) + tuple(index for chain in _CHAINS if chain for index in chain)
 )
 
-THUMB_FLEX_MAX = 0.50
-THUMB_ABDUCT_MAX = 0.85
+THUMB_OPPOSITION_MAX = 0.50
+THUMB_FLEX_MAX = 0.87
 THUMB_FLEX_OPEN_RAD = 0.10
 THUMB_FLEX_CLOSED_RAD = 1.75
 THUMB_ABDUCT_OPEN_RAD = 0.35
 THUMB_ABDUCT_CLOSED_RAD = 1.65
+PINCH_OPPOSITION_MAX = 0.30
+PINCH_CLOSED_PALM_RATIO = 0.28
+PINCH_OPEN_PALM_RATIO = 0.75
 
 
 def axis_name(side: str, channel: str) -> str:
@@ -66,13 +80,14 @@ def gesture_targets(
 
     points = _tracked_points(hand)
     if _REQUIRED_HAND_JOINTS.issubset(points):
+        finger_flex = tuple(_chain_curl(points, chain) for chain in _CHAINS[2:])
         return (
+            max(
+                _thumb_abduction(points) * THUMB_OPPOSITION_MAX,
+                _thumb_pinch_opposition(points, sum(finger_flex) / 4.0),
+            ),
             _thumb_flexion(points) * THUMB_FLEX_MAX,
-            _thumb_abduction(points) * THUMB_ABDUCT_MAX,
-            _chain_curl(points, _CHAINS[2]),
-            _chain_curl(points, _CHAINS[3]),
-            _chain_curl(points, _CHAINS[4]),
-            _chain_curl(points, _CHAINS[5]),
+            *finger_flex,
         )
 
     trigger = _controller_value(controller, "trigger")
@@ -82,8 +97,8 @@ def gesture_targets(
         _controller_value(controller, "grip_force"),
     )
     return (
-        trigger * THUMB_FLEX_MAX,
         trigger * 0.50,
+        trigger * THUMB_FLEX_MAX,
         trigger,
         grip,
         grip,
@@ -94,12 +109,18 @@ def gesture_targets(
 def command_targets(command: Mapping[str, Any], side: str) -> tuple[int, ...]:
     """Extract one hand's descriptor axes as SDK 0..1000 values."""
 
+    return _command_targets(command, side, CHANNELS)
+
+
+def _command_targets(
+    command: Mapping[str, Any], side: str, channels: Sequence[str]
+) -> tuple[int, ...]:
     axes = command.get("axes") or {}
     if not isinstance(axes, Mapping):
         axes = {}
     return tuple(
         round(1000.0 * _clamp(float(axes.get(axis_name(side, channel), 0.0))))
-        for channel in CHANNELS
+        for channel in channels
     )
 
 
@@ -122,10 +143,10 @@ def command_packet_v2(
     timestamp_ns: int | None = None,
     flags: int = 0,
 ) -> bytes:
-    """Encode one command for HoloMotion's existing BrainCo UDP runtime."""
+    """Encode the legacy v2 order: thumb flexion, then thumb opposition."""
 
     return target_packet_v2(
-        command_targets(command, side),
+        _command_targets(command, side, LEGACY_V2_CHANNELS),
         side,
         sequence,
         speed=speed,
@@ -143,7 +164,73 @@ def target_packet_v2(
     timestamp_ns: int | None = None,
     flags: int = 0,
 ) -> bytes:
-    """Encode explicit 0..1000 targets for HoloMotion's BrainCo runtime."""
+    """Encode explicit targets in the legacy v2 channel order."""
+
+    return _target_packet(
+        targets,
+        side,
+        sequence,
+        version=COMMAND_PACKET_VERSION_V2,
+        speed=speed,
+        timestamp_ns=timestamp_ns,
+        flags=flags,
+    )
+
+
+def command_packet_v3(
+    command: Mapping[str, Any],
+    side: str,
+    sequence: int,
+    *,
+    speed: float | Sequence[float] = 0.5,
+    timestamp_ns: int | None = None,
+    flags: int = 0,
+) -> bytes:
+    """Encode the canonical v3 order: thumb opposition, then flexion."""
+
+    return target_packet_v3(
+        command_targets(command, side),
+        side,
+        sequence,
+        speed=speed,
+        timestamp_ns=timestamp_ns,
+        flags=flags,
+    )
+
+
+def target_packet_v3(
+    targets: Sequence[float],
+    side: str,
+    sequence: int,
+    *,
+    speed: float | Sequence[float] = 0.5,
+    timestamp_ns: int | None = None,
+    flags: int = 0,
+) -> bytes:
+    """Encode explicit targets in the canonical v3 channel order."""
+
+    return _target_packet(
+        targets,
+        side,
+        sequence,
+        version=COMMAND_PACKET_VERSION,
+        speed=speed,
+        timestamp_ns=timestamp_ns,
+        flags=flags,
+    )
+
+
+def _target_packet(
+    targets: Sequence[float],
+    side: str,
+    sequence: int,
+    *,
+    version: int,
+    speed: float | Sequence[float],
+    timestamp_ns: int | None,
+    flags: int,
+) -> bytes:
+    """Encode one BCH2 packet after its channel order has been selected."""
 
     _validate_side(side)
     normalized_targets = tuple(_clamp(value / 1000.0) for value in _six(targets, "targets"))
@@ -154,7 +241,7 @@ def target_packet_v2(
     return struct.pack(
         COMMAND_PACKET_FORMAT,
         COMMAND_PACKET_MAGIC,
-        COMMAND_PACKET_VERSION,
+        version,
         0 if side == "left" else 1,
         int(flags) & 0xFFFF,
         int(sequence) & 0xFFFFFFFF,
@@ -205,6 +292,60 @@ class Revo2HandFeedback:
         )
 
 
+@dataclass(frozen=True)
+class Revo2TactileFeedback:
+    """Raw five-finger tactile values from a Revo2 touch-capable hand."""
+
+    normal: tuple[float, ...]
+    tangential: tuple[float, ...]
+    direction: tuple[float, ...]
+    proximity: tuple[float, ...]
+    status: tuple[float, ...]
+
+    @classmethod
+    def from_items(cls, items: Sequence[Any]) -> "Revo2TactileFeedback":
+        fingers = tuple(items)
+        if len(fingers) != len(TACTILE_FINGERS):
+            raise ValueError("touch items must contain five fingers")
+
+        normal: list[float] = []
+        tangential: list[float] = []
+        direction: list[float] = []
+        proximity: list[float] = []
+        status: list[float] = []
+        for item in fingers:
+            tangential_values = tuple(
+                _numeric_attr(item, f"tangential_force{index}")
+                for index in range(1, 4)
+            )
+            peak_index = max(
+                range(len(tangential_values)),
+                key=lambda index: abs(tangential_values[index]),
+            )
+            normal.append(
+                max(_numeric_attr(item, f"normal_force{index}") for index in range(1, 4))
+            )
+            tangential.append(tangential_values[peak_index])
+            direction.append(
+                _numeric_attr(item, f"tangential_direction{peak_index + 1}")
+            )
+            proximity.append(
+                max(
+                    _numeric_attr(item, "self_proximity1"),
+                    _numeric_attr(item, "self_proximity2"),
+                    _numeric_attr(item, "mutual_proximity"),
+                )
+            )
+            status.append(_numeric_attr(item, "status"))
+        return cls(
+            tuple(normal),
+            tuple(tangential),
+            tuple(direction),
+            tuple(proximity),
+            tuple(status),
+        )
+
+
 class CurrentEma:
     """Small current low-pass filter for stable headset colors."""
 
@@ -230,6 +371,8 @@ def telemetry_values(
     *,
     left: Revo2HandFeedback | None = None,
     right: Revo2HandFeedback | None = None,
+    left_touch: Revo2TactileFeedback | None = None,
+    right_touch: Revo2TactileFeedback | None = None,
 ) -> dict[str, list[float]]:
     """Build the flat telemetry keys consumed by the Godot feedback overlay."""
 
@@ -241,6 +384,14 @@ def telemetry_values(
         values[f"revo2_{side}_position"] = list(feedback.position)
         values[f"revo2_{side}_current"] = list(feedback.current)
         values[f"revo2_{side}_stall"] = list(feedback.stall)
+    for side, tactile in (("left", left_touch), ("right", right_touch)):
+        if tactile is None:
+            continue
+        values[f"revo2_{side}_touch_normal"] = list(tactile.normal)
+        values[f"revo2_{side}_touch_tangential"] = list(tactile.tangential)
+        values[f"revo2_{side}_touch_direction"] = list(tactile.direction)
+        values[f"revo2_{side}_touch_proximity"] = list(tactile.proximity)
+        values[f"revo2_{side}_touch_status"] = list(tactile.status)
     return values
 
 
@@ -299,17 +450,53 @@ def merge_descriptor(descriptor: Mapping[str, Any]) -> dict[str, Any]:
                         "length": 6,
                     }
                 )
+        for suffix, display, unit in (
+            ("touch_normal", "Tactile Normal", "sensor_raw"),
+            ("touch_tangential", "Tactile Tangential", "sensor_raw"),
+            ("touch_direction", "Tactile Direction", "sensor_angle_raw"),
+            ("touch_proximity", "Tactile Proximity", "sensor_raw"),
+            ("touch_status", "Tactile Sensor Status", "enum"),
+        ):
+            name = f"revo2_{side}_{suffix}"
+            if name not in existing_telemetry:
+                telemetry.append(
+                    {
+                        "name": name,
+                        "display": f"{side.title()} Revo2 {display}",
+                        "unit": unit,
+                        "type": "array",
+                        "length": 5,
+                    }
+                )
     return merged
+
+
+def _numeric_attr(item: Any, name: str) -> float:
+    if not hasattr(item, name):
+        raise ValueError(f"touch sample is missing {name}")
+    value = getattr(item, name)
+    if isinstance(value, bool):
+        raise ValueError(f"touch sample {name} must be numeric")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"touch sample {name} must be numeric") from exc
+    if not isfinite(numeric):
+        raise ValueError(f"touch sample {name} must be finite")
+    return numeric
 
 
 def _tracked_points(hand: HandState | None) -> dict[int, tuple[float, float, float]]:
     if hand is None or not hand.active:
         return {}
-    return {
-        joint.joint: joint.pose.position
-        for joint in hand.joints
-        if joint.tracked and joint.pose.valid
-    }
+    points: dict[int, tuple[float, float, float]] = {}
+    for joint in hand.joints:
+        if not joint.tracked or not joint.pose.valid:
+            continue
+        position = tuple(float(value) for value in joint.pose.position)
+        if len(position) == 3 and all(isfinite(value) for value in position):
+            points[joint.joint] = position
+    return points
 
 
 def _chain_curl(
@@ -353,6 +540,21 @@ def _thumb_abduction(points: Mapping[int, tuple[float, float, float]]) -> float:
         (angle - THUMB_ABDUCT_OPEN_RAD)
         / (THUMB_ABDUCT_CLOSED_RAD - THUMB_ABDUCT_OPEN_RAD)
     )
+
+
+def _thumb_pinch_opposition(
+    points: Mapping[int, tuple[float, float, float]], average_finger_flex: float
+) -> float:
+    palm_width = dist(points[6], points[21])
+    if palm_width <= 1e-4:
+        return 0.0
+    tip_ratio = dist(points[5], points[10]) / palm_width
+    pinch_closeness = _clamp(
+        (PINCH_OPEN_PALM_RATIO - tip_ratio)
+        / (PINCH_OPEN_PALM_RATIO - PINCH_CLOSED_PALM_RATIO)
+    )
+    open_finger_weight = 1.0 - _clamp(average_finger_flex / 0.50)
+    return pinch_closeness * open_finger_weight * PINCH_OPPOSITION_MAX
 
 
 def _segment_angle(
@@ -422,6 +624,8 @@ def _six_any(values: Sequence[Any], name: str) -> tuple[Any, ...]:
 
 
 def _clamp(value: float) -> float:
+    if not isfinite(value):
+        return 0.0
     return min(1.0, max(0.0, value))
 
 

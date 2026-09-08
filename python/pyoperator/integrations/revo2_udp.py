@@ -18,11 +18,21 @@ from .revo2 import (
     command_targets,
     hand_enabled,
     merge_descriptor,
-    target_packet_v2,
+    target_packet_v3,
 )
 
 
-_TELEMETRY_SUFFIXES = ("target", "position", "current", "stall")
+_TELEMETRY_LENGTHS = {
+    "target": 6,
+    "position": 6,
+    "current": 6,
+    "stall": 6,
+    "touch_normal": 5,
+    "touch_tangential": 5,
+    "touch_direction": 5,
+    "touch_proximity": 5,
+    "touch_status": 5,
+}
 
 
 def make_revo2_descriptor() -> dict[str, Any]:
@@ -236,7 +246,7 @@ class Revo2UdpHostedAdapter:
             else self._adaptive_speeds(side, target_values, now_ns)
         )
         self._sequence[side] = (self._sequence[side] + 1) & 0xFFFFFFFF
-        packet = target_packet_v2(
+        packet = target_packet_v3(
             target_values,
             side,
             self._sequence[side],
@@ -356,12 +366,12 @@ def _resolve_ipv4(host: str) -> set[str]:
 def _validated_telemetry_values(values: Mapping[str, Any]) -> dict[str, list[float]]:
     validated: dict[str, list[float]] = {}
     for side in SIDES:
-        for suffix in _TELEMETRY_SUFFIXES:
+        for suffix, expected_length in _TELEMETRY_LENGTHS.items():
             key = f"revo2_{side}_{suffix}"
             value = values.get(key)
             if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
                 continue
-            if len(value) != 6:
+            if len(value) != expected_length:
                 continue
             if not all(
                 isinstance(item, Real)

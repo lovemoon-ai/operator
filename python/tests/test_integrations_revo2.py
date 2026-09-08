@@ -3,6 +3,7 @@ import math
 import unittest
 import struct
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pyoperator.integrations.revo2 import (
@@ -10,13 +11,16 @@ from pyoperator.integrations.revo2 import (
     COMMAND_FLAG_HOLD,
     CurrentEma,
     Revo2HandFeedback,
+    Revo2TactileFeedback,
     axis_name,
     command_packet_v2,
+    command_packet_v3,
     command_targets,
     gesture_targets,
     hand_enabled,
     merge_descriptor,
     target_packet_v2,
+    target_packet_v3,
     telemetry_values,
 )
 from pyoperator.integrations.revo2_udp import Revo2UdpHostedAdapter, make_revo2_descriptor
@@ -75,25 +79,41 @@ def _hand(
     return HandState(active=True, joints=joints)
 
 
+def _pinch_hand() -> HandState:
+    hand = _hand(False, thumb_flexed=True, thumb_opposed=False)
+    return HandState(
+        active=True,
+        joints=tuple(
+            _joint(5, (-0.018, 0.088, 0.0)) if joint.joint == 5 else joint
+            for joint in hand.joints
+        ),
+    )
+
+
 class Revo2IntegrationTests(unittest.TestCase):
     def test_gesture_mapping_and_controller_fallback(self) -> None:
         open_targets = gesture_targets(_hand(False))
         closed_targets = gesture_targets(_hand(True))
         flex_only = gesture_targets(_hand(False, thumb_flexed=True, thumb_opposed=False))
         oppose_only = gesture_targets(_hand(False, thumb_flexed=False, thumb_opposed=True))
+        pinch_targets = gesture_targets(_pinch_hand())
         self.assertLess(open_targets[2], 0.1)
         self.assertGreater(closed_targets[2], 0.8)
-        self.assertLessEqual(flex_only[0], 0.5)
-        self.assertGreater(flex_only[0], 0.4)
-        self.assertLess(flex_only[1], 0.1)
-        self.assertLess(oppose_only[0], 0.1)
-        self.assertGreater(oppose_only[1], 0.75)
-        self.assertLessEqual(oppose_only[1], 0.85)
+        self.assertLess(flex_only[0], 0.1)
+        self.assertGreater(flex_only[1], 0.8)
+        self.assertLessEqual(flex_only[1], 0.87)
+        self.assertGreater(oppose_only[0], 0.45)
+        self.assertLessEqual(oppose_only[0], 0.5)
+        self.assertLess(oppose_only[1], 0.1)
+        self.assertGreater(pinch_targets[0], 0.25)
 
         controller = ControllerState(
             input=ControllerInput(values={"trigger": 0.7, "grip": 0.4})
         )
-        self.assertEqual(gesture_targets(None, controller), (0.35, 0.35, 0.7, 0.4, 0.4, 0.4))
+        self.assertEqual(
+            gesture_targets(None, controller),
+            (0.35, 0.609, 0.7, 0.4, 0.4, 0.4),
+        )
 
         hand_without_thumb_tip = HandState(
             active=True,
@@ -101,13 +121,11 @@ class Revo2IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             gesture_targets(hand_without_thumb_tip, controller),
-            (0.35, 0.35, 0.7, 0.4, 0.4, 0.4),
+            (0.35, 0.609, 0.7, 0.4, 0.4, 0.4),
         )
 
     def test_command_extraction_and_deadman(self) -> None:
-        channels = (
-            "thumb_flex", "thumb_aux", "index_flex", "middle_flex", "ring_flex", "pinky_flex"
-        )
+        channels = CHANNELS
         axes = {axis_name("left", channel): index / 5 for index, channel in enumerate(channels)}
         command = {"axes": axes, "buttons": {"left_enable": True, "right_enable": False}}
         self.assertEqual(command_targets(command, "left"), (0, 200, 400, 600, 800, 1000))
@@ -122,8 +140,17 @@ class Revo2IntegrationTests(unittest.TestCase):
         packet = command_packet_v2(command, "left", 7, speed=0.25, timestamp_ns=123)
         unpacked = struct.unpack("<4sBBHIQ12f", packet)
         self.assertEqual(unpacked[:6], (b"BCH2", 2, 0, 0, 7, 123))
-        self.assertAlmostEqual(unpacked[7], 0.2)
+        self.assertAlmostEqual(unpacked[6], 0.2)
+        self.assertAlmostEqual(unpacked[7], 0.0)
         self.assertEqual(unpacked[-6:], (0.25,) * 6)
+
+        current_packet = command_packet_v3(
+            command, "left", 8, speed=0.5, timestamp_ns=234
+        )
+        current = struct.unpack("<4sBBHIQ12f", current_packet)
+        self.assertEqual(current[:6], (b"BCH2", 3, 0, 0, 8, 234))
+        self.assertAlmostEqual(current[6], 0.0)
+        self.assertAlmostEqual(current[7], 0.2)
 
         direct_packet = target_packet_v2(
             [0, 200, 400, 600, 800, 1000],
@@ -138,6 +165,19 @@ class Revo2IntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(direct[11], 1.0)
         for actual, expected in zip(direct[-6:], (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)):
             self.assertAlmostEqual(actual, expected)
+
+        current_direct = struct.unpack(
+            "<4sBBHIQ12f",
+            target_packet_v3(
+                [100, 200, 300, 400, 500, 600],
+                "right",
+                10,
+                timestamp_ns=567,
+            ),
+        )
+        self.assertEqual(current_direct[:6], (b"BCH2", 3, 1, 0, 10, 567))
+        self.assertAlmostEqual(current_direct[6], 0.1)
+        self.assertAlmostEqual(current_direct[7], 0.2)
 
     def test_feedback_filter_and_flat_telemetry(self) -> None:
         ema = CurrentEma(0.5)
@@ -156,6 +196,61 @@ class Revo2IntegrationTests(unittest.TestCase):
         self.assertEqual(values["revo2_left_position"], [90.0] * 6)
         self.assertEqual(values["revo2_left_stall"], [0.0, 1.0, 1.0, 0.0, 0.0, 0.0])
         self.assertNotIn("revo2_right_position", values)
+
+        touch = Revo2TactileFeedback.from_items([
+            SimpleNamespace(
+                normal_force1=index + 1,
+                normal_force2=(index + 1) * 10,
+                normal_force3=0,
+                tangential_force1=1,
+                tangential_force2=(index + 1) * 5,
+                tangential_force3=2,
+                tangential_direction1=10,
+                tangential_direction2=20 + index,
+                tangential_direction3=30,
+                self_proximity1=100,
+                self_proximity2=200 + index,
+                mutual_proximity=150,
+                status=0,
+            )
+            for index in range(5)
+        ])
+        touch_values = telemetry_values(left_touch=touch)
+        self.assertEqual(touch_values["revo2_left_touch_normal"], [10, 20, 30, 40, 50])
+        self.assertEqual(
+            touch_values["revo2_left_touch_tangential"], [5, 10, 15, 20, 25]
+        )
+        self.assertEqual(
+            touch_values["revo2_left_touch_direction"], [20, 21, 22, 23, 24]
+        )
+        self.assertEqual(
+            touch_values["revo2_left_touch_proximity"], [200, 201, 202, 203, 204]
+        )
+        with self.assertRaises(ValueError):
+            Revo2TactileFeedback.from_items([SimpleNamespace()] * 4)
+        malformed = [SimpleNamespace(**vars(item)) for item in [
+            SimpleNamespace(
+                normal_force1=1,
+                normal_force2=2,
+                normal_force3=3,
+                tangential_force1=1,
+                tangential_force2=2,
+                tangential_force3=3,
+                tangential_direction1=1,
+                tangential_direction2=2,
+                tangential_direction3=3,
+                self_proximity1=1,
+                self_proximity2=2,
+                mutual_proximity=3,
+                status=0,
+            )
+        ] * 5]
+        del malformed[2].normal_force2
+        with self.assertRaises(ValueError):
+            Revo2TactileFeedback.from_items(malformed)
+        malformed[2].normal_force2 = math.nan
+        with self.assertRaises(ValueError):
+            Revo2TactileFeedback.from_items(malformed)
 
         class MotorState:
             def __init__(self, q, tau_est, mode):
@@ -182,7 +277,7 @@ class Revo2IntegrationTests(unittest.TestCase):
         merged_twice = merge_descriptor(merged)
         self.assertEqual(len(merged["control_schema"]["axes"]), 12)
         self.assertEqual(len(merged["input_mapping"]), 12)
-        self.assertEqual(len(merged["telemetry_schema"]["values"]), 8)
+        self.assertEqual(len(merged["telemetry_schema"]["values"]), 18)
         self.assertEqual(merged_twice, merged)
         self.assertNotIn("control_schema", descriptor)
         self.assertEqual(merged["control_schema"]["axes"][0]["range"], [0.0, 1.0])
@@ -215,6 +310,8 @@ class Revo2IntegrationTests(unittest.TestCase):
         active = struct.unpack("<4sBBHIQ12f", capture.sent[0][0])
         hold = struct.unpack("<4sBBHIQ12f", capture.sent[1][0])
         repeated_hold = struct.unpack("<4sBBHIQ12f", capture.sent[4][0])
+        self.assertEqual(active[1], 3)
+        self.assertEqual(hold[1], 3)
         self.assertEqual(active[3], 0)
         self.assertEqual(hold[3], COMMAND_FLAG_HOLD)
         self.assertEqual(repeated_hold[3], COMMAND_FLAG_HOLD)
@@ -296,7 +393,10 @@ class Revo2IntegrationTests(unittest.TestCase):
                 return self.packets.pop(0)
 
         valid = json.dumps({
-            "values": {"revo2_left_position": [100] * 6},
+            "values": {
+                "revo2_left_position": [100] * 6,
+                "revo2_left_touch_normal": [10] * 5,
+            },
             "timestamp_ns": 123,
         }).encode()
         invalid_number = json.dumps({
@@ -318,6 +418,10 @@ class Revo2IntegrationTests(unittest.TestCase):
         self.assertEqual(
             adapter.telemetry()["values"]["revo2_left_position"],
             [100.0] * 6,
+        )
+        self.assertEqual(
+            adapter.telemetry()["values"]["revo2_left_touch_normal"],
+            [10.0] * 5,
         )
         received_ns = adapter._value_received_ns["revo2_left_position"]
         with patch(

@@ -286,8 +286,11 @@ func connect_to_video_stream(host: String, port: int) -> void:
 
 
 func _connect(host: String, port: int, mode: StreamMode) -> void:
-	if _state != State.DISCONNECTED:
-		disconnect_from_robot()
+	# Always recreate the peer before a new attempt. StreamPeerTCP can retain
+	# STATUS_ERROR/STATUS_CONNECTING after our logical state has already moved to
+	# DISCONNECTED; reusing that peer makes connect_to_host fail forever with
+	# ERR_ALREADY_IN_USE.
+	disconnect_from_robot()
 
 	_host = host
 	_port = port
@@ -306,13 +309,15 @@ func _connect(host: String, port: int, mode: StreamMode) -> void:
 
 ## Disconnect from the robot.
 func disconnect_from_robot() -> void:
-	if _state == State.DISCONNECTED:
-		return
-
+	var was_active := _state != State.DISCONNECTED
 	_tcp.disconnect_from_host()
+	_tcp = StreamPeerTCP.new()
 	_state = State.DISCONNECTED
+	_connect_elapsed = 0.0
+	_bad_status_ticks = 0
 	_recv_buffer.clear()
-	disconnected_from_server.emit()
+	if was_active:
+		disconnected_from_server.emit()
 
 
 ## Send raw bytes over TCP.

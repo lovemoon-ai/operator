@@ -2,9 +2,13 @@ extends RefCounted
 
 const CASE_ID := "teleop.revo2_hand_feedback"
 const GestureMapper = preload("res://scripts/input/hand_gesture_mapper.gd")
+const TargetFilter = preload("res://scripts/input/hand_target_filter.gd")
 const FeedbackOverlay = preload("res://scripts/ui/dexterous_hand_feedback_overlay.gd")
+const TactileOverlay = preload("res://scripts/ui/dexterous_hand_tactile_overlay.gd")
 const HandControlIndicatorScript = preload("res://scripts/ui/hand_control_indicator.gd")
 const HandPalmMenuScript = preload("res://scripts/ui/hand_unlock_button.gd")
+const ControlFrameGizmoScript = preload("res://scripts/ui/control_frame_gizmo.gd")
+const TcpHandlerScript = preload("res://scripts/network/tcp_handler.gd")
 const PalmMenuVisibilityStateScript = preload(
 	"res://scripts/ui/palm_menu_visibility_state.gd"
 )
@@ -19,13 +23,13 @@ class FakeCommandSender:
 class FakeOutsideTarget:
 	extends Node
 	var started_with: Dictionary = {}
-	var ready := false
+	var target_ready := false
 
 	func start(config: Dictionary) -> void:
 		started_with = config.duplicate(true)
 
 	func is_ready() -> bool:
-		return ready
+		return target_ready
 
 
 class FakeTcpHandler:
@@ -45,26 +49,46 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var oppose_only := GestureMapper.targets_from_tracking(
 		_hand_skeleton(false, false, true), {}
 	)
+	var pinch_targets := GestureMapper.targets_from_tracking(_pinch_hand_skeleton(), {})
 	t.is_true(float(open_targets[2]) < 0.1, "straight index finger maps near open")
 	t.is_true(float(closed_targets[2]) > 0.8, "curled index finger maps near closed")
-	t.is_true(float(flex_only[0]) <= 0.5,
-		"thumb proximal flex stays below the official SDK safety cap")
-	t.is_true(float(flex_only[0]) > 0.4,
-		"thumb joint bend drives the first Revo2 motor")
-	t.is_true(float(flex_only[1]) < 0.1,
-		"thumb joint bend does not drive the abduction motor")
-	t.is_true(float(oppose_only[0]) < 0.1,
-		"thumb opposition does not drive the flex motor")
-	t.is_true(float(oppose_only[1]) > 0.75 and float(oppose_only[1]) <= 0.85,
-		"thumb opposition drives the second Revo2 motor")
+	t.is_true(float(flex_only[0]) < 0.1,
+		"thumb joint bend does not drive the metacarpal motor")
+	t.is_true(float(flex_only[1]) > 0.8 and float(flex_only[1]) <= 0.87,
+		"thumb joint bend drives the second Revo2 motor")
+	t.is_true(float(oppose_only[0]) > 0.45 and float(oppose_only[0]) <= 0.5,
+		"thumb opposition drives the first Revo2 motor")
+	t.is_true(float(oppose_only[1]) < 0.1,
+		"thumb opposition does not drive the proximal motor")
+	t.is_true(float(pinch_targets[0]) > 0.25,
+		"thumb-index proximity adds opposition for a natural pinch")
 
 	var fallback := GestureMapper.targets_from_tracking([], {"trigger": 0.7, "grip": 0.4})
 	t.almost_eq(float(fallback[0]), 0.35, 0.001,
-		"trigger controls capped fallback thumb flex")
-	t.almost_eq(float(fallback[1]), 0.35, 0.001,
-		"trigger controls fallback thumb auxiliary")
+		"trigger controls fallback thumb opposition")
+	t.almost_eq(float(fallback[1]), 0.609, 0.001,
+		"trigger controls fallback thumb flex")
 	t.almost_eq(float(fallback[2]), 0.7, 0.001, "trigger controls fallback index")
 	t.almost_eq(float(fallback[5]), 0.4, 0.001, "grip controls fallback pinky")
+	var target_filter := TargetFilter.new()
+	var filter_start := target_filter.filter(
+		PackedFloat64Array([0.2, 0.3, 0.4, 0.4, 0.4, 0.4]), 1_000_000
+	)
+	var filter_jitter := target_filter.filter(
+		PackedFloat64Array([0.202, 0.302, 0.402, 0.402, 0.402, 0.402]), 1_014_000
+	)
+	t.eq(filter_jitter, filter_start, "sub-deadband tracking jitter is held")
+	var filter_motion := target_filter.filter(
+		PackedFloat64Array([0.4, 0.6, 0.8, 0.8, 0.8, 0.8]), 1_028_000
+	)
+	t.is_true(float(filter_motion[2]) > 0.4 and float(filter_motion[2]) < 0.8,
+		"fast motion passes promptly without an unfiltered step")
+	target_filter.reset()
+	var finite_filter := target_filter.filter(
+		PackedFloat64Array([NAN, 0.2, 0.3, 0.3, 0.3, 0.3]), 2_000_000
+	)
+	t.almost_eq(float(finite_filter[0]), 0.0, 0.0001,
+		"non-finite tracking targets reset to a safe open command")
 	var open_palm := _mirrored_hand_x(_hand_skeleton(false))
 	var palm_menu: Dictionary = GestureMapper.palm_menu_state(
 		open_palm, Vector3(0.0, 0.0, 0.5), GestureMapper.HAND_LEFT
@@ -104,6 +128,23 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.is_true(not bool(GestureMapper.palm_menu_state(
 		missing_palm, Vector3(0.0, 0.0, 0.5), GestureMapper.HAND_LEFT
 	).get("tracked", true)), "losing a required palm joint invalidates the menu pose")
+	var invalid_wrist_joints := open_palm.duplicate(true)
+	invalid_wrist_joints[1]["position"] = Vector3(NAN, 0.0, 0.0)
+	t.eq(GestureMapper.wrist_position(invalid_wrist_joints), null,
+		"non-finite wrist tracking cannot reach a wrist-mounted render node")
+	t.is_true(not bool(GestureMapper.palm_menu_state(
+		open_palm, Vector3(INF, 0.0, 0.0), GestureMapper.HAND_LEFT
+	).get("tracked", true)), "non-finite head tracking cannot place the palm menu")
+	var distant_palm := open_palm.duplicate(true)
+	for distant_joint_v in distant_palm:
+		var distant_joint := distant_joint_v as Dictionary
+		if bool(distant_joint.get("tracked", false)):
+			distant_joint["position"] = (
+				distant_joint.get("position", Vector3.ZERO) as Vector3
+			) + Vector3(25.0, 0.0, 0.0)
+	t.is_true(bool(GestureMapper.palm_menu_state(
+		distant_palm, Vector3(25.0, 0.0, 0.5), GestureMapper.HAND_LEFT
+	).get("tracked", false)), "large-room tracking coordinates keep the palm menu valid")
 
 	var visibility := PalmMenuVisibilityStateScript.new()
 	t.is_true(not visibility.update(true, 1.0, 1.0, 0.10),
@@ -163,6 +204,16 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var expected_up := (Vector3.UP - to_head * Vector3.UP.dot(to_head)).normalized()
 	t.is_true(display_transform.basis.y.distance_to(expected_up) < 0.0001,
 		"palm-menu text remains upright for the operator")
+	t.is_true(not HandPalmMenuScript.transform_is_safe(
+		Transform3D(Basis.IDENTITY, Vector3(NAN, 0.0, 0.0))),
+		"non-finite palm-menu positions are rejected before rendering")
+	t.is_true(not HandPalmMenuScript.transform_is_safe(
+		Transform3D(Basis(Vector3.ZERO, Vector3.UP, Vector3.BACK), Vector3.ZERO)),
+		"degenerate palm-menu bases are rejected before inversion")
+	t.is_true(not HandControlIndicatorScript.position_is_safe(Vector3(INF, 0.0, 0.0)),
+		"non-finite wrist lamp positions are rejected before rendering")
+	t.is_true(not ControlFrameGizmoScript._position_is_safe(Vector3(0.0, NAN, 0.0)),
+		"non-finite control-frame origins are rejected before rendering")
 
 	var control_mode := ControlMode.new()
 	control_mode.configure({
@@ -235,6 +286,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"manual unlock enables the tracked right hand")
 	t.is_true(bool(clutch_mode.get_hand_control_state(0).get("control_enabled", false)),
 		"wrist state exposes the exact manual unlock state")
+	t.eq((clutch_mode.get_hand_control_state(0).get("joints", []) as Array).size(), 26,
+		"tactile feedback reuses the same tracked joints as hand control")
 	t.eq(
 		HandControlIndicatorScript.status_color(true, true),
 		HandControlIndicatorScript.CONTROL_ENABLED_COLOR,
@@ -287,6 +340,85 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"low current uses the safe color")
 	t.eq(FeedbackOverlay.current_color(0.0, true), FeedbackOverlay.CURRENT_HIGH,
 		"STALL overrides current with the alert color")
+	t.eq(FeedbackOverlay.CHANNEL_LABELS[0], "OP",
+		"the first feedback row names thumb opposition")
+	t.eq(FeedbackOverlay.CHANNEL_LABELS[1], "TF",
+		"the second feedback row names thumb flexion")
+
+	var tactile_payload := {"values": {
+		"revo2_left_touch_normal": [0, 10, 100, 1000, 10000],
+		"revo2_left_touch_tangential": [0, 20, 200, 2000, 20000],
+		"revo2_left_touch_direction": [0, 45, 90, 180, 270],
+		"revo2_left_touch_proximity": [0, 100, 1000, 10000, 100000],
+		"revo2_left_touch_status": [0, 0, 0, 1, 0],
+	}}
+	var parsed_tactile := TactileOverlay.parse_telemetry(tactile_payload)
+	t.is_true(bool(parsed_tactile.get("left", {}).get("valid", false)),
+		"complete five-finger tactile telemetry is accepted")
+	t.is_true(not bool(parsed_tactile.get("right", {}).get("valid", true)),
+		"missing tactile hand telemetry stays hidden")
+	t.is_true(not bool(parsed_tactile.get("right", {}).get("present", true)),
+		"missing tactile hand telemetry is distinguished from a malformed sample")
+	var incomplete_tactile_payload := {"values": {
+		"revo2_left_touch_normal": [1, 1, 1, 1, 1],
+	}}
+	var incomplete_tactile := TactileOverlay.parse_telemetry(incomplete_tactile_payload)
+	t.is_true(not bool(incomplete_tactile.get("left", {}).get("valid", true)),
+		"partial tactile telemetry is rejected instead of rendered as healthy zeros")
+	t.is_true(bool(incomplete_tactile.get("left", {}).get("present", false)),
+		"partial tactile telemetry is marked malformed rather than absent")
+	var non_finite_tactile := TactileOverlay.parse_telemetry({"values": {
+		"revo2_left_touch_normal": [0, 10, NAN, 1000, 10000],
+		"revo2_left_touch_tangential": [0, 10, 100, 1000, 10000],
+		"revo2_left_touch_direction": [0, 45, 90, 180, 270],
+		"revo2_left_touch_proximity": [0, 100, 1000, 10000, 100000],
+		"revo2_left_touch_status": [0, 0, 0, 0, 0],
+	}})
+	t.is_true(not bool(non_finite_tactile.get("left", {}).get("valid", true)),
+		"non-finite tactile telemetry is rejected before rendering")
+	t.is_true(TactileOverlay.tactile_intensity(1000.0) >
+		TactileOverlay.tactile_intensity(10.0),
+		"larger raw tactile values produce stronger visual intensity")
+	t.almost_eq(TactileOverlay.direction_radians(90.0), PI * 0.5, 0.001,
+		"degree tactile direction rotates the fingertip shear marker")
+	t.is_true(not TactileOverlay.direction_is_available(65535.0),
+		"the unavailable direction sentinel hides the shear marker")
+	t.eq(TactileOverlay.tactile_color(0.0, 0.0, 0.2, 1.0),
+		TactileOverlay.SENSOR_ERROR_COLOR,
+		"abnormal tactile sensors use the explicit error color")
+	t.eq(TactileOverlay.tactile_state(0.0, 0.0, 0.0, true),
+		TactileOverlay.STATE_STALE,
+		"stale telemetry uses the explicit stale state")
+	var tactile_overlay := TactileOverlay.new()
+	tactile_overlay._build_markers()
+	tactile_overlay.update_telemetry(tactile_payload)
+	var tactile_update_usec := int(tactile_overlay._last_update_usec["left"])
+	tactile_overlay.update_telemetry({"values": {}})
+	t.eq(int(tactile_overlay._last_update_usec["left"]), tactile_update_usec,
+		"missing tactile keys preserve the last sample for stale-state rendering")
+	tactile_overlay.update_telemetry(incomplete_tactile_payload)
+	t.eq(int(tactile_overlay._last_update_usec["left"]), 0,
+		"malformed tactile keys invalidate the cached sample immediately")
+	var tactile_marker := (tactile_overlay._markers["left"] as Array)[0] as Dictionary
+	t.is_true(tactile_overlay._update_marker(
+		tactile_marker, 1200.0, 3000.0, 90.0, 40000.0, 0.0, false
+	), "finite tactile data updates the fingertip marker")
+	var tactile_dot := tactile_marker.get("dot") as Label3D
+	var tactile_shear := tactile_marker.get("shear") as Label3D
+	t.is_true(tactile_dot.modulate.a >= TactileOverlay.ONLINE_MARKER_ALPHA,
+		"fresh fingertips remain visible even at low contact")
+	t.is_true(tactile_dot.scale.x > TactileOverlay.DOT_MIN_SCALE,
+		"normal and proximity intensity scale the fingertip dot")
+	t.is_true(tactile_shear.visible,
+		"tangential contact renders a directional shear bar")
+	t.almost_eq(tactile_shear.rotation.z, PI * 0.5, 0.001,
+		"the shear bar follows the reported tactile direction")
+	tactile_overlay._update_marker(
+		tactile_marker, 1200.0, 3000.0, 90.0, 40000.0, 0.0, true
+	)
+	t.is_true(not tactile_shear.visible,
+		"stale tactile telemetry hides its directional shear bar")
+	tactile_overlay.free()
 
 	var discovery := RobotDiscoveryScript.new()
 	discovery._process_announcement(JSON.stringify({
@@ -301,11 +433,31 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(int((discovered["test-bridge"] as Dictionary).get("telemetry_port", 0)), 64009,
 		"discovery preserves the dedicated telemetry port")
 	var controller := TeleopControllerScript.new()
+	controller._capture_control_frame_for_hand({"frame": [0.0, NAN, 0.0, 1.0]}, 0,
+		"frame", "mirror")
+	t.is_true(not bool(controller._control_frame_valid[0]),
+		"non-finite telemetry quaternions never reach the control-frame gizmo")
+	controller._capture_control_frame_for_hand({"frame": [0.0, 0.0, 0.0, 0.0]}, 0,
+		"frame", "mirror")
+	t.is_true(not bool(controller._control_frame_valid[0]),
+		"zero-length telemetry quaternions never reach the control-frame gizmo")
 	controller._known_robots = {"192.0.2.10": discovered["test-bridge"]}
 	t.eq(controller._telemetry_port_for("192.0.2.10", 64001), 64009,
 		"teleop uses the discovered telemetry port")
 	t.eq(controller._telemetry_port_for("192.0.2.11", 63901), 63903,
 		"manual endpoints derive the standard telemetry port")
+	var tcp_server := TCPServer.new()
+	t.eq(tcp_server.listen(0, "127.0.0.1"), OK,
+		"loopback server supports the TCP reset regression")
+	var raw_tcp_handler := TcpHandlerScript.new()
+	t.eq(raw_tcp_handler._tcp.connect_to_host(
+		"127.0.0.1", tcp_server.get_local_port()
+	), OK, "raw peer starts a connection while logical state remains disconnected")
+	raw_tcp_handler.disconnect_from_robot()
+	t.eq(raw_tcp_handler._tcp.get_status(), StreamPeerTCP.STATUS_NONE,
+		"logical disconnect always recreates a reusable StreamPeerTCP")
+	tcp_server.stop()
+	raw_tcp_handler.free()
 	var command_sender := FakeCommandSender.new()
 	var outside_target := FakeOutsideTarget.new()
 	var tcp_handler := FakeTcpHandler.new()
@@ -328,7 +480,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	controller._set_revo2_hand_control_unlocked(true)
 	t.is_true(not controller._revo2_hand_control_unlocked,
 		"transport connection alone cannot unlock before the descriptor is ready")
-	outside_target.ready = true
+	outside_target.target_ready = true
 	controller._set_revo2_hand_control_unlocked(true)
 	t.is_true(controller._revo2_hand_control_unlocked,
 		"an explicit touch may unlock only after the target is ready")
@@ -410,6 +562,12 @@ func _mirrored_hand_x(joints: Array[Dictionary]) -> Array[Dictionary]:
 		position.x = -position.x
 		joint["position"] = position
 	return mirrored
+
+
+func _pinch_hand_skeleton() -> Array[Dictionary]:
+	var joints := _hand_skeleton(false, true, false)
+	joints[5]["position"] = joints[10]["position"]
+	return joints
 
 
 func _set_thumb(joints: Array[Dictionary], flexed: bool, opposed: bool) -> void:

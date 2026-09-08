@@ -18,6 +18,7 @@ const AXIS_LEN := 0.12
 const AXIS_RADIUS := 0.005
 const LABEL_GAP := 0.025
 const LABEL_SIZE := 0.035
+const MAX_TRACKED_POSITION_SQUARED := 1_000_000.0
 
 const COLOR_FORWARD := Color(1.0, 0.32, 0.32)
 const COLOR_LATERAL := Color(0.36, 0.95, 0.45)
@@ -108,6 +109,9 @@ var _has_orientation := false
 ## delivered command rate. So the arms are only rebuilt when the frame actually
 ## changes.
 func apply(origin: Vector3, frame: Quaternion, mirror: bool) -> void:
+	if not _position_is_safe(origin) or not _quaternion_is_valid(frame):
+		visible = false
+		return
 	# Keep our own basis identity and orient each arm explicitly, so the child
 	# offsets below can be plain world-space directions.
 	global_transform = Transform3D(Basis.IDENTITY, origin)
@@ -135,7 +139,13 @@ func apply(origin: Vector3, frame: Quaternion, mirror: bool) -> void:
 
 
 func _orient(index: int, direction: Vector3) -> void:
+	if not _position_is_safe(direction) or direction.length_squared() <= 0.000001:
+		visible = false
+		return
 	var dir := direction.normalized()
+	if not _position_is_safe(dir):
+		visible = false
+		return
 	var axis := _axes[index]
 	# CylinderMesh runs along local +Y centred on the origin, so shift by half a
 	# length to make it read as an arrow growing out of the controller.
@@ -146,3 +156,20 @@ func _orient(index: int, direction: Vector3) -> void:
 	else:
 		axis.basis = Basis(Quaternion(Vector3.UP, dir))
 	_labels[index].position = dir * (AXIS_LEN + LABEL_GAP)
+
+
+static func _position_is_safe(value: Vector3) -> bool:
+	if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z):
+		return false
+	var length_squared := value.length_squared()
+	return is_finite(length_squared) and length_squared <= MAX_TRACKED_POSITION_SQUARED
+
+
+static func _quaternion_is_valid(value: Quaternion) -> bool:
+	if not is_finite(value.x) \
+		or not is_finite(value.y) \
+		or not is_finite(value.z) \
+		or not is_finite(value.w):
+		return false
+	var length_squared := value.length_squared()
+	return is_finite(length_squared) and length_squared > 0.000001
