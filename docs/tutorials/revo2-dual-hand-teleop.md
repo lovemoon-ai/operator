@@ -1,26 +1,27 @@
 # BrainCo Revo2 Dual-Hand Gesture Control and Visual Feedback
 
-This integration keeps the Revo2 Basic hands in their normal position mode.
-It does not claim that position error is a calibrated force. The headset shows
-three separate signals:
+This integration keeps Revo2 hands in their normal position mode. It does not
+claim that position error or raw tactile magnitude is a calibrated force. The
+headset shows four separate signals:
 
 - target versus actual motor position as a geometric displacement;
 - filtered motor current as green/yellow/red load intensity;
-- motor `STALL` state as an explicit contact alert.
+- motor `STALL` state as an explicit contact alert;
+- TOUCH fingertip proximity, normal contact, and directional shear.
 
-The six-channel order is `thumb proximal flex`, `thumb metacarpal
-abduction/opposition`, `index`, `middle`, `ring`, `pinky`. The SDK names the
-first two motors `Thumb` and `ThumbAux`. The official ROS driver exposes them
-as the thumb proximal and thumb metacarpal joints respectively. Values sent to
-the hand SDK are normalized integers from 0 to 1000.
+The canonical six-channel order is `thumb metacarpal opposition`, `thumb
+proximal flexion`, `index`, `middle`, `ring`, `pinky`. The SDK names the first
+two motors `Thumb` and `ThumbAux`: `Thumb` is the rotation/opposition motor and
+`ThumbAux` is the flexion motor. Values sent to the hand SDK are normalized
+integers from 0 to 1000.
 
 ## Quest Input
 
 `ControlMode` exposes these descriptor sources for both `left` and `right`:
 
 ```text
-left_hand_thumb_flex
 left_hand_thumb_aux
+left_hand_thumb_flex
 left_hand_index_flex
 left_hand_middle_flex
 left_hand_ring_flex
@@ -31,19 +32,20 @@ The right-hand names use the `right_hand_` prefix. Index through pinky flexion
 is derived from scale-independent OpenXR chain straightness. The two thumb
 motors are independent:
 
-- `Thumb` follows the summed bend of the OpenXR thumb proximal and distal
-  segments and is capped at 0.5.
-- `ThumbAux` follows the in-palm rotation of the OpenXR thumb metacarpal toward
-  opposition. It is measured in a hand-local basis built from wrist and MCP
-  joints, works identically for left and right hands, and is capped at 0.85.
+- `Thumb` follows in-palm metacarpal rotation toward opposition and a
+  scale-normalized thumb-index pinch constraint. It is capped at 0.5.
+- `ThumbAux` follows the summed bend of the OpenXR thumb proximal and distal
+  segments and is capped at 0.87.
 
 This preserves the two physical Revo2 thumb degrees of freedom instead of
 driving both motors from one curl value. If the runtime does not provide a hand
 skeleton, trigger remains the coarse fallback for both thumb axes and index,
 while grip controls middle/ring/pinky.
 
-The Thor runtime independently clamps SDK motor 0 (`Thumb`) to 500 and motor 1
-(`ThumbAux`) to 870 as defense in depth.
+The Thor runtime independently clamps SDK motor 0 (`Thumb`, opposition) to 500
+and motor 1 (`ThumbAux`, flexion) to 870 as defense in depth. Per-hand One-Euro
+filtering plus a small output deadband suppresses tracking shimmer without a
+fixed low-pass delay.
 
 The isolated hand profile exposes an explicit palm menu only when the left palm
 faces the headset and all five fingers are open. The menu stays below the palm
@@ -57,8 +59,9 @@ disconnecting, reconnecting, or leaving Teleop locks both hands again. The
 adapter sends one latest-actual-position hold when a hand is disabled; it never
 sends an open/reset command.
 
-`pyoperator.integrations.revo2.merge_descriptor()` adds the twelve axes,
-input mappings, and eight telemetry definitions to an existing G1 descriptor.
+`pyoperator.integrations.revo2.merge_descriptor()` adds the twelve axes, input
+mappings, eight motor telemetry definitions, and ten tactile telemetry
+definitions to an existing G1 descriptor.
 
 ## Thor Control Loop
 
@@ -72,7 +75,7 @@ hand handling into the same command/watchdog loop:
 from pyoperator.integrations.revo2 import (
     CurrentEma,
     Revo2HandFeedback,
-    command_packet_v2,
+    command_packet_v3,
     command_targets,
     hand_enabled,
     merge_descriptor,
@@ -114,9 +117,11 @@ async def collect_hand_telemetry(left_target, right_target):
 ```
 
 The inspected HoloMotion checkout already has a safer integration point than
-opening the serial ports again: its BrainCo runtime accepts version-2 `BCH2`
-UDP packets and publishes `rt/brainco/{left,right}/state`. Use
-`command_packet_v2()` for the existing UDP receiver. Convert each DDS
+opening the serial ports again: its legacy BrainCo runtime accepts version-2
+`BCH2` UDP packets and publishes `rt/brainco/{left,right}/state`. Use
+`command_packet_v2()` only for that legacy receiver; v2 keeps the old flexion,
+opposition channel order. New Operator runtimes use `command_packet_v3()` and
+the canonical opposition, flexion order. Convert each DDS
 `MotorStates` sample with `Revo2HandFeedback.from_motor_states()`; it maps
 `q` to position, `tau_est` to current, and `mode` to the STALL flag. The
 Operator bridge then merges `telemetry_values()` into its normal telemetry
@@ -170,29 +175,53 @@ install -D -m 0755 robot/target/release/xr-bridge \
   /tmp/operator-hand/bin/xr-bridge
 install -D -m 0644 robot/configs/revo2_tuning.yaml \
   /tmp/operator-hand/config/revo2_tuning.yaml
-mkdir -p /tmp/operator-hand/lib /tmp/operator-hand/sdk
-cp -a python/pyoperator /tmp/operator-hand/lib/
+mkdir -p \
+  /tmp/operator-hand/lib/pyoperator/integrations \
+  /tmp/operator-hand/lib/pyoperator/protocol \
+  /tmp/operator-hand/sdk/bc_stark_sdk \
+  /tmp/operator-hand/sdk/bc_stark_sdk.libs
+for module in __init__.py hosted.py ik.py models.py retargeting.py robot.py session.py xr_bridge.py; do
+  install -m 0644 "python/pyoperator/$module" "/tmp/operator-hand/lib/pyoperator/$module"
+done
+for module in __init__.py revo2.py revo2_udp.py; do
+  install -m 0644 "python/pyoperator/integrations/$module" \
+    "/tmp/operator-hand/lib/pyoperator/integrations/$module"
+done
+for module in __init__.py retargeting.py; do
+  install -m 0644 "python/pyoperator/protocol/$module" \
+    "/tmp/operator-hand/lib/pyoperator/protocol/$module"
+done
+rm -rf /tmp/revo2-sdk-wheel
 python3 -m zipfile -e /path/to/bc_stark_sdk-*-linux_aarch64.whl \
-  /tmp/operator-hand/sdk
+  /tmp/revo2-sdk-wheel
+install -m 0644 /tmp/revo2-sdk-wheel/bc_stark_sdk/main_mod.abi3.so \
+  /tmp/operator-hand/sdk/bc_stark_sdk/main_mod.abi3.so
+install -m 0644 /tmp/revo2-sdk-wheel/bc_stark_sdk.libs/libudev-*.so.1 \
+  /tmp/operator-hand/sdk/bc_stark_sdk.libs/
 rsync -a --delete /tmp/operator-hand/ \
   unitree@192.168.124.64:/home/unitree/ws/operator-hand/
 ```
 
 The `unitree` user must be able to open the two FTDI serial interfaces. Stop any
-other hand process before starting this service; in particular,
-`brainco_hand_control_server` must not own the same serial ports.
+other manually started hand process before this temporary debug runtime takes
+the ports. Do not install, enable, disable, or otherwise change a Thor system
+service for this workflow.
 
 ```bash
 ssh unitree@192.168.124.64
-sudo systemctl disable --now brainco_hand_control_server.service
+fuser /dev/ttyUSB* 2>/dev/null
 cd /home/unitree/ws/operator-hand
 ./revo2_thor_service.py --check
 ```
 
-The check validates the ARM64 bridge, bridge config, SDK import, and automatic
-left/right discovery by Modbus ID and hand serial. Explicit `--left-port` and
-`--right-port` overrides remain available, but persistent
-`/dev/serial/by-id/...-port0` paths should be used instead of `ttyUSB` numbers.
+The check validates the ARM64 bridge, bridge config, SDK import, BCH2 protocol
+agreement between the runtime and bundled `pyoperator`, and automatic left/right
+discovery by Modbus ID and hand serial. Always redeploy the complete bundle when
+either the service or `python/pyoperator` changes; mixing a v3 runtime with the
+legacy v2 adapter connects successfully but cannot deliver motion commands.
+Explicit `--left-port` and `--right-port` overrides remain available, but
+persistent `/dev/serial/by-id/...-port0` paths should be used instead of
+`ttyUSB` numbers.
 
 Start without `--allow-commands` first. Read-only mode never calls a motion API
 and previews received gesture targets beside actual positions in the headset:
@@ -212,8 +241,12 @@ Only after physical clearance and an explicit motion confirmation, restart the
 same service with `./revo2_thor_service.py --allow-commands`. An explicit hold
 packet stops motion on deadman release; its 1-second watchdog remains the
 fallback if command traffic is lost. The guarded defaults are
-`--command-side both --rate 50 --max-step 160 --max-speed 1000
---max-current-ma 500 --protected-current-ma 400`. The adapter sets
+`--command-side both --rate 50 --touch-rate 20 --touch-timeout-ms 15
+--max-step 160 --max-speed 1000 --max-current-ma 500
+--protected-current-ma 400`. Tactile reads run as a bounded background sampler
+behind the same per-hand serial lock as motor reads and writes, so the SDK
+context is never used concurrently and a slow touch read cannot remain inside
+the 50 Hz control loop. The adapter sets
 each motor speed independently from the measured gesture velocity and the
 target-to-actual tracking error, rather than applying one low fixed speed.
 
@@ -229,39 +262,6 @@ orange means the explicit unlock is active and that tracked hand can command its
 Revo2. Opening the settings panel returns orange to green because the panel
 intentionally locks command output without disconnecting the link.
 
-### Install as a systemd robot service
-
-After the foreground read-only and controlled runs both pass, install the same
-entry point as the robot service:
-
-```ini
-# /etc/systemd/system/operator-revo2.service
-[Unit]
-Description=Operator Revo2 dual-hand robot service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=unitree
-WorkingDirectory=/home/unitree/ws/operator-hand
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/unitree/ws/operator-hand/revo2_thor_service.py --allow-commands --advertise-host 192.168.124.64
-Restart=on-failure
-RestartSec=2
-TimeoutStopSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now operator-revo2.service
-systemctl status operator-revo2.service
-journalctl -u operator-revo2.service -f
-```
-
 Thor must expose UDP `63900`, TCP `63901`, UDP `63902`, and TCP `63903` to the
 headset network. TCP `63910` and UDP `19091`/`19092` are internal adapter/runtime
 ports and remain bound to `127.0.0.1`; do not expose them externally.
@@ -270,11 +270,11 @@ The hand interface number may change after USB recabling, which is why the
 unified service discovers ports by hand serial instead of assuming fixed
 interface numbers. The default expected identities are:
 
-- left hand: Modbus ID 126, serial `BCXRL2103J2600007`;
-- right hand: Modbus ID 127, serial `BCXRR2100J2600007`.
+- left hand: Revo2 TOUCH, Modbus ID 126, serial `BCXTL2196J2600010`;
+- right hand: Revo2 TOUCH, Modbus ID 127, serial `BCXTR2196J2600012`.
 
-On August 28, 2026, the connected FTDI adapter enumerated the left hand on
-interface 01 and the right hand on interface 02. Do not encode those interface
+On September 1, 2026, the connected FTDI adapter enumerated the left hand on
+interface 02 and the right hand on interface 01. Do not encode those interface
 numbers into deployment configuration.
 
 ## Quest Visualization Contract
@@ -294,6 +294,25 @@ The same keys with `right` drive the right panel. Each row renders the actual
 position marker, translucent target marker, and the line between them. Current
 controls marker/load-bar color; `STALL` forces red and enlarges the marker.
 Telemetry older than 800 ms is marked stale and hidden after three seconds.
+
+TOUCH and TOUCH PRESSURE hands additionally publish five-element arrays in
+physical finger order: thumb, index, middle, ring, pinky.
+
+```json
+{
+  "revo2_left_touch_normal": [0, 0, 0, 0, 0],
+  "revo2_left_touch_tangential": [0, 0, 0, 0, 0],
+  "revo2_left_touch_direction": [0, 0, 0, 0, 0],
+  "revo2_left_touch_proximity": [0, 0, 0, 0, 0],
+  "revo2_left_touch_status": [0, 0, 0, 0, 0]
+}
+```
+
+The fingertip dot grows and brightens with proximity and normal contact. Blue
+means online/proximity, yellow through red means increasing normal contact,
+the white bar shows tangential magnitude and direction, purple indicates an
+explicit sensor error, and gray means stale data. These are logarithmic,
+uncalibrated relative intensities rather than newtons.
 
 This is intentionally a schematic actuator view. A later strict spatial view
 can replace each row with Revo2 URDF forward kinematics while preserving the

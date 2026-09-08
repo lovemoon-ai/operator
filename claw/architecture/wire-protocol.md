@@ -260,11 +260,12 @@ rig look single-arm the moment both operators let go.
 
 Dexterous-hand integrations use flat six-element arrays so they remain valid
 `DeviceTelemetry` values and can be merged into any arm adapter. The channel
-order is thumb proximal flex (`Thumb`), thumb metacarpal
-abduction/opposition (`ThumbAux`), index, middle, ring, pinky. The Quest
-bare-hand mapper derives thumb flexion from thumb-joint bend and thumb
-abduction/opposition from the metacarpal direction in the palm-local frame
-so the two motors no longer mirror one scalar curl value.
+order is thumb metacarpal opposition (`Thumb` / `thumb_aux`), thumb proximal
+flexion (`ThumbAux` / `thumb_flex`), index, middle, ring, pinky. The Quest
+bare-hand mapper derives thumb flexion from thumb-joint bend and opposition
+from the metacarpal direction in the palm-local frame plus a scale-normalized
+thumb-index pinch constraint. Per-hand One-Euro filtering and a `0.008` output
+deadband suppress tracking shimmer without adding a fixed low-pass delay.
 
 | key | type | meaning |
 | --- | --- | --- |
@@ -272,17 +273,30 @@ so the two motors no longer mirror one scalar curl value.
 | `revo2_left_position` / `revo2_right_position` | array[6] | Measured normalized motor positions. |
 | `revo2_left_current` / `revo2_right_current` | array[6] | Filtered signed normalized motor current. This is a load proxy, not calibrated force. |
 | `revo2_left_stall` / `revo2_right_stall` | array[6] | Per-motor contact/stall flags encoded as 0 or 1. |
+| `revo2_left_touch_normal` / `revo2_right_touch_normal` | array[5] | Raw per-finger normal tactile magnitude in thumb, index, middle, ring, pinky order. |
+| `revo2_left_touch_tangential` / `revo2_right_touch_tangential` | array[5] | Raw per-finger tangential tactile magnitude. |
+| `revo2_left_touch_direction` / `revo2_right_touch_direction` | array[5] | Raw per-finger tangential direction reported by the hand firmware. |
+| `revo2_left_touch_proximity` / `revo2_right_touch_proximity` | array[5] | Raw per-finger capacitive proximity magnitude. |
+| `revo2_left_touch_status` / `revo2_right_touch_status` | array[5] | Raw per-finger firmware status word for diagnostics. |
 
 The XR client renders target-to-actual displacement separately from current
 intensity. It must not label position error as force because Revo2 Basic's
 internal position-loop stiffness is not part of this protocol.
 
-The hand adapter/runtime UDP link uses the version-2 `BCH2` packet. Bit `0x0001`
-of its little-endian `u16` flags field requests an immediate current-position
-hold. The runtime captures its own latest measured position for this operation;
-the packet's position fields are only a backwards-compatible fallback. While a
-previously active hand remains locked, the adapter repeats hold packets so one
-lost UDP datagram cannot leave the previous motion target active.
+Touch-capable Revo2 hands add five fingertip samples rather than six motor
+samples because the thumb flexion and opposition motors share one physical
+thumb tactile sensor. Raw values remain uncalibrated on the wire. The XR client
+uses a logarithmic relative-intensity mapping and must not label them as newtons.
+
+The current hand adapter/runtime UDP link uses the version-3 `BCH2` packet,
+whose six position and speed values follow the channel order above. Version 2
+is retained only for legacy HoloMotion receivers, where the first two channels
+were flexion then opposition. Bit `0x0001` of the little-endian `u16` flags
+field requests an immediate current-position hold. The runtime captures its own
+latest measured position for this operation; the packet's position fields are
+only a backwards-compatible fallback. While a previously active hand remains
+locked, the adapter repeats hold packets so one lost UDP datagram cannot leave
+the previous motion target active.
 
 ### Adapter → plugin control state
 

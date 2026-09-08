@@ -1,19 +1,23 @@
 class_name HandGestureMapper
 extends RefCounted
 ## Maps an OpenXR 26-joint hand skeleton to the six active Revo2 channels.
-## Output order matches the SDK/ROS driver: thumb proximal flex, thumb
-## metacarpal abduction/opposition, index, middle, ring, pinky.
+## Output order matches the hardware SDK: thumb metacarpal opposition, thumb
+## proximal flexion, index, middle, ring, pinky.
 
-const THUMB_FLEX_MAX := 0.50
-const THUMB_ABDUCT_MAX := 0.85
+const MAX_TRACKED_POSITION_SQUARED := 1_000_000.0
+const THUMB_OPPOSITION_MAX := 0.50
+const THUMB_FLEX_MAX := 0.87
 const THUMB_FLEX_OPEN_RAD := 0.10
 const THUMB_FLEX_CLOSED_RAD := 1.75
 const THUMB_ABDUCT_OPEN_RAD := 0.35
 const THUMB_ABDUCT_CLOSED_RAD := 1.65
+const PINCH_OPPOSITION_MAX := 0.30
+const PINCH_CLOSED_PALM_RATIO := 0.28
+const PINCH_OPEN_PALM_RATIO := 0.75
 
 const CHANNEL_NAMES := [
-	"thumb_flex",
 	"thumb_aux",
+	"thumb_flex",
 	"index_flex",
 	"middle_flex",
 	"ring_flex",
@@ -52,14 +56,14 @@ const PALM_MENU_FOREARM_OFFSET_M := 0.055
 const PALM_MENU_HEAD_OFFSET_M := 0.018
 
 const _SOURCE_TO_CHANNEL := {
-	"left_hand_thumb_flex": [0, 0],
-	"left_hand_thumb_aux": [0, 1],
+	"left_hand_thumb_aux": [0, 0],
+	"left_hand_thumb_flex": [0, 1],
 	"left_hand_index_flex": [0, 2],
 	"left_hand_middle_flex": [0, 3],
 	"left_hand_ring_flex": [0, 4],
 	"left_hand_pinky_flex": [0, 5],
-	"right_hand_thumb_flex": [1, 0],
-	"right_hand_thumb_aux": [1, 1],
+	"right_hand_thumb_aux": [1, 0],
+	"right_hand_thumb_flex": [1, 1],
 	"right_hand_index_flex": [1, 2],
 	"right_hand_middle_flex": [1, 3],
 	"right_hand_ring_flex": [1, 4],
@@ -94,7 +98,9 @@ static func palm_menu_state(
 	head_position: Variant,
 	hand: int = HAND_LEFT,
 ) -> Dictionary:
-	if not _has_required_joints(joints) or not head_position is Vector3:
+	if not _has_required_joints(joints) \
+			or not head_position is Vector3 \
+			or not _position_is_safe(head_position as Vector3):
 		return {"tracked": false}
 	var palm_v: Variant = _joint_position(joints, JOINT_PALM)
 	var wrist_v: Variant = _joint_position(joints, JOINT_WRIST)
@@ -111,16 +117,16 @@ static func palm_menu_state(
 	var thumbward_axis := (index_v as Vector3) - (pinky_v as Vector3)
 	var toward_head := (head_position as Vector3) - palm
 	var toward_forearm := wrist - palm
-	if finger_axis.length_squared() <= 0.000001 \
-			or thumbward_axis.length_squared() <= 0.000001 \
-			or toward_head.length_squared() <= 0.000001 \
-			or toward_forearm.length_squared() <= 0.000001:
+	if not _vector_has_direction(finger_axis) \
+			or not _vector_has_direction(thumbward_axis) \
+			or not _vector_has_direction(toward_head) \
+			or not _vector_has_direction(toward_forearm):
 		return {"tracked": false}
 
 	var palm_normal := thumbward_axis.cross(finger_axis)
 	if hand == HAND_RIGHT:
 		palm_normal = -palm_normal
-	if palm_normal.length_squared() <= 0.000001:
+	if not _vector_has_direction(palm_normal):
 		return {"tracked": false}
 	palm_normal = palm_normal.normalized()
 	toward_head = toward_head.normalized()
@@ -129,6 +135,8 @@ static func palm_menu_state(
 		+ toward_forearm.normalized() * PALM_MENU_FOREARM_OFFSET_M
 		+ toward_head * PALM_MENU_HEAD_OFFSET_M
 	)
+	if not _position_is_safe(anchor):
+		return {"tracked": false}
 	return {
 		"tracked": true,
 		"anchor_position": anchor,
@@ -177,7 +185,6 @@ static func hand_openness(joints: Array) -> float:
 
 static func _targets_from_joints(joints: Array) -> PackedFloat64Array:
 	var thumb_flex := _thumb_flexion(joints) * THUMB_FLEX_MAX
-	var thumb_aux := _thumb_abduction(joints) * THUMB_ABDUCT_MAX
 	var index_flex := _chain_curl(joints, [
 		JOINT_INDEX_METACARPAL,
 		JOINT_INDEX_PROXIMAL,
@@ -206,9 +213,14 @@ static func _targets_from_joints(joints: Array) -> PackedFloat64Array:
 		JOINT_PINKY_DISTAL,
 		JOINT_PINKY_TIP,
 	])
+	var average_finger_flex := (index_flex + middle_flex + ring_flex + pinky_flex) / 4.0
+	var thumb_aux := maxf(
+		_thumb_abduction(joints) * THUMB_OPPOSITION_MAX,
+		_thumb_pinch_opposition(joints, average_finger_flex)
+	)
 	return PackedFloat64Array([
-		thumb_flex,
 		thumb_aux,
+		thumb_flex,
 		index_flex,
 		middle_flex,
 		ring_flex,
@@ -227,8 +239,8 @@ static func _targets_from_controller(input: Dictionary) -> PackedFloat64Array:
 		1.0
 	)
 	return PackedFloat64Array([
-		trigger * THUMB_FLEX_MAX,
 		trigger * 0.50,
+		trigger * THUMB_FLEX_MAX,
 		trigger,
 		grip,
 		grip,
@@ -297,6 +309,30 @@ static func _thumb_abduction(joints: Array) -> float:
 		0.0,
 		1.0
 	)
+
+
+static func _thumb_pinch_opposition(joints: Array, average_finger_flex: float) -> float:
+	var thumb_tip_v: Variant = _joint_position(joints, JOINT_THUMB_TIP)
+	var index_tip_v: Variant = _joint_position(joints, JOINT_INDEX_TIP)
+	var index_base_v: Variant = _joint_position(joints, JOINT_INDEX_METACARPAL)
+	var pinky_base_v: Variant = _joint_position(joints, JOINT_PINKY_METACARPAL)
+	if not thumb_tip_v is Vector3 or not index_tip_v is Vector3 \
+			or not index_base_v is Vector3 or not pinky_base_v is Vector3:
+		return 0.0
+	var palm_width := (index_base_v as Vector3).distance_to(pinky_base_v as Vector3)
+	if not is_finite(palm_width) or palm_width <= 0.0001:
+		return 0.0
+	var tip_distance := (thumb_tip_v as Vector3).distance_to(index_tip_v as Vector3)
+	if not is_finite(tip_distance):
+		return 0.0
+	var tip_ratio := tip_distance / palm_width
+	var pinch_closeness := clampf(
+		inverse_lerp(PINCH_OPEN_PALM_RATIO, PINCH_CLOSED_PALM_RATIO, tip_ratio),
+		0.0,
+		1.0
+	)
+	var open_finger_weight := 1.0 - clampf(average_finger_flex / 0.50, 0.0, 1.0)
+	return pinch_closeness * open_finger_weight * PINCH_OPPOSITION_MAX
 
 
 static func _segment_angle(first: Vector3, second: Vector3) -> float:
@@ -370,6 +406,20 @@ static func _joint_position(joints: Array, index: int) -> Variant:
 	if not position_v is Vector3:
 		return null
 	var position := position_v as Vector3
-	if not is_finite(position.x) or not is_finite(position.y) or not is_finite(position.z):
+	if not _position_is_safe(position):
 		return null
 	return position
+
+
+static func _position_is_safe(position: Vector3) -> bool:
+	if not is_finite(position.x) or not is_finite(position.y) or not is_finite(position.z):
+		return false
+	var length_squared := position.length_squared()
+	return is_finite(length_squared) and length_squared <= MAX_TRACKED_POSITION_SQUARED
+
+
+static func _vector_has_direction(vector: Vector3) -> bool:
+	if not _position_is_safe(vector):
+		return false
+	var length_squared := vector.length_squared()
+	return is_finite(length_squared) and length_squared > 0.000001

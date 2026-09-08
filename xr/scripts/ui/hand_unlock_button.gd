@@ -23,6 +23,7 @@ const TRIGGER_FLASH_SEC := 0.18
 const POSITION_FOLLOW_RATE := 18.0
 const ROTATION_FOLLOW_RATE := 14.0
 const BUTTON_PRESSED_OFFSET := Vector2(0.0, 7.0)
+const MAX_TRACKED_POSITION_SQUARED := 1_000_000.0
 
 var _title: Label
 var _buttons: Dictionary = {}
@@ -135,12 +136,22 @@ func update_palm_menu(
 	var tracked := bool(menu_state.get("tracked", false))
 	var facing := float(menu_state.get("facing", -1.0))
 	var openness := float(menu_state.get("openness", 0.0))
+	if not is_finite(facing) or not is_finite(openness):
+		tracked = false
 	var pose_visible: bool = _visibility_state.update(tracked, facing, openness, delta)
 	var anchor_v: Variant = menu_state.get("anchor_position", null)
-	if tracked and anchor_v is Vector3 and head_transform is Transform3D:
-		_update_smoothed_transform(
-			face_head_transform(anchor_v as Vector3, head_transform as Transform3D), delta
+	if tracked \
+			and anchor_v is Vector3 \
+			and position_is_safe(anchor_v as Vector3) \
+			and head_transform is Transform3D \
+			and transform_is_safe(head_transform as Transform3D):
+		var target := face_head_transform(
+			anchor_v as Vector3, head_transform as Transform3D
 		)
+		if transform_is_safe(target):
+			_update_smoothed_transform(target, delta)
+		else:
+			_has_smoothed_transform = false
 	else:
 		_has_smoothed_transform = false
 
@@ -152,7 +163,10 @@ func update_palm_menu(
 
 	visible = true
 	var pose_interactive := PalmMenuVisibilityStateScript.meets_exit_pose(facing, openness)
-	if not available or not pose_interactive or not fingertip_position is Vector3:
+	if not available \
+			or not pose_interactive \
+			or not fingertip_position is Vector3 \
+			or not position_is_safe(fingertip_position as Vector3):
 		_reset_touch()
 		if not available:
 			_clear_trigger_feedback()
@@ -160,6 +174,10 @@ func update_palm_menu(
 		return
 
 	var local_tip := transform.affine_inverse() * (fingertip_position as Vector3)
+	if not position_is_safe(local_tip):
+		_reset_touch()
+		_refresh()
+		return
 	var touch := _touch_state(local_tip)
 	var phase := str(touch.get("phase", "idle"))
 	var action_id := StringName(touch.get("action", &""))
@@ -210,7 +228,10 @@ func _clear_trigger_feedback() -> void:
 
 
 func _update_smoothed_transform(target: Transform3D, delta: float) -> void:
-	if not _has_smoothed_transform:
+	if not transform_is_safe(target):
+		_has_smoothed_transform = false
+		return
+	if not _has_smoothed_transform or not transform_is_safe(transform):
 		transform = target
 		_has_smoothed_transform = true
 		return
@@ -220,7 +241,11 @@ func _update_smoothed_transform(target: Transform3D, delta: float) -> void:
 	var rotation := transform.basis.get_rotation_quaternion().slerp(
 		target.basis.get_rotation_quaternion(), rotation_weight
 	)
-	transform = Transform3D(Basis(rotation), position)
+	var smoothed := Transform3D(Basis(rotation), position)
+	if transform_is_safe(smoothed):
+		transform = smoothed
+	else:
+		_has_smoothed_transform = false
 
 
 func _trigger_action(action_id: StringName) -> void:
@@ -334,6 +359,8 @@ static func touch_phase(local_tip: Vector3) -> String:
 
 
 static func touch_phase_for_rect(local_tip: Vector3, rect: Rect2) -> String:
+	if not position_is_safe(local_tip):
+		return "idle"
 	var center := rect_center_local(rect)
 	var offset := local_tip - Vector3(center.x, center.y, 0.0)
 	var distance_to_plane := absf(offset.z)
@@ -358,6 +385,8 @@ static func touch_released(local_tip: Vector3) -> bool:
 
 
 static func touch_released_for_rect(local_tip: Vector3, rect: Rect2) -> bool:
+	if not position_is_safe(local_tip):
+		return true
 	var center := rect_center_local(rect)
 	var offset := local_tip - Vector3(center.x, center.y, 0.0)
 	var hover_half_size := rect_half_size_local(rect, 1.08)
@@ -414,19 +443,49 @@ static func feedback_event_for_state(unlocked: bool) -> String:
 
 
 static func face_head_transform(anchor: Vector3, head_transform: Transform3D) -> Transform3D:
+	if not position_is_safe(anchor) or not transform_is_safe(head_transform):
+		return Transform3D()
 	var z_axis := head_transform.origin - anchor
-	if z_axis.length_squared() <= 0.000001:
+	if not vector_has_direction(z_axis):
 		return Transform3D(head_transform.basis.orthonormalized(), anchor)
 	z_axis = z_axis.normalized()
 	var y_axis := head_transform.basis.y - z_axis * head_transform.basis.y.dot(z_axis)
-	if y_axis.length_squared() <= 0.000001:
+	if not vector_has_direction(y_axis):
 		y_axis = z_axis.cross(Vector3.RIGHT)
-	if y_axis.length_squared() <= 0.000001:
+	if not vector_has_direction(y_axis):
 		y_axis = Vector3.UP
 	y_axis = y_axis.normalized()
 	var x_axis := y_axis.cross(z_axis).normalized()
 	y_axis = z_axis.cross(x_axis).normalized()
-	return Transform3D(Basis(x_axis, y_axis, z_axis).orthonormalized(), anchor)
+	var result := Transform3D(Basis(x_axis, y_axis, z_axis).orthonormalized(), anchor)
+	return result if transform_is_safe(result) else Transform3D()
+
+
+static func transform_is_safe(value: Transform3D) -> bool:
+	if not position_is_safe(value.origin):
+		return false
+	for axis in [value.basis.x, value.basis.y, value.basis.z]:
+		var basis_axis := axis as Vector3
+		if not is_finite(basis_axis.x) \
+				or not is_finite(basis_axis.y) \
+				or not is_finite(basis_axis.z):
+			return false
+	var determinant := value.basis.determinant()
+	return is_finite(determinant) and absf(determinant) > 0.000001
+
+
+static func position_is_safe(value: Vector3) -> bool:
+	if not is_finite(value.x) or not is_finite(value.y) or not is_finite(value.z):
+		return false
+	var length_squared := value.length_squared()
+	return is_finite(length_squared) and length_squared <= MAX_TRACKED_POSITION_SQUARED
+
+
+static func vector_has_direction(value: Vector3) -> bool:
+	if not position_is_safe(value):
+		return false
+	var length_squared := value.length_squared()
+	return is_finite(length_squared) and length_squared > 0.000001
 
 
 static func smoothing_weight(follow_rate: float, delta: float) -> float:

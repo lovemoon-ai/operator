@@ -20,6 +20,7 @@ var _enable_latched: Dictionary = {}  # enable target -> bool (hysteresis state)
 const ENABLE_PRESS_THRESHOLD := 0.6
 const ENABLE_RELEASE_THRESHOLD := 0.4
 const HandGestureMapperScript = preload("res://scripts/input/hand_gesture_mapper.gd")
+const HandTargetFilterScript = preload("res://scripts/input/hand_target_filter.gd")
 
 # --- Driving hand -------------------------------------------------------------
 # One controller drives one arm. Rather than hard-coding "right" (which breaks
@@ -79,6 +80,10 @@ var _input_cache: Dictionary = {}
 var _hand_target_cache: Dictionary = {}
 var _hand_joint_cache: Dictionary = {}
 var _hand_control_unlocked := false
+var _hand_target_filters := {
+	HAND_LEFT: HandTargetFilterScript.new(),
+	HAND_RIGHT: HandTargetFilterScript.new(),
+}
 
 
 func _cached_input(tracking: TrackingProvider, hand: int) -> Dictionary:
@@ -237,10 +242,20 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 
 func _get_hand_target(tracking: TrackingProvider, hand: int, channel: int) -> float:
 	if not _hand_target_cache.has(hand):
-		_hand_target_cache[hand] = HandGestureMapperScript.targets_from_tracking(
-			_cached_hand_joints(tracking, hand),
+		var joints := _cached_hand_joints(tracking, hand)
+		var raw_targets: PackedFloat64Array = HandGestureMapperScript.targets_from_tracking(
+			joints,
 			_cached_input(tracking, hand)
 		)
+		var filter_v: Variant = _hand_target_filters.get(hand, null)
+		if filter_v is HandTargetFilter:
+			if HandGestureMapperScript.has_required_joints(joints):
+				_hand_target_cache[hand] = filter_v.filter(raw_targets)
+			else:
+				filter_v.reset()
+				_hand_target_cache[hand] = raw_targets
+		else:
+			_hand_target_cache[hand] = raw_targets
 	var targets: PackedFloat64Array = _hand_target_cache[hand]
 	if channel < 0 or channel >= targets.size():
 		return 0.0
@@ -257,6 +272,9 @@ func _get_hand_clutch(tracking: TrackingProvider, hand: int) -> float:
 func set_hand_control_unlocked(unlocked: bool) -> void:
 	_hand_control_unlocked = unlocked
 	if not unlocked:
+		for filter_v in _hand_target_filters.values():
+			if filter_v is HandTargetFilter:
+				filter_v.reset()
 		for target in _enable_latched:
 			if _is_enable_target(str(target)):
 				_enable_latched[target] = false
@@ -279,6 +297,7 @@ func get_hand_control_state(hand: int, head_position: Variant = null) -> Diction
 		"tracked": wrist_position is Vector3,
 		"position": wrist_position,
 		"index_tip": HandGestureMapperScript.index_tip_position(joints),
+		"joints": joints,
 		"palm_menu": HandGestureMapperScript.palm_menu_state(joints, head_position, hand),
 		"control_enabled": is_deadman_engaged_for_hand(hand),
 	}

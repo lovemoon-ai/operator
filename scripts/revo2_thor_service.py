@@ -27,6 +27,8 @@ import time
 from types import SimpleNamespace
 from typing import Any, Dict, IO, Optional, Sequence, Tuple
 
+sys.dont_write_bytecode = True
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 for dependency_dir in (
     SCRIPT_DIR / "lib",
@@ -37,29 +39,48 @@ for dependency_dir in (
         sys.path.insert(0, str(dependency_dir))
 
 from pyoperator.hosted import create_server
+from pyoperator.integrations.revo2 import (
+    COMMAND_PACKET_VERSION as ADAPTER_COMMAND_PACKET_VERSION,
+    Revo2TactileFeedback,
+)
 from pyoperator.integrations.revo2_udp import (
     Revo2UdpHostedAdapter,
     make_revo2_descriptor,
 )
 
-DEFAULT_LEFT_SERIAL = "BCXRL2103J2600007"
-DEFAULT_RIGHT_SERIAL = "BCXRR2100J2600007"
+DEFAULT_LEFT_SERIAL = "BCXTL2196J2600010"
+DEFAULT_RIGHT_SERIAL = "BCXTR2196J2600012"
 DEFAULT_PID_FILE = "revo2_thor_service.pid"
 XR_POSE_PORT = 63901
 XR_TELEMETRY_PORT = 63903
 PACKET = struct.Struct("<4sBBHIQ12f")
 MAGIC = b"BCH2"
-VERSION = 2
+VERSION = 3
 FLAG_HOLD = 1 << 0
 CHANNEL_NAMES = (
-    "thumb_flex",
     "thumb_aux",
+    "thumb_flex",
     "index",
     "middle",
     "ring",
     "pinky",
 )
+
+
+def validate_protocol_version(
+    adapter_version: int = ADAPTER_COMMAND_PACKET_VERSION,
+) -> None:
+    if adapter_version != VERSION:
+        raise RuntimeError(
+            "Revo2 protocol mismatch: runtime expects BCH2 v%d but bundled "
+            "pyoperator emits v%d; redeploy the complete operator-hand bundle"
+            % (VERSION, adapter_version)
+        )
+
+
 CHANNEL_MAX_POSITIONS = (500.0, 870.0, 1000.0, 1000.0, 1000.0, 1000.0)
+TOUCH_HARDWARE_TYPES = (6, 7)
+TOUCH_FINGER_COUNT = 5
 
 
 def _sdk():
@@ -128,6 +149,46 @@ def masked_targets(
 def _stall(value: Any) -> float:
     name = getattr(value, "name", str(value)).upper()
     return 1.0 if name.endswith("STALL") or value == 2 else 0.0
+
+
+def _enum_value(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    for candidate in (value, getattr(value, "value", None)):
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _supports_touch(device: Any, serial: str) -> bool:
+    hardware_type = _enum_value(getattr(device, "hardware_type", None))
+    if hardware_type in TOUCH_HARDWARE_TYPES:
+        return True
+    hardware_name = str(getattr(device, "hardware_type", "")).upper()
+    return "TOUCH" in hardware_name or serial.upper().startswith("BCXT")
+
+
+def _touch_items(status: Any) -> Tuple[Any, ...]:
+    items = getattr(status, "items", status)
+    if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+        raise ValueError("touch status must contain five finger items")
+    result = tuple(items)
+    if len(result) != TOUCH_FINGER_COUNT:
+        raise ValueError("touch status must contain five finger items")
+    return result
+
+
+def tactile_values(status: Any) -> Dict[str, list[float]]:
+    tactile = Revo2TactileFeedback.from_items(_touch_items(status))
+    return {
+        "touch_normal": list(tactile.normal),
+        "touch_tangential": list(tactile.tangential),
+        "touch_direction": list(tactile.direction),
+        "touch_proximity": list(tactile.proximity),
+        "touch_status": list(tactile.status),
+    }
 
 
 @dataclass
@@ -202,6 +263,8 @@ class HandWorker:
         command_channels: Tuple[bool, ...],
         current_alpha: float,
         rate_hz: float,
+        touch_rate_hz: float,
+        touch_timeout_seconds: float,
     ) -> None:
         self.sdk = sdk
         self.config = config
@@ -217,12 +280,23 @@ class HandWorker:
         self.command_channels = command_channels
         self.current_alpha = current_alpha
         self.interval = 1.0 / rate_hz
+        self.touch_interval = 1.0 / touch_rate_hz
+        self.touch_timeout_seconds = touch_timeout_seconds
+        self.touch_stale_ns = int(
+            max(self.touch_interval * 3.0, touch_timeout_seconds * 2.0)
+            * 1_000_000_000
+        )
         self.context = None
+        self._io_lock = asyncio.Lock()
         self.actual: Tuple[float, ...] = (0.0,) * 6
         self.target: Tuple[float, ...] = (0.0,) * 6
         self.filtered_current: Optional[Tuple[float, ...]] = None
         self.last_written: Optional[Tuple[float, ...]] = None
         self.hold_sent = False
+        self.touch_supported = False
+        self.tactile: Dict[str, list[float]] = {}
+        self.tactile_received_ns: Optional[int] = None
+        self.touch_error_reported = False
 
     async def connect(self) -> None:
         detected = await self.sdk.auto_detect(
@@ -248,16 +322,18 @@ class HandWorker:
                 )
             )
         self.context = await self.sdk.init_from_detected(matches[0])
+        self.touch_supported = _supports_touch(matches[0], self.config.serial)
         if self.allow_commands:
             await self._configure_current_limits()
         print(
-            "%s connected port=%s id=%d serial=%s commands=%s"
+            "%s connected port=%s id=%d serial=%s commands=%s touch=%s"
             % (
                 self.config.side,
                 self.config.port,
                 self.config.slave_id,
                 self.config.serial,
                 "enabled" if self.allow_commands else "disabled",
+                "enabled" if self.touch_supported else "unavailable",
             ),
             flush=True,
         )
@@ -333,67 +409,121 @@ class HandWorker:
     async def run(self, stopping: asyncio.Event, *, connected: bool = False) -> None:
         if not connected:
             await self.connect()
+        touch_task = (
+            asyncio.create_task(
+                self._run_touch_sampler(stopping),
+                name=f"revo2-{self.config.side}-touch",
+            )
+            if self.touch_supported
+            else None
+        )
         next_tick = time.monotonic()
-        while not stopping.is_set():
-            try:
-                status = await self.context.get_motor_status(self.config.slave_id)
-                self.actual = tuple(float(value) for value in status.positions)
-                current = tuple(float(value) for value in status.currents)
-                if self.filtered_current is None:
-                    self.filtered_current = current
-                else:
-                    self.filtered_current = tuple(
-                        old + self.current_alpha * (new - old)
-                        for old, new in zip(self.filtered_current, current)
+        try:
+            while not stopping.is_set():
+                try:
+                    status = await self._read_motor_status()
+                    self.actual = tuple(float(value) for value in status.positions)
+                    current = tuple(float(value) for value in status.currents)
+                    if self.filtered_current is None:
+                        self.filtered_current = current
+                    else:
+                        self.filtered_current = tuple(
+                            old + self.current_alpha * (new - old)
+                            for old, new in zip(self.filtered_current, current)
+                        )
+                    command = self.receiver.commands.get(self.config.side_id)
+                    fresh = (
+                        command is not None
+                        and time.monotonic_ns() - command.received_ns
+                        <= self.watchdog_ns
                     )
-                command = self.receiver.commands.get(self.config.side_id)
-                fresh = (
-                    command is not None
-                    and time.monotonic_ns() - command.received_ns <= self.watchdog_ns
-                )
-                hold_requested = fresh and bool(command.flags & FLAG_HOLD)
-                if hold_requested:
-                    self.target = self.actual
-                    if (
+                    hold_requested = fresh and bool(command.flags & FLAG_HOLD)
+                    if hold_requested:
+                        self.target = self.actual
+                        if (
+                            self.allow_commands
+                            and self.last_written is not None
+                            and not self.hold_sent
+                        ):
+                            await self._write(self.actual, (0.02,) * 6)
+                            self.last_written = self.actual
+                            self.hold_sent = True
+                    elif fresh:
+                        requested = tuple(value * 1000.0 for value in command.q)
+                        desired = masked_targets(
+                            self.actual, requested, self.command_channels
+                        )
+                        self.target = tuple(float(value) for value in desired)
+                        if self.allow_commands:
+                            base = (
+                                self.last_written
+                                if self.last_written is not None
+                                else self.actual
+                            )
+                            limited = slew_targets(base, desired, self.max_step)
+                            await self._write(limited, command.dq)
+                            self.last_written = tuple(float(value) for value in limited)
+                            self.hold_sent = False
+                    elif (
                         self.allow_commands
                         and self.last_written is not None
                         and not self.hold_sent
                     ):
                         await self._write(self.actual, (0.02,) * 6)
                         self.last_written = self.actual
+                        self.target = self.actual
                         self.hold_sent = True
-                elif fresh:
-                    requested = tuple(value * 1000.0 for value in command.q)
-                    desired = masked_targets(
-                        self.actual, requested, self.command_channels
+                    else:
+                        self.target = self.actual
+                    self._publish(status.states)
+                except Exception as exc:
+                    print(
+                        "%s loop error: %s" % (self.config.side, exc),
+                        file=sys.stderr,
                     )
-                    self.target = tuple(float(value) for value in desired)
-                    if self.allow_commands:
-                        base = (
-                            self.last_written
-                            if self.last_written is not None
-                            else self.actual
-                        )
-                        limited = slew_targets(base, desired, self.max_step)
-                        await self._write(limited, command.dq)
-                        self.last_written = tuple(float(value) for value in limited)
-                        self.hold_sent = False
-                elif (
-                    self.allow_commands
-                    and self.last_written is not None
-                    and not self.hold_sent
-                ):
-                    await self._write(self.actual, (0.02,) * 6)
-                    self.last_written = self.actual
-                    self.target = self.actual
-                    self.hold_sent = True
-                else:
-                    self.target = self.actual
-                self._publish(status.states)
-            except Exception as exc:
-                print("%s loop error: %s" % (self.config.side, exc), file=sys.stderr)
-            next_tick += self.interval
-            await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
+                next_tick += self.interval
+                await asyncio.sleep(max(0.0, next_tick - time.monotonic()))
+        finally:
+            if touch_task is not None:
+                touch_task.cancel()
+                await asyncio.gather(touch_task, return_exceptions=True)
+
+    async def _read_motor_status(self) -> Any:
+        async with self._io_lock:
+            return await self.context.get_motor_status(self.config.slave_id)
+
+    async def _run_touch_sampler(self, stopping: asyncio.Event) -> None:
+        next_sample = time.monotonic()
+        while not stopping.is_set():
+            await self._sample_touch()
+            next_sample += self.touch_interval
+            await asyncio.sleep(max(0.0, next_sample - time.monotonic()))
+
+    async def _sample_touch(self) -> None:
+        try:
+            async with self._io_lock:
+                status = await asyncio.wait_for(
+                    self.context.get_touch_sensor_status(self.config.slave_id),
+                    timeout=self.touch_timeout_seconds,
+                )
+            values = tactile_values(status)
+        except asyncio.TimeoutError:
+            self._clear_tactile("timed out")
+            return
+        except Exception as exc:
+            self._clear_tactile(str(exc))
+            return
+        self.tactile = values
+        self.tactile_received_ns = time.monotonic_ns()
+        self.touch_error_reported = False
+
+    def _clear_tactile(self, reason: str) -> None:
+        if not self.touch_error_reported:
+            print(
+                "%s tactile read failed: %s" % (self.config.side, reason),
+                file=sys.stderr,
+            )
+            self.touch_error_reported = True
 
     async def _write(self, positions: Sequence[float], speed: Sequence[float]) -> None:
         position_values = [
@@ -409,23 +539,31 @@ class HandWorker:
             )
             for value in speed
         ]
-        await self.context.set_finger_positions_and_speeds(
-            self.config.slave_id,
-            position_values,
-            speed_values,
-        )
+        async with self._io_lock:
+            await self.context.set_finger_positions_and_speeds(
+                self.config.slave_id,
+                position_values,
+                speed_values,
+            )
 
     def _publish(self, states: Sequence[Any]) -> None:
         current = self.filtered_current or (0.0,) * 6
         prefix = "revo2_%s" % self.config.side
+        values = {
+            prefix + "_target": list(self.target),
+            prefix + "_position": list(self.actual),
+            prefix + "_current": list(current),
+            prefix + "_stall": [_stall(value) for value in states],
+        }
+        if (
+            self.tactile_received_ns is not None
+            and time.monotonic_ns() - self.tactile_received_ns <= self.touch_stale_ns
+        ):
+            for suffix, samples in self.tactile.items():
+                values[prefix + "_" + suffix] = samples
         payload = json.dumps(
             {
-                "values": {
-                    prefix + "_target": list(self.target),
-                    prefix + "_position": list(self.actual),
-                    prefix + "_current": list(current),
-                    prefix + "_stall": [_stall(value) for value in states],
-                },
+                "values": values,
                 "timestamp_ns": time.time_ns(),
             },
             separators=(",", ":"),
@@ -478,6 +616,8 @@ async def run_hand_runtime(
             command_channels=args.command_channels,
             current_alpha=args.current_alpha,
             rate_hz=args.rate,
+            touch_rate_hz=args.touch_rate,
+            touch_timeout_seconds=args.touch_timeout_ms / 1000.0,
         )
         for config in configs
     ]
@@ -492,8 +632,9 @@ async def run_hand_runtime(
         if ready is not None:
             ready.set()
         print(
-            "BCH2 runtime listening udp=%s:%d telemetry=%s:%d mode=%s"
+            "BCH2 v%d runtime listening udp=%s:%d telemetry=%s:%d mode=%s"
             % (
+                VERSION,
                 args.bind,
                 args.command_port,
                 args.telemetry_host,
@@ -596,21 +737,11 @@ async def resolve_paths(args: argparse.Namespace, sdk: object) -> ServicePaths:
 
 
 def _tcp_port_listening(port: int) -> bool:
-    target = f"{port:04X}"
-    for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
-        try:
-            lines = table.read_text(encoding="utf-8").splitlines()[1:]
-        except OSError:
-            continue
-        for line in lines:
-            fields = line.split()
-            if (
-                len(fields) >= 4
-                and fields[1].rsplit(":", 1)[-1] == target
-                and fields[3] == "0A"
-            ):
-                return True
-    return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+            return True
+    except OSError:
+        return False
 
 
 async def _wait_for_bridge(process: asyncio.subprocess.Process) -> None:
@@ -646,6 +777,8 @@ def runtime_args(args: argparse.Namespace, paths: ServicePaths) -> SimpleNamespa
         command_side=args.command_side,
         command_channels=parse_channel_mask(args.command_channels),
         current_alpha=args.current_alpha,
+        touch_rate=args.touch_rate,
+        touch_timeout_ms=args.touch_timeout_ms,
         allow_commands=args.allow_commands,
     )
 
@@ -824,6 +957,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--right-id", type=lambda value: int(value, 0), default=127)
     parser.add_argument("--right-serial", default=DEFAULT_RIGHT_SERIAL)
     parser.add_argument("--rate", type=float, default=50.0)
+    parser.add_argument("--touch-rate", type=float, default=20.0)
+    parser.add_argument("--touch-timeout-ms", type=float, default=15.0)
     parser.add_argument("--watchdog-ms", type=float, default=1000.0)
     parser.add_argument("--max-step", type=float, default=160.0)
     parser.add_argument("--max-speed", type=int, default=1000)
@@ -858,6 +993,8 @@ def build_parser() -> argparse.ArgumentParser:
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     positive = (
         "rate",
+        "touch_rate",
+        "touch_timeout_ms",
         "watchdog_ms",
         "max_step",
         "telemetry_rate",
@@ -868,6 +1005,10 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
     for name in positive:
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.touch_rate > args.rate:
+        parser.error("--touch-rate must not exceed --rate")
+    if args.touch_timeout_ms > 1000.0 / args.rate:
+        parser.error("--touch-timeout-ms must not exceed one control interval")
     if not 1 <= args.max_speed <= 1000:
         parser.error("--max-speed must be in 1..1000")
     if not 1 <= args.protected_current_ma <= args.max_current_ma:
@@ -887,6 +1028,7 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 async def _main_async(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     try:
+        validate_protocol_version()
         sdk = _sdk()
         paths = await resolve_paths(args, sdk)
         runtime_args(args, paths)

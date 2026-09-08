@@ -46,8 +46,8 @@ const TELEMETRY_RETRY_DELAY_SEC := 1.0
 const REVO2_DEVICE_TYPE := "revo2_dual_hand"
 const PASSTHROUGH_BACKGROUND_MODE := Environment.BG_COLOR
 const REVO2_HAND_CHANNELS := [
-	"thumb_flex",
 	"thumb_aux",
+	"thumb_flex",
 	"index_flex",
 	"middle_flex",
 	"ring_flex",
@@ -70,6 +70,9 @@ const EEPoseTrajectoryScript = preload("res://scripts/ui/ee_pose_trajectory.gd")
 const DexterousHandFeedbackOverlayScript = preload(
 	"res://scripts/ui/dexterous_hand_feedback_overlay.gd"
 )
+const DexterousHandTactileOverlayScript = preload(
+	"res://scripts/ui/dexterous_hand_tactile_overlay.gd"
+)
 const HandControlIndicatorScript = preload(
 	"res://scripts/ui/hand_control_indicator.gd"
 )
@@ -81,6 +84,7 @@ var _control_frame_valid := {HAND_LEFT: false, HAND_RIGHT: false}
 var _control_frame_mirror := {HAND_LEFT: true, HAND_RIGHT: true}
 var _ee_pose_trajectory: EEPoseTrajectory
 var _hand_feedback_overlay: DexterousHandFeedbackOverlay
+var _hand_tactile_overlay: DexterousHandTactileOverlay
 var _hand_control_indicators := {}
 var _revo2_hand_runtime_enabled := false
 var _revo2_hand_control_unlocked := false
@@ -461,6 +465,11 @@ func _create_v2_nodes() -> void:
 	_hand_feedback_overlay.name = "DexterousHandFeedbackOverlay"
 	_camera.add_child(_hand_feedback_overlay)
 	_hand_feedback_overlay.set_enabled(false)
+	_hand_tactile_overlay = DexterousHandTactileOverlayScript.new()
+	_hand_tactile_overlay.name = "DexterousHandTactileOverlay"
+	_hand_tactile_overlay.set_tracking_provider(_tracking_provider)
+	_origin.add_child(_hand_tactile_overlay)
+	_hand_tactile_overlay.set_enabled(false)
 	for hand in [HAND_LEFT, HAND_RIGHT]:
 		var indicator := HandControlIndicatorScript.new()
 		indicator.name = "LeftHandControlIndicator" if hand == HAND_LEFT else "RightHandControlIndicator"
@@ -861,8 +870,12 @@ func _set_revo2_hand_runtime_enabled(enabled: bool) -> void:
 		_set_revo2_hand_control_unlocked(false)
 		if _hand_feedback_overlay:
 			_hand_feedback_overlay.clear()
+		if _hand_tactile_overlay:
+			_hand_tactile_overlay.clear()
 	if _hand_feedback_overlay:
 		_hand_feedback_overlay.set_enabled(enabled)
+	if _hand_tactile_overlay:
+		_hand_tactile_overlay.set_enabled(enabled)
 	if not enabled:
 		for indicator_v in _hand_control_indicators.values():
 			var indicator = indicator_v
@@ -1007,6 +1020,8 @@ func _set_teleop_suspended(suspended: bool) -> void:
 		_ee_pose_trajectory.break_all()
 	if _hand_feedback_overlay:
 		_hand_feedback_overlay.set_suspended(suspended)
+	if _hand_tactile_overlay:
+		_hand_tactile_overlay.set_suspended(suspended)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_suspended"):
 		_teleop_controller_panel.call("set_suspended", suspended)
 
@@ -1325,6 +1340,8 @@ func _connect_to_robot(ip: String, port: int) -> void:
 		_ee_pose_trajectory.clear()
 	if _hand_feedback_overlay:
 		_hand_feedback_overlay.clear()
+	if _hand_tactile_overlay:
+		_hand_tactile_overlay.clear()
 	_set_status(tr("UI_CONNECTING_TO") % [ip, port])
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
@@ -1380,6 +1397,8 @@ func _on_disconnected() -> void:
 		_ee_pose_trajectory.clear()
 	if _hand_feedback_overlay:
 		_hand_feedback_overlay.clear()
+	if _hand_tactile_overlay:
+		_hand_tactile_overlay.clear()
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	_video_tcp_handler.disconnect_from_robot()
@@ -1441,6 +1460,8 @@ func _on_telemetry_disconnected() -> void:
 	print("[Operator] Telemetry stream disconnected")
 	if _hand_feedback_overlay:
 		_hand_feedback_overlay.clear()
+	if _hand_tactile_overlay:
+		_hand_tactile_overlay.clear()
 
 
 func _on_telemetry_connection_failed(reason: String) -> void:
@@ -1820,6 +1841,8 @@ func _on_telemetry_received(_data: Dictionary) -> void:
 	_capture_control_frame(_data)
 	if _hand_feedback_overlay and _revo2_hand_runtime_enabled:
 		_hand_feedback_overlay.update_telemetry(_data)
+	if _hand_tactile_overlay and _revo2_hand_runtime_enabled:
+		_hand_tactile_overlay.update_telemetry(_data)
 	if _synthetic:
 		_synth_capture_telemetry(_data)
 
@@ -1861,10 +1884,18 @@ func _capture_control_frame_for_hand(
 	var frame_any: Variant = values.get(frame_key, null)
 	if frame_any is Array and (frame_any as Array).size() == 4:
 		var f: Array = frame_any
-		_control_frame[hand] = (
-			Quaternion(float(f[0]), float(f[1]), float(f[2]), float(f[3])).normalized()
-		)
-		_control_frame_valid[hand] = true
+		for component in f:
+			if (typeof(component) != TYPE_INT and typeof(component) != TYPE_FLOAT) \
+				or not is_finite(float(component)):
+				_control_frame_valid[hand] = false
+				return
+		var frame := Quaternion(float(f[0]), float(f[1]), float(f[2]), float(f[3]))
+		var frame_length_squared := frame.length_squared()
+		if is_finite(frame_length_squared) and frame_length_squared > 0.000001:
+			_control_frame[hand] = frame.normalized()
+			_control_frame_valid[hand] = true
+		else:
+			_control_frame_valid[hand] = false
 	else:
 		_control_frame_valid[hand] = false
 	_control_frame_mirror[hand] = bool(values.get(mirror_key, true))
@@ -1891,6 +1922,11 @@ func _update_hand_control_indicators() -> void:
 			indicator.update_state(null, false, false, false)
 			continue
 		var state: Dictionary = mode.get_hand_control_state(hand)
+		if _hand_tactile_overlay:
+			_hand_tactile_overlay.update_hand_joints(
+				"left" if hand == HAND_LEFT else "right",
+				state.get("joints", []) as Array,
+			)
 		var shown: bool = bool(state.get("tracked", false))
 		var control_enabled: bool = (
 			transport_connected
