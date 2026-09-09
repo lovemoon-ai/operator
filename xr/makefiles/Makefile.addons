@@ -205,8 +205,8 @@ prepare-android-libs:
 #   - addons/ahb_decoder/libahb_decoder.so  — picked up by Godot at runtime
 #   - android/build/libs/release/arm64-v8a/libahb_decoder.so  — packaged
 #     into the APK by Gradle's release.jniLibs.srcDirs
-# We copy the addon .so to the JNI path so build.sh's own (stale) JNI_DST
-# doesn't get in the way.
+# build.sh installs to both paths itself; this rule re-copies so the JNI
+# .so is rebuilt whenever the addon .so is.
 $(AHB_ADDON_SO): $(AHB_SRC)
 	@if [ -z "$$ANDROID_NDK" ] && [ -z "$$ANDROID_NDK_HOME" ]; then \
 	    echo "[ahb] sources require rebuilding $@, but ANDROID_NDK (or ANDROID_NDK_HOME) is not set" >&2; \

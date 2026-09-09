@@ -74,14 +74,18 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		// instead of (or in addition to) the YUV plane copy path. When
 		// absent, we silently stay on plan B's 3-plane upload.
 		//
-		// [issue 005 follow-up] Sampling AHB-imported VK_FORMAT_UNDEFINED
-		// images requires a VkSamplerYcbcrConversion-aware immutable
-		// sampler in the descriptor set layout — Godot's standard
-		// `sampler2D` shader binding does NOT have one. So the AHB path
-		// imports the buffer correctly but the fragment shader samples
-		// black. Until we either (a) wire YCbCr conversion through the
-		// RenderingDevice API or (b) add a Vulkan compute pass that
-		// blits AHB → RGBA, we let the operator force-disable AHB via:
+		// Sampling AHB-imported VK_FORMAT_UNDEFINED images requires a
+		// VkSamplerYcbcrConversion-aware immutable sampler in the
+		// descriptor set layout — Godot's standard `sampler2D` shader
+		// binding does NOT have one, which is why handing the imported
+		// image straight to Godot sampled black. ahb_decoder now solves
+		// this on the native side: it owns a private compute pipeline
+		// whose descriptor set layout carries the YCbCr conversion as an
+		// immutable sampler, and blits into a plain RGBA8 image that
+		// Godot can sample normally. See xr/native/ahb_decoder/README.md.
+		//
+		// The escape hatch remains, for bringing up new devices or when
+		// the runtime does not enable the required Vulkan extensions:
 		//   adb shell setprop debug.xrobo.force_yuv_plane 1
 		// which falls back to Plan B's CPU plane copy + 3 L8 textures
 		// + GPU YUV->RGB shader (proven to display real frames).

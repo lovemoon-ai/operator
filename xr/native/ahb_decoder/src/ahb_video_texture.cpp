@@ -31,6 +31,7 @@
 #include <vulkan/vulkan_android.h>
 
 #include <cstring>
+#include <vector>
 
 #define LOG_TAG "AhbVideoTexture"
 #define LOGI(fmt, ...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, fmt, ##__VA_ARGS__)
@@ -126,6 +127,83 @@ AhbVideoTexture::~AhbVideoTexture() {
 }
 
 
+// ---------- Capability probe ------------------------------------------------
+
+bool AhbVideoTexture::_probe_vulkan_capabilities() {
+	uint32_t count = 0;
+	if (vkEnumerateDeviceExtensionProperties(_vk_phys_device, nullptr, &count, nullptr) != VK_SUCCESS) {
+		LOGE("vkEnumerateDeviceExtensionProperties failed — cannot verify AHB support");
+		return false;
+	}
+	std::vector<VkExtensionProperties> exts(count);
+	if (vkEnumerateDeviceExtensionProperties(_vk_phys_device, nullptr, &count, exts.data()) != VK_SUCCESS) {
+		LOGE("vkEnumerateDeviceExtensionProperties(2) failed — cannot verify AHB support");
+		return false;
+	}
+
+	bool has_ahb = false;
+	bool has_ycbcr = false;
+	bool has_foreign = false;
+	for (const VkExtensionProperties &e : exts) {
+		if (strcmp(e.extensionName, VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME) == 0) {
+			has_ahb = true;
+		} else if (strcmp(e.extensionName, VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME) == 0) {
+			has_ycbcr = true;
+		} else if (strcmp(e.extensionName, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME) == 0) {
+			has_foreign = true;
+		}
+	}
+
+	// Driver-level support for the YCbCr feature bit. This is what the
+	// hardware can do, NOT what Godot enabled at vkCreateDevice time —
+	// Vulkan offers no way to read back enabled features. If sampling
+	// ever comes out black or solid-colour while this logs "yes", the
+	// runtime did not aggregate the feature in and the compute blit is
+	// running against a disabled feature.
+	//
+	// Chain the 1.1-era struct, not VkPhysicalDeviceVulkan11Features:
+	// the latter is a Vulkan 1.2 struct and passing it to a 1.1-only
+	// physical device is invalid usage.
+	const char *ycbcr_feature = "unknown";
+	VkPhysicalDeviceSamplerYcbcrConversionFeatures ycbcr_feats{};
+	ycbcr_feats.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES;
+	VkPhysicalDeviceFeatures2 feats{};
+	feats.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	feats.pNext = &ycbcr_feats;
+	auto get_features2 = (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(
+			_vk_instance, "vkGetPhysicalDeviceFeatures2");
+	if (!get_features2) {
+		get_features2 = (PFN_vkGetPhysicalDeviceFeatures2)vkGetInstanceProcAddr(
+				_vk_instance, "vkGetPhysicalDeviceFeatures2KHR");
+	}
+	if (get_features2) {
+		get_features2(_vk_phys_device, &feats);
+		ycbcr_feature = ycbcr_feats.samplerYcbcrConversion ? "yes" : "no";
+	}
+
+	LOGI("Vulkan capability probe: AHB_import=%s sampler_ycbcr_ext=%s queue_family_foreign=%s "
+			"samplerYcbcrConversion_supported=%s (%u device extensions)",
+			has_ahb ? "yes" : "NO", has_ycbcr ? "yes" : "NO", has_foreign ? "yes" : "NO",
+			ycbcr_feature, count);
+
+	if (!has_ahb || !has_ycbcr) {
+		LOGE("Physical device lacks the extensions the zero-copy path needs "
+				"(AHB_import=%d sampler_ycbcr=%d) — falling back to plane copy",
+				(int)has_ahb, (int)has_ycbcr);
+		return false;
+	}
+	if (!has_foreign) {
+		// We issue a VK_QUEUE_FAMILY_FOREIGN_EXT ownership acquire in
+		// _dispatch_blit unconditionally. Without the extension that
+		// barrier is undefined behaviour rather than an error, so warn
+		// loudly instead of silently corrupting frames.
+		LOGW("VK_EXT_queue_family_foreign not advertised — the FOREIGN acquire barrier "
+				"in _dispatch_blit is undefined behaviour on this driver");
+	}
+	return true;
+}
+
+
 // ---------- TODO #1 — pull VkDevice out of Godot's RenderingDevice ----------
 
 bool AhbVideoTexture::_ensure_device() {
@@ -151,6 +229,10 @@ bool AhbVideoTexture::_ensure_device() {
 			RenderingDevice::DRIVER_RESOURCE_PHYSICAL_DEVICE,
 			RID(),
 			0);
+	_vk_instance = (VkInstance)(uintptr_t)rd->get_driver_resource(
+			RenderingDevice::DRIVER_RESOURCE_TOPMOST_OBJECT,
+			RID(),
+			0);
 	if (_vk_device == VK_NULL_HANDLE || _vk_phys_device == VK_NULL_HANDLE) {
 		LOGE("RenderingDevice didn't return Vulkan handles (vk_device=%p vk_phys=%p)",
 				(void *)_vk_device, (void *)_vk_phys_device);
@@ -159,11 +241,32 @@ bool AhbVideoTexture::_ensure_device() {
 		return false;
 	}
 
-	// Resolve the AHB / YCbCr extension entry points. These are
-	// _instance_-level extensions hidden behind device-level functions
-	// because we need a device handle to call them. They're guaranteed
-	// available on Android API 26+ if VK_ANDROID_external_memory_android_hardware_buffer
-	// was loaded — Godot's Vulkan driver enables that automatically on Android.
+	if (!_probe_vulkan_capabilities()) {
+		_vk_device = VK_NULL_HANDLE;
+		_vk_phys_device = VK_NULL_HANDLE;
+		return false;
+	}
+
+	// Resolve the AHB / YCbCr entry points.
+	//
+	// NOTE: Godot does NOT request these itself. Stock 4.5.1's
+	// _initialize_device_extensions() registers neither
+	// VK_ANDROID_external_memory_android_hardware_buffer nor
+	// VK_EXT_queue_family_foreign, and rendering_device_driver_vulkan.cpp
+	// hard-codes `vulkan_1_1_features.samplerYcbcrConversion = 0`.
+	// (Upstream PR #97163, which would flip both, is still a draft stub.)
+	//
+	// We get them anyway because Godot creates its VkDevice through
+	// VulkanHooks -> xrCreateVulkanDeviceKHR, and XR_KHR_vulkan_enable2
+	// requires the runtime to "aggregate the requirements specified by
+	// the application with its own requirements". Meta/PICO hand out
+	// swapchain images that are themselves AHardwareBuffers, so their
+	// runtimes pull these extensions in. That is the load-bearing
+	// assumption of this whole file — hence the probe above.
+	//
+	// A null proc-addr here is the one honest signal Vulkan gives us
+	// that an extension was not enabled, so we treat it as fatal and
+	// let the caller fall back to the plane-copy path.
 	_fn_get_ahb_props = (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)
 			vkGetDeviceProcAddr(_vk_device, "vkGetAndroidHardwareBufferPropertiesANDROID");
 	_fn_create_ycbcr = (PFN_vkCreateSamplerYcbcrConversion)
@@ -842,12 +945,6 @@ bool AhbVideoTexture::_dispatch_blit() {
 			VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 			0, 0, nullptr, 0, nullptr, 2, pre);
 
-	// DIAGNOSTIC: instead of the compute dispatch, do a vkCmdClearColorImage
-	// writing solid green. If the headset shows green, the _dst_image RID
-	// is reaching Godot's display path correctly — bug is in the compute
-	// pipeline (sampler / YCbCr conversion / barriers). If the headset
-	// still shows the placeholder blue, the binding itself is broken — our
-	// writes go to a different image than the one Godot displays.
 	vkCmdBindPipeline(_cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_pipeline);
 	vkCmdBindDescriptorSets(_cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
 			_pipeline_layout, 0, 1, &_descriptor_set, 0, nullptr);
@@ -856,8 +953,6 @@ bool AhbVideoTexture::_dispatch_blit() {
 	uint32_t gx = (uint32_t)((_dst_width + 7) / 8);
 	uint32_t gy = (uint32_t)((_dst_height + 7) / 8);
 	vkCmdDispatch(_cmd_buffer, gx, gy, 1);
-	(void)_compute_pipeline; (void)_pipeline_layout; (void)_descriptor_set;
-	(void)_dst_width; (void)_dst_height;
 
 	// --- Barrier AFTER the dispatch: dst GENERAL -> SHADER_READ_ONLY
 	// so Godot's fragment shader (next subpass on the queue) reads it.
@@ -888,6 +983,16 @@ bool AhbVideoTexture::_dispatch_blit() {
 	submit.pCommandBuffers = &_cmd_buffer;
 	// No semaphores: we share the queue with Godot's main render, so
 	// same-queue submission ordering gives us the dependency for free.
+	//
+	// LOAD-BEARING INVARIANT: this must stay on Godot's render thread.
+	// VkQueue is externally synchronised, and XR_KHR_vulkan_enable2
+	// says the OpenXR runtime may itself touch this same queue inside
+	// xrBeginFrame / xrEndFrame / xrAcquireSwapchainImage /
+	// xrReleaseSwapchainImage. Godot drives those from the render
+	// thread, so routing through call_on_render_thread (see
+	// push_buffer) is what serialises us against the runtime. Submit
+	// from any other thread and this becomes a data race on the queue
+	// with the compositor.
 	r = vkQueueSubmit(_vk_queue, 1, &submit, _blit_fence);
 	if (r != VK_SUCCESS) {
 		LOGE("vkQueueSubmit failed: %d", r);

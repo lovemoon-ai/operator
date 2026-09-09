@@ -120,10 +120,12 @@ fi
 
 # Install to:
 #   1. addons/ahb_decoder/  — referenced by ahb_decoder.gdextension
-#   2. android/build/libs/arm64-v8a/  — picked up by Kotlin
-#      System.loadLibrary("ahb_decoder")
+#   2. android/build/libs/release/arm64-v8a/  — packaged into the APK by
+#      Gradle's release.jniLibs.srcDirs, then found by Kotlin's
+#      System.loadLibrary("ahb_decoder"). Must match build.gradle:244;
+#      libs/arm64-v8a/ is read by no variant and silently ships nothing.
 ADDON_DST="$SCRIPT_DIR/../../addons/ahb_decoder/libahb_decoder.so"
-JNI_DST="$SCRIPT_DIR/../../android/build/libs/arm64-v8a/libahb_decoder.so"
+JNI_DST="$SCRIPT_DIR/../../android/build/libs/release/arm64-v8a/libahb_decoder.so"
 
 mkdir -p "$(dirname "$ADDON_DST")"
 mkdir -p "$(dirname "$JNI_DST")"

@@ -65,6 +65,9 @@ private:
 	// because AHB just bumps a refcount).
 	VkDevice _vk_device = VK_NULL_HANDLE;
 	VkPhysicalDevice _vk_phys_device = VK_NULL_HANDLE;
+	// Only used to resolve vkGetPhysicalDeviceFeatures2 for the
+	// capability probe; we never create anything on it.
+	VkInstance _vk_instance = VK_NULL_HANDLE;
 	VkImage _vk_image = VK_NULL_HANDLE;
 	VkDeviceMemory _vk_memory = VK_NULL_HANDLE;
 	VkImageView _vk_image_view = VK_NULL_HANDLE;
@@ -167,6 +170,18 @@ private:
 	/// Vulkan one (e.g. the project was forced to GLES) or if the
 	/// required extensions aren't supported.
 	bool _ensure_device();
+
+	/// Log what the physical device actually advertises for the three
+	/// capabilities this path depends on, and hard-fail if the AHB
+	/// import extension is missing. Returns false to abort init.
+	///
+	/// This exists because we cannot query which device extensions or
+	/// features Godot/the OpenXR runtime *enabled* — Vulkan has no such
+	/// API. What we can do is record driver support in logcat so that a
+	/// black/green screen report is diagnosable without a rebuild. See
+	/// the note above _ensure_device() in the .cpp for why enablement
+	/// is not something we control.
+	bool _probe_vulkan_capabilities();
 
 	/// Tear down the current VkImage/memory/view chain. Safe to call
 	/// even when nothing is allocated yet.
