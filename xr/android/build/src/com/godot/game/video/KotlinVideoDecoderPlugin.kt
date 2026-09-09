@@ -104,10 +104,25 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 					"using YUV plane upload (visible video, no zero-copy)")
 				return@run false
 			}
-			if (isPicoDevice()) {
+			// The PICO block predates any logged evidence: it was added
+			// with the note "its Vulkan driver does not support the AHB
+			// import path", but nothing recorded which call failed. The
+			// claim is worth re-testing — PICO's own OpenXR runtime hands
+			// out AHardwareBuffer-backed swapchain images, so the driver
+			// plainly supports some of this. force_ahb=1 lifts the block
+			// for one session so _probe_vulkan_capabilities() can log what
+			// the device actually advertises; default behaviour is
+			// unchanged. Delete isPicoDevice() only once that log says the
+			// extensions are there.
+			val forceAhb = readSystemProp("debug.xrobo.force_ahb") == "1"
+			if (isPicoDevice() && !forceAhb) {
 				Log.i(TAG, "PICO device detected — disabling unsupported Vulkan AHB import, " +
-					"using YUV plane upload")
+					"using YUV plane upload (set debug.xrobo.force_ahb=1 to re-test)")
 				return@run false
+			}
+			if (forceAhb) {
+				Log.i(TAG, "debug.xrobo.force_ahb=1 — bypassing the device block; " +
+					"watch for the AhbVideoTexture capability probe line")
 			}
 			try {
 				System.loadLibrary("ahb_decoder")
