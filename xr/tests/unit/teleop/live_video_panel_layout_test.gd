@@ -16,6 +16,20 @@ class PressCapturingTarget:
 		return true
 
 
+class RestartingDecoder:
+	extends RefCounted
+	var running := false
+	var starts := 0
+
+	func is_running() -> bool:
+		return running
+
+	func start_decoder_with_codec(_width: int, _height: int, _codec: String) -> bool:
+		starts += 1
+		running = true
+		return true
+
+
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var view = LiveVideoViewScript.new()
 	var camera := XRCamera3D.new()
@@ -92,6 +106,75 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	view._decoder_busy_count = 3
 	t.is_true(view._total_drop_count() == 5,
 		"compact drop count includes local stale and decoder drops")
+
+	t.eq(
+		LiveVideoViewScript._resolve_yuv_color_standard("auto", 720),
+		LiveVideoViewScript.YUV_COLOR_STANDARD_BT709,
+		"720p video defaults to BT.709",
+	)
+	t.eq(
+		LiveVideoViewScript._resolve_yuv_color_standard("smpte170m", 1080),
+		LiveVideoViewScript.YUV_COLOR_STANDARD_BT601,
+		"explicit BT.601 aliases override the resolution default",
+	)
+	t.eq(
+		LiveVideoViewScript._resolve_yuv_color_range("jpeg"),
+		LiveVideoViewScript.YUV_COLOR_RANGE_FULL,
+		"JPEG/full-range aliases select full-range YUV",
+	)
+	var intervals: Array[float] = [33.0, 34.0, 50.0, 32.0, 40.0]
+	t.is_true(
+		is_equal_approx(LiveVideoViewScript._frame_interval_percentile(intervals, 0.50), 34.0),
+		"draw interval P50 uses the rendered-frame sample window",
+	)
+	t.is_true(
+		is_equal_approx(LiveVideoViewScript._frame_interval_percentile(intervals, 0.95), 50.0),
+		"draw interval P95 exposes visible pacing spikes",
+	)
+
+	view._submitted_video_packets = [
+		{"frame_id": 10, "receive_ns": 1_000_123},
+		{"frame_id": 11, "receive_ns": 2_000_456},
+		{"frame_id": 12, "receive_ns": 3_000_789},
+	]
+	var correlated_packet := view._take_latest_decoder_packet(1, 3000)
+	t.eq(int(correlated_packet.get("frame_id", -1)), 12,
+		"MediaCodec PTS skips parameter-set metadata that produced no frame")
+	t.eq(view._submitted_video_packets.size(), 0,
+		"PTS correlation retires all metadata through the decoded frame")
+
+	view.visible = false
+	view._pending_draw_sequence = 3
+	view._on_frame_post_draw()
+	t.eq(view._drawn_frame_count, 0,
+		"frames received while the panel is hidden are not counted as drawn")
+	t.eq(view._display_skipped_frame_count, 0,
+		"frames intentionally hidden are not counted as display drops")
+	view.visible = true
+	view._pending_draw_sequence = 5
+	view._on_frame_post_draw()
+	t.eq(view._drawn_frame_count, 1,
+		"one render completion counts one actually drawn source frame")
+	t.eq(view._display_skipped_frame_count, 1,
+		"only mailbox sequences skipped while visible are counted as display drops")
+	view._on_frame_post_draw()
+	t.eq(view._drawn_frame_count, 1,
+		"re-rendering the same texture does not inflate displayed frame count")
+
+	var restarting_decoder := RestartingDecoder.new()
+	view._video_decoder = restarting_decoder
+	view._configured_width = 1280
+	view._configured_height = 720
+	view._configured_codec = "h264"
+	view._on_video_decoder_error("synthetic failure")
+	t.is_true(view._decoder_restart_pending,
+		"decoder failures schedule recovery after the worker stops")
+	view._restart_video_decoder_after_error()
+	t.eq(restarting_decoder.starts, 1,
+		"decoder recovery restarts the configured codec")
+	t.is_false(view._decoder_restart_pending,
+		"successful decoder recovery clears the pending restart")
+	view._video_decoder = null
 
 	# Regression: the measured distance must not be clamped before the scroll
 	# delta is applied. In world-locked mode the operator can walk until the

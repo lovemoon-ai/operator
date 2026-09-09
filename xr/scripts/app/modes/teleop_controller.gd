@@ -120,10 +120,12 @@ var _last_video_feed: Dictionary = {}
 var _active_telemetry_port := DEFAULT_TELEMETRY_PORT
 var _telemetry_retry_remaining := 0.0
 var _clock_sync: RobotClockSync
+## Discovery identity -> endpoint metadata. Identity includes the protocol so an
+## Operator service and an XRoboToolkit RoboticsService may coexist on one host.
 var _known_robots: Dictionary = {}
 ## Node listening for XRoboToolkit's own 1 Hz robot beacon. Separate port and
 ## separate wire format from `_discovery`, so it is a separate listener that
-## merges into the same `_known_robots` map.
+## merges into the same protocol-aware `_known_robots` map.
 var _xrt_discovery: Node = null
 var _outside_target: Node
 var _xrt_target: Node
@@ -174,6 +176,7 @@ const SYNTH_KEY_DURATION := "--operator-teleop-duration"
 const TELEOP_KEY_HOST := "--operator-teleop-host"
 const TELEOP_KEY_PORT := "--operator-teleop-port"
 const TELEOP_KEY_PROTOCOL := "--operator-teleop-protocol"
+const TELEOP_KEY_SHOW_VIDEO_PANEL := "--operator-teleop-show-video-panel"
 const TELEOP_KEY_XROBOT_TOOLKIT_DEVICE_SN := "--operator-xrobot-toolkit-device-sn"
 const TELEOP_KEY_PICO_BODY_CALIBRATE := "--operator-teleop-pico-body-calibrate"
 ## Inside Robot launch overrides. Inside is otherwise only reachable by hand in
@@ -659,6 +662,7 @@ func _on_xr_started() -> void:
 		launch_options["target_scope"] = "outside"
 		launch_options["protocol"] = _teleop_arg(
 			TELEOP_KEY_PROTOCOL, str(launch_options.get("protocol", "operator")))
+		_apply_common_launch_overrides(launch_options)
 		launch_options["ip"] = launch_host
 		launch_options["port"] = launch_port
 		launch_options["xrobot_toolkit_device_sn"] = _teleop_arg(
@@ -671,6 +675,7 @@ func _on_xr_started() -> void:
 			_settings_panel.visible = false
 		_settings_button.visible = true
 		_set_teleop_suspended(false)
+		_apply_runtime_settings(launch_options)
 		print(
 			"[Operator] Direct-connect launch override %s:%d via %s"
 			% [launch_host, launch_port, str(launch_options.get("protocol", "operator"))]
@@ -884,9 +889,51 @@ func _set_revo2_hand_runtime_enabled(enabled: bool) -> void:
 	_update_hand_palm_menu()
 
 
-func _prepare_outside_runtime_features(ip: String) -> void:
-	var info_v: Variant = _known_robots.get(ip, {})
-	var info: Dictionary = info_v if info_v is Dictionary else {}
+static func _operator_discovery_key(ip: String, pose_port: int) -> String:
+	return "operator|%s|%d" % [ip, pose_port]
+
+
+static func _xrt_discovery_key(ip: String, port: int) -> String:
+	return "xrobot_toolkit_v1|%s|%d" % [ip, port]
+
+
+static func _known_robot_ip(key: Variant, info: Dictionary) -> String:
+	var endpoint_ip := str(info.get("ip", "")).strip_edges()
+	if endpoint_ip.is_empty() and str(key).is_valid_ip_address():
+		endpoint_ip = str(key)
+	return endpoint_ip
+
+
+func _find_known_robot(ip: String, protocol := "", pose_port := 0) -> Dictionary:
+	for key in _known_robots:
+		var info_v: Variant = _known_robots[key]
+		if not info_v is Dictionary:
+			continue
+		var info := info_v as Dictionary
+		if _known_robot_ip(key, info) != ip:
+			continue
+		if not protocol.is_empty() and str(info.get("protocol", "operator")) != protocol:
+			continue
+		if pose_port > 0 and int(info.get("pose_port", 0)) != pose_port:
+			continue
+		return info
+	return {}
+
+
+static func _discovery_matches_options(info: Dictionary, options: Dictionary) -> bool:
+	return (
+		str(info.get("ip", "")).strip_edges() == str(options.get("ip", "")).strip_edges()
+		and int(info.get("pose_port", 0)) == int(options.get("port", 0))
+		and str(info.get("protocol", "operator")) == str(options.get("protocol", "operator"))
+	)
+
+
+static func _can_auto_connect_discovered(info: Dictionary, options: Dictionary) -> bool:
+	return bool(options.get("loaded", false)) and _discovery_matches_options(info, options)
+
+
+func _prepare_outside_runtime_features(ip: String, pose_port: int) -> void:
+	var info := _find_known_robot(ip, "operator", pose_port)
 	_set_revo2_hand_runtime_enabled(
 		str(info.get("device_type", "")) == REVO2_DEVICE_TYPE
 	)
@@ -1126,9 +1173,9 @@ func _resume_inside_embodiment() -> void:
 #
 #   show_on_launch == true   → always show panel
 #   0 robots                 → show panel (manual fallback, status hints why)
-#   1 robot == last_used_ip  → auto-connect after spinner, close panel
-#   1 robot, last_used_ip is loopback default → auto-connect after spinner
-#   1 robot, different IP    → show panel pre-filled with the new IP
+#   1 robot == saved endpoint → auto-connect after spinner, close panel
+#   fresh/default settings    → show panel and keep Manual editable
+#   1 different endpoint      → show panel for confirmation
 #   N robots                 → show panel with the dropdown populated
 #
 # `last_used_ip` lives in user://teleop_settings.cfg. The robot agent broadcasts on
@@ -1204,11 +1251,14 @@ func _finalize_launch(token: int) -> void:
 		_show_settings_panel_with_status(tr("UI_NO_ROBOTS_DISCOVERED"))
 		return
 
-	# Try to match last-used IP first — that's the "silent auto-connect" case.
+	# Silent auto-connect is allowed only for an endpoint the operator previously
+	# confirmed. A fresh install's loopback default must never grant ownership to
+	# whichever unrelated debug service happens to be the sole broadcaster.
 	if n_robots == 1:
-		var only_ip := String(_known_robots.keys()[0])
-		var only_info: Dictionary = _known_robots[only_ip]
-		if only_ip == last_ip or _is_loopback_host(last_ip):
+		var only_key: Variant = _known_robots.keys()[0]
+		var only_info: Dictionary = _known_robots[only_key]
+		var only_ip := _known_robot_ip(only_key, only_info)
+		if _can_auto_connect_discovered(only_info, persisted):
 			_auto_connect_to_discovered(only_ip, int(only_info.get("pose_port", 63901)), only_info)
 			return
 		# Single robot but it's not the one we used before — surface it for confirmation.
@@ -1236,7 +1286,13 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	# the panel-hide step (panel was never shown). Also apply persisted
 	# video mode so the auto-path matches what OK would do.
 	var persisted: Dictionary = SettingsUI.load_settings()
-	_apply_runtime_settings(persisted)
+	var options := persisted.duplicate(true)
+	options["target_scope"] = "outside"
+	options["protocol"] = str(info.get("protocol", "operator"))
+	options["ip"] = ip
+	options["port"] = port
+	_applied_options = options.duplicate(true)
+	_apply_runtime_settings(options)
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
 
@@ -1246,8 +1302,11 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 		_settings_panel.visible = false
 	_settings_button.visible = true
 	_set_teleop_suspended(false)
-	print("[Operator] Auto-connecting to discovered robot @ %s:%d" % [ip, port])
-	_connect_to_robot(ip, port)
+	print(
+		"[Operator] Auto-connecting to discovered %s endpoint @ %s:%d"
+		% [str(options.get("protocol", "operator")), ip, port]
+	)
+	_start_outside_with_options(options)
 
 
 func _show_settings_panel_with_status(text: String) -> void:
@@ -1278,16 +1337,18 @@ func _show_settings_panel_discovering() -> void:
 		_settings_ui.set_discovering(true, tr("UI_DISCOVERING_ROBOTS"))
 
 
-## Translate this controller's IP-keyed `_known_robots` into the name-keyed
-## structure SettingsUI expects, then push it down with the user's
-## preferred IP so the dropdown auto-selects the right row.
+## Translate the protocol-aware discovery map into the name-keyed structure
+## SettingsUI expects. Only an explicitly saved endpoint is preselected; fresh
+## defaults stay on Manual so the endpoint fields remain immediately usable.
 func _push_discovery_to_settings_ui() -> void:
 	if not _settings_ui or not _settings_ui.has_method("set_discovery_state"):
 		return
-	var by_name: Dictionary = {}
-	for ip in _known_robots:
-		var raw: Dictionary = _known_robots[ip]
+	var by_endpoint: Dictionary = {}
+	for key in _known_robots:
+		var raw: Dictionary = _known_robots[key]
+		var ip := _known_robot_ip(key, raw)
 		var info: Dictionary = {
+			"name": raw.get("name", ip),
 			"ip": ip,
 			"pose_port": raw.get("pose_port", 63901),
 			"video_port": raw.get("video_port", 0),
@@ -1295,14 +1356,18 @@ func _push_discovery_to_settings_ui() -> void:
 			"device_type": raw.get("device_type", ""),
 			"device_name": raw.get("device_name", ""),
 		}
-		# Only beacon-sourced entries carry this. It tells the panel which
-		# protocol the discovered host actually speaks.
-		if raw.has("protocol"):
-			info["protocol"] = raw.get("protocol")
-		var rname: String = String(raw.get("name", ip))
-		by_name[rname] = info
+		info["protocol"] = raw.get("protocol", "operator")
+		by_endpoint[str(key)] = info
 	var persisted: Dictionary = SettingsUI.load_settings()
-	_settings_ui.set_discovery_state(by_name, String(persisted.get("ip", "")))
+	if bool(persisted.get("loaded", false)):
+		_settings_ui.set_discovery_state(
+			by_endpoint,
+			String(persisted.get("ip", "")),
+			String(persisted.get("protocol", "operator")),
+			int(persisted.get("port", 63901)),
+		)
+	else:
+		_settings_ui.set_discovery_state(by_endpoint)
 
 
 ## Single-path "show this status" helper. Goes to logcat always; goes
@@ -1335,7 +1400,7 @@ func _on_command_sent(command: Dictionary) -> void:
 
 func _connect_to_robot(ip: String, port: int) -> void:
 	_set_revo2_hand_control_unlocked(false)
-	_prepare_outside_runtime_features(ip)
+	_prepare_outside_runtime_features(ip, port)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.clear()
 	if _hand_feedback_overlay:
@@ -1383,7 +1448,7 @@ func _on_connected() -> void:
 	if _outside_target:
 		_outside_target.mark_transport_connected()
 	_connect_telemetry_stream(_tcp_handler.get_host())
-	_connect_video_stream(_tcp_handler.get_host())
+	_connect_video_stream(_tcp_handler.get_host(), _tcp_handler.get_port())
 	if _clock_sync:
 		_clock_sync.start()
 
@@ -1489,11 +1554,10 @@ func _on_telemetry_command_received(command: String, data: PackedByteArray) -> v
 
 
 func _telemetry_port_for(ip: String, pose_port: int) -> int:
-	if _known_robots.has(ip):
-		var info: Dictionary = _known_robots[ip]
-		var discovered_port := int(info.get("telemetry_port", 0))
-		if discovered_port > 0 and discovered_port <= 65535:
-			return discovered_port
+	var info := _find_known_robot(ip, "operator", pose_port)
+	var discovered_port := int(info.get("telemetry_port", 0))
+	if discovered_port > 0 and discovered_port <= 65535:
+		return discovered_port
 	var derived := pose_port + TELEMETRY_PORT_OFFSET
 	return derived if derived > 0 and derived <= 65535 else DEFAULT_TELEMETRY_PORT
 
@@ -1815,7 +1879,7 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	# whether the robot is offering UDP. Re-call `_connect_video_stream`
 	# so we can upgrade to UDP if the descriptor advertises it.
 	if _tcp_handler.is_connected_to_robot():
-		_connect_video_stream(_tcp_handler.get_host())
+		_connect_video_stream(_tcp_handler.get_host(), _tcp_handler.get_port())
 
 
 func _on_device_disconnected() -> void:
@@ -2050,27 +2114,26 @@ func _on_robot_found(
 	ip: String,
 	pose_port: int,
 	video_port: int,
+	telemetry_port: int,
 	device_type: String,
 	device_name: String
 ) -> void:
 	# Discovery feed drives both (1) auto-reconnect of the video stream
 	# when the descriptor matches the currently connected host, and (2)
 	# the SettingsPanel's "Discovered" dropdown (per the D launch flow).
-	var telemetry_port := pose_port + TELEMETRY_PORT_OFFSET
-	var discovered: Dictionary = _discovery.get_known_robots()
-	if discovered.has(robot_name):
-		telemetry_port = int(
-			(discovered[robot_name] as Dictionary).get("telemetry_port", telemetry_port)
-		)
-	_known_robots[ip] = {
+	if telemetry_port <= 0:
+		telemetry_port = pose_port + TELEMETRY_PORT_OFFSET
+	_known_robots[_operator_discovery_key(ip, pose_port)] = {
 		"name": robot_name,
+		"ip": ip,
 		"pose_port": pose_port,
 		"video_port": video_port,
 		"telemetry_port": telemetry_port,
 		"device_type": device_type,
 		"device_name": device_name,
+		"protocol": "operator",
 		# Marks which listener owns this entry. The XRoboToolkit beacon defers to
-		# native announcements because it carries strictly less information.
+		# native announcements only for metadata, not for endpoint identity.
 		"source": "operator",
 	}
 	# Push live update to the panel iff it's currently visible — when the
@@ -2079,26 +2142,17 @@ func _on_robot_found(
 		_settings_panel
 		and _settings_panel.visible
 		and _settings_ui
-		and _settings_ui.has_method("add_discovered")
+		and _settings_ui.has_method("set_discovery_state")
 	):
-		(
-			_settings_ui
-			. add_discovered(
-				robot_name,
-				{
-					"ip": ip,
-					"pose_port": pose_port,
-					"video_port": video_port,
-					"telemetry_port": telemetry_port,
-					"device_type": device_type,
-					"device_name": device_name,
-				}
-			)
-		)
-	if _tcp_handler.is_connected_to_robot() and _tcp_handler.get_host() == ip:
+		_push_discovery_to_settings_ui()
+	if (
+		_tcp_handler.is_connected_to_robot()
+		and _tcp_handler.get_host() == ip
+		and _tcp_handler.get_port() == pose_port
+	):
 		_active_telemetry_port = telemetry_port
 		_connect_telemetry_stream(ip)
-		_connect_video_stream(ip)
+		_connect_video_stream(ip, pose_port)
 
 
 ## XRoboToolkit's beacon carries only an address and a clock reading — no name,
@@ -2126,16 +2180,10 @@ func _xrt_robot_name(ip: String) -> String:
 
 
 func _on_xrt_host_found(ip: String, port: int, _timestamp_ms: int) -> void:
-	# A robot that answers on both discovery channels is one robot. The native
-	# announcement carries a name, real ports and a device type, so it always
-	# wins; overwriting it with the beacon's placeholders would downgrade the
-	# entry every second.
-	var existing: Dictionary = _known_robots.get(ip, {})
-	if not existing.is_empty() and str(existing.get("source", "")) != XROBOT_TOOLKIT_DEVICE_TYPE:
-		return
 	var robot_name := _xrt_robot_name(ip)
 	var info := {
 		"name": robot_name,
+		"ip": ip,
 		"pose_port": port,
 		"video_port": 0,
 		"telemetry_port": 0,
@@ -2147,54 +2195,65 @@ func _on_xrt_host_found(ip: String, port: int, _timestamp_ms: int) -> void:
 		# choice the user has no way to know they need to make.
 		"protocol": "xrobot_toolkit_v1",
 	}
-	_known_robots[ip] = info
+	_known_robots[_xrt_discovery_key(ip, port)] = info
 	if (
 		_settings_panel
 		and _settings_panel.visible
 		and _settings_ui
-		and _settings_ui.has_method("add_discovered")
+		and _settings_ui.has_method("set_discovery_state")
 	):
-		var entry := info.duplicate(true)
-		entry["ip"] = ip
-		_settings_ui.add_discovered(robot_name, entry)
+		_push_discovery_to_settings_ui()
 
 
 func _on_xrt_host_lost(ip: String) -> void:
-	var existing: Dictionary = _known_robots.get(ip, {})
-	if str(existing.get("source", "")) != XROBOT_TOOLKIT_DEVICE_TYPE:
+	var removed := false
+	for key in _known_robots.keys():
+		var existing: Dictionary = _known_robots[key]
+		if (
+			str(existing.get("source", "")) == XROBOT_TOOLKIT_DEVICE_TYPE
+			and _known_robot_ip(key, existing) == ip
+		):
+			_known_robots.erase(key)
+			removed = true
+	if not removed:
 		return
-	_known_robots.erase(ip)
 	if (
 		_settings_panel
 		and _settings_panel.visible
 		and _settings_ui
-		and _settings_ui.has_method("remove_discovered")
+		and _settings_ui.has_method("set_discovery_state")
 	):
-		_settings_ui.remove_discovered(_xrt_robot_name(ip))
+		_push_discovery_to_settings_ui()
 
 
-func _on_robot_lost(robot_name: String) -> void:
-	for ip in _known_robots.keys():
-		var info: Dictionary = _known_robots[ip]
-		if info.get("name", "") == robot_name:
-			_known_robots.erase(ip)
-			if _video_tcp_handler.is_connected_to_robot() and _video_tcp_handler.get_host() == ip:
-				_video_tcp_handler.disconnect_from_robot()
-			if _video_udp_handler.is_connected_to_robot() and _video_udp_handler.get_host() == ip:
-				_video_udp_handler.disconnect_from_robot()
-			if _telemetry_tcp_handler.is_connected_to_robot() and _telemetry_tcp_handler.get_host() == ip:
-				_telemetry_tcp_handler.disconnect_from_robot()
-			break
+func _on_robot_lost(_robot_name: String, ip: String, pose_port: int) -> void:
+	var key := _operator_discovery_key(ip, pose_port)
+	var info: Dictionary = _known_robots.get(key, {})
+	if info.is_empty():
+		return
+	var endpoint_was_active := (
+		_tcp_handler.is_connected_to_robot()
+		and _tcp_handler.get_host() == ip
+		and _tcp_handler.get_port() == pose_port
+	)
+	if not _known_robots.erase(key):
+		return
+	if endpoint_was_active and _video_tcp_handler.is_connected_to_robot():
+		_video_tcp_handler.disconnect_from_robot()
+	if endpoint_was_active and _video_udp_handler.is_connected_to_robot():
+		_video_udp_handler.disconnect_from_robot()
+	if endpoint_was_active and _telemetry_tcp_handler.is_connected_to_robot():
+		_telemetry_tcp_handler.disconnect_from_robot()
 	if (
 		_settings_panel
 		and _settings_panel.visible
 		and _settings_ui
-		and _settings_ui.has_method("remove_discovered")
+		and _settings_ui.has_method("set_discovery_state")
 	):
-		_settings_ui.remove_discovered(robot_name)
+		_push_discovery_to_settings_ui()
 
 
-func _connect_video_stream(ip: String) -> void:
+func _connect_video_stream(ip: String, pose_port: int = 0) -> void:
 	if not _manual_video_options.is_empty():
 		_connect_configured_video(_manual_video_options, false)
 		return
@@ -2204,8 +2263,8 @@ func _connect_video_stream(ip: String) -> void:
 	# Resolve the TCP port: prefer the descriptor's primary feed, then
 	# the discovery announcement, then the legacy default.
 	var tcp_port := 12345
-	if _known_robots.has(ip):
-		var info: Dictionary = _known_robots[ip]
+	var info := _find_known_robot(ip, "operator", pose_port)
+	if not info.is_empty():
 		tcp_port = int(info.get("video_port", tcp_port))
 	if int(_last_video_feed.get("port", 0)) > 0:
 		tcp_port = int(_last_video_feed["port"])
@@ -2378,6 +2437,7 @@ func _disconnect_outside_media() -> void:
 func _start_inside_from_launch_args() -> void:
 	var options: Dictionary = SettingsUI.load_settings()
 	options["target_scope"] = "inside"
+	_apply_common_launch_overrides(options)
 	var profile_id := _teleop_arg(TELEOP_KEY_PROFILE, "")
 	if not profile_id.is_empty():
 		options["inside_profile"] = profile_id
@@ -2395,6 +2455,16 @@ func _start_inside_from_launch_args() -> void:
 	_settings_button.visible = true
 	_set_teleop_suspended(false)
 	_on_settings_applied(options)
+
+
+func _apply_common_launch_overrides(options: Dictionary) -> void:
+	var show_video_panel := _teleop_arg(TELEOP_KEY_SHOW_VIDEO_PANEL, "")
+	_apply_show_video_panel_launch_override(options, show_video_panel)
+
+
+static func _apply_show_video_panel_launch_override(options: Dictionary, raw: String) -> void:
+	if not raw.is_empty():
+		options["show_video_panel"] = _parse_boolean_flag(raw)
 
 
 ## Read a launch argument. Intent extras reach here as the dashed form that
@@ -2419,7 +2489,11 @@ func _synthetic_flag_set() -> bool:
 
 
 func _teleop_flag_set(key: String) -> bool:
-	var raw := _teleop_arg(key, "").to_lower()
+	return _parse_boolean_flag(_teleop_arg(key, ""))
+
+
+static func _parse_boolean_flag(raw: String) -> bool:
+	raw = raw.to_lower()
 	return raw == "1" or raw == "true" or raw == "yes" or raw == "on"
 
 

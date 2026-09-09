@@ -3,7 +3,7 @@ render_mode unshaded, cull_disabled;
 
 // Plan B: YUV path. When `use_yuv` is true the fragment shader samples
 // three single-channel textures (Y full size, U/V at half size) and does
-// the BT.601 limited-range YUV->RGB conversion on the GPU. When false we
+// the configured YUV->RGB conversion on the GPU. When false we
 // fall back to the legacy single RGBA texture path used by the placeholder
 // and any pre-decoded frames.
 
@@ -12,6 +12,12 @@ uniform sampler2D video_texture : source_color, filter_linear;
 uniform sampler2D y_texture : hint_default_white, filter_linear;
 uniform sampler2D u_texture : hint_default_white, filter_linear;
 uniform sampler2D v_texture : hint_default_white, filter_linear;
+
+// 0 = BT.601, 1 = BT.709. Video at 720p and above defaults to BT.709 in
+// LiveVideoView; feeds can override this through their descriptor.
+uniform int yuv_color_standard = 1;
+// false = studio/limited range (Y 16..235, Cb/Cr 16..240), true = full range.
+uniform bool yuv_full_range = false;
 
 // How much of the texture width each eye uses (0.5 = side-by-side stereo).
 uniform float content_ratio : hint_range(0.0, 1.0) = 0.5;
@@ -23,16 +29,52 @@ uniform bool stereo_layout = true;
 uniform float opacity : hint_range(0.0, 1.0) = 1.0;
 
 
-vec3 yuv_to_rgb_bt601(vec3 yuv) {
-	// BT.601 limited-range, matching the integer coefficients in the
-	// Kotlin CPU path: 298, 409, -100, -208, 516 scaled by 1/256.
-	float y = (yuv.x * 255.0 - 16.0) * (298.0 / 256.0);
-	float u = yuv.y * 255.0 - 128.0;
-	float v = yuv.z * 255.0 - 128.0;
-	float r = y + 1.5979 * v;
-	float g = y - 0.3917 * u - 0.8129 * v;
-	float b = y + 2.0156 * u;
-	return clamp(vec3(r, g, b) / 255.0, vec3(0.0), vec3(1.0));
+vec3 srgb_to_linear(vec3 color) {
+	vec3 low = color / 12.92;
+	vec3 high = pow((color + vec3(0.055)) / 1.055, vec3(2.4));
+	return mix(high, low, lessThanEqual(color, vec3(0.04045)));
+}
+
+
+vec3 yuv_to_srgb(vec3 yuv) {
+	float cb = yuv.y - (128.0 / 255.0);
+	float cr = yuv.z - (128.0 / 255.0);
+	float y;
+	vec3 color;
+
+	if (yuv_full_range) {
+		y = yuv.x;
+		if (yuv_color_standard == 1) {
+			color = vec3(
+				y + 1.5748 * cr,
+				y - 0.187324 * cb - 0.468124 * cr,
+				y + 1.8556 * cb
+			);
+		} else {
+			color = vec3(
+				y + 1.402 * cr,
+				y - 0.344136 * cb - 0.714136 * cr,
+				y + 1.772 * cb
+			);
+		}
+	} else {
+		y = (yuv.x - (16.0 / 255.0)) * (255.0 / 219.0);
+		if (yuv_color_standard == 1) {
+			color = vec3(
+				y + 1.792741 * cr,
+				y - 0.213249 * cb - 0.532909 * cr,
+				y + 2.112402 * cb
+			);
+		} else {
+			color = vec3(
+				y + 1.596027 * cr,
+				y - 0.391762 * cb - 0.812968 * cr,
+				y + 2.017232 * cb
+			);
+		}
+	}
+
+	return clamp(color, vec3(0.0), vec3(1.0));
 }
 
 
@@ -56,7 +98,11 @@ void fragment() {
 		float y_sample = texture(y_texture, uv).r;
 		float u_sample = texture(u_texture, uv).r;
 		float v_sample = texture(v_texture, uv).r;
-		color = yuv_to_rgb_bt601(vec3(y_sample, u_sample, v_sample));
+		// YUV matrices produce gamma-encoded RGB. Godot spatial ALBEDO is
+		// linear, so convert exactly once here; omitting this conversion makes
+		// the renderer encode the signal a second time and visibly washes out
+		// mid-tones on PICO.
+		color = srgb_to_linear(yuv_to_srgb(vec3(y_sample, u_sample, v_sample)));
 	} else {
 		color = texture(video_texture, uv).rgb;
 	}
