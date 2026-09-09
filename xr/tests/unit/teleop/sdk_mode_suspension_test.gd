@@ -40,6 +40,8 @@ class FakeTcpHandler:
 	extends Node
 	var connected := false
 	var disconnect_calls := 0
+	var host := ""
+	var port := 0
 
 	func is_connected_to_robot() -> bool:
 		return connected
@@ -47,6 +49,12 @@ class FakeTcpHandler:
 	func disconnect_from_robot() -> void:
 		disconnect_calls += 1
 		connected = false
+
+	func get_host() -> String:
+		return host
+
+	func get_port() -> int:
+		return port
 
 
 class FakeCommandSender:
@@ -80,6 +88,7 @@ class FakeXrtTarget:
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_stream_exclusivity(t)
 	_test_protocol_aware_outside_start(t)
+	_test_protocol_aware_discovery_identity(t)
 
 
 func _test_stream_exclusivity(t: OperatorTestAssertions) -> void:
@@ -198,3 +207,94 @@ func _test_protocol_aware_outside_start(t: OperatorTestAssertions) -> void:
 	command_sender.free()
 	outside_target.free()
 	xrt_target.free()
+
+
+func _test_protocol_aware_discovery_identity(t: OperatorTestAssertions) -> void:
+	var controller = TeleopControllerScript.new()
+	var shared_ip := "192.168.1.40"
+	var operator_info := {
+		"name": "g1d-debug",
+		"ip": shared_ip,
+		"pose_port": 63901,
+		"protocol": "operator",
+	}
+	var xrt_info := {
+		"name": "XRoboToolkit %s" % shared_ip,
+		"ip": shared_ip,
+		"pose_port": 63901,
+		"protocol": "xrobot_toolkit_v1",
+	}
+	controller._known_robots = {
+		TeleopControllerScript._operator_discovery_key(shared_ip, 63901): operator_info,
+		TeleopControllerScript._xrt_discovery_key(shared_ip, 63901): xrt_info,
+	}
+
+	t.eq(controller._known_robots.size(), 2,
+		"Operator and XRoboToolkit services on one IP remain separate choices")
+	t.eq(controller._find_known_robot(shared_ip, "operator", 63901), operator_info,
+		"Operator lookup selects the native service")
+	t.eq(controller._find_known_robot(shared_ip, "xrobot_toolkit_v1", 63901), xrt_info,
+		"XRoboToolkit lookup selects the HoloMotion-compatible service")
+	var alternate_operator_info := {
+		"name": "g1d-debug-alt",
+		"ip": shared_ip,
+		"pose_port": 64001,
+		"video_port": 12445,
+		"protocol": "operator",
+	}
+	controller._known_robots[
+		TeleopControllerScript._operator_discovery_key(shared_ip, 64001)
+	] = alternate_operator_info
+	t.eq(controller._find_known_robot(shared_ip, "operator", 64001), alternate_operator_info,
+		"Operator lookup keeps same-IP services separated by command port")
+	var active_transport := FakeTcpHandler.new()
+	active_transport.connected = true
+	active_transport.host = shared_ip
+	active_transport.port = 63901
+	controller._tcp_handler = active_transport
+	controller._active_telemetry_port = 63903
+	controller._on_robot_found(
+		"g1d-debug-alt", shared_ip, 64001, 12445, 64003, "unitree_g1d", ""
+	)
+	t.eq(controller._active_telemetry_port, 63903,
+		"a same-IP announcement on another command port cannot retarget active media")
+	t.is_false(TeleopControllerScript._discovery_matches_options(xrt_info, {
+		"ip": shared_ip,
+		"port": 63901,
+		"protocol": "operator",
+	}), "auto-connect requires the saved protocol as well as IP and port")
+	t.is_true(TeleopControllerScript._discovery_matches_options(xrt_info, {
+		"ip": shared_ip,
+		"port": 63901,
+		"protocol": "xrobot_toolkit_v1",
+	}), "the exact saved XRoboToolkit endpoint remains eligible for auto-connect")
+	t.is_false(TeleopControllerScript._can_auto_connect_discovered(xrt_info, {
+		"loaded": false,
+		"ip": shared_ip,
+		"port": 63901,
+		"protocol": "xrobot_toolkit_v1",
+	}), "fresh defaults never auto-connect to the only discovered service")
+
+	var second_ip := "192.168.1.41"
+	controller._known_robots = {
+		TeleopControllerScript._operator_discovery_key(shared_ip, 63901): operator_info,
+		TeleopControllerScript._operator_discovery_key(second_ip, 63901): {
+			"name": "g1d-debug",
+			"ip": second_ip,
+			"pose_port": 63901,
+			"protocol": "operator",
+		},
+	}
+	t.eq(controller._known_robots.size(), 2,
+		"same-name Operator services retain separate endpoint identities")
+	t.eq(controller._find_known_robot(second_ip, "operator", 63901).get("name"), "g1d-debug",
+		"same-name Operator lookup resolves the requested endpoint")
+	t.is_true(TeleopControllerScript._can_auto_connect_discovered(xrt_info, {
+		"loaded": true,
+		"ip": shared_ip,
+		"port": 63901,
+		"protocol": "xrobot_toolkit_v1",
+	}), "an explicitly saved exact endpoint may still auto-connect")
+
+	active_transport.free()
+	controller.free()

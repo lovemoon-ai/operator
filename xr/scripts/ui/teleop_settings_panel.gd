@@ -123,6 +123,7 @@ var _status_label: Label
 var _discovery_spinner: DiscoverySpinner
 var _discovery_active := false
 var _discovered: Dictionary = {}
+var _applying_discovery_selection := false
 
 
 func _init() -> void:
@@ -238,6 +239,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_ip_input.text = DEFAULT_IP
 	_ip_input.custom_minimum_size.y = 55
 	_ip_input.add_theme_font_size_override("font_size", 21)
+	_ip_input.text_changed.connect(_on_manual_endpoint_changed)
 	add_interactive(ip_row, _ip_input)
 
 	_ip_test_button = Button.new()
@@ -253,6 +255,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_port_input.text = str(DEFAULT_PORT)
 	_port_input.custom_minimum_size.y = 55
 	_port_input.add_theme_font_size_override("font_size", 21)
+	_port_input.text_changed.connect(_on_manual_endpoint_changed)
 	add_interactive(connection, _port_input)
 
 	_xrobot_toolkit_device_sn_input = LineEdit.new()
@@ -502,47 +505,57 @@ func _on_confirm_requested() -> void:
 	settings_applied.emit(options)
 
 
-func set_discovery_state(known_robots: Dictionary, prefer_ip: String = "") -> void:
+func set_discovery_state(
+	known_robots: Dictionary,
+	prefer_ip: String = "",
+	prefer_protocol: String = "",
+	prefer_port: int = 0
+) -> void:
 	_discovered = known_robots.duplicate(true)
 
-	var previously_selected_name := _selected_robot_name()
+	var previously_selected_id := _selected_discovery_id()
 
 	_discovery_option.clear()
 	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 
-	var names: Array = _discovered.keys()
-	names.sort()
+	var endpoint_ids: Array = _discovered.keys()
+	endpoint_ids.sort()
 	var idx_to_select := 0
-	for i in range(names.size()):
-		var rname: String = names[i]
-		var info: Dictionary = _discovered[rname]
+	for i in range(endpoint_ids.size()):
+		var endpoint_id: String = endpoint_ids[i]
+		var info: Dictionary = _discovered[endpoint_id]
+		var rname := String(info.get("name", endpoint_id))
 		var disp := _format_robot_label(rname, info)
 		var idx := _add_option_item(
 			_discovery_option,
 			disp,
-			rname,
+			endpoint_id,
 			_icon_name_for_robot_type(String(info.get("device_type", "")))
 		)
-		if rname == previously_selected_name:
+		if endpoint_id == previously_selected_id:
 			idx_to_select = idx
-		elif idx_to_select == 0 and prefer_ip != "" and String(info.get("ip", "")) == prefer_ip:
-			idx_to_select = idx
-
-	if idx_to_select == 0 and names.size() == 1:
-		idx_to_select = 1
+		elif idx_to_select == 0 and not prefer_ip.is_empty():
+			var endpoint_protocol := _normalized_protocol(String(info.get("protocol", PROTOCOL_OPERATOR)))
+			var protocol_matches := (
+				prefer_protocol.is_empty()
+				or endpoint_protocol == _normalized_protocol(prefer_protocol)
+			)
+			var port_matches := prefer_port <= 0 or int(info.get("pose_port", 0)) == prefer_port
+			if String(info.get("ip", "")) == prefer_ip and protocol_matches and port_matches:
+				idx_to_select = idx
 
 	_discovery_option.select(idx_to_select)
 	_on_discovery_selected(idx_to_select)
 
 
-func add_discovered(robot_name: String, info: Dictionary) -> void:
-	_discovered[robot_name] = info
-	set_discovery_state(_discovered, _ip_input.text.strip_edges())
+func add_discovered(endpoint_id: String, info: Dictionary) -> void:
+	_discovered[endpoint_id] = info
+	set_discovery_state(_discovered)
 
 
-func remove_discovered(robot_name: String) -> void:
-	if _discovered.erase(robot_name):
-		set_discovery_state(_discovered, _ip_input.text.strip_edges())
+func remove_discovered(endpoint_id: String) -> void:
+	if _discovered.erase(endpoint_id):
+		set_discovery_state(_discovered)
 
 
 func set_status(text: String) -> void:
@@ -625,10 +638,12 @@ func _on_discovery_selected(idx: int) -> void:
 		set_status(tr("UI_MANUAL_ENTRY_STATUS"))
 		return
 
-	var rname: String = String(_discovery_option.get_item_metadata(idx))
-	if not _discovered.has(rname):
+	var endpoint_id: String = String(_discovery_option.get_item_metadata(idx))
+	if not _discovered.has(endpoint_id):
 		return
-	var info: Dictionary = _discovered[rname]
+	var info: Dictionary = _discovered[endpoint_id]
+	var rname := String(info.get("name", endpoint_id))
+	_applying_discovery_selection = true
 	_ip_input.text = String(info.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(info.get("pose_port", DEFAULT_PORT)))
 	# A host found on the XRoboToolkit beacon speaks only that protocol, and the
@@ -638,6 +653,7 @@ func _on_discovery_selected(idx: int) -> void:
 	if not announced_protocol.is_empty():
 		_selected_protocol = _normalized_protocol(announced_protocol)
 		_refresh_protocol_buttons()
+	_applying_discovery_selection = false
 	_apply_mode_lock()
 	set_status(tr("UI_WILL_CONNECT_TO") % _format_robot_label(rname, info))
 
@@ -645,13 +661,22 @@ func _on_discovery_selected(idx: int) -> void:
 func _apply_mode_lock() -> void:
 	if _discovery_option == null:
 		return
-	var manual := _discovery_option.selected <= 0
-	_ip_input.editable = manual
-	_port_input.editable = manual
-	# A discovery beacon can auto-select a robot — and so flip these to
-	# read-only — while the operator is still typing in one of them. No focus
-	# change occurs, so the keyboard would stay up and silently eat keys.
+	# Discovery is a shortcut, not an ownership lock. Keeping the endpoint fields
+	# editable lets an operator recover when a different service was discovered
+	# first, and editing either field switches the picker back to Manual.
+	_ip_input.editable = true
+	_port_input.editable = true
 	refresh_keyboard()
+
+
+func _on_manual_endpoint_changed(_value: String) -> void:
+	if _applying_discovery_selection or _discovery_option == null:
+		return
+	if _discovery_option.selected <= 0:
+		return
+	_discovery_option.select(0)
+	_apply_mode_lock()
+	set_status(tr("UI_MANUAL_ENTRY_STATUS"))
 
 
 # --- IP reachability test ----------------------------------------------------
@@ -744,7 +769,7 @@ func _format_robot_label(rname: String, info: Dictionary) -> String:
 	return "%s%s — %s:%d" % [head, type_suffix, String(info.get("ip", "?")), int(info.get("pose_port", 0))]
 
 
-func _selected_robot_name() -> String:
+func _selected_discovery_id() -> String:
 	if _discovery_option == null:
 		return ""
 	var idx := _discovery_option.selected
@@ -826,7 +851,17 @@ func _on_scope_button_pressed(scope: String) -> void:
 
 
 func _on_protocol_pressed(protocol: String) -> void:
-	_selected_protocol = _normalized_protocol(protocol)
+	var next_protocol := _normalized_protocol(protocol)
+	if _discovery_option != null and _discovery_option.selected > 0:
+		var endpoint_id := _selected_discovery_id()
+		var selected_info: Dictionary = _discovered.get(endpoint_id, {})
+		var announced_protocol := _normalized_protocol(
+			str(selected_info.get("protocol", PROTOCOL_OPERATOR))
+		)
+		if announced_protocol != next_protocol:
+			_discovery_option.select(0)
+			set_status(tr("UI_MANUAL_ENTRY_STATUS"))
+	_selected_protocol = next_protocol
 	_refresh_protocol_buttons()
 
 

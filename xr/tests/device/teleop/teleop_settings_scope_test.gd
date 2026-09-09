@@ -94,6 +94,51 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"Operator protocol hides PICO Body Calibration"
 	)
 	t.is_false(inside_box.visible, "outside hides the inside settings")
+	var discovery_option: OptionButton = panel.get("_discovery_option")
+	var ip_input: LineEdit = panel.get("_ip_input")
+	var port_input: LineEdit = panel.get("_port_input")
+	var shared_ip := "192.168.1.40"
+	var discovered := {
+		"operator|%s|63901" % shared_ip: {
+			"name": "G1-D Debug",
+			"ip": shared_ip,
+			"pose_port": 63901,
+			"device_type": "unitree_g1d",
+			"protocol": "operator",
+		},
+		"xrobot_toolkit_v1|%s|63901" % shared_ip: {
+			"name": "XRoboToolkit %s" % shared_ip,
+			"ip": shared_ip,
+			"pose_port": 63901,
+			"device_type": "xrobot_toolkit",
+			"protocol": "xrobot_toolkit_v1",
+		},
+		"operator|192.168.1.41|63901": {
+			"name": "G1-D Debug",
+			"ip": "192.168.1.41",
+			"pose_port": 63901,
+			"device_type": "unitree_g1d",
+			"protocol": "operator",
+		},
+	}
+	panel.set_discovery_state(discovered)
+	t.eq(discovery_option.item_count, 4,
+		"same-IP cross-protocol and same-name Operator services are all listed")
+	t.eq(discovery_option.selected, 0,
+		"discovery without an explicitly saved endpoint leaves Manual selected")
+	t.is_true(ip_input.editable, "manual robot IP remains editable when services are discovered")
+	t.is_true(port_input.editable, "manual robot port remains editable when services are discovered")
+	panel.set_discovery_state(discovered, shared_ip, "xrobot_toolkit_v1", 63901)
+	t.eq(
+		str(discovery_option.get_item_metadata(discovery_option.selected)),
+		"xrobot_toolkit_v1|%s|63901" % shared_ip,
+		"saved protocol disambiguates services that share an IP and port"
+	)
+	t.eq(panel.get_options().get("protocol", ""), "xrobot_toolkit_v1",
+		"selecting the HoloMotion-compatible entry switches the wire protocol")
+	ip_input.text = "192.168.1.41"
+	panel.call("_on_manual_endpoint_changed", ip_input.text)
+	t.eq(discovery_option.selected, 0, "editing a discovered endpoint switches back to Manual")
 
 	var xrobot_options := _options("outside")
 	xrobot_options["protocol"] = "xrobot_toolkit_v1"

@@ -9,6 +9,11 @@
 - Operator packet compatibility via `report_video_packet()`.
 - Android MediaCodec integration through the `KotlinVideoDecoderPlugin` singleton.
 - AHB, YUV-plane, and RGBA presentation paths using `stereo_display.gdshader`.
+- A bounded compressed-frame queue plus a latest-frame mailbox. Queue overflow
+  flushes stale decoder work and resumes from the next random-access frame,
+  while the render thread uploads at most one newest decoded frame per tick.
+- Stage telemetry for received, decoded, uploaded, and actually drawn frames,
+  including rendered-frame interval P50/P95 and decoder input queue depth.
 
 ## Basic Use
 
@@ -24,6 +29,12 @@ func _ready() -> void:
 func _on_access_unit(access_unit: PackedByteArray) -> void:
 	view.submit_h264_access_unit(access_unit)
 ```
+
+`configure_video_stream()` also accepts `color_standard` (`auto`, `bt601`, or
+`bt709`) and `color_range` (`limited` or `full`). `auto` selects BT.709 at 720p
+and above, otherwise BT.601. The default range is limited. YUV output is
+converted from gamma-encoded video RGB into Godot's linear lighting space
+before being written to `ALBEDO`.
 
 For Operator receivers, keep sending packet dictionaries to `report_video_packet(packet)`.
 

@@ -1,9 +1,9 @@
 // AhbVideoTexture: a Godot Texture2DRD subclass backed by a Vulkan
 // VkImage that was imported from an AHardwareBuffer (the exact buffer
 // MediaCodec wrote into). One instance is shared between the decoder
-// callback (writer) and the fragment shader sampler (reader); access
-// is single-writer, single-reader so we use atomics rather than locks
-// for the swap.
+// callback (writer) and the fragment shader sampler (reader). Pending
+// buffer metadata is protected by a mutex so coalescing cannot pair a
+// buffer with another frame's timestamps or sequence.
 
 #pragma once
 
@@ -35,13 +35,19 @@ public:
 	/// Called from the JNI bridge on the decoder thread. `buffer` is
 	/// already AHardwareBuffer_acquire()-ed by the caller; this class
 	/// takes ownership and releases when it swaps to a newer one.
-	/// `decoded_ns` is the wall-clock time the decoder produced the
-	/// frame, used for latency reporting.
-	void push_buffer(AHardwareBuffer *buffer, int64_t decoded_ns);
+	/// Metadata is carried with the exact buffer so mailbox coalescing does not
+	/// break packet correlation on the GDScript side.
+	void push_buffer(
+			AHardwareBuffer *buffer,
+			int64_t decoded_ns,
+			int64_t frame_sequence,
+			int64_t presentation_time_us);
 
 	/// GDScript-callable: poll the most recently decoded buffer's
 	/// metadata. Returns a Dictionary like
-	///   { "decoded_ns": int, "width": int, "height": int, "frames": int }
+	///   { "decoded_ns": int, "frame_sequence": int,
+	///     "presentation_time_us": int, "width": int, "height": int,
+	///     "frames": int }
 	/// or empty if no frame has arrived yet.
 	Dictionary get_latest_info() const;
 
@@ -124,6 +130,8 @@ private:
 
 	AHardwareBuffer *_active_buffer = nullptr;
 	std::atomic<int64_t> _latest_decoded_ns{0};
+	std::atomic<int64_t> _latest_frame_sequence{0};
+	std::atomic<int64_t> _latest_presentation_time_us{0};
 	std::atomic<int32_t> _frame_counter{0};
 	std::atomic<bool> _is_ready{false};
 	int32_t _width = 0;
@@ -135,13 +143,16 @@ private:
 	// get_driver_resource / texture_create_from_extension off the
 	// render thread silently returns 0 — that's what produced the
 	// "RenderingDevice didn't return Vulkan handles" cascade in our
-	// first attempt. We instead atomically stash the latest AHB into
-	// `_pending_buffer` and schedule `_render_thread_tick` via
+	// first attempt. We instead stash the latest AHB and its metadata under
+	// one lock, then schedule `_render_thread_tick` via
 	// RenderingServer::call_on_render_thread, which then does ALL the
 	// real work (Vulkan import + RID create + set_texture_rd_rid) on
 	// the render thread where the guard passes.
-	std::atomic<AHardwareBuffer *> _pending_buffer{nullptr};
-	std::atomic<int64_t> _pending_decoded_ns{0};
+	std::mutex _pending_mutex;
+	AHardwareBuffer *_pending_buffer = nullptr;
+	int64_t _pending_decoded_ns = 0;
+	int64_t _pending_frame_sequence = 0;
+	int64_t _pending_presentation_time_us = 0;
 	std::atomic<bool> _render_tick_scheduled{false};
 	std::mutex _mutex;
 	RID _current_rd_rid;

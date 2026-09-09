@@ -18,7 +18,7 @@ touched** between decoder output and the GPU.
    `VkSamplerYcbcrConversion`, dedicated-import `vkAllocateMemory`,
    image view + RD texture binding all live there.
 3. ✅ `KotlinVideoDecoderPlugin.kt` declares
-   `external fun nativeImportAhb(buffer: HardwareBuffer, decodedNs: Long)`
+   `external fun nativeImportAhb(buffer, decodedNs, frameSequence, presentationTimeUs)`
    and `System.loadLibrary("ahb_decoder")` is gated on the .so being
    present in the APK.
 4. ✅ `build.sh` produces and installs `libahb_decoder.so` to both
@@ -67,7 +67,7 @@ MediaCodec output buffer
 Image.getHardwareBuffer()                    Kotlin
         │  (AHardwareBuffer*, refcounted)
         ▼
-nativeImportAhb(buffer, decodedNs)           JNI
+nativeImportAhb(buffer, decodedNs, sequence, ptsUs) JNI
         │
         ▼
 AHardwareBuffer_describe → VkAndroidHardwareBufferFormatPropertiesANDROID

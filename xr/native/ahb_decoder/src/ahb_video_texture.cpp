@@ -57,8 +57,12 @@ AhbVideoTexture::~AhbVideoTexture() {
 	ahb_unregister_active(this);
 	// Drain any AHB still queued for the render thread — push_buffer
 	// owns a refcount on it that the render thread normally consumes.
-	AHardwareBuffer *pending =
-			_pending_buffer.exchange(nullptr, std::memory_order_acq_rel);
+	AHardwareBuffer *pending = nullptr;
+	{
+		std::lock_guard<std::mutex> pending_lock(_pending_mutex);
+		pending = _pending_buffer;
+		_pending_buffer = nullptr;
+	}
 	if (pending) {
 		AHardwareBuffer_release(pending);
 	}
@@ -912,7 +916,11 @@ bool AhbVideoTexture::_dispatch_blit() {
 // — only one outstanding tick at a time, which itself drains the
 // latest pending buffer when it finally runs (matches the "drop stale
 // keep newest" policy in ImageReader.acquireLatestImage).
-void AhbVideoTexture::push_buffer(AHardwareBuffer *buffer, int64_t decoded_ns) {
+void AhbVideoTexture::push_buffer(
+		AHardwareBuffer *buffer,
+		int64_t decoded_ns,
+		int64_t frame_sequence,
+		int64_t presentation_time_us) {
 	if (!buffer) {
 		return;
 	}
@@ -920,12 +928,18 @@ void AhbVideoTexture::push_buffer(AHardwareBuffer *buffer, int64_t decoded_ns) {
 	// Hand the AHB ref to the pending slot. If a previous frame was
 	// queued but the render thread hasn't drained it yet, release that
 	// older one — we always render the newest.
-	AHardwareBuffer *previous_pending =
-			_pending_buffer.exchange(buffer, std::memory_order_acq_rel);
+	AHardwareBuffer *previous_pending = nullptr;
+	{
+		std::lock_guard<std::mutex> pending_lock(_pending_mutex);
+		previous_pending = _pending_buffer;
+		_pending_buffer = buffer;
+		_pending_decoded_ns = decoded_ns;
+		_pending_frame_sequence = frame_sequence;
+		_pending_presentation_time_us = presentation_time_us;
+	}
 	if (previous_pending) {
 		AHardwareBuffer_release(previous_pending);
 	}
-	_pending_decoded_ns.store(decoded_ns, std::memory_order_release);
 
 	// Coalesce: only schedule a render-thread callback if one isn't
 	// already pending. The tick will see the freshest buffer either
@@ -952,12 +966,21 @@ void AhbVideoTexture::_render_thread_tick() {
 	// with us (between us draining and us finishing) can re-schedule.
 	_render_tick_scheduled.store(false, std::memory_order_release);
 
-	AHardwareBuffer *buffer =
-			_pending_buffer.exchange(nullptr, std::memory_order_acq_rel);
+	AHardwareBuffer *buffer = nullptr;
+	int64_t decoded_ns = 0;
+	int64_t frame_sequence = 0;
+	int64_t presentation_time_us = 0;
+	{
+		std::lock_guard<std::mutex> pending_lock(_pending_mutex);
+		buffer = _pending_buffer;
+		_pending_buffer = nullptr;
+		decoded_ns = _pending_decoded_ns;
+		frame_sequence = _pending_frame_sequence;
+		presentation_time_us = _pending_presentation_time_us;
+	}
 	if (!buffer) {
 		return;
 	}
-	int64_t decoded_ns = _pending_decoded_ns.load(std::memory_order_acquire);
 
 	std::lock_guard<std::mutex> lk(_mutex);
 
@@ -1056,6 +1079,8 @@ void AhbVideoTexture::_render_thread_tick() {
 	}
 
 	_latest_decoded_ns.store(decoded_ns, std::memory_order_release);
+	_latest_frame_sequence.store(frame_sequence, std::memory_order_release);
+	_latest_presentation_time_us.store(presentation_time_us, std::memory_order_release);
 	_frame_counter.fetch_add(1, std::memory_order_acq_rel);
 	_is_ready.store(true, std::memory_order_release);
 }
@@ -1082,6 +1107,9 @@ uint32_t AhbVideoTexture::_find_memory_type(uint32_t memory_type_bits) const {
 Dictionary AhbVideoTexture::get_latest_info() const {
 	Dictionary out;
 	out["decoded_ns"] = (int64_t)_latest_decoded_ns.load(std::memory_order_acquire);
+	out["frame_sequence"] = (int64_t)_latest_frame_sequence.load(std::memory_order_acquire);
+	out["presentation_time_us"] =
+			(int64_t)_latest_presentation_time_us.load(std::memory_order_acquire);
 	out["width"] = _width;
 	out["height"] = _height;
 	out["frames"] = _frame_counter.load(std::memory_order_acquire);

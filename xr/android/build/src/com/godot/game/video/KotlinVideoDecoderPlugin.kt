@@ -32,14 +32,18 @@ private const val TAG = "KotlinVideoDecoder"
 // (e.g. the descriptor flips a feed to HEVC) picks the right MediaCodec.
 private const val MIME_AVC = "video/avc"
 private const val MIME_HEVC = "video/hevc"
-private const val QUEUE_CAPACITY = 2
-private const val INPUT_TIMEOUT_US = 10_000L
+private const val QUEUE_CAPACITY = 8
+private const val INITIAL_INPUT_WAIT_MS = 20L
+private const val ACTIVE_INPUT_WAIT_MS = 2L
+private const val OUTPUT_SURFACE_IMAGES = 2
 private const val TIMING_MAP_MAX_AGE_NS = 10_000_000_000L
 
 private data class FrameData(
+	val sequence: Long,
 	val width: Int,
 	val height: Int,
 	val decodedNs: Long,
+	val presentationTimeUs: Long,
 	val rgba: ByteArray,
 	val yPlane: ByteArray = ByteArray(0),
 	val uPlane: ByteArray = ByteArray(0),
@@ -52,6 +56,7 @@ private data class AccessUnit(
 	val sendNs: Long,
 	val clockOffsetNs: Long,
 	val clockSamples: Int,
+	val generation: Long,
 )
 
 private data class AccessUnitTiming(
@@ -128,12 +133,28 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		// Marked @JvmStatic external so the symbol matches the
 		// Java_com_godot_game_video_KotlinVideoDecoderPlugin_nativeImportAhb signature.
 		@JvmStatic
-		external fun nativeImportAhb(buffer: android.hardware.HardwareBuffer, decodedNs: Long)
+		external fun nativeImportAhb(
+			buffer: android.hardware.HardwareBuffer,
+			decodedNs: Long,
+			frameSequence: Long,
+			presentationTimeUs: Long,
+		)
 	}
 
 		private val running = AtomicBoolean(false)
 		private val accessUnitQueue = LinkedBlockingQueue<AccessUnit>(QUEUE_CAPACITY)
+		private val queueStateLock = Any()
+		private val resyncGeneration = AtomicLong(0)
+		private val awaitingRandomAccess = AtomicBoolean(false)
+		private val submittedAccessUnitCount = AtomicLong(0)
+		private val decodedFrameCount = AtomicLong(0)
+		private val droppedAccessUnitCount = AtomicLong(0)
 		private val timingByPtsUs = ConcurrentHashMap<Long, AccessUnitTiming>()
+		private var cachedH264Sps: ByteArray? = null
+		private var cachedH264Pps: ByteArray? = null
+		private var cachedHevcVps: ByteArray? = null
+		private var cachedHevcSps: ByteArray? = null
+		private var cachedHevcPps: ByteArray? = null
 		private val ahbLatencyLock = Object()
 		private var ahbLatencyCount = 0
 		private var ahbLatencySumMs = 0.0
@@ -222,15 +243,16 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			"submit_access_unit_timed",
 			"submit_access_unit_timed_with_clock",
 			"get_latest_frame",
+			"get_decoder_stats",
 			"get_ahb_latency_stats",
 			"probe_hardware_buffer_support",
 		)
 
 	override fun getPluginSignals(): MutableSet<SignalInfo> =
 		mutableSetOf(
-			// Legacy RGBA frame signal (kept so the placeholder/no-GPU
-			// fallback in robot_view.gd still works on devices where the
-			// 3-plane YUV path can't be set up for some reason).
+			// Retained for binary/API compatibility. Video frames are no longer
+			// emitted through deferred signals; LiveVideoView polls the latest-frame
+			// mailbox once per render tick.
 			SignalInfo(
 				"frame_ready",
 				Int::class.javaObjectType,
@@ -279,6 +301,8 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			"hevc", "h265", "x265" -> MIME_HEVC
 			else -> MIME_AVC
 		}
+		val configurationChanged =
+			configuredWidth != width || configuredHeight != height || configuredMime != mime
 
 		if (running.get()) {
 			if (configuredWidth == width && configuredHeight == height && configuredMime == mime) {
@@ -291,12 +315,19 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			Log.w(TAG, "start_decoder rejected invalid size ${width}x$height")
 			return false
 		}
+		if (configurationChanged) {
+			clearCodecConfigCache()
+			awaitingRandomAccess.set(false)
+		}
 
 			configuredWidth = width
 			configuredHeight = height
 			configuredMime = mime
 			latestFrame = null
 			accessUnitQueue.clear()
+			submittedAccessUnitCount.set(0)
+			decodedFrameCount.set(0)
+			droppedAccessUnitCount.set(0)
 			timingByPtsUs.clear()
 			resetAhbLatencyStats()
 			running.set(true)
@@ -317,7 +348,9 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	fun stop_decoder() {
 			running.set(false)
 			accessUnitQueue.clear()
+			awaitingRandomAccess.set(false)
 			timingByPtsUs.clear()
+			clearCodecConfigCache()
 			resetAhbLatencyStats()
 			decoderThread?.interrupt()
 		decoderThread?.join(1000)
@@ -363,46 +396,123 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			clockOffsetNs: Long,
 			clockSamples: Int,
 		): Boolean {
-			if (!running.get()) {
-				return false
-			}
 			if (access_unit.isEmpty()) {
 				return false
 			}
-			val accepted = accessUnitQueue.offer(
-				AccessUnit(
-					bytes = access_unit.clone(),
-					receiveNs = receiveNs,
-					sendNs = sendNs,
-					clockOffsetNs = clockOffsetNs,
-					clockSamples = clockSamples,
+
+			synchronized(queueStateLock) {
+				if (!running.get()) {
+					return false
+				}
+				updateCodecConfigCache(access_unit)
+				val isRandomAccess = containsRandomAccessUnit(access_unit)
+				val generation = resyncGeneration.get()
+
+				if (awaitingRandomAccess.get()) {
+					if (!isRandomAccess) {
+						droppedAccessUnitCount.incrementAndGet()
+						return false
+					}
+					val accepted = accessUnitQueue.offer(
+						makeAccessUnit(recoveryAccessUnit(access_unit), receiveNs, sendNs, clockOffsetNs, clockSamples, generation)
+					)
+					if (accepted) {
+						awaitingRandomAccess.set(false)
+						submittedAccessUnitCount.incrementAndGet()
+					}
+					return accepted
+				}
+
+				val accepted = accessUnitQueue.offer(
+					makeAccessUnit(access_unit.clone(), receiveNs, sendNs, clockOffsetNs, clockSamples, generation)
 				)
-			)
-			if (!accepted) {
-				Log.w(TAG, "Decoder queue full, dropping access unit")
-				return false
+				if (accepted) {
+					submittedAccessUnitCount.incrementAndGet()
+					return true
+				}
+
+				val discarded = accessUnitQueue.size + if (isRandomAccess) 0 else 1
+				accessUnitQueue.clear()
+				timingByPtsUs.clear()
+				val recoveryGeneration = resyncGeneration.incrementAndGet()
+				awaitingRandomAccess.set(true)
+				droppedAccessUnitCount.addAndGet(discarded.toLong())
+				Log.w(
+					TAG,
+					"Decoder queue reached $QUEUE_CAPACITY access units; " +
+						"discarding backlog and waiting for a random-access frame",
+				)
+				if (!isRandomAccess) {
+					return false
+				}
+
+				val recovered = accessUnitQueue.offer(
+					makeAccessUnit(
+						recoveryAccessUnit(access_unit),
+						receiveNs,
+						sendNs,
+						clockOffsetNs,
+						clockSamples,
+						recoveryGeneration,
+					)
+				)
+				if (recovered) {
+					awaitingRandomAccess.set(false)
+					submittedAccessUnitCount.incrementAndGet()
+				}
+				return recovered
 			}
-			return true
 	}
+
+	private fun makeAccessUnit(
+		bytes: ByteArray,
+		receiveNs: Long,
+		sendNs: Long,
+		clockOffsetNs: Long,
+		clockSamples: Int,
+		generation: Long,
+	): AccessUnit = AccessUnit(
+		bytes = bytes,
+		receiveNs = receiveNs,
+		sendNs = sendNs,
+		clockOffsetNs = clockOffsetNs,
+		clockSamples = clockSamples,
+		generation = generation,
+	)
 
 	@Suppress("FunctionName")
 	@UsedByGodot
 	fun get_latest_frame(): Dictionary {
 		val dict = Dictionary()
 		val frame = latestFrame ?: return dict
+		dict["frame_sequence"] = frame.sequence
 		dict["width"] = frame.width
 		dict["height"] = frame.height
 		dict["timestamp_ns"] = frame.decodedNs
 		dict["decoded_ns"] = frame.decodedNs
+		dict["presentation_time_us"] = frame.presentationTimeUs
 		dict["rgba"] = frame.rgba
-		// Plan B: also expose YUV planes when present so the GDScript
-		// fallback path (used when the deferred signal hasn't fired yet)
-		// can prefer the GPU YUV path too.
+		// Plan B: expose tightly-packed YUV planes through a single-slot
+		// latest-frame mailbox. GDScript polls this once per render tick.
 		if (frame.yPlane.isNotEmpty()) {
 			dict["y_plane"] = frame.yPlane
 			dict["u_plane"] = frame.uPlane
 			dict["v_plane"] = frame.vPlane
 		}
+		return dict
+	}
+
+	@Suppress("FunctionName")
+	@UsedByGodot
+	fun get_decoder_stats(): Dictionary {
+		val dict = Dictionary()
+		dict["submitted_access_units"] = submittedAccessUnitCount.get()
+		dict["decoded_frames"] = decodedFrameCount.get()
+		dict["dropped_access_units"] = droppedAccessUnitCount.get()
+		dict["input_queue_depth"] = accessUnitQueue.size
+		dict["awaiting_random_access"] = awaitingRandomAccess.get()
+		dict["surface_mode"] = surfaceMode
+		dict["latest_frame_sequence"] = latestFrame?.sequence ?: 0L
 		return dict
 	}
 
@@ -472,88 +582,106 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	}
 
 	private fun runDecoderLoop() {
-		// [issue 005 / D-6] Synchronous polling is the final design.
-		// History: [opt 8] tried async MediaCodec.Callback (HandlerThread
-		// + setCallback) but onOutputBufferAvailable never fired on
-		// one affected Android XR runtime consumed input slots while output stayed silent —
-		// freezing the pipeline. Sync polling adds ~20 ms scheduling
-		// latency at worst, comfortably inside our motion-to-photons
-		// budget. The OES SurfaceTexture path was the previous
-		// "Surface output" idea; it is fully superseded by the
-		// ImageReader → AHardwareBuffer route below (configureCodec)
-		// because OES textures don't expose the underlying
-		// AHardwareBuffer that the Vulkan zero-copy path needs.
-		//
-		// Trip-wire: revisit async on a new device family (Quest 4,
-		// non-Snapdragon) where the codec/driver may behave; the
-		// scaffolding (codecHandlerThread field) was kept clean so a
-		// re-attempt only needs to wire setCallback() back in.
-			var pendingAccessUnit: AccessUnit? = null
+		// Keep synchronous MediaCodec polling for the affected Android XR
+		// runtimes, but always drain decoded output before waiting for more
+		// input. The previous 20 ms input wait could leave an already-decoded
+		// frame parked in MediaCodec for most of a display period.
+		var pendingAccessUnit: AccessUnit? = null
+		var activeGeneration = resyncGeneration.get()
+		var failureMessage: String? = null
 
 		try {
 			while (running.get() && !Thread.currentThread().isInterrupted) {
+				val requestedGeneration = resyncGeneration.get()
+				if (requestedGeneration != activeGeneration) {
+					pendingAccessUnit = null
+					codec?.flush()
+					latestFrame = null
+					timingByPtsUs.clear()
+					activeGeneration = requestedGeneration
+				}
+				codec?.let { drainOutput(it) }
+
 				if (pendingAccessUnit == null) {
-					pendingAccessUnit = accessUnitQueue.poll(20, TimeUnit.MILLISECONDS)
+					val waitMs = if (codec == null) INITIAL_INPUT_WAIT_MS else ACTIVE_INPUT_WAIT_MS
+					pendingAccessUnit = accessUnitQueue.poll(waitMs, TimeUnit.MILLISECONDS)
+					if (pendingAccessUnit == null) {
+						continue
+					}
 				}
 
-					val codecLocal = codec
-					if (pendingAccessUnit != null && codecLocal == null) {
-						if (!configureCodec(pendingAccessUnit!!.bytes)) {
-							running.set(false)
-							break
-						}
+				val accessUnit = pendingAccessUnit ?: continue
+				val latestGeneration = resyncGeneration.get()
+				if (accessUnit.generation != latestGeneration) {
+					pendingAccessUnit = null
+					continue
+				}
+				if (accessUnit.generation != activeGeneration) {
+					codec?.flush()
+					latestFrame = null
+					timingByPtsUs.clear()
+					activeGeneration = accessUnit.generation
+				}
+				if (codec == null && !configureCodec(accessUnit.bytes)) {
+					running.set(false)
+					markDecoderRecoveryRequired()
+					failureMessage = "Failed to configure decoder"
+					break
 				}
 
 				val activeCodec = codec ?: continue
+				drainOutput(activeCodec)
+				val inputIndex = activeCodec.dequeueInputBuffer(0)
+				if (inputIndex < 0) {
+					Thread.sleep(1L)
+					continue
+				}
 
-				if (pendingAccessUnit != null) {
-					val inputIndex = activeCodec.dequeueInputBuffer(INPUT_TIMEOUT_US)
-					if (inputIndex >= 0) {
-						val inputBuffer = activeCodec.getInputBuffer(inputIndex)
-						if (inputBuffer == null) {
-							emitSignal("decoder_error", "Decoder input buffer unavailable")
-							running.set(false)
-							break
-							}
-							inputBuffer.clear()
-							inputBuffer.put(pendingAccessUnit!!.bytes)
-							val queuedNs = nowNs()
-							val receiveNs = pendingAccessUnit!!.receiveNs
-							val ptsUs = if (receiveNs > 0L) receiveNs / 1_000L else queuedNs / 1_000L
-							activeCodec.queueInputBuffer(
-								inputIndex,
-								0,
-								pendingAccessUnit!!.bytes.size,
-								ptsUs,
-								0,
-							)
-							if (receiveNs > 0L) {
-								val sendNsXr =
-									if (pendingAccessUnit!!.clockSamples > 0 && pendingAccessUnit!!.sendNs > 0L) {
-										pendingAccessUnit!!.sendNs - pendingAccessUnit!!.clockOffsetNs
-									} else {
-										0L
-									}
-								timingByPtsUs[ptsUs] = AccessUnitTiming(
-									receiveNs = receiveNs,
-									sendNsXr = sendNsXr,
-									queuedNs = queuedNs,
-								)
-								pruneTimingMap(queuedNs)
-							}
-							pendingAccessUnit = null
+				val inputBuffer = activeCodec.getInputBuffer(inputIndex)
+				if (inputBuffer == null) {
+					running.set(false)
+					markDecoderRecoveryRequired()
+					failureMessage = "Decoder input buffer unavailable"
+					break
+				}
+				inputBuffer.clear()
+				inputBuffer.put(accessUnit.bytes)
+				val queuedNs = nowNs()
+				val receiveNs = accessUnit.receiveNs
+				val ptsUs = if (receiveNs > 0L) receiveNs / 1_000L else queuedNs / 1_000L
+				activeCodec.queueInputBuffer(inputIndex, 0, accessUnit.bytes.size, ptsUs, 0)
+				if (receiveNs > 0L) {
+					val sendNsXr =
+						if (accessUnit.clockSamples > 0 && accessUnit.sendNs > 0L) {
+							accessUnit.sendNs - accessUnit.clockOffsetNs
+						} else {
+							0L
 						}
-					}
-
+					timingByPtsUs[ptsUs] = AccessUnitTiming(
+						receiveNs = receiveNs,
+						sendNsXr = sendNsXr,
+						queuedNs = queuedNs,
+					)
+					pruneTimingMap(queuedNs)
+				}
+				pendingAccessUnit = null
 				drainOutput(activeCodec)
 			}
 		} catch (e: InterruptedException) {
 			Thread.currentThread().interrupt()
 		} catch (e: Exception) {
 			Log.e(TAG, "Decoder loop failed", e)
-			emitSignal("decoder_error", "Decoder loop failed: ${e.message}")
+			failureMessage = "Decoder loop failed: ${e.message ?: e.javaClass.simpleName}"
+			running.set(false)
+			markDecoderRecoveryRequired()
 		} finally {
 			releaseCodec()
+			running.set(false)
+			accessUnitQueue.clear()
+			timingByPtsUs.clear()
+		}
+		if (failureMessage != null) {
+			emitSignal("decoder_error", failureMessage)
 		}
 	}
 
@@ -561,6 +689,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	private var codecHandlerThread: HandlerThread? = null
 
 	private fun configureCodec(firstAccessUnit: ByteArray): Boolean {
+		var createdCodec: MediaCodec? = null
 		return try {
 			val mime = configuredMime
 			val format = MediaFormat.createVideoFormat(mime, configuredWidth, configuredHeight)
@@ -604,7 +733,8 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 				}
 				csdDesc = "sps=${sps != null}/pps=${pps != null}"
 			}
-			val createdCodec = MediaCodec.createDecoderByType(mime)
+			val newCodec = MediaCodec.createDecoderByType(mime)
+			createdCodec = newCodec
 
 			// Surface-output path: only enable when libahb_decoder.so is
 			// loaded, otherwise we'd lose the YUV plane copy that the
@@ -622,7 +752,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 					configuredWidth,
 					configuredHeight,
 					ImageFormat.PRIVATE,
-					QUEUE_CAPACITY,
+					OUTPUT_SURFACE_IMAGES,
 					HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
 				)
 				ir.setOnImageAvailableListener(
@@ -642,9 +772,9 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 				null
 			}
 
-			createdCodec.configure(format, outSurface, null, 0)
-			createdCodec.start()
-			codec = createdCodec
+			newCodec.configure(format, outSurface, null, 0)
+			newCodec.start()
+			codec = newCodec
 			Log.i(
 				TAG,
 				"Decoder configured ${configuredWidth}x${configuredHeight} " +
@@ -653,7 +783,15 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			true
 		} catch (e: Exception) {
 			Log.e(TAG, "Failed to configure MediaCodec", e)
-			emitSignal("decoder_error", "Failed to configure decoder: ${e.message}")
+			try { createdCodec?.stop() } catch (_: Exception) {}
+			try { createdCodec?.release() } catch (_: Exception) {}
+			val failedReader = imageReader
+			imageReader = null
+			try { failedReader?.close() } catch (_: Exception) {}
+			val failedReaderThread = imageReaderThread
+			imageReaderThread = null
+			try { failedReaderThread?.quitSafely() } catch (_: Exception) {}
+			surfaceMode = false
 			false
 		}
 	}
@@ -683,48 +821,55 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 			if (ahb == null) {
 				return
 			}
-				val nowNsCached = nowNs()
-				val imageTimestampNs = try {
-					image.timestamp
-				} catch (_: Throwable) {
-					0L
+			val nowNsCached = nowNs()
+			val imageTimestampNs = try {
+				image.timestamp
+			} catch (_: Throwable) {
+				0L
+			}
+			if (imageTimestampNs > 0L) {
+				val timing = timingByPtsUs.remove(imageTimestampNs / 1_000L)
+				if (timing != null && timing.receiveNs > 0L && nowNsCached >= timing.receiveNs) {
+					val bridgeToAhbMs =
+						if (
+							timing.sendNsXr > 0L &&
+							timing.receiveNs >= timing.sendNsXr &&
+							nowNsCached >= timing.sendNsXr
+						) {
+							(nowNsCached - timing.sendNsXr) / 1_000_000.0
+						} else {
+							Double.NaN
+						}
+					recordAhbLatency(
+						(nowNsCached - timing.receiveNs) / 1_000_000.0,
+						bridgeToAhbMs,
+					)
 				}
-				if (imageTimestampNs > 0L) {
-					val timing = timingByPtsUs.remove(imageTimestampNs / 1_000L)
-					if (timing != null && timing.receiveNs > 0L && nowNsCached >= timing.receiveNs) {
-						val bridgeToAhbMs =
-							if (timing.sendNsXr > 0L && timing.receiveNs >= timing.sendNsXr && nowNsCached >= timing.sendNsXr) {
-								(nowNsCached - timing.sendNsXr) / 1_000_000.0
-							} else {
-								Double.NaN
-							}
-						recordAhbLatency(
-							(nowNsCached - timing.receiveNs) / 1_000_000.0,
-							bridgeToAhbMs,
-						)
-					}
-				}
-				try {
-					nativeImportAhb(ahb, nowNsCached)
-					latestFrame = FrameData(
+			}
+			try {
+				val sequence = decodedFrameCount.incrementAndGet()
+				nativeImportAhb(ahb, nowNsCached, sequence, imageTimestampNs / 1_000L)
+				latestFrame = FrameData(
+					sequence = sequence,
 					width = image.width,
 					height = image.height,
 					decodedNs = nowNsCached,
+					presentationTimeUs = imageTimestampNs / 1_000L,
 					rgba = ByteArray(0),
 				)
-				val n = ahbFrameCounter.incrementAndGet()
-				val last = ahbLastReportNs.get()
-				if (last == 0L) {
+				val frames = ahbFrameCounter.incrementAndGet()
+				val lastReportNs = ahbLastReportNs.get()
+				if (lastReportNs == 0L) {
 					ahbLastReportNs.compareAndSet(0L, nowNsCached)
-				} else if (nowNsCached - last >= 1_000_000_000L) {
-					if (ahbLastReportNs.compareAndSet(last, nowNsCached)) {
-							val dtMs = (nowNsCached - last) / 1_000_000.0
-							val fps = n.toDouble() * 1000.0 / dtMs
-							Log.i(TAG, "AHB import: $n frames in %.0f ms (~%.1f fps)".format(dtMs, fps))
-							reportAhbLatencyStats(nowNsCached, n, dtMs, fps)
-							ahbFrameCounter.set(0)
-						}
+				} else if (nowNsCached - lastReportNs >= 1_000_000_000L) {
+					if (ahbLastReportNs.compareAndSet(lastReportNs, nowNsCached)) {
+						val dtMs = (nowNsCached - lastReportNs) / 1_000_000.0
+						val fps = frames.toDouble() * 1000.0 / dtMs
+						Log.i(TAG, "AHB import: $frames frames in %.0f ms (~%.1f fps)".format(dtMs, fps))
+						reportAhbLatencyStats(nowNsCached, frames, dtMs, fps)
+						ahbFrameCounter.set(0)
 					}
+				}
 			} catch (t: Throwable) {
 				Log.w(TAG, "nativeImportAhb threw: ${t.message}")
 			} finally {
@@ -755,7 +900,7 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 							Log.w(TAG, "releaseOutputBuffer(render) threw: ${e.message}")
 						}
 					} else {
-						drainOutputByteBufferMode(codec, outputIndex)
+						drainOutputByteBufferMode(codec, outputIndex, info.presentationTimeUs)
 					}
 				}
 				outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
@@ -778,7 +923,11 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	 * the AHB GDExtension shipped this path is a safety net only.
 	 */
 	@Suppress("DEPRECATION")
-	private fun drainOutputByteBufferMode(codec: MediaCodec, outputIndex: Int) {
+	private fun drainOutputByteBufferMode(
+		codec: MediaCodec,
+		outputIndex: Int,
+		presentationTimeUs: Long,
+	) {
 		val image = try {
 			codec.getOutputImage(outputIndex)
 		} catch (_: Exception) {
@@ -787,36 +936,31 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		try {
 			if (image != null) {
 				val nowNsCached = nowNs()
+				val sequence = decodedFrameCount.incrementAndGet()
 				val planes = extractYuvPlanesTight(image)
 				if (planes != null) {
 					latestFrame = FrameData(
+						sequence = sequence,
 						width = image.width,
 						height = image.height,
 						decodedNs = nowNsCached,
+						presentationTimeUs = presentationTimeUs,
 						rgba = ByteArray(0),
 						yPlane = planes.first,
 						uPlane = planes.second,
 						vPlane = planes.third,
 					)
-					emitSignal(
-						"yuv_frame_ready",
-						image.width,
-						image.height,
-						nowNsCached,
-						planes.first,
-						planes.second,
-						planes.third,
-					)
 				} else {
 					val rgba = convertToRgbaCpu(image)
 					if (rgba.isNotEmpty()) {
 						latestFrame = FrameData(
+							sequence = sequence,
 							width = image.width,
 							height = image.height,
 							decodedNs = nowNsCached,
+							presentationTimeUs = presentationTimeUs,
 							rgba = rgba,
 						)
-						emitSignal("frame_ready", image.width, image.height, nowNsCached, rgba)
 					}
 				}
 			}
@@ -905,6 +1049,96 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 				ahbLastBridgeMaxMs = Double.NaN
 			}
 		}
+
+	private fun markDecoderRecoveryRequired() {
+		synchronized(queueStateLock) {
+			accessUnitQueue.clear()
+			timingByPtsUs.clear()
+			awaitingRandomAccess.set(true)
+			resyncGeneration.incrementAndGet()
+		}
+	}
+
+	private fun clearCodecConfigCache() {
+		synchronized(queueStateLock) {
+			cachedH264Sps = null
+			cachedH264Pps = null
+			cachedHevcVps = null
+			cachedHevcSps = null
+			cachedHevcPps = null
+		}
+	}
+
+	private fun updateCodecConfigCache(accessUnit: ByteArray) {
+		forEachNalRange(accessUnit) { start, payloadStart, end ->
+			if (configuredMime == MIME_HEVC) {
+				when ((accessUnit[payloadStart].toInt() ushr 1) and 0x3F) {
+					32 -> cachedHevcVps = accessUnit.copyOfRange(start, end)
+					33 -> cachedHevcSps = accessUnit.copyOfRange(start, end)
+					34 -> cachedHevcPps = accessUnit.copyOfRange(start, end)
+				}
+			} else {
+				when (accessUnit[payloadStart].toInt() and 0x1F) {
+					7 -> cachedH264Sps = accessUnit.copyOfRange(start, end)
+					8 -> cachedH264Pps = accessUnit.copyOfRange(start, end)
+				}
+			}
+		}
+	}
+
+	private fun containsRandomAccessUnit(accessUnit: ByteArray): Boolean {
+		var found = false
+		forEachNalRange(accessUnit) { _, payloadStart, _ ->
+			if (configuredMime == MIME_HEVC) {
+				if (((accessUnit[payloadStart].toInt() ushr 1) and 0x3F) in 16..21) {
+					found = true
+				}
+			} else if ((accessUnit[payloadStart].toInt() and 0x1F) == 5) {
+				found = true
+			}
+		}
+		return found
+	}
+
+	private fun recoveryAccessUnit(randomAccessUnit: ByteArray): ByteArray {
+		val parameterSets = if (configuredMime == MIME_HEVC) {
+			listOfNotNull(cachedHevcVps, cachedHevcSps, cachedHevcPps)
+		} else {
+			listOfNotNull(cachedH264Sps, cachedH264Pps)
+		}
+		if (parameterSets.isEmpty()) {
+			return randomAccessUnit.clone()
+		}
+		val totalSize = parameterSets.sumOf { it.size } + randomAccessUnit.size
+		val recovered = ByteArray(totalSize)
+		var offset = 0
+		for (parameterSet in parameterSets) {
+			System.arraycopy(parameterSet, 0, recovered, offset, parameterSet.size)
+			offset += parameterSet.size
+		}
+		System.arraycopy(randomAccessUnit, 0, recovered, offset, randomAccessUnit.size)
+		return recovered
+	}
+
+	private inline fun forEachNalRange(
+		accessUnit: ByteArray,
+		visit: (start: Int, payloadStart: Int, end: Int) -> Unit,
+	) {
+		var start = findStartCode(accessUnit, 0)
+		if (start < 0) {
+			visit(0, 0, accessUnit.size)
+			return
+		}
+		while (start >= 0 && start < accessUnit.size) {
+			val payloadStart = start + startCodeLength(accessUnit, start)
+			val next = findStartCode(accessUnit, payloadStart)
+			val end = if (next >= 0) next else accessUnit.size
+			if (end > payloadStart) {
+				visit(start, payloadStart, end)
+			}
+			start = next
+		}
+	}
 
 		private fun recordAhbLatency(rxToAhbMs: Double, bridgeToAhbMs: Double) {
 			synchronized(ahbLatencyLock) {

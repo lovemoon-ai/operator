@@ -175,8 +175,11 @@ reported as `N/A`; local stale and decoder-busy drops remain available.
 For automated PICO launches, Android intent extras map directly to the target:
 `operator.teleop.host`, `operator.teleop.port`,
 `operator.teleop.protocol=xrobot_toolkit_v1`, and
-`operator.teleop.xrobot_toolkit_device_sn`. The latter should be the legacy
-PICO `EQUIPMENT_SN` when the deployed RoboticsService identifies clients by SN.
+`operator.teleop.xrobot_toolkit_device_sn`. Set
+`operator.teleop.show_video_panel=true` to override the persisted panel toggle
+for that launch without rewriting the saved settings. The device-SN extra
+should be the legacy PICO `EQUIPMENT_SN` when the deployed RoboticsService
+identifies clients by SN.
 `operator.teleop.pico_body_calibrate=true` opens PICO's body-tracking
 calibration flow after XR startup. The same action is available from the
 XRoboToolkit-compatible Teleop settings panel.

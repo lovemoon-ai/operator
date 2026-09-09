@@ -16,6 +16,12 @@ const DISTANCE_METERS_PER_SCROLL_PIXEL := 0.0015
 const PERFORMANCE_PANEL_GAP_METERS := 0.10
 const SIDECAR_Z_OFFSET_METERS := 0.02
 const VIDEO_INTERACTION_PRIORITY := 10
+const YUV_COLOR_STANDARD_AUTO := "auto"
+const YUV_COLOR_STANDARD_BT601 := "bt601"
+const YUV_COLOR_STANDARD_BT709 := "bt709"
+const YUV_COLOR_RANGE_LIMITED := "limited"
+const YUV_COLOR_RANGE_FULL := "full"
+const MAX_DRAW_INTERVAL_SAMPLES := 120
 
 @onready var _display_mesh: MeshInstance3D = get_node_or_null("DisplayMesh") as MeshInstance3D
 var _panel_sidecar: Node3D
@@ -24,10 +30,29 @@ var _panel_sidecar: Node3D
 # legible while still being fresh enough to react to network blips.
 const _HUD_UPDATE_INTERVAL_NS: int = 200_000_000
 var _last_hud_update_ns: int = 0
-var _display_fps: float = 0.0
-var _fps_sample_ns: int = 0
-var _fps_sample_frames: int = 0
-var _presented_frame_count: int = 0
+var _received_fps: float = 0.0
+var _decoded_fps: float = 0.0
+var _uploaded_fps: float = 0.0
+var _drawn_fps: float = 0.0
+var _rate_sample_ns: int = 0
+var _rate_sample_received: int = 0
+var _rate_sample_decoded: int = 0
+var _rate_sample_uploaded: int = 0
+var _rate_sample_drawn: int = 0
+var _received_access_unit_count: int = 0
+var _decoded_frame_count: int = 0
+var _uploaded_frame_count: int = 0
+var _drawn_frame_count: int = 0
+var _display_skipped_frame_count: int = 0
+var _decoder_queue_depth: int = 0
+var _decoder_dropped_access_unit_count: int = 0
+var _last_polled_decoder_sequence: int = 0
+var _last_correlated_decoder_sequence: int = 0
+var _last_ahb_import_count: int = 0
+var _pending_draw_sequence: int = 0
+var _last_drawn_sequence: int = 0
+var _last_draw_timestamp_ns: int = 0
+var _draw_intervals_ms: Array[float] = []
 # Source of UDP-level reassembly drops, injected by main.gd via
 # `set_packet_source`. Optional — the HUD just shows -- for udp drops if
 # no source is set (e.g. on the TCP path).
@@ -63,17 +88,19 @@ var _last_video_packet: Dictionary = {}
 var _video_decoder: Object = null
 var _video_decoder_connected: bool = false
 var _video_decoder_warning_logged: bool = false
+var _decoder_restart_pending: bool = false
 var _configured_width: int = 0
 var _configured_height: int = 0
 # Active codec family ("h264" / "hevc") last passed to the decoder. Defaults to
 # H.264 so a descriptor without a `codec` field keeps the historical behaviour,
 # and so the first configure only restarts the decoder when it actually flips.
 var _configured_codec: String = "h264"
+var _configured_yuv_color_standard: String = YUV_COLOR_STANDARD_BT709
+var _configured_yuv_color_range: String = YUV_COLOR_RANGE_LIMITED
 var _desired_stereo_layout: bool = true
 var _video_layout_stereo: bool = true
 var _pending_access_unit: PackedByteArray = PackedByteArray()
 var _submitted_video_packets: Array[Dictionary] = []
-var _last_ahb_frame_count: int = 0
 
 
 ## When true, the display panel rides with the user's head so it is always
@@ -111,7 +138,10 @@ func _ready() -> void:
 	_ensure_panel_sidecar()
 	_default_panel_distance = clampf(follow_distance, MIN_PANEL_DISTANCE, MAX_PANEL_DISTANCE)
 	add_to_group(TARGET_GROUP)
-	_set_performance_metrics(0.0, 0.0, 0, 0)
+	var post_draw_callback := Callable(self, "_on_frame_post_draw")
+	if not RenderingServer.frame_post_draw.is_connected(post_draw_callback):
+		RenderingServer.frame_post_draw.connect(post_draw_callback)
+	_set_performance_metrics()
 	visible = false
 
 
@@ -394,12 +424,20 @@ func _set_performance_text(text: String) -> void:
 		_panel_sidecar.call("set_performance_text", text)
 
 
-func _set_performance_metrics(fps: float, latency_ms: float, drops: int, frames: int) -> void:
+func _set_performance_metrics() -> void:
+	var interval_p50 := _frame_interval_percentile(_draw_intervals_ms, 0.50)
+	var interval_p95 := _frame_interval_percentile(_draw_intervals_ms, 0.95)
 	_set_performance_text(tr("UI_VIDEO_PERFORMANCE_FORMAT") % [
-		_fmt_compact_fps(fps),
-		_fmt_compact_ms(latency_ms),
-		str(maxi(drops, 0)),
-		str(maxi(frames, 0)),
+		_fmt_compact_fps(_received_fps),
+		_fmt_compact_fps(_decoded_fps),
+		_fmt_compact_fps(_uploaded_fps),
+		_fmt_compact_fps(_drawn_fps),
+		_fmt_compact_ms(interval_p50),
+		_fmt_compact_ms(interval_p95),
+		_fmt_compact_ms(_smoothed_local_latency_ms),
+		str(maxi(_decoder_queue_depth, 0)),
+		str(maxi(_total_drop_count(), 0)),
+		str(maxi(_drawn_frame_count, 0)),
 	])
 
 
@@ -421,6 +459,7 @@ func _try_create_ahb_texture() -> void:
 
 
 func _process(_delta: float) -> void:
+	_restart_video_decoder_after_error()
 	# [opt 10] Once the AhbVideoTexture's native side reports ready
 	# (first VkImage successfully imported), swap it into the shader
 	# in place of plan B's three L8 textures. After this swap the
@@ -443,6 +482,10 @@ func _process(_delta: float) -> void:
 	# so a later `configure_video_stream({stereo: ...})` is picked up too.
 	if _ahb_bound_to_shader and _video_layout_stereo != _desired_stereo_layout:
 		_apply_video_layout(_desired_stereo_layout)
+	if _ahb_bound_to_shader:
+		_poll_ahb_frame()
+	else:
+		_poll_latest_decoder_frame()
 
 	# Cheap idempotent check; flips visibility on the frame after
 	# `_receiving_video` (or `show_video_panel`) changes — keeps the panel
@@ -502,9 +545,70 @@ func _process(_delta: float) -> void:
 		_sync_sidecar_transform()
 
 
-## Refresh the compact performance sidecar. It intentionally reports only
-## values available for every supported transport: displayed FPS, local
-## receive-to-display latency, local/transport drops, and displayed frames.
+func _poll_latest_decoder_frame() -> void:
+	if _video_decoder == null or not _decoder_is_running():
+		return
+	var stats: Dictionary = _video_decoder.call("get_decoder_stats")
+	var available_sequence := int(stats.get("latest_frame_sequence", 0))
+	_decoded_frame_count = maxi(_decoded_frame_count, int(stats.get("decoded_frames", 0)))
+	_decoder_queue_depth = maxi(0, int(stats.get("input_queue_depth", 0)))
+	if available_sequence <= _last_polled_decoder_sequence:
+		return
+	var frame: Dictionary = _video_decoder.call("get_latest_frame")
+	if frame.is_empty():
+		return
+	var frame_sequence := int(frame.get("frame_sequence", 0))
+	if frame_sequence <= _last_polled_decoder_sequence:
+		return
+	_last_polled_decoder_sequence = frame_sequence
+	_decoded_frame_count = maxi(_decoded_frame_count, frame_sequence)
+
+	var presentation_time_us := int(frame.get("presentation_time_us", 0))
+	var packet := _take_latest_decoder_packet(frame_sequence, presentation_time_us)
+	var width := int(frame.get("width", 0))
+	var height := int(frame.get("height", 0))
+	var decoded_ns := int(frame.get("decoded_ns", frame.get("timestamp_ns", 0)))
+	var y_bytes: PackedByteArray = frame.get("y_plane", PackedByteArray())
+	var u_bytes: PackedByteArray = frame.get("u_plane", PackedByteArray())
+	var v_bytes: PackedByteArray = frame.get("v_plane", PackedByteArray())
+	if not y_bytes.is_empty() and not u_bytes.is_empty() and not v_bytes.is_empty():
+		_on_video_yuv_frame_ready(
+			width, height, decoded_ns, y_bytes, u_bytes, v_bytes, frame_sequence, packet
+		)
+		return
+
+	var rgba: PackedByteArray = frame.get("rgba", PackedByteArray())
+	if not rgba.is_empty():
+		_on_video_frame_ready(width, height, decoded_ns, rgba, frame_sequence, packet)
+
+
+func _poll_ahb_frame() -> void:
+	if _ahb_texture == null or not _ahb_texture.has_method("get_latest_info"):
+		return
+	var info: Dictionary = _ahb_texture.call("get_latest_info")
+	var import_count := int(info.get("frames", 0))
+	if import_count <= _last_ahb_import_count:
+		return
+	var imported_delta := import_count - _last_ahb_import_count
+	_last_ahb_import_count = import_count
+	var frame_sequence := int(info.get("frame_sequence", 0))
+	if frame_sequence <= _last_polled_decoder_sequence:
+		return
+	_last_polled_decoder_sequence = frame_sequence
+	_decoded_frame_count = maxi(_decoded_frame_count, frame_sequence)
+	_uploaded_frame_count += imported_delta
+	_pending_draw_sequence = frame_sequence
+	_receiving_video = true
+	var decoded_ns := int(info.get("decoded_ns", 0))
+	var presentation_time_us := int(info.get("presentation_time_us", 0))
+	_record_local_latency(
+		_take_latest_decoder_packet(frame_sequence, presentation_time_us), decoded_ns
+	)
+
+
+## Refresh the compact performance sidecar with stage-specific rates. Counting
+## decoded and uploaded frames separately makes mailbox skips visible instead
+## of reporting a misleading callback rate as display FPS.
 func _update_latency_hud() -> void:
 	if _panel_sidecar == null:
 		return
@@ -514,26 +618,13 @@ func _update_latency_hud() -> void:
 	_last_hud_update_ns = now_ns
 
 	if not _receiving_video:
-		_fps_sample_ns = 0
-		_fps_sample_frames = 0
-		_set_performance_metrics(0.0, 0.0, _total_drop_count(), 0)
+		_rate_sample_ns = 0
+		_set_performance_metrics()
 		return
 
-	var displayed_frames: int = _presented_frame_count
-	if _ahb_bound_to_shader and _ahb_texture and _ahb_texture.has_method("get_latest_info"):
-		var info: Dictionary = _ahb_texture.call("get_latest_info")
-		displayed_frames = int(info.get("frames", displayed_frames))
-		var decoded_ns := int(info.get("decoded_ns", 0))
-		if displayed_frames > _last_ahb_frame_count:
-			_record_local_latency(_take_latest_ahb_packet(displayed_frames), decoded_ns)
-	_update_display_fps(now_ns, displayed_frames)
-
-	_set_performance_metrics(
-		_display_fps,
-		_smoothed_local_latency_ms,
-		_total_drop_count(),
-		displayed_frames,
-	)
+	_refresh_decoder_count()
+	_update_stage_rates(now_ns)
+	_set_performance_metrics()
 
 
 func _record_local_latency(packet: Dictionary, completed_ns: int) -> void:
@@ -547,7 +638,8 @@ func _record_local_latency(packet: Dictionary, completed_ns: int) -> void:
 
 
 func _total_drop_count() -> int:
-	var drops := _stale_dropped_count + _decoder_busy_count
+	var decoder_drops := maxi(_decoder_busy_count, _decoder_dropped_access_unit_count)
+	var drops := _stale_dropped_count + decoder_drops + _display_skipped_frame_count
 	if (
 		bool(_last_video_packet.get("transport_loss_available", true))
 		and _packet_source != null
@@ -557,17 +649,83 @@ func _total_drop_count() -> int:
 	return drops
 
 
-func _update_display_fps(now_ns: int, displayed_frames: int) -> void:
-	if _fps_sample_ns == 0 or displayed_frames < _fps_sample_frames:
-		_fps_sample_ns = now_ns
-		_fps_sample_frames = displayed_frames
+func _refresh_decoder_count() -> void:
+	if _video_decoder == null or not _decoder_is_running():
 		return
-	var elapsed_ns := now_ns - _fps_sample_ns
+	var stats: Dictionary = _video_decoder.call("get_decoder_stats")
+	if stats.is_empty():
+		return
+	_decoded_frame_count = maxi(_decoded_frame_count, int(stats.get("decoded_frames", 0)))
+	_decoder_queue_depth = maxi(0, int(stats.get("input_queue_depth", 0)))
+	_decoder_dropped_access_unit_count = maxi(
+		_decoder_dropped_access_unit_count, int(stats.get("dropped_access_units", 0))
+	)
+
+
+func _on_frame_post_draw() -> void:
+	if not visible or _display_mesh == null or not _display_mesh.is_visible_in_tree():
+		_last_drawn_sequence = _pending_draw_sequence
+		_last_draw_timestamp_ns = 0
+		return
+	if _pending_draw_sequence <= _last_drawn_sequence:
+		return
+	var sequence_delta := _pending_draw_sequence - _last_drawn_sequence
+	if sequence_delta > 1:
+		_display_skipped_frame_count += sequence_delta - 1
+	_last_drawn_sequence = _pending_draw_sequence
+	_drawn_frame_count += 1
+	var now_ns := VideoLatencyTracker.now_ns()
+	if _last_draw_timestamp_ns > 0 and now_ns > _last_draw_timestamp_ns:
+		_draw_intervals_ms.append(float(now_ns - _last_draw_timestamp_ns) / 1_000_000.0)
+		if _draw_intervals_ms.size() > MAX_DRAW_INTERVAL_SAMPLES:
+			_draw_intervals_ms.pop_front()
+	_last_draw_timestamp_ns = now_ns
+
+
+static func _frame_interval_percentile(samples: Array[float], percentile: float) -> float:
+	if samples.is_empty():
+		return -1.0
+	var sorted_samples := samples.duplicate()
+	sorted_samples.sort()
+	var clamped_percentile := clampf(percentile, 0.0, 1.0)
+	var index := int(ceil(clamped_percentile * float(sorted_samples.size())) - 1.0)
+	return float(sorted_samples[clampi(index, 0, sorted_samples.size() - 1)])
+
+
+func _update_stage_rates(now_ns: int) -> void:
+	if _rate_sample_ns == 0:
+		_rate_sample_ns = now_ns
+		_rate_sample_received = _received_access_unit_count
+		_rate_sample_decoded = _decoded_frame_count
+		_rate_sample_uploaded = _uploaded_frame_count
+		_rate_sample_drawn = _drawn_frame_count
+		return
+	var elapsed_ns := now_ns - _rate_sample_ns
 	if elapsed_ns < 1_000_000_000:
 		return
-	_display_fps = float(displayed_frames - _fps_sample_frames) / (float(elapsed_ns) / 1_000_000_000.0)
-	_fps_sample_ns = now_ns
-	_fps_sample_frames = displayed_frames
+	var elapsed_seconds := float(elapsed_ns) / 1_000_000_000.0
+	_received_fps = float(maxi(0, _received_access_unit_count - _rate_sample_received)) / elapsed_seconds
+	_decoded_fps = float(maxi(0, _decoded_frame_count - _rate_sample_decoded)) / elapsed_seconds
+	_uploaded_fps = float(maxi(0, _uploaded_frame_count - _rate_sample_uploaded)) / elapsed_seconds
+	_drawn_fps = float(maxi(0, _drawn_frame_count - _rate_sample_drawn)) / elapsed_seconds
+	_rate_sample_ns = now_ns
+	_rate_sample_received = _received_access_unit_count
+	_rate_sample_decoded = _decoded_frame_count
+	_rate_sample_uploaded = _uploaded_frame_count
+	_rate_sample_drawn = _drawn_frame_count
+	var interval_p50 := _frame_interval_percentile(_draw_intervals_ms, 0.50)
+	var interval_p95 := _frame_interval_percentile(_draw_intervals_ms, 0.95)
+	print("[LiveVideo] pipeline: rx=%.1f dec=%.1f up=%.1f draw=%.1f queue=%d display_drop=%d interval_p50=%s interval_p95=%s latency=%s" % [
+		_received_fps,
+		_decoded_fps,
+		_uploaded_fps,
+		_drawn_fps,
+		_decoder_queue_depth,
+		_display_skipped_frame_count,
+		_fmt_compact_ms(interval_p50),
+		_fmt_compact_ms(interval_p95),
+		_fmt_compact_ms(_smoothed_local_latency_ms),
+	])
 
 
 static func _ewma(prev: float, sample: float) -> float:
@@ -620,25 +778,46 @@ func configure_video_stream(feed: Dictionary) -> void:
 	# h264 so pre-codec robots keep working.
 	var codec_raw := String(feed.get("codec", "h264")).to_lower()
 	var codec := "hevc" if codec_raw in ["hevc", "h265", "x265"] else "h264"
+	var color_standard := _resolve_yuv_color_standard(
+		String(feed.get("color_standard", feed.get("color_matrix", YUV_COLOR_STANDARD_AUTO))),
+		height,
+	)
+	var color_range_value: Variant = feed.get("color_range", YUV_COLOR_RANGE_LIMITED)
+	if feed.has("full_range"):
+		color_range_value = YUV_COLOR_RANGE_FULL if bool(feed.get("full_range")) else YUV_COLOR_RANGE_LIMITED
+	var color_range := _resolve_yuv_color_range(String(color_range_value))
 
 	var decoder_size_changed := width != _configured_width or height != _configured_height
 	var layout_changed := stereo != _desired_stereo_layout
 	var codec_changed := codec != _configured_codec
+	var color_changed := (
+		color_standard != _configured_yuv_color_standard
+		or color_range != _configured_yuv_color_range
+	)
 
 	var decoder_running := _decoder_is_running()
 
-	if not decoder_size_changed and not layout_changed and not codec_changed and decoder_running:
+	if (
+		not decoder_size_changed
+		and not layout_changed
+		and not codec_changed
+		and not color_changed
+		and decoder_running
+	):
 		return
 
 	_configured_width = width
 	_configured_height = height
 	_configured_codec = codec
+	_configured_yuv_color_standard = color_standard
+	_configured_yuv_color_range = color_range
 	_desired_stereo_layout = stereo
-	_pending_access_unit = PackedByteArray()
-	_submitted_video_packets.clear()
+	_apply_yuv_colorimetry()
+	if decoder_size_changed or codec_changed:
+		_reset_frame_pipeline_metrics()
 
 	if not _ensure_video_decoder(width, height):
-		if decoder_size_changed or layout_changed or codec_changed:
+		if decoder_size_changed or layout_changed or codec_changed or color_changed:
 			print("[LiveVideo] Video decoder unavailable; keeping placeholder texture")
 		return
 
@@ -658,9 +837,12 @@ func configure_video_stream(feed: Dictionary) -> void:
 		if not started:
 			print("[LiveVideo] Warning: failed to start video decoder")
 			return
+		_decoder_restart_pending = false
 
-	if decoder_size_changed or layout_changed or codec_changed:
-		print("[LiveVideo] Video stream configured: %dx%d stereo=%s codec=%s" % [width, height, stereo, codec])
+	if decoder_size_changed or layout_changed or codec_changed or color_changed:
+		print("[LiveVideo] Video stream configured: %dx%d stereo=%s codec=%s color=%s/%s" % [
+			width, height, stereo, codec, color_standard, color_range,
+		])
 
 
 ## Convenience API for projects that do not use Teleoperate-Anything feed dictionaries.
@@ -670,6 +852,65 @@ func configure_h264_stream(width: int, height: int, stereo: bool = false) -> voi
 		"height": height,
 		"stereo": stereo,
 	})
+
+
+static func _resolve_yuv_color_standard(value: String, height: int) -> String:
+	var normalized := value.strip_edges().to_lower().replace(".", "").replace("-", "")
+	if normalized in ["601", "bt601", "smpte170m"]:
+		return YUV_COLOR_STANDARD_BT601
+	if normalized in ["709", "bt709"]:
+		return YUV_COLOR_STANDARD_BT709
+	return YUV_COLOR_STANDARD_BT709 if height >= 720 else YUV_COLOR_STANDARD_BT601
+
+
+static func _resolve_yuv_color_range(value: String) -> String:
+	var normalized := value.strip_edges().to_lower().replace("_", "").replace("-", "")
+	return YUV_COLOR_RANGE_FULL if normalized in ["full", "jpeg", "pc"] else YUV_COLOR_RANGE_LIMITED
+
+
+func _apply_yuv_colorimetry() -> void:
+	if _shader_material == null:
+		return
+	_shader_material.set_shader_parameter(
+		"yuv_color_standard",
+		1 if _configured_yuv_color_standard == YUV_COLOR_STANDARD_BT709 else 0,
+	)
+	_shader_material.set_shader_parameter(
+		"yuv_full_range",
+		_configured_yuv_color_range == YUV_COLOR_RANGE_FULL,
+	)
+
+
+func _reset_frame_pipeline_metrics() -> void:
+	_pending_access_unit = PackedByteArray()
+	_submitted_video_packets.clear()
+	_received_fps = 0.0
+	_decoded_fps = 0.0
+	_uploaded_fps = 0.0
+	_drawn_fps = 0.0
+	_rate_sample_ns = 0
+	_rate_sample_received = 0
+	_rate_sample_decoded = 0
+	_rate_sample_uploaded = 0
+	_rate_sample_drawn = 0
+	_received_access_unit_count = 0
+	_decoded_frame_count = 0
+	_uploaded_frame_count = 0
+	_drawn_frame_count = 0
+	_display_skipped_frame_count = 0
+	_decoder_queue_depth = 0
+	_decoder_dropped_access_unit_count = 0
+	_last_polled_decoder_sequence = 0
+	_last_correlated_decoder_sequence = 0
+	_last_ahb_import_count = 0
+	if _ahb_texture != null and _ahb_texture.has_method("get_latest_info"):
+		var ahb_info: Dictionary = _ahb_texture.call("get_latest_info")
+		_last_ahb_import_count = int(ahb_info.get("frames", 0))
+	_pending_draw_sequence = 0
+	_last_drawn_sequence = 0
+	_last_draw_timestamp_ns = 0
+	_draw_intervals_ms.clear()
+	_last_latency_log_ns = 0
 
 
 func _decoder_is_running() -> bool:
@@ -733,8 +974,9 @@ func _setup_material() -> void:
 	_shader_material.set_shader_parameter("video_texture", _placeholder_texture)
 	_shader_material.set_shader_parameter("content_ratio", 0.5)
 	_shader_material.set_shader_parameter("visible_ratio", 1.0)
-	_shader_material.set_shader_parameter("opacity", 0.9)
+	_shader_material.set_shader_parameter("opacity", 1.0)
 	_shader_material.set_shader_parameter("stereo_layout", true)
+	_apply_yuv_colorimetry()
 
 	_display_mesh.material_override = _shader_material
 
@@ -756,20 +998,9 @@ func _ensure_video_decoder(width: int, height: int) -> bool:
 	_video_decoder = decoder
 
 	if not _video_decoder_connected:
-		# Decoder runs on a worker thread; defer callbacks to the main thread.
-		_video_decoder.connect(
-			"frame_ready",
-			Callable(self, "_on_video_frame_ready"),
-			CONNECT_DEFERRED
-		)
-		# Plan B: GPU YUV->RGB. Prefer this path; the RGBA frame_ready
-		# signal stays connected as a fallback for the placeholder code.
-		if _video_decoder.has_signal("yuv_frame_ready"):
-			_video_decoder.connect(
-				"yuv_frame_ready",
-				Callable(self, "_on_video_yuv_frame_ready"),
-				CONNECT_DEFERRED
-			)
+		# Decoded video is polled once from _process() through a latest-frame
+		# mailbox. Per-frame deferred signals can bunch several uploads into one
+		# render tick, inflating FPS while only the final upload is visible.
 		_video_decoder.connect(
 			"decoder_error",
 			Callable(self, "_on_video_decoder_error"),
@@ -782,27 +1013,37 @@ func _ensure_video_decoder(width: int, height: int) -> bool:
 
 func _on_video_decoder_error(message: String) -> void:
 	print("[LiveVideo] Video decoder error: %s" % message)
+	_decoder_restart_pending = _configured_width > 0 and _configured_height > 0
+
+
+func _restart_video_decoder_after_error() -> void:
+	if not _decoder_restart_pending or _video_decoder == null or _decoder_is_running():
+		return
+	_decoder_restart_pending = false
+	_reset_frame_pipeline_metrics()
+	var started := bool(_video_decoder.call(
+		"start_decoder_with_codec", _configured_width, _configured_height, _configured_codec
+	))
+	if started:
+		print("[LiveVideo] Video decoder restarted; waiting for a random-access frame")
+	else:
+		print("[LiveVideo] Warning: failed to restart video decoder")
 
 
 func _exit_tree() -> void:
-	# The decoder is an Engine singleton, so it outlives this node. Dropping
-	# the view on a mode switch would otherwise leave MediaCodec holding a
-	# hardware decoder instance and keep our deferred callbacks wired to a
-	# node that is no longer in the tree. Godot only auto-disconnects signals
-	# when a node is *freed*, not when it merely leaves the tree, so release
-	# both explicitly. _ensure_video_decoder() re-arms everything the next
-	# time a stream is configured.
+	var post_draw_callback := Callable(self, "_on_frame_post_draw")
+	if RenderingServer.frame_post_draw.is_connected(post_draw_callback):
+		RenderingServer.frame_post_draw.disconnect(post_draw_callback)
+	# The decoder is an Engine singleton, so it outlives this node. Release it
+	# explicitly on mode switches; _ensure_video_decoder() re-arms it later.
 	_release_video_decoder()
 
 
 func _release_video_decoder() -> void:
 	if _video_decoder == null:
 		return
-	if _decoder_is_running():
-		_decoder_call_void("stop_decoder")
+	_decoder_call_void("stop_decoder")
 	if _video_decoder_connected:
-		_disconnect_decoder_signal("frame_ready", "_on_video_frame_ready")
-		_disconnect_decoder_signal("yuv_frame_ready", "_on_video_yuv_frame_ready")
 		_disconnect_decoder_signal("decoder_error", "_on_video_decoder_error")
 		_video_decoder_connected = false
 	_video_decoder = null
@@ -849,20 +1090,34 @@ var _ahb_bound_to_shader: bool = false
 # to logcat is non-trivial (string format + JNI write) and at 30 fps
 # was visible in flame graphs.
 var _last_latency_log_ns: int = 0
-# Per-second running stats so we can still see actual displayed fps
-# even with the per-frame log throttled.
-var _stats_window_start_ns: int = 0
-var _stats_frame_count: int = 0
-var _stats_total_ms: float = 0.0
-var _stats_decode_ms: float = 0.0
-var _stats_present_ms: float = 0.0
-
-
-func _take_latest_ahb_packet(frame_count: int) -> Dictionary:
-	if frame_count <= _last_ahb_frame_count:
+func _take_latest_decoder_packet(
+		frame_sequence: int, presentation_time_us: int = 0
+	) -> Dictionary:
+	if frame_sequence <= _last_correlated_decoder_sequence:
 		return _last_video_packet
-	var delta: int = frame_count - _last_ahb_frame_count
-	_last_ahb_frame_count = frame_count
+	var delta: int = frame_sequence - _last_correlated_decoder_sequence
+	_last_correlated_decoder_sequence = frame_sequence
+
+	# MediaCodec preserves the input presentation timestamp on decoded output.
+	# Match that timestamp first instead of assuming one submitted NAL produces
+	# one decoded frame: SPS/PPS/VPS inputs intentionally produce no output and
+	# would otherwise offset every latency sample after stream startup.
+	if presentation_time_us > 0:
+		for packet_index in range(_submitted_video_packets.size()):
+			var candidate: Dictionary = _submitted_video_packets[packet_index]
+			var receive_ns := int(candidate.get("receive_ns", 0))
+			if receive_ns <= 0 or int(receive_ns / 1000) != presentation_time_us:
+				continue
+			var matched_packet := candidate
+			for _unused_index in range(packet_index + 1):
+				_submitted_video_packets.pop_front()
+			return matched_packet
+
+		# Metadata may have aged out of the bounded GDScript queue. Preserve the
+		# exact MediaCodec timing rather than attaching an unrelated packet.
+		var timing_packet := _last_video_packet.duplicate(true)
+		timing_packet["receive_ns"] = presentation_time_us * 1000
+		return timing_packet
 
 	var packet: Dictionary = {}
 	for i in range(delta):
@@ -880,6 +1135,8 @@ func _on_video_yuv_frame_ready(
 		y_bytes: PackedByteArray,
 		u_bytes: PackedByteArray,
 		v_bytes: PackedByteArray,
+		frame_sequence: int = 0,
+		packet: Dictionary = {},
 	) -> void:
 	# [opt 10] When the AHB zero-copy path is bound, the Kotlin
 	# decoder skips emitting yuv_frame_ready in favour of calling
@@ -911,7 +1168,8 @@ func _on_video_yuv_frame_ready(
 	# 3 allocations + 3 GC handles per frame at the cost of three
 	# pre-allocated Image objects.
 	var size := Vector2i(width, height)
-	if _y_texture == null or _yuv_size != size:
+	var textures_recreated := _y_texture == null or _yuv_size != size
+	if textures_recreated:
 		_y_image = Image.create_from_data(width, height, false, Image.FORMAT_L8, y_bytes)
 		_u_image = Image.create_from_data(cw, ch, false, Image.FORMAT_L8, u_bytes)
 		_v_image = Image.create_from_data(cw, ch, false, Image.FORMAT_L8, v_bytes)
@@ -934,34 +1192,29 @@ func _on_video_yuv_frame_ready(
 	# parameters are set once on the first frame and re-bound only if
 	# we re-allocated the textures (i.e. resolution changed) — saves 3
 	# set_shader_parameter calls per frame.
-	if not _yuv_path_logged:
+	if not _yuv_path_logged or textures_recreated:
 		_shader_material.set_shader_parameter("use_yuv", true)
 		_shader_material.set_shader_parameter("y_texture", _y_texture)
 		_shader_material.set_shader_parameter("u_texture", _u_texture)
 		_shader_material.set_shader_parameter("v_texture", _v_texture)
+		if not _yuv_path_logged:
+			print("[LiveVideo] GPU YUV path active: %dx%d (chroma %dx%d)" % [width, height, cw, ch])
 		_yuv_path_logged = true
-		print("[LiveVideo] GPU YUV path active: %dx%d (chroma %dx%d)" % [width, height, cw, ch])
-	elif _yuv_size != size:
-		_shader_material.set_shader_parameter("y_texture", _y_texture)
-		_shader_material.set_shader_parameter("u_texture", _u_texture)
-		_shader_material.set_shader_parameter("v_texture", _v_texture)
 
 	if _video_layout_stereo != _desired_stereo_layout:
 		_apply_video_layout(_desired_stereo_layout)
 
 	_receiving_video = true
-	_presented_frame_count += 1
+	_uploaded_frame_count += 1
+	_pending_draw_sequence = frame_sequence if frame_sequence > 0 else _uploaded_frame_count
 
 	# [plan C] Latency log was per-frame. At 30 fps that's 30
 	# print()-to-logcat calls per second, each requiring a string
 	# format pass. Throttle to ~1 Hz: emit only when we've crossed a
 	# 1-second boundary, plus any latency outliers (>200 ms total).
-	# Pop the matching submitted packet to keep the inflight queue
-	# accurate.
-	var packet: Dictionary = {}
-	if not _submitted_video_packets.is_empty():
-		packet = _submitted_video_packets.pop_front()
-	elif not _last_video_packet.is_empty():
+	# The mailbox poll already correlated this decoded sequence with the newest
+	# submitted access unit. Legacy direct callers may omit packet metadata.
+	if packet.is_empty() and not _last_video_packet.is_empty():
 		packet = _last_video_packet
 	if packet.is_empty():
 		return
@@ -973,35 +1226,7 @@ func _on_video_yuv_frame_ready(
 	_last_video_packet["present_ns"] = present_ns
 	_record_local_latency(_last_video_packet, present_ns)
 
-	# Update per-second running stats so we can summarise fps + median
-	# latency even when the verbose per-frame log is throttled.
-	if _stats_window_start_ns == 0:
-		_stats_window_start_ns = present_ns
-	_stats_frame_count += 1
 	var receive_ns: int = int(_last_video_packet.get("receive_ns", 0))
-	if receive_ns > 0 and present_ns >= receive_ns:
-		_stats_total_ms += float(present_ns - receive_ns) / 1_000_000.0
-	if decoded_ns > 0 and receive_ns > 0 and decoded_ns >= receive_ns:
-		_stats_decode_ms += float(decoded_ns - receive_ns) / 1_000_000.0
-	if decoded_ns > 0 and present_ns >= decoded_ns:
-		_stats_present_ms += float(present_ns - decoded_ns) / 1_000_000.0
-
-	var window_ns: int = present_ns - _stats_window_start_ns
-	if window_ns >= 1_000_000_000:
-		var window_s: float = float(window_ns) / 1_000_000_000.0
-		var fps: float = float(_stats_frame_count) / window_s
-		var avg_total: float = _stats_total_ms / float(_stats_frame_count)
-		var avg_decode: float = _stats_decode_ms / float(_stats_frame_count)
-		var avg_present: float = _stats_present_ms / float(_stats_frame_count)
-		print("[LiveVideo] stats: %.1f fps  decode_avg=%.1f ms  present_avg=%.1f ms  total_avg=%.1f ms (n=%d in %.2fs)" % [
-			fps, avg_decode, avg_present, avg_total, _stats_frame_count, window_s,
-		])
-		_stats_window_start_ns = present_ns
-		_stats_frame_count = 0
-		_stats_total_ms = 0.0
-		_stats_decode_ms = 0.0
-		_stats_present_ms = 0.0
-
 	var should_log: bool = present_ns - _last_latency_log_ns >= 1_000_000_000
 	if not should_log:
 		if receive_ns > 0 and present_ns - receive_ns > 200_000_000:
@@ -1015,7 +1240,9 @@ func _on_video_frame_ready(
 		width: int = -1,
 		height: int = -1,
 		decoded_ns: int = 0,
-		rgba: PackedByteArray = PackedByteArray()
+		rgba: PackedByteArray = PackedByteArray(),
+		frame_sequence: int = 0,
+		packet: Dictionary = {},
 	) -> void:
 	if _video_decoder and not _decoder_is_running():
 		return
@@ -1098,12 +1325,18 @@ func _on_video_frame_ready(
 			path, err, ProjectSettings.globalize_path(path),
 		])
 
-	var packet: Dictionary = _submitted_video_packets.pop_front() if not _submitted_video_packets.is_empty() else _last_video_packet
-	update_video_texture(image, packet, decoded_ns)
+	if packet.is_empty() and not _last_video_packet.is_empty():
+		packet = _last_video_packet
+	update_video_texture(image, packet, decoded_ns, frame_sequence)
 
 
 ## Update the video texture and print a full latency summary.
-func update_video_texture(image: Image, packet: Dictionary = {}, decoded_ns: int = 0) -> void:
+func update_video_texture(
+		image: Image,
+		packet: Dictionary = {},
+		decoded_ns: int = 0,
+		frame_sequence: int = 0,
+	) -> void:
 	if image.get_width() <= 0 or image.get_height() <= 0:
 		return
 
@@ -1121,7 +1354,8 @@ func update_video_texture(image: Image, packet: Dictionary = {}, decoded_ns: int
 		_shader_material.set_shader_parameter("use_yuv", false)
 		_shader_material.set_shader_parameter("video_texture", texture)
 		_receiving_video = true
-		_presented_frame_count += 1
+		_uploaded_frame_count += 1
+		_pending_draw_sequence = frame_sequence if frame_sequence > 0 else _uploaded_frame_count
 		# One-shot confirmation that the shader is actually sampling the
 		# video texture, not the placeholder.
 		if not _shader_video_bound_logged:
@@ -1145,7 +1379,15 @@ func update_video_texture(image: Image, packet: Dictionary = {}, decoded_ns: int
 	var present_ns := VideoLatencyTracker.now_ns()
 	_last_video_packet["present_ns"] = present_ns
 	_record_local_latency(_last_video_packet, present_ns)
-	print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(_last_video_packet, _clock_offset_ns, _clock_samples))
+	var receive_ns := int(_last_video_packet.get("receive_ns", 0))
+	var should_log := present_ns - _last_latency_log_ns >= 1_000_000_000
+	if not should_log and receive_ns > 0 and present_ns - receive_ns > 200_000_000:
+		should_log = true
+	if should_log:
+		_last_latency_log_ns = present_ns
+		print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(
+			_last_video_packet, _clock_offset_ns, _clock_samples
+		))
 
 
 func _update_video_texture(image: Image) -> ImageTexture:
@@ -1167,68 +1409,11 @@ func _apply_video_layout(stereo_layout: bool) -> void:
 		_shader_material.set_shader_parameter("content_ratio", 0.5 if stereo_layout else 1.0)
 
 
-## Hard cap on how many in-flight access-unit packets we remember.
-##
-## Tradeoff: small cap = honest low latency but visible frame drops
-## when the GDScript main thread is busy; big cap = no drops but the
-## queue lag dominates `decode=` and total end-to-end latency.
-##
-## We chose 3:
-##   - cap=3 measured: decode median 50 ms, total 100 ms, ~19 fps shown
-##   - cap=12 measured: decode median 340 ms, total 400 ms, ~25 fps shown
-## For a teleoperation use case we'd rather drop the occasional frame
-## than show a noticeably-old one. The stale-NAL guard from [opt 2]
-## already discards anything older than 100 ms upstream of this queue.
-##
-## If the dropped-frame perception is the dominant complaint, the
-## right fix is to remove the deferred-callback bottleneck (e.g. the
-## item 10 AHB import path), not to enlarge this queue.
 # Metadata queue used to correlate decoder output with packet timestamps.
-# MediaCodec can report a sizeable output delay, so keep a few seconds of
-# packet timing metadata. This does not queue video frames in GDScript.
-const MAX_INFLIGHT_PACKETS: int = 96
-
-
-## Inspect an Annex-B access unit and return true if it contains a NAL the
-## decoder must not lose: for H.264 an IDR (5), SPS (7) or PPS (8); for HEVC an
-## IRAP slice (16..21) or VPS (32) / SPS (33) / PPS (34). We never drop those
-## even if they're "old".
-func _access_unit_has_keyframe(access_unit: PackedByteArray) -> bool:
-	# Annex B: NAL units are separated by 0x00 00 00 01 (or 0x00 00 01). The
-	# byte(s) after the start code are the NAL header. H.264 puts the type in
-	# the low 5 bits of byte 0; HEVC's header is 2 bytes and the type is bits
-	# 6..1 of byte 0 ((byte >> 1) & 0x3F).
-	var hevc := _configured_codec == "hevc"
-	var n := access_unit.size()
-	if n < 5:
-		return false
-	var i := 0
-	while i + 4 < n:
-		var is_4byte := access_unit[i] == 0 and access_unit[i + 1] == 0 \
-				and access_unit[i + 2] == 0 and access_unit[i + 3] == 1
-		var is_3byte := access_unit[i] == 0 and access_unit[i + 1] == 0 \
-				and access_unit[i + 2] == 1
-		if is_4byte:
-			if _is_key_nal(access_unit[i + 4], hevc):
-				return true
-			i += 4
-		elif is_3byte:
-			if _is_key_nal(access_unit[i + 3], hevc):
-				return true
-			i += 3
-		else:
-			i += 1
-	return false
-
-
-## True if the NAL header byte names a must-keep NAL for the given codec.
-func _is_key_nal(header_byte: int, hevc: bool) -> bool:
-	if hevc:
-		var t: int = (header_byte >> 1) & 0x3F
-		# IRAP slices (BLA/IDR/CRA = 16..21) + VPS/SPS/PPS (32/33/34).
-		return (t >= 16 and t <= 21) or t == 32 or t == 33 or t == 34
-	var nal_type: int = header_byte & 0x1F
-	return nal_type == 5 or nal_type == 7 or nal_type == 8
+# MediaCodec output stays ordered because the low-latency encoder emits no
+# B-frames. Keep enough metadata for several seconds of temporary backlog; this
+# array does not contain the compressed frame bytes themselves.
+const MAX_INFLIGHT_PACKETS: int = 512
 
 
 func _submit_video_access_unit(access_unit: PackedByteArray, packet: Dictionary) -> bool:
@@ -1290,18 +1475,12 @@ func submit_h264_access_unit(access_unit: PackedByteArray, packet: Dictionary = 
 	return _submit_video_access_unit(access_unit, packet)
 
 
-## Skip non-keyframe access units that are already this many ms behind
-## by the time the access unit is fully reassembled. Bounds the
-## end-to-end latency upper bound: any pipeline stall (Wi-Fi reconnect,
-## GC pause, app backgrounding) gets discarded instead of decoded.
-const STALE_NAL_BUDGET_MS: int = 100
-
-# Stats so we can spot stale-drop patterns from the latency log.
+# Legacy counters remain part of the diagnostics surface. When the bounded
+# decoder queue overflows, the decoder rejects frames until it can flush and
+# resume from a random-access frame instead of decoding a broken reference chain.
 var _stale_dropped_count: int = 0
-var _stale_dropped_log_at: int = 0
-# Frames the decoder couldn't accept (queue full / not running). Surfaced
-# on the HUD next to stale drops so we can tell a hot Wi-Fi link
-# (UDP reassembly drops) from a CPU-starved decoder (queue full).
+# Submission failures indicate decoder shutdown/reconfiguration or frames
+# intentionally rejected while waiting for a random-access frame.
 var _decoder_busy_count: int = 0
 
 
@@ -1325,26 +1504,7 @@ func report_video_packet(packet: Dictionary) -> void:
 
 	var access_unit := _pending_access_unit
 	_pending_access_unit = PackedByteArray()
-
-	# Stale-drop guard. The receive timestamp on the packet was stamped
-	# in tcp_handler when the bytes came off the socket. If reassembly +
-	# scheduling has already burned more than STALE_NAL_BUDGET_MS we
-	# would just be making the latency worse by feeding the decoder.
-	# Exception: keyframes (NAL type 5) are kept regardless because
-	# without an IDR the H.264 decoder cannot recover from a drop.
-	var receive_ns: int = int(_last_video_packet.get("receive_ns", 0))
-	if receive_ns > 0 and not _access_unit_has_keyframe(access_unit):
-		var age_ms: float = float(VideoLatencyTracker.now_ns() - receive_ns) / 1_000_000.0
-		if age_ms > float(STALE_NAL_BUDGET_MS):
-			_stale_dropped_count += 1
-			# Log at most every 30 drops so we don't drown the latency
-			# stream but can still see the rate.
-			if _stale_dropped_count - _stale_dropped_log_at >= 30:
-				_stale_dropped_log_at = _stale_dropped_count
-				print("[LiveVideo] stale-NAL drops: %d total, latest age=%.1f ms (frame %d)" % [
-					_stale_dropped_count, age_ms, int(_last_video_packet.get("frame_id", -1)),
-				])
-			return
+	_received_access_unit_count += 1
 
 	var decoder_running := _decoder_is_running()
 
@@ -1370,22 +1530,19 @@ func report_video_frame(packet: Dictionary) -> void:
 
 ## Clear decoder state and restore the placeholder texture.
 func clear_video_stream() -> void:
-	_pending_access_unit = PackedByteArray()
-	_submitted_video_packets.clear()
-	_last_ahb_frame_count = 0
-	_display_fps = 0.0
-	_fps_sample_ns = 0
-	_fps_sample_frames = 0
-	_presented_frame_count = 0
+	_decoder_restart_pending = false
+	_reset_frame_pipeline_metrics()
 	_smoothed_local_latency_ms = -1.0
 	_stale_dropped_count = 0
-	_stale_dropped_log_at = 0
 	_decoder_busy_count = 0
 	_last_video_packet.clear()
 	_receiving_video = false
 	_configured_width = 0
 	_configured_height = 0
 	_configured_codec = "h264"
+	_configured_yuv_color_standard = YUV_COLOR_STANDARD_BT709
+	_configured_yuv_color_range = YUV_COLOR_RANGE_LIMITED
+	_apply_yuv_colorimetry()
 	_desired_stereo_layout = true
 	_apply_video_layout(true)
 	_video_texture = null

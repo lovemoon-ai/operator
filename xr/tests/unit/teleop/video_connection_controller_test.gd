@@ -39,6 +39,7 @@ class FakeRobotView:
 	extends Node
 	var display_size := Vector2(3.2, 1.8)
 	var follow_distance := 3.0
+	var follow_camera := true
 	var feeds: Array[Dictionary] = []
 	var packet_source: Node
 	var packets: Array[Dictionary] = []
@@ -113,6 +114,26 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		close_offset.origin.is_equal_approx(Vector3(1.47, 0.77, -2.96)),
 		"preview close button is anchored at the video panel's top-right corner",
 	)
+
+	var launch_options := {"show_video_panel": false}
+	TeleopControllerScript._apply_show_video_panel_launch_override(launch_options, "true")
+	t.eq(launch_options.get("show_video_panel"), true,
+		"direct-launch true overrides a persisted hidden video panel")
+	TeleopControllerScript._apply_show_video_panel_launch_override(launch_options, "off")
+	t.eq(launch_options.get("show_video_panel"), false,
+		"direct-launch false explicitly hides the video panel")
+	TeleopControllerScript._apply_show_video_panel_launch_override(launch_options, "")
+	t.eq(launch_options.get("show_video_panel"), false,
+		"an absent launch override preserves the persisted setting")
+
+	controller._apply_runtime_settings({
+		"video_face_locked": false,
+		"show_video_panel": true,
+	})
+	t.is_false(robot_view.follow_camera,
+		"runtime launch settings apply world-locked video placement")
+	t.eq(robot_view.show_values.back(), true,
+		"runtime launch settings reach the shared video view")
 
 	controller._on_video_connect_requested({
 		"video_protocol": "operator_timed_h264",

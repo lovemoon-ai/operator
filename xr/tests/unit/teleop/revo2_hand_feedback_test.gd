@@ -430,8 +430,26 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"device_type": "revo2_dual_hand",
 	}), "192.0.2.10")
 	var discovered: Dictionary = discovery.get_known_robots()
-	t.eq(int((discovered["test-bridge"] as Dictionary).get("telemetry_port", 0)), 64009,
+	var discovery_key := RobotDiscoveryScript._endpoint_key("192.0.2.10", 64001)
+	t.eq(int((discovered[discovery_key] as Dictionary).get("telemetry_port", 0)), 64009,
 		"discovery preserves the dedicated telemetry port")
+	discovery._process_announcement(JSON.stringify({
+		"service": "xrobo-agent",
+		"name": "test-bridge",
+		"tcp_port": 64001,
+		"video_port": 0,
+		"device_type": "revo2_dual_hand",
+	}), "192.0.2.11")
+	discovered = discovery.get_known_robots()
+	t.eq(discovered.size(), 2, "discovery preserves same-name services on distinct endpoints")
+	var second_discovery_key := RobotDiscoveryScript._endpoint_key("192.0.2.11", 64001)
+	discovery._known_robots[discovery_key]["last_seen"] = -100.0
+	discovery._check_timeouts()
+	discovered = discovery.get_known_robots()
+	t.is_false(discovered.has(discovery_key),
+		"timeout removes only the expired endpoint identity")
+	t.is_true(discovered.has(second_discovery_key),
+		"same-name peer remains discovered when the other endpoint expires")
 	var controller := TeleopControllerScript.new()
 	controller._capture_control_frame_for_hand({"frame": [0.0, NAN, 0.0, 1.0]}, 0,
 		"frame", "mirror")
@@ -441,7 +459,14 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"frame", "mirror")
 	t.is_true(not bool(controller._control_frame_valid[0]),
 		"zero-length telemetry quaternions never reach the control-frame gizmo")
-	controller._known_robots = {"192.0.2.10": discovered["test-bridge"]}
+	controller._known_robots = {
+		RobotDiscoveryScript._endpoint_key("192.0.2.10", 64001): {
+			"name": "test-bridge",
+			"ip": "192.0.2.10",
+			"pose_port": 64001,
+			"telemetry_port": 64009,
+		}
+	}
 	t.eq(controller._telemetry_port_for("192.0.2.10", 64001), 64009,
 		"teleop uses the discovered telemetry port")
 	t.eq(controller._telemetry_port_for("192.0.2.11", 63901), 63903,

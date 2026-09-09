@@ -12,8 +12,16 @@ extends Node
 ##   "telemetry_port": 63903
 ## }
 
-signal robot_found(name: String, ip: String, pose_port: int, video_port: int, device_type: String, device_name: String)
-signal robot_lost(name: String)
+signal robot_found(
+	name: String,
+	ip: String,
+	pose_port: int,
+	video_port: int,
+	telemetry_port: int,
+	device_type: String,
+	device_name: String
+)
+signal robot_lost(name: String, ip: String, pose_port: int)
 
 const DISCOVERY_PORT: int = 63900
 ## How long before a robot is considered lost (seconds)
@@ -21,7 +29,8 @@ const ROBOT_TIMEOUT: float = 10.0
 
 ## UDP peer for receiving broadcasts
 var _udp_peer: PacketPeerUDP = null
-## Known robots: name -> { ip, pose_port, video_port, telemetry_port, last_seen }
+## Known robots: endpoint identity -> metadata. Names are labels and are not
+## unique; two services may legitimately advertise the same robot name.
 var _known_robots: Dictionary = {}
 ## Whether scanning is active
 var _scanning: bool = false
@@ -66,13 +75,13 @@ func _process_announcement(text: String, sender_ip: String) -> void:
 	if tcp_port <= 0:
 		return
 
-	var is_new := not _known_robots.has(robot_name)
-	var previous: Dictionary = _known_robots.get(robot_name, {})
+	var endpoint_key := _endpoint_key(sender_ip, tcp_port)
+	var is_new := not _known_robots.has(endpoint_key)
+	var previous: Dictionary = _known_robots.get(endpoint_key, {})
 	var endpoint_changed := (
 		not is_new
 		and (
-			str(previous.get("ip", "")) != sender_ip
-			or int(previous.get("pose_port", 0)) != tcp_port
+			str(previous.get("name", "")) != robot_name
 			or int(previous.get("video_port", 0)) != video_port
 			or int(previous.get("telemetry_port", 0)) != telemetry_port
 			or str(previous.get("device_type", "")) != device_type
@@ -80,7 +89,8 @@ func _process_announcement(text: String, sender_ip: String) -> void:
 		)
 	)
 
-	_known_robots[robot_name] = {
+	_known_robots[endpoint_key] = {
+		"name": robot_name,
 		"ip": sender_ip,
 		"pose_port": tcp_port,
 		"video_port": video_port,
@@ -92,22 +102,38 @@ func _process_announcement(text: String, sender_ip: String) -> void:
 
 	if is_new or endpoint_changed:
 		print("[Discovery] Robot found: %s at %s:%d (type: %s)" % [robot_name, sender_ip, tcp_port, device_type])
-		robot_found.emit(robot_name, sender_ip, tcp_port, video_port, device_type, device_name)
+		robot_found.emit(
+			robot_name,
+			sender_ip,
+			tcp_port,
+			video_port,
+			telemetry_port,
+			device_type,
+			device_name,
+		)
 
 
 func _check_timeouts() -> void:
 	var now: float = Time.get_ticks_msec() / 1000.0
 	var to_remove: Array[String] = []
 
-	for robot_name in _known_robots:
-		var info: Dictionary = _known_robots[robot_name]
+	for endpoint_key in _known_robots:
+		var info: Dictionary = _known_robots[endpoint_key]
 		if now - info["last_seen"] > ROBOT_TIMEOUT:
-			to_remove.append(robot_name)
+			to_remove.append(endpoint_key)
 
-	for robot_name in to_remove:
-		_known_robots.erase(robot_name)
-		print("[Discovery] Robot lost: %s" % robot_name)
-		robot_lost.emit(robot_name)
+	for endpoint_key in to_remove:
+		var info: Dictionary = _known_robots[endpoint_key]
+		_known_robots.erase(endpoint_key)
+		var robot_name := str(info.get("name", "Unknown Robot"))
+		var ip := str(info.get("ip", ""))
+		var pose_port := int(info.get("pose_port", 0))
+		print("[Discovery] Robot lost: %s at %s:%d" % [robot_name, ip, pose_port])
+		robot_lost.emit(robot_name, ip, pose_port)
+
+
+static func _endpoint_key(ip: String, pose_port: int) -> String:
+	return "operator|%s|%d" % [ip, pose_port]
 
 
 ## Start scanning for robot broadcasts.

@@ -1,5 +1,10 @@
 // JNI bridge: Kotlin's KotlinVideoDecoderPlugin calls
-//   external fun nativeImportAhb(buffer: HardwareBuffer, decodedNs: Long)
+//   external fun nativeImportAhb(
+//       buffer: HardwareBuffer,
+//       decodedNs: Long,
+//       frameSequence: Long,
+//       presentationTimeUs: Long,
+//   )
 // which lands here. We unwrap the AHardwareBuffer pointer (refcount-bumped
 // by AHardwareBuffer_fromHardwareBuffer) and hand it to the singleton
 // AhbVideoTexture.
@@ -37,14 +42,21 @@ extern "C" {
 // Matches:
 //   package com.godot.game.video
 //   class KotlinVideoDecoderPlugin {
-//       external fun nativeImportAhb(buffer: HardwareBuffer, decodedNs: Long)
+//       external fun nativeImportAhb(
+//           buffer: HardwareBuffer,
+//           decodedNs: Long,
+//           frameSequence: Long,
+//           presentationTimeUs: Long,
+//       )
 //   }
 JNIEXPORT void JNICALL
 Java_com_godot_game_video_KotlinVideoDecoderPlugin_nativeImportAhb(
-        JNIEnv *env,
-        jobject /* thiz */,
-        jobject hardware_buffer,
-        jlong decoded_ns) {
+	JNIEnv *env,
+	jobject /* thiz */,
+	jobject hardware_buffer,
+	jlong decoded_ns,
+	jlong frame_sequence,
+	jlong presentation_time_us) {
     if (hardware_buffer == nullptr) {
         return;
     }
@@ -62,7 +74,11 @@ Java_com_godot_game_video_KotlinVideoDecoderPlugin_nativeImportAhb(
         AHardwareBuffer_release(ahb);
         return;
     }
-    tex->push_buffer(ahb, (int64_t)decoded_ns);
+	tex->push_buffer(
+			ahb,
+			(int64_t)decoded_ns,
+			(int64_t)frame_sequence,
+			(int64_t)presentation_time_us);
 }
 
 } // extern "C"

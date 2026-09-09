@@ -30,7 +30,7 @@ func _init() -> void:
 func set_performance_text(text: String) -> void:
 	if _performance_label == null:
 		return
-	_performance_label.text = text.replace("\n", "    ")
+	_performance_label.text = text
 
 
 func captures_teleop_input() -> bool:
@@ -113,7 +113,7 @@ func _make_performance_label() -> Label:
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	label.autowrap_mode = TextServer.AUTOWRAP_OFF
-	label.add_theme_font_size_override("font_size", 28)
+	label.add_theme_font_size_override("font_size", 24)
 	label.add_theme_color_override("font_color", COL_TEXT)
 	return label
 
