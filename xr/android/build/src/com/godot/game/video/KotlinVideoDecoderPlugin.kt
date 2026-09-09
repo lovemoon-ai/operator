@@ -68,6 +68,14 @@ private data class AccessUnitTiming(
 @Suppress("DEPRECATION")
 class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 	companion object {
+		private fun isPicoDevice(): Boolean {
+			return listOf(Build.MANUFACTURER, Build.BRAND, Build.PRODUCT, Build.DEVICE)
+				.any { value ->
+					val normalized = value.orEmpty().lowercase()
+					normalized.contains("pico") || normalized == "sparrow"
+				}
+		}
+
 		// [plan B] Optional libahb_decoder.so — the Vulkan AHardwareBuffer
 		// import GDExtension. When present, drainOutput pushes the
 		// MediaCodec output Image's HardwareBuffer through nativeImportAhb
@@ -89,14 +97,6 @@ class KotlinVideoDecoderPlugin(private val host: Godot) : GodotPlugin(host) {
 		//   adb shell setprop debug.xrobo.force_yuv_plane 1
 		// which falls back to Plan B's CPU plane copy + 3 L8 textures
 		// + GPU YUV->RGB shader (proven to display real frames).
-		private fun isPicoDevice(): Boolean {
-			return listOf(Build.MANUFACTURER, Build.BRAND, Build.PRODUCT, Build.DEVICE)
-				.any { value ->
-					val normalized = value.orEmpty().lowercase()
-					normalized.contains("pico") || normalized == "sparrow"
-				}
-		}
-
 		private val ahbNativeAvailable: Boolean = run {
 			val forceYuv = readSystemProp("debug.xrobo.force_yuv_plane") == "1"
 			if (forceYuv) {
