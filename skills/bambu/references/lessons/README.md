@@ -24,6 +24,7 @@
 | [`2026-09-04-machine-service-paths.md`](2026-09-04-machine-service-paths.md) | 用 G-code 坐标检查越界 | 未区分机器维护轨迹与模型打印轨迹 |
 | [`2026-09-08-cloud-submit-false-positive.md`](2026-09-08-cloud-submit-false-positive.md) | Cloud/PIN 打印、云接口返回成功、异地网络打印 | 未观察到 `PREPARE/RUNNING`；把上传成功误报为打印开始；状态未知时重复提交 |
 | [`2026-09-09-multi-shell-assembly-fused.md`](2026-09-09-multi-shell-assembly-fused.md) | 单 STL 含多个闭合 shell、装配体、壳体加背板、print-in-place | 未确认物理零件数；可拆件仍按一个对象打印；间隙小于线宽 |
+| [`2026-09-10-critical-neck-layer-fracture.md`](2026-09-10-critical-neck-layer-fracture.md) | 窄颈、安装耳、悬臂座、承力凸台、沿层面断裂 | 未审核载荷与层线方向；承力连接仍用低墙数/低填充；侧立稳定性未验证 |
 
 ## 新增 lesson 格式
 
