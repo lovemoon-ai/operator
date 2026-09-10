@@ -2231,7 +2231,7 @@ func _on_robot_lost(_robot_name: String, ip: String, pose_port: int) -> void:
 	var info: Dictionary = _known_robots.get(key, {})
 	if info.is_empty():
 		return
-	var endpoint_was_active := (
+	var endpoint_was_active: bool = (
 		_tcp_handler.is_connected_to_robot()
 		and _tcp_handler.get_host() == ip
 		and _tcp_handler.get_port() == pose_port
