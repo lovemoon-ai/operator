@@ -139,6 +139,8 @@ Python application
   -> pyoperator.xr_bridge.start()
   -> PyO3 in-process xr-bridge SDK mode
   <- one immutable XrStateFrame per headset render sample
+  -> Blueprint + latest BlueprintState
+  <- ordered BlueprintEvent
   -> Python Retargeter -> optional IKSolver -> user Robot
 ```
 
@@ -146,6 +148,29 @@ The embedded path and the existing Operator `robot-service` path are peers. SDK 
 selected by the descriptor's optional `xr_stream` block; descriptors without
 that block continue to use `DeviceCommand`. The Python consumer receives one
 latest-wins frame and never assembles state from granular getters.
+
+Python backends behind a standalone `xr-bridge` can publish the same
+Blueprint contract with `HostedBlueprint`. The adapter boundary forwards
+Blueprint/state toward XR and ordered UI events back to Python without moving
+the existing device-command or telemetry control path.
+
+The Blueprint contract is mode-independent; see
+`claw/architecture/blueprint.md`. Outside Robot Teleop is its first host adapter,
+not part of the runtime or primitive definitions. A future VR or Realtime Feed
+mode can attach the same runtime and provide its own external-view mappings.
+
+Outside Robot Blueprint follows the same ownership direction as control:
+the robot-side Python application declares built-in XR UI through a versioned
+blueprint and publishes low-frequency bound state, while the headset performs
+rendering, tracking, gesture recognition, and hit testing locally. Users may
+persistently override visibility only for components marked
+`user_overridable`. Arbitrary robot-provided code and assets are not part of
+the v1 contract. After a native Operator Teleop session enters its work page,
+the settings launcher is the only client-owned visualization. Video/FPV,
+controller help, control-frame gizmos, operation trajectories, hand menus, and
+robot status UI stay hidden unless the active Blueprint declares their built-in
+component. Inside Robot does not use this protocol because it has no external
+robot session; that is a product boundary rather than a Blueprint limitation.
 
 Outside Robot can alternatively select `xrobot_toolkit_v1`. That target opens
 its own TCP connection and emits the legacy binary XRoboToolkit packets expected

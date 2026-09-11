@@ -32,6 +32,12 @@ mujuco-arm-so101/
 模型加载入口是 `assets/so101/scene_pickplace.xml`，该 XML `<include>` 了 `so101.xml`，
 并在世界中加入桌子、红色方块以及第三视角相机。
 
+> `sim_so101.py bridge` 是 Rust `robot-adapter` 的 MuJoCo 执行后端，不拥有 XR
+> 会话，也不会发布 `Blueprint`，因此原生 Operator 工作页只显示设置按钮。
+> 机器人端声明式 UI 的参考实现位于
+> `python/examples/custom_robot.py`；独立 UI 演示位于
+> `python/examples/blueprint.py`。
+
 > **关于 STL mesh**：19 个 STL 总计约 17 MB，未提交进 git。`./prepare.sh` 会从上游
 > [`mujoco_menagerie`](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101/assets)
 > （Apache-2.0）拉取并放进 `assets/so101/assets/`，**钉到具体 commit** 保证可复现。

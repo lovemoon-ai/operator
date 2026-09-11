@@ -5,11 +5,12 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use teleop_protocol::{
-    ControlSchema, DeviceDescriptor, DeviceInfo, DeviceTelemetry, XrStateFrame, XrStreamConfig,
-    XR_STATE_SCHEMA_VERSION,
+    Blueprint, BlueprintEvent, BlueprintState, ControlSchema, DeviceDescriptor, DeviceInfo,
+    DeviceTelemetry, XrStateFrame, XrStreamConfig, BLUEPRINT_CAPABILITY,
+    BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256, XR_STATE_SCHEMA_VERSION,
 };
 
 use crate::config::BridgeConfig;
@@ -84,6 +85,13 @@ pub struct XrStateSink {
     pub stats: Arc<XrStateStats>,
 }
 
+#[derive(Clone)]
+pub struct BlueprintStreams {
+    pub blueprint_rx: watch::Receiver<Option<Arc<Blueprint>>>,
+    pub state_rx: watch::Receiver<Option<Arc<BlueprintState>>>,
+    pub event_tx: mpsc::Sender<BlueprintEvent>,
+}
+
 /// Latest-wins publication: slow consumers lose complete frames and never
 /// block the headset socket or observe a field-by-field update.
 pub fn state_channel() -> (XrStateSink, watch::Receiver<Option<Arc<XrStateFrame>>>) {
@@ -103,7 +111,7 @@ pub async fn run_sdk_mode(
     sink: XrStateSink,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_sdk_mode_inner(config, sink, shutdown, None).await
+    run_sdk_mode_inner(config, sink, shutdown, None, None).await
 }
 
 /// SDK service variant that reports whether all startup resources were
@@ -115,7 +123,17 @@ pub async fn run_sdk_mode_with_startup(
     shutdown: watch::Receiver<bool>,
     startup: oneshot::Sender<std::result::Result<(), String>>,
 ) -> Result<()> {
-    run_sdk_mode_inner(config, sink, shutdown, Some(startup)).await
+    run_sdk_mode_inner(config, sink, shutdown, Some(startup), None).await
+}
+
+pub async fn run_sdk_mode_with_startup_and_blueprint(
+    config: BridgeConfig,
+    sink: XrStateSink,
+    shutdown: watch::Receiver<bool>,
+    startup: oneshot::Sender<std::result::Result<(), String>>,
+    blueprint: BlueprintStreams,
+) -> Result<()> {
+    run_sdk_mode_inner(config, sink, shutdown, Some(startup), Some(blueprint)).await
 }
 
 async fn run_sdk_mode_inner(
@@ -123,6 +141,7 @@ async fn run_sdk_mode_inner(
     sink: XrStateSink,
     mut shutdown: watch::Receiver<bool>,
     startup: Option<oneshot::Sender<std::result::Result<(), String>>>,
+    blueprint: Option<BlueprintStreams>,
 ) -> Result<()> {
     let mut descriptor = DeviceDescriptor {
         device: DeviceInfo {
@@ -149,6 +168,16 @@ async fn run_sdk_mode_inner(
         }),
         ..DeviceDescriptor::default()
     };
+    if blueprint.is_some() {
+        descriptor.capabilities.insert(
+            BLUEPRINT_CAPABILITY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        descriptor.capabilities.insert(
+            BLUEPRINT_SPEC_HASH_CAPABILITY.to_string(),
+            serde_json::Value::String(SPEC_SHA256.to_string()),
+        );
+    }
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
     let video_feeds = video_feed_relays(&config.video.feeds);
     log_video_feeds(&video_feeds);
@@ -208,13 +237,14 @@ async fn run_sdk_mode_inner(
     let stack = async {
         tokio::try_join!(
             discovery::run_prepared(discovery),
-            pose_server::run_on_with_xr_state(
+            pose_server::run_on_with_xr_state_and_blueprint(
                 pose_listener,
                 descriptor,
                 device_cmd_tx.clone(),
                 telemetry_rx.clone(),
                 latency.clone(),
                 sink,
+                blueprint,
             ),
             pose_udp_server::run_on(
                 pose_udp_socket,

@@ -198,8 +198,8 @@ func initialize() -> void:
 	# World-locked mode still needs one camera-relative placement. After this
 	# initial placement it stays in world space until the user adjusts or resets.
 	_place_panel_in_front_of_camera(follow_distance)
-	# Defer visibility to `_update_panel_visibility`: even when the user has
-	# opted in via `show_video_panel`, we only un-hide once the robot is
+	# Defer visibility to `_update_panel_visibility`: even when the active
+	# Blueprint requests `show_video_panel`, we only un-hide once the robot is
 	# actually sending frames — otherwise the operator sees the blue
 	# placeholder quad floating in front of them.
 	_update_panel_visibility()
@@ -208,8 +208,8 @@ func initialize() -> void:
 	])
 
 
-## External setter so main.gd can flip the preference without touching the
-## exported property directly (keeps the visibility invariant centralised).
+## External setter so a Blueprint host can change the requested
+## visibility without touching the exported property directly.
 func set_show_video_panel(value: bool) -> void:
 	if show_video_panel == value:
 		return
@@ -218,7 +218,7 @@ func set_show_video_panel(value: bool) -> void:
 
 
 ## Single source of truth for whether the 3D panel should be on screen.
-## The panel is visible iff (a) the user opted in via `show_video_panel`,
+## The panel is visible iff (a) the active owner requested `show_video_panel`,
 ## AND (b) we've seen at least one frame from the robot. Called from
 ## `_process` so transitions (`_receiving_video` flips, `clear_video_stream`)
 ## are picked up within one frame without us having to sprinkle calls at

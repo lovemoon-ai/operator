@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterator
 
 from .models import BridgeStats, XrFrame
+from .blueprint import BlueprintClient
 from .session import BridgeConfig, XrSession
 
 _default_session: XrSession | None = None
@@ -45,3 +46,7 @@ def frames(timeout: float | None = None) -> Iterator[XrFrame]:
 
 def stats() -> BridgeStats:
     return session().stats()
+
+
+def blueprint() -> BlueprintClient:
+    return session().blueprint

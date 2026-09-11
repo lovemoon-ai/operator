@@ -16,6 +16,99 @@ if frame:
 xr_bridge.stop()
 ```
 
+## Blueprint UI
+
+Any Operator mode can consume a Blueprint without loading source-provided XR
+code. The current Outside Robot adapter is the first integration. Version 1
+uses only built-in primitives and keeps rendering and hand interaction local to
+the headset:
+
+```python
+from pyoperator import BlueprintComponent, Blueprint, xr_bridge
+
+session = xr_bridge.start()
+session.blueprint.set_blueprint(
+    Blueprint(
+        blueprint_id="my_robot.default",
+        components=(
+            BlueprintComponent.status_lamp(
+                "connection",
+                text="Robot",
+                anchor="right_controller",
+                state_binding="robot.state",
+            ),
+            BlueprintComponent.palm_menu(
+                "hand_control",
+                title="Hand control",
+                action="toggle_unlock",
+                value_binding="hand.unlocked",
+                available_binding="hand.available",
+                properties={"settings_label": "Hand control menu"},
+            ),
+            BlueprintComponent.video_panel(
+                follow_camera=True,
+                properties={"settings_label": "First-person video"},
+            ),
+            BlueprintComponent.controller_help(),
+            BlueprintComponent.control_frame(),
+            BlueprintComponent.operation_trajectory(),
+        ),
+    )
+)
+session.blueprint.update(
+    {
+        "robot.state": "active",
+        "hand.unlocked": False,
+        "hand.available": True,
+    }
+)
+
+event = session.blueprint.poll_event(timeout=0.1)
+if event and event.action == "toggle_unlock":
+    session.blueprint.update({"hand.unlocked": bool(event.value)})
+
+session.blueprint.clear()
+xr_bridge.stop()
+```
+
+Available components are `label`, `status_lamp`, `palm_menu`,
+`fingertip_tactile`, `video_panel`, `controller_help`, `control_frame`, and
+`operation_trajectory`; anchors are world, head, either controller, or either palm.
+`fingertip_tactile` binds five-element normal, tangential, direction, proximity,
+and status arrays for either or both hands; XR places the markers on tracked
+fingertips. The final four component types gate XR-owned views. A
+`DeviceDescriptor.video_feeds` entry describes video transport, while
+`video_panel` alone decides whether that feed is presented. Without a Blueprint,
+native Operator Teleop shows only its settings button. `user_overridable=True`
+lets a headset-side Follow Robot / Show /
+Hide preference win over robot state; set a static `settings_label` property
+when the component id is not user-friendly.
+Blueprints are
+structural and should change rarely. `update()` merges the provided keys into a
+local value map, then publishes a complete latest-wins snapshot, so a slow
+network does not build an unbounded UI backlog or lose unchanged bindings.
+This path does not delay the independent XR tracking stream. `clear()` removes
+the active UI from connected and future headsets.
+
+Runnable examples:
+
+```bash
+# UI-only smoke/demo: rendered components plus XR-owned view gates.
+python python/examples/blueprint.py
+
+# Complete custom-robot shape: shared session, control loop, UI state and events.
+python python/examples/custom_robot.py
+```
+
+`custom_robot.py` starts with robot control locked. Open the left-palm menu and
+touch it with the other hand to unlock, then hold the right controller grip to
+drive the example retargeter. Replace `DemoRobot` with the vendor SDK calls;
+keep Blueprint state low-frequency and event-driven.
+
+`read_xr.py` remains an intentionally read-only diagnostics example. It uses
+the same `XrSession` API but does not declare robot UI because it has no robot
+application state to present.
+
 Install from the Operator checkout:
 
 ```bash
@@ -242,3 +335,8 @@ Stable Python backends can still run behind the standalone bridge with
 `pyoperator.hosted.serve`. It implements the existing length-prefixed adapter
 protocol; point `xr-bridge --adapter-endpoint tcp:127.0.0.1:63910` at it. This
 mode is intentionally separate from the embedded `xr_bridge.start()` mode.
+Pass a `pyoperator.hosted.HostedBlueprint` to `serve`, `serve_async`, or
+`create_server` to publish the same Blueprint/state/event contract through the
+standalone bridge. The BrainCo Revo2 service is the reference hosted example.
+Its runnable entry point is
+`examples/brainco-revo2/revo2_thor_service.py`.

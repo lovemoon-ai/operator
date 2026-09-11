@@ -33,6 +33,7 @@ const COL_BUTTON_B := Color(1.0, 0.42, 0.30, 1.0)
 const COL_DIM := Color(0.18, 0.20, 0.23, 0.86)
 
 var _enabled_for_device := false
+var _blueprint_enabled := false
 var _has_control_help := false
 var _continuous_control := false
 var _controller_active := false
@@ -102,6 +103,17 @@ func set_controller_active(active: bool) -> void:
 		return
 	_controller_active = active
 	_refresh()
+
+
+func set_blueprint_enabled(enabled: bool) -> void:
+	if _blueprint_enabled == enabled:
+		return
+	_blueprint_enabled = enabled
+	_refresh()
+
+
+func is_blueprint_enabled() -> bool:
+	return _blueprint_enabled
 
 
 ## Hide the overlay while the settings panel owns the controllers; teleop
@@ -298,7 +310,12 @@ func _label_backplate(node_name: String, position: Vector3, width: float, height
 
 
 func _refresh() -> void:
-	if _suspended or not _enabled_for_device or not _controller_active:
+	if (
+		_suspended
+		or not _blueprint_enabled
+		or not _enabled_for_device
+		or not _controller_active
+	):
 		visible = false
 		return
 	visible = true

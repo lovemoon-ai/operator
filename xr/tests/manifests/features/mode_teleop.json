@@ -57,6 +57,13 @@
       "script": "res://tests/unit/teleop/revo2_hand_feedback_test.gd"
     },
     {
+      "id": "blueprint.runtime",
+      "level": "unit",
+      "suite": "blueprint",
+      "module": "core/blueprint",
+      "script": "res://tests/unit/blueprint/blueprint_runtime_test.gd"
+    },
+    {
       "id": "teleop.sdk_mode_suspension",
       "level": "unit",
       "suite": "teleop.lifecycle",
