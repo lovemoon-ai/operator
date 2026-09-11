@@ -23,6 +23,10 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、审核、监�
 
 - **LAN**：打印机 IP 可达，并且有序列号与 LAN Access Code。使用 `status`、`doctor`、
   `ams status` 以及普通 `print start`。
+- **H2 系列 LAN**：用户侧仍使用普通 `print start`，但 CLI 必须识别 H2 序列号并改走
+  Bambu Studio networking plugin 的 BRTC/eMMC 通道。提交前按顺序检查 FTPS 诊断、BRTC
+  media ability、本地 `push_status` 和 `device_cert_installed`；具体失败模式见
+  `references/lessons/README.md` 中四篇 H2 lesson。
 - **Cloud**：打印机在另一局域网或只能用匹配 PIN。要求 Linux 上安装并登录 Bambu
   Studio，且存在官方 `libbambu_networking.so`。使用 `cloud doctor`、`cloud bind`、
   `cloud ams` 和 `print start --cloud`。
@@ -40,7 +44,9 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、审核、监�
 4. 保留独立对象；不要为了绕过单输入限制把多个零件静默合并成一个 STL。
 5. 对最终 `gcode.3mf` 运行自动校验，并输出布局、首层、支撑、悬垂和风险层审核结果。
 6. 向用户提交最终打印报告；授权必须绑定到已审核文件的 SHA-256。
-7. 能用 `--dry-run` 时先预演，然后只提交一次真实命令；不要自动重试物理动作。
+7. 能用 `--dry-run` 时先预演，然后只提交一次真实命令。失败后默认不自动重试；若用户已对
+   同一打印机、同一 SHA 和同一材料映射明确授予持续修复与重试权限，可在每次确认前次任务
+   未启动且设备状态安全后继续。
 8. 执行后查询状态。区分“已提交”“PREPARE”“RUNNING”和“FINISH”。
 
 ## 物理安全
@@ -49,6 +55,8 @@ description: 使用 bambu-cli 安装、配置、诊断、切片、审核、监�
   灯光、校准、重启、云端复位、发送 G-code、上传/删除打印文件。
 - 在打印、运动、加热、校准、重启、复位或任意 G-code 前，必须在当前上下文中取得用户
   对该具体动作的许可。旧任务的许可不能自动沿用到新的打印或恢复动作。
+- 用户可以对一个明确限定的任务授予持续执行或重试权限；记录其打印机、文件 SHA、材料映射
+  和停止条件，不要把该权限扩展到其他任务。
 - 回零、移动或复位前，提醒用户确认打印盘、喷头路径和机构附近无手、工具、残料或打印件。
 - `--force` 会绕过 CLI 自带确认；仅在用户明确要求无交互执行该具体动作时使用。
 - 优先使用精确确认 token：`cloud-print`、`reset`、`stop`、`delete`、`gcode`、

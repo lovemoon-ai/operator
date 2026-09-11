@@ -14,11 +14,11 @@ CLI="$(./scripts/find_bambu_cli.sh)"
 "$CLI" --help
 ```
 
-仅在用户要求安装/更新或本机没有可用二进制时，从 fork 构建。当前 Cloud/PIN/切片功能位于
-`feat/cloud-printing-and-headless-slicing` 分支：
+仅在用户要求安装/更新或本机没有可用二进制时，从 fork 的 `main` 构建；该分支已包含
+Cloud/PIN、无头切片和 H2 系列 LAN 打印支持：
 
 ```bash
-git clone --branch feat/cloud-printing-and-headless-slicing --single-branch \
+git clone --branch main --single-branch \
   https://github.com/DuinoDu/bambu-cli.git /tmp/bambu-cli-src
 cd /tmp/bambu-cli-src
 make test
@@ -33,8 +33,7 @@ bambu-cli --help
 ```
 
 若目标目录已存在，不要覆盖或强制重置。先检查 `git status`、remote 和当前分支；有未提交
-修改时停止并询问用户。未来默认分支已经包含 `cloud` 与 `slice` 后，可改用默认分支，但必须
-以实际 `bambu-cli --help` 为准。
+修改时停止并询问用户。始终以实际 `bambu-cli --help` 和 `--version` 为准。
 
 ## 参数位置
 
@@ -98,6 +97,38 @@ bambu-cli --printer lab --json ams status
 
 `doctor`、`status` 和 `ams status` 是 LAN 路径，需要 IP 可达和 Access Code。LAN 默认检查
 MQTT 8883、FTPS 990、Camera 6000。
+
+## H2 系列 LAN
+
+H2S/H2D 等 H2 系列不能沿用 P1/A1/X1 的 FTPS `STOR` 打印路径。CLI 根据序列号识别 H2，
+通过 Bambu Studio 的 `libbambu_networking.so` 建立本地 MQTT，再走 BRTC/eMMC 上传和
+`bambu_network_start_local_print`。安装包必须同时包含：
+
+```text
+$PREFIX/bin/bambu-cloud-helper
+$PREFIX/share/bambu-cli/cert/slicer_base64.cer
+$PREFIX/share/bambu-cli/cert/printer.cer
+```
+
+首次使用、升级 helper 或排查 `-4030` 时，先执行无副作用的就绪检查。Access Code 只能从
+文件经 stdin 传入：
+
+```bash
+CLI="$(./scripts/find_bambu_cli.sh)"
+HELPER="$(dirname "$CLI")/bambu-cloud-helper"
+cat ~/.config/bambu/lab.code | "$HELPER" local-connect \
+  --json --serial SERIAL_PLACEHOLDER --ip 192.168.1.200 --access-code-stdin
+```
+
+只有结果同时包含以下字段，才允许提交 H2 打印：
+
+```json
+{"connected":true,"device_cert_ready":true,"printer_ready":true}
+```
+
+这三个字段分别只证明 LAN MQTT 已连接、特权消息签名证书已安装、`push_status` 状态流已
+就绪。BRTC media ability 还必须包含 `emmc`。任一阶段失败都应在上传前阻断；完整故障链按
+`lessons/README.md` 中 H2 lessons 的顺序检查。
 
 ## Cloud / 匹配 PIN
 
@@ -186,13 +217,24 @@ RGBA 十六进制，例如红色可能接近 `FF0000FF`，但必须同时核对 
 
 只有 `print-sop.md` 的需求、几何、切片和发布关卡全部通过，且用户已批准最终 artifact 的
 SHA-256 后才能进入本节。执行前再次确认目标打印机、盘号、打印盘已清理、bed type、材料和
-AMS tray。先预演，再执行一次；失败时不要自动重复提交。
+AMS tray。先预演，再执行一次；失败时默认不要自动重复提交。若用户明确授予同一任务的持续
+重试权限，重试前仍须查询状态，确认前次提交未进入 `PREPARE/RUNNING`，且文件 SHA、打印机和
+AMS 映射未变化。
 
 LAN：
 
 ```bash
 bambu-cli --printer lab --dry-run print start --plate 1 ./part.gcode.3mf
 bambu-cli --printer lab print start --plate 1 ./part.gcode.3mf
+```
+
+H2 系列仍使用同一条 LAN 命令；CLI 会自动改走 BRTC/eMMC。使用 AMS 时映射数量必须与目标
+plate 的 filament 数一致：
+
+```bash
+bambu-cli --printer h2s-lan print start \
+  --plate 1 --ams-mapping 3 --flow-calibration --vibration-calibration \
+  ./part.gcode.3mf
 ```
 
 Cloud + AMS：
@@ -278,3 +320,11 @@ LAN `print start`、`home`、`move z`、`temps set`、`fans set`、`light on/off
 - `confirmation required`：使用正确 token，不要默认改用 `--force`。
 - AMS mapping 数量错误：重新运行 `print validate` 和 `cloud ams`，按 filament 数重新映射。
 - 上一次打印状态不明：停止自动流程，要求用户确认屏幕状态和打印盘，之后再决定 stop/reset/home。
+- H2S 的 `files list` 返回 `522 session reuse required`：当前 CLI 构建缺少 FTPS 数据连接会话
+  复用；更新到包含共享 TLS client session cache 和稳定 `ServerName` 的构建，再做只读验证。
+- H2 系列 `files list` 成功但 `STOR` 返回 `553`：不要继续尝试 FTP 路径。H2 LAN 打印应使用
+  Bambu Studio networking plugin 的 BRTC/eMMC 本地打印接口；先确认插件存在，并通过只读
+  media-ability 探测看到 `emmc`。
+- H2 本地上传完成但发送返回 `-4030`：先确认已经收到 `push_status`，再确认 helper 调用了
+  `bambu_network_update_cert`、同时请求 LAN/账号绑定两种设备证书，并等待
+  `device_cert_installed`。只有 `connected=true` 不足以证明可以发送特权打印命令。

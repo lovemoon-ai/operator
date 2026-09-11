@@ -25,6 +25,14 @@
 | [`2026-09-08-cloud-submit-false-positive.md`](2026-09-08-cloud-submit-false-positive.md) | Cloud/PIN 打印、云接口返回成功、异地网络打印 | 未观察到 `PREPARE/RUNNING`；把上传成功误报为打印开始；状态未知时重复提交 |
 | [`2026-09-09-multi-shell-assembly-fused.md`](2026-09-09-multi-shell-assembly-fused.md) | 单 STL 含多个闭合 shell、装配体、壳体加背板、print-in-place | 未确认物理零件数；可拆件仍按一个对象打印；间隙小于线宽 |
 | [`2026-09-10-critical-neck-layer-fracture.md`](2026-09-10-critical-neck-layer-fracture.md) | 窄颈、安装耳、悬臂座、承力凸台、沿层面断裂 | 未审核载荷与层线方向；承力连接仍用低墙数/低填充；侧立稳定性未验证 |
+| [`2026-09-11-h2s-ftps-session-reuse.md`](2026-09-11-h2s-ftps-session-reuse.md) | H2S 旧式 FTPS 目录读取出现 `522` | 数据连接未复用控制连接 TLS 会话；把可读误判为可写 |
+| [`2026-09-11-h2-project-file-protocol.md`](2026-09-11-h2-project-file-protocol.md) | H2 系列 LAN 打印、FTPS `STOR` 返回 `553` | 未使用官方 BRTC/eMMC 本地打印接口；失败后未经新授权自动重发 |
+| [`2026-09-11-h2-local-mqtt-readiness.md`](2026-09-11-h2-local-mqtt-readiness.md) | H2 本地连接成功、BRTC 上传后发送阶段返回 `-4030` | 未发送 `pushall` 并等待本地 `push_status`；把连接回调误当作发布通道就绪 |
+| [`2026-09-11-h2-device-cert-signing.md`](2026-09-11-h2-device-cert-signing.md) | H2 已收到 `push_status`，但特权打印命令仍返回 `-4030` | 未安装应用/设备证书；缺少 `device_cert_installed` 就绪证据 |
+
+H2 系列排障按表中顺序执行：先区分 FTPS 数据连接与写入能力，再切换 BRTC/eMMC，随后验证
+本地 `push_status`，最后验证设备证书。某一层成功不能替代下一层；只有目标任务进入
+`PREPARE/RUNNING` 才能确认提交链路真正完成。
 
 ## 新增 lesson 格式
 
