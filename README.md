@@ -119,6 +119,17 @@ xr_bridge.stop()
 See [`python/README.md`](python/README.md) for custom `Robot`,
 retargeting/IK, record/replay, and the existing standalone-bridge hosted mode.
 
+```bash
+# Robot-authored Outside Robot UI without physical hardware.
+python python/examples/blueprint.py
+
+# Complete pyoperator custom-robot teleop + Blueprint example.
+python python/examples/custom_robot.py
+
+# BrainCo Revo2 dual-hand hosted Blueprint example.
+python3 examples/brainco-revo2/revo2_thor_service.py --help
+```
+
 Web ingest and review app commands run from `web/`:
 
 ```bash

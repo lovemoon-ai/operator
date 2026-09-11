@@ -14,6 +14,9 @@ const PalmMenuVisibilityStateScript = preload(
 )
 const RobotDiscoveryScript = preload("res://scripts/network/discovery.gd")
 const TeleopControllerScript = preload("res://scripts/app/modes/teleop_controller.gd")
+const BlueprintRuntimeScript = preload(
+	"res://scripts/blueprint/blueprint_runtime.gd"
+)
 
 
 class FakeCommandSender:
@@ -484,6 +487,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	tcp_server.stop()
 	raw_tcp_handler.free()
 	var command_sender := FakeCommandSender.new()
+	command_sender.control_mode = ControlMode.new()
 	var outside_target := FakeOutsideTarget.new()
 	var tcp_handler := FakeTcpHandler.new()
 	controller._command_sender = command_sender
@@ -512,6 +516,17 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	controller._set_teleop_suspended(true)
 	t.is_true(not controller._revo2_hand_control_unlocked,
 		"opening settings always restores the locked state")
+	var authored_blueprint := BlueprintRuntimeScript.new()
+	authored_blueprint._blueprint_id = "brainco.revo2.dual_hand"
+	controller._blueprint_runtime = authored_blueprint
+	controller._teleop_suspended = false
+	controller._refresh_revo2_visualization_ownership()
+	t.is_true(command_sender.control_mode.is_hand_control_unlocked(),
+		"robot-authored Revo2 UI keeps hand samples flowing for server-side gating")
+	authored_blueprint.clear()
+	controller._refresh_revo2_visualization_ownership()
+	t.is_true(not command_sender.control_mode.is_hand_control_unlocked(),
+		"clearing the robot-authored UI restores the legacy local lock")
 	t.is_true(TeleopControllerScript._descriptor_supports_revo2_hand_runtime(
 		_revo2_capability_descriptor()),
 		"authoritative descriptor capabilities activate Revo2 without a vendor type")
@@ -521,6 +536,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"telemetry_schema": {"values": []},
 	}), "unrelated formal configurations do not show Revo2 controls")
 	controller.free()
+	authored_blueprint.free()
 	command_sender.free()
 	outside_target.free()
 	tcp_handler.free()

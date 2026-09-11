@@ -24,6 +24,7 @@ Exits non-zero with itemized errors.
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -431,6 +432,18 @@ def parse_id_map():
 
 def main():
     errors = []
+    generated_spec = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/generate_blueprint_spec.py"), "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if generated_spec.returncode != 0:
+        errors.append(
+            "(l) Blueprint generated bindings are stale; run "
+            "python3 scripts/generate_blueprint_spec.py"
+        )
     for path in (
         PRESETS,
         EXPORT_PLUGIN,

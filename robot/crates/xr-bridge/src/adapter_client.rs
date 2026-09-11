@@ -22,6 +22,8 @@
 //! frame (the descriptor) *before* splitting so callers see a fully-formed
 //! descriptor synchronously, then moves the read half into the reader task.
 
+use std::sync::Arc;
+
 use anyhow::{anyhow, Context, Result};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
@@ -29,8 +31,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::codec::Framed;
 
 use teleop_protocol::{
-    connect, AdapterToBridge, BridgeCodec, BridgeToAdapter, Conn, DeviceCommand, DeviceDescriptor,
-    DeviceTelemetry, Endpoint,
+    connect, AdapterToBridge, Blueprint, BlueprintEvent, BlueprintState, BridgeCodec,
+    BridgeToAdapter, Conn, DeviceCommand, DeviceDescriptor, DeviceTelemetry, Endpoint,
+    BLUEPRINT_CAPABILITY, BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256,
 };
 
 /// The framed sink/stream over the boundary connection.
@@ -50,12 +53,17 @@ pub struct AdapterClient {
     telemetry_tx: watch::Sender<Option<DeviceTelemetry>>,
     /// Kept alive so the watch channel never closes from the receiver side.
     telemetry_rx: watch::Receiver<Option<DeviceTelemetry>>,
+    blueprint_tx: watch::Sender<Option<Arc<Blueprint>>>,
+    blueprint_rx: watch::Receiver<Option<Arc<Blueprint>>>,
+    blueprint_state_tx: watch::Sender<Option<Arc<BlueprintState>>>,
+    blueprint_state_rx: watch::Receiver<Option<Arc<BlueprintState>>>,
     /// Best-effort inbound message fan-out sender (cloned into the reader task).
     events_tx: mpsc::Sender<AdapterToBridge>,
     /// The receiving end, handed out once via [`take_events`].
     events_rx: Option<mpsc::Receiver<AdapterToBridge>>,
     /// Reader task handle, present after handshake.
     reader: Option<tokio::task::JoinHandle<()>>,
+    blueprint_compatible: bool,
 }
 
 enum ConnState {
@@ -77,14 +85,21 @@ impl AdapterClient {
             .with_context(|| format!("connecting to adapter at {endpoint}"))?;
         let framed = Framed::new(conn, BridgeCodec);
         let (telemetry_tx, telemetry_rx) = watch::channel(None);
+        let (blueprint_tx, blueprint_rx) = watch::channel(None);
+        let (blueprint_state_tx, blueprint_state_rx) = watch::channel(None);
         let (events_tx, events_rx) = mpsc::channel(256);
         Ok(AdapterClient {
             state: ConnState::PreHandshake(framed),
             telemetry_tx,
             telemetry_rx,
+            blueprint_tx,
+            blueprint_rx,
+            blueprint_state_tx,
+            blueprint_state_rx,
             events_tx,
             events_rx: Some(events_rx),
             reader: None,
+            blueprint_compatible: false,
         })
     }
 
@@ -115,6 +130,12 @@ impl AdapterClient {
                 Some(Ok(AdapterToBridge::Telemetry(_))) => {
                     tracing::debug!("Telemetry received before descriptor; ignoring");
                 }
+                Some(Ok(AdapterToBridge::Blueprint { .. })) => {
+                    tracing::debug!("Blueprint received before descriptor; ignoring");
+                }
+                Some(Ok(AdapterToBridge::BlueprintState { .. })) => {
+                    tracing::debug!("BlueprintState received before descriptor; ignoring");
+                }
                 Some(Ok(AdapterToBridge::Event { kind, msg })) => {
                     tracing::debug!("Adapter event before descriptor: {kind}: {msg}");
                 }
@@ -124,9 +145,37 @@ impl AdapterClient {
         };
 
         // Split: write half stays on the client; read half goes to the reader.
+        self.blueprint_compatible = descriptor
+            .capabilities
+            .get(BLUEPRINT_CAPABILITY)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && descriptor
+                .capabilities
+                .get(BLUEPRINT_SPEC_HASH_CAPABILITY)
+                .and_then(serde_json::Value::as_str)
+                == Some(SPEC_SHA256);
+        if descriptor
+            .capabilities
+            .get(BLUEPRINT_CAPABILITY)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && !self.blueprint_compatible
+        {
+            tracing::warn!(
+                expected = SPEC_SHA256,
+                actual = descriptor
+                    .capabilities
+                    .get(BLUEPRINT_SPEC_HASH_CAPABILITY)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("missing"),
+                "Adapter Blueprint spec does not match bridge; Blueprint stream disabled"
+            );
+        }
+
         let (sink, stream) = framed.split();
         self.state = ConnState::Connected(sink);
-        self.spawn_reader(stream);
+        self.spawn_reader(stream, self.blueprint_compatible);
 
         Ok(*descriptor)
     }
@@ -147,6 +196,16 @@ impl AdapterClient {
             .context("sending Stop")
     }
 
+    /// Forward one robot-authored blueprint interaction to the adapter.
+    pub async fn send_blueprint_event(&mut self, event: BlueprintEvent) -> Result<()> {
+        self.sink_mut()?
+            .send(BridgeToAdapter::BlueprintEvent {
+                event: Box::new(event),
+            })
+            .await
+            .context("sending BlueprintEvent")
+    }
+
     /// Tell the adapter to shut down cleanly.
     pub async fn shutdown(&mut self) -> Result<()> {
         self.sink_mut()?
@@ -159,6 +218,20 @@ impl AdapterClient {
     /// stored value is `None` until the first telemetry frame arrives.
     pub fn telemetry(&self) -> watch::Receiver<Option<DeviceTelemetry>> {
         self.telemetry_rx.clone()
+    }
+
+    /// Latest source-authored Blueprint definition, including clears.
+    pub fn blueprint(&self) -> watch::Receiver<Option<Arc<Blueprint>>> {
+        self.blueprint_rx.clone()
+    }
+
+    /// Latest source-authored Blueprint state.
+    pub fn blueprint_state(&self) -> watch::Receiver<Option<Arc<BlueprintState>>> {
+        self.blueprint_state_rx.clone()
+    }
+
+    pub fn blueprint_compatible(&self) -> bool {
+        self.blueprint_compatible
     }
 
     /// Take the best-effort inbound-message receiver. Returns `None` if already
@@ -183,15 +256,78 @@ impl AdapterClient {
 
     /// Move the read half into a background task that forwards inbound messages
     /// to the telemetry watch (latest) and the events mpsc (best effort).
-    fn spawn_reader(&mut self, mut stream: Stream) {
+    fn spawn_reader(&mut self, mut stream: Stream, blueprint_compatible: bool) {
         let telemetry_tx = self.telemetry_tx.clone();
+        let blueprint_tx = self.blueprint_tx.clone();
+        let blueprint_state_tx = self.blueprint_state_tx.clone();
         let events_tx = self.events_tx.clone();
         let handle = tokio::spawn(async move {
+            let mut active_blueprint: Option<Arc<Blueprint>> = None;
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(msg) => {
-                        if let AdapterToBridge::Telemetry(t) = &msg {
-                            let _ = telemetry_tx.send(Some(t.clone()));
+                        match &msg {
+                            AdapterToBridge::Telemetry(telemetry) => {
+                                let _ = telemetry_tx.send(Some(telemetry.clone()));
+                            }
+                            AdapterToBridge::Blueprint { blueprint } => {
+                                if !blueprint_compatible {
+                                    tracing::warn!(
+                                        "Dropping Blueprint from adapter with incompatible primitive spec"
+                                    );
+                                    continue;
+                                }
+                                let blueprint = blueprint
+                                    .as_ref()
+                                    .map(|value| Arc::new(value.as_ref().clone()));
+                                if let Some(blueprint) = &blueprint {
+                                    if let Err(error) = blueprint.validate() {
+                                        tracing::warn!(
+                                            "Dropping invalid Blueprint from adapter: {error}"
+                                        );
+                                        continue;
+                                    }
+                                    tracing::info!(
+                                        blueprint_id = %blueprint.blueprint_id,
+                                        revision = blueprint.revision,
+                                        components = blueprint.components.len(),
+                                        "Received Blueprint from adapter"
+                                    );
+                                } else {
+                                    tracing::info!("Adapter cleared Blueprint");
+                                }
+                                // BlueprintState is scoped to one exact
+                                // Blueprint id/revision. Clear it before
+                                // publishing any replacement so a headset can
+                                // never pair the new definition with stale
+                                // values from the previous one.
+                                let _ = blueprint_state_tx.send(None);
+                                active_blueprint = blueprint.clone();
+                                let _ = blueprint_tx.send(blueprint);
+                            }
+                            AdapterToBridge::BlueprintState { state } => {
+                                if !blueprint_compatible {
+                                    tracing::warn!(
+                                        "Dropping BlueprintState from adapter with incompatible primitive spec"
+                                    );
+                                    continue;
+                                }
+                                let Some(blueprint) = &active_blueprint else {
+                                    tracing::warn!(
+                                        "Dropping BlueprintState without an active Blueprint"
+                                    );
+                                    continue;
+                                };
+                                if let Err(error) = blueprint.validate_state(state) {
+                                    tracing::warn!(
+                                        "Dropping invalid BlueprintState from adapter: {error}"
+                                    );
+                                    continue;
+                                }
+                                let _ =
+                                    blueprint_state_tx.send(Some(Arc::new(state.as_ref().clone())));
+                            }
+                            AdapterToBridge::Descriptor(_) | AdapterToBridge::Event { .. } => {}
                         }
                         // The events channel is diagnostic. It must never
                         // backpressure the reader because that would also stall

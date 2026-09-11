@@ -194,17 +194,25 @@ define godot_export_release
 	@set -e; \
 	echo "[build-profile] profile=$(OPERATOR_BUILD_PROFILE) quick_entry=$(if $(OPERATOR_QUICK_ENTRY),$(OPERATOR_QUICK_ENTRY),preset) preset=$(2)"; \
 	tmp_manifest=$$(mktemp); \
+	export_log=$$(mktemp); \
 	cp $(release_manifest) $$tmp_manifest; \
 	restore_release_manifest() { \
 		status=$$?; \
 		trap - EXIT INT TERM; \
 		cp $$tmp_manifest $(release_manifest); \
-		rm -f $$tmp_manifest; \
+		rm -f $$tmp_manifest $$export_log; \
 		exit $$status; \
 	}; \
 	trap restore_release_manifest EXIT INT TERM; \
 	set +e; \
-	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3)
+	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3) >$$export_log 2>&1; \
+	status=$$?; \
+	cat $$export_log; \
+	if grep -Eq 'SCRIPT ERROR:|Parse Error:|Could not resolve class' $$export_log; then \
+		echo "[export] GDScript parser errors detected; refusing APK $(3)" >&2; \
+		status=1; \
+	fi; \
+	exit $$status
 endef
 
 FULL_QUEST_BUILD_DEPS := verify-host-tools deps verify-ndk setup-vendors-patched prepare-android-libs build-ahb build-hand-capture build-godot-mujoco clean-pico-openxr-loader-stage prepare-capture-plugins build-retargeting verify-retargeting-lib

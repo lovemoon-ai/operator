@@ -192,12 +192,21 @@ or the packed build discovers nothing.
 Changing target or leaving Teleop stops the old target before creating the new
 one. Target-owned tracking providers, solvers, sockets, overlays, and
 simulations are therefore released as one lifecycle unit. The controller panel
-always shows `REAL`, `SIM`, or `OUTSIDE` from the active descriptor before
-control can be enabled.
+can show `REAL`, `SIM`, or `OUTSIDE` from the active descriptor, but native
+Outside Robot sessions render it only when their Blueprint declares the
+`controller_help` built-in view.
 
 The Outside target creates the v2 network stack at runtime:
 
-- `Session` for Hello, descriptor, telemetry, and legacy fallback.
+- `Session` for Hello, descriptor, telemetry, and Blueprint messages.
+- `BlueprintRuntime` for mode-independent declarative XR UI. It
+  instantiates built-in `label`, `status_lamp`, `palm_menu`, and
+  `fingertip_tactile` components and gates the existing `video_panel`,
+  `controller_help`, `control_frame`, and `operation_trajectory` views. It binds
+  latest state values, persists permitted visibility overrides, exposes Follow
+  Source / Show / Hide choices in Teleop settings, and sends interaction events
+  back through `Session`. Outside Robot is currently the adapter that owns this
+  runtime. Without a Blueprint, only the settings launcher is visible there.
 - `CommandSender` for controller/tracking command frames.
 - `XrStateSender` for one atomic raw tracking snapshot when `xr_stream` is
   advertised by an embedded `pyoperator` session.
@@ -208,12 +217,24 @@ The Outside target creates the v2 network stack at runtime:
   FPV TCP flow.
 - `RobotClockSync` for latency reporting.
 - settings and controller overlays from `scripts/ui`.
-- `EEPoseTrajectory` for the optional descriptor-driven operation trail. It
+- `EEPoseTrajectory` for the optional Blueprint-gated, descriptor-driven
+  operation trail. It
   observes successfully queued `DeviceCommand` poses, renders independent
   left/right world-space paths, keeps the latest two deadman segments per hand,
   and starts a new segment after each release so inactive controller motion is
   never joined into the trail. A successfully queued reset-to-home command
   clears both hands' trails before its bundled poses can be rendered.
+
+The Blueprint runtime is deliberately mode-independent and separate from the
+tracking/control hot path. A blueprint rebuild happens only when its source
+publishes a new structural revision. State updates refresh bound properties;
+the per-frame loop contains only components attached to moving head,
+controller, or palm anchors. Opening Settings suspends those components, while
+the owning mode suspends or clears it. The current Teleop adapter clears it on
+disconnect, target replacement, Python `clear()`, and Teleop exit so an old
+robot cannot leave stale UI in the next session. XR owns all palm
+tracking and touch interaction, so no hand-joint stream is echoed back merely
+to render a menu.
 
 Video transport is descriptor-driven. TCP is the default and supports USB
 `adb reverse`; UDP is selected when the descriptor advertises a usable UDP
@@ -242,7 +263,9 @@ JSON and frames it with the legacy byte-command envelope. Selecting
 `xrobot_toolkit_v1` creates a separate outside target with its own TCP client,
 handshake, heartbeat, reconnect, and neutral-frame safety behavior. It bypasses
 Operator `Session`, `DeviceDescriptor`, video, and clock sync. The composition
-root enforces `CommandSender XOR XrStateSender XOR XrtSender`. The compatibility
+root also clears `BlueprintRuntime`; Blueprint/state/event commands are
+not defined by the XRT v1 wire format. It enforces
+`CommandSender XOR XrStateSender XOR XrtSender`. The compatibility
 sampler starts PICO full-body tracking only when XRT transmission becomes
 active, so merely constructing the optional target cannot perturb the normal
 Operator path. It deliberately does not request the

@@ -117,6 +117,14 @@ even when a command-line `OPERATOR_BUILD_PROFILE=teleop` is passed.
 The export process may invoke `godot --headless`; that is export tooling only.
 Do not use desktop headless Godot to run or test the XR project.
 
+An APK artifact does not by itself prove that the exported GDScript dependency
+graph is valid. Godot may write the APK while logging a parser failure, with a
+downstream `Could not resolve class` hiding the original type error. Every
+Android export target captures the Godot log and fails on `SCRIPT ERROR`,
+`Parse Error`, or `Could not resolve class`. When diagnosing a failure, fix the
+earliest parser error first. Dynamic GDScript results should use explicit
+`Variant` or concrete annotations rather than ambiguous `:=` inference.
+
 ## Install And Run
 
 Run from `xr/`:

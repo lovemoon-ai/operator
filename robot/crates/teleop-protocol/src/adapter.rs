@@ -19,6 +19,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio_util::codec::{Decoder, Encoder};
 
+use crate::blueprint::{Blueprint, BlueprintEvent, BlueprintState};
 use crate::descriptor::DeviceDescriptor;
 use crate::wire::{DeviceCommand, DeviceTelemetry};
 
@@ -36,6 +37,8 @@ pub enum BridgeToAdapter {
     Command(DeviceCommand),
     /// Ask the adapter to safe the device immediately (watchdog / E-stop).
     Stop { reason: String },
+    /// An interaction emitted by a Blueprint primitive.
+    BlueprintEvent { event: Box<BlueprintEvent> },
     /// Tell the adapter to shut down cleanly.
     Shutdown,
 }
@@ -48,6 +51,10 @@ pub enum AdapterToBridge {
     Descriptor(Box<DeviceDescriptor>),
     /// Periodic telemetry from the device.
     Telemetry(DeviceTelemetry),
+    /// Replace or clear the active Blueprint.
+    Blueprint { blueprint: Option<Box<Blueprint>> },
+    /// Publish the latest state for the active Blueprint.
+    BlueprintState { state: Box<BlueprintState> },
     /// An out-of-band event/log line (e.g. a warning or state change).
     Event { kind: String, msg: String },
 }

@@ -141,10 +141,11 @@ safety state governs the whole upper body.
 
 ## Thor Standalone Robot Service
 
-For isolated hand tuning before merging with the G1 adapter, deploy one
-self-contained bundle to Thor. `revo2_thor_service.py` is the only robot-side
-entry point: it owns both serial ports, runs the guarded hand loop, hosts the
-pyoperator adapter on loopback, and supervises `xr-bridge`.
+For isolated hand tuning before merging with the G1 adapter, deploy the
+`examples/brainco-revo2` service as one self-contained bundle to Thor.
+`revo2_thor_service.py` is the only robot-side entry point: it owns both serial
+ports, runs the guarded hand loop, hosts the pyoperator adapter on loopback,
+and supervises `xr-bridge`.
 
 ### Bundle layout
 
@@ -162,6 +163,13 @@ The default paths expect this directory structure:
 Build `xr-bridge` on Thor or another Linux aarch64 host, then stage the bundle
 from the repository root. Extract the official BrainCo Linux aarch64 wheel into
 `sdk/`; do not install an x86_64 wheel on Thor.
+The hosted Blueprint frames extend the local adapter boundary, so the new
+service must be deployed with the `xr-bridge` built from the same checkout; an
+older bridge will reject the new frame variants. The PICO APK must also come
+from that checkout: Blueprint is enabled only when the Python bundle,
+`xr-bridge`, and headset advertise the same generated primitive-spec SHA-256.
+A mismatch disables only Blueprint and is reported explicitly in the bridge
+log; tracking, control, telemetry, and video can otherwise remain connected.
 
 ```bash
 cd robot
@@ -169,7 +177,7 @@ cargo build --release -p xr-bridge
 cd ..
 
 rm -rf /tmp/operator-hand
-install -D -m 0755 scripts/revo2_thor_service.py \
+install -D -m 0755 examples/brainco-revo2/revo2_thor_service.py \
   /tmp/operator-hand/revo2_thor_service.py
 install -D -m 0755 robot/target/release/xr-bridge \
   /tmp/operator-hand/bin/xr-bridge
@@ -180,7 +188,7 @@ mkdir -p \
   /tmp/operator-hand/lib/pyoperator/protocol \
   /tmp/operator-hand/sdk/bc_stark_sdk \
   /tmp/operator-hand/sdk/bc_stark_sdk.libs
-for module in __init__.py hosted.py ik.py models.py retargeting.py robot.py session.py xr_bridge.py; do
+for module in __init__.py _blueprint_spec.py hosted.py ik.py models.py blueprint.py retargeting.py robot.py session.py xr_bridge.py; do
   install -m 0644 "python/pyoperator/$module" "/tmp/operator-hand/lib/pyoperator/$module"
 done
 for module in __init__.py revo2.py revo2_udp.py; do
@@ -223,8 +231,11 @@ Explicit `--left-port` and `--right-port` overrides remain available, but
 persistent `/dev/serial/by-id/...-port0` paths should be used instead of
 `ttyUSB` numbers.
 
-Start without `--allow-commands` first. Read-only mode never calls a motion API
-and previews received gesture targets beside actual positions in the headset:
+Start without `--allow-commands` first. Read-only mode never calls a motion API.
+It publishes the Revo2 Blueprint so the headset can validate the robot-authored
+status label, per-hand status lamps, user visibility overrides, palm menu, and
+fingertip tactile feedback. The menu remains touch-interactive as an input
+preview, but its unlocked state cannot cause physical motion in read-only mode:
 
 ```bash
 cd /home/unitree/ws/operator-hand
@@ -250,17 +261,24 @@ the 50 Hz control loop. The adapter sets
 each motor speed independently from the measured gesture velocity and the
 target-to-actual tracking error, rather than applying one low fixed speed.
 
-Show the menu by facing the left palm toward the headset with all five fingers
-open. Use the right index fingertip to press `解锁`; approach from outside the
-button, then push the fingertip into its surface. No hand ray or pinch is used.
-Press `锁定` to stop both hands. The lock resets after opening Settings, any
-network disconnect/reconnect, or leaving Teleop, so motion never resumes
-automatically.
-Each tracked wrist carries a three-state status lamp: gray means the robot link
-is disconnected, green means the link is connected but that hand is locked, and
-orange means the explicit unlock is active and that tracked hand can command its
-Revo2. Opening the settings panel returns orange to green because the panel
-intentionally locks command output without disconnecting the link.
+The menu is no longer a Revo2-specific XR widget. `revo2_thor_service.py`
+publishes a built-in `palm_menu` through `HostedBlueprint`; the headset owns
+hand tracking, hit testing, smoothing, and rendering. Show it by facing the left
+palm toward the headset with all five fingers open. Use the right index
+fingertip to press `解锁`; approach from outside the button, then push the
+fingertip into its surface. No hand ray or pinch is used. The resulting
+`BlueprintEvent` returns to the service, which is the authoritative
+motion gate. Press `锁定` to send hold packets and stop both hands.
+
+The lock resets when Settings disables the hand command stream, when hand
+tracking is lost, on any network disconnect/reconnect, bridge shutdown, or when
+leaving Teleop; the one-second watchdog remains a fallback. Motion therefore
+never resumes automatically. Each tracked palm carries a
+robot-authored status lamp: gray means startup has not completed, green means
+that hand is connected and locked, orange means control is active, and a
+warning state means expected telemetry is unavailable. The head-anchored label
+reports read-only, waiting, locked, or unlocked state. All components remain
+user-overridable from Teleop settings.
 
 Thor must expose UDP `63900`, TCP `63901`, UDP `63902`, and TCP `63903` to the
 headset network. TCP `63910` and UDP `19091`/`19092` are internal adapter/runtime
@@ -277,7 +295,7 @@ On September 1, 2026, the connected FTDI adapter enumerated the left hand on
 interface 02 and the right hand on interface 01. Do not encode those interface
 numbers into deployment configuration.
 
-## Quest Visualization Contract
+## Telemetry Contract
 
 The robot telemetry `values` object may contain either or both hands:
 
@@ -290,10 +308,11 @@ The robot telemetry `values` object may contain either or both hands:
 }
 ```
 
-The same keys with `right` drive the right panel. Each row renders the actual
-position marker, translucent target marker, and the line between them. Current
-controls marker/load-bar color; `STALL` forces red and enlarges the marker.
-Telemetry older than 800 ms is marked stale and hidden after three seconds.
+The same keys with `right` describe the right hand. The v1 robot-authored
+Blueprint uses fresh `*_position` samples to drive connection status and
+menu availability. Motor-position/current/stall arrays remain on the telemetry
+channel for logging and future built-in visual components; the migrated example
+does not activate the previous hardcoded actuator overlay.
 
 TOUCH and TOUCH PRESSURE hands additionally publish five-element arrays in
 physical finger order: thumb, index, middle, ring, pinky.
@@ -308,12 +327,9 @@ physical finger order: thumb, index, middle, ring, pinky.
 }
 ```
 
-The fingertip dot grows and brightens with proximity and normal contact. Blue
-means online/proximity, yellow through red means increasing normal contact,
-the white bar shows tangential magnitude and direction, purple indicates an
-explicit sensor error, and gray means stale data. These are logarithmic,
-uncalibrated relative intensities rather than newtons.
-
-This is intentionally a schematic actuator view. A later strict spatial view
-can replace each row with Revo2 URDF forward kinematics while preserving the
-same telemetry contract.
+These values remain uncalibrated sensor intensities rather than newtons. The
+Revo2 Blueprint binds them to the built-in `fingertip_tactile` component. XR
+reuses the original logarithmic intensity mapping and renders proximity,
+normal contact, strong contact, sensor errors, and directional shear on each
+tracked fingertip without restoring robot-specific ownership in the Teleop
+controller.

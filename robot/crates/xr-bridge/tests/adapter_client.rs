@@ -12,19 +12,21 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tokio_util::codec::Framed;
 
 use teleop_protocol::{
-    listen, AdapterCodec, AdapterToBridge, AxisDef, BridgeToAdapter, ControlSchema, DeviceCommand,
-    DeviceDescriptor, DeviceInfo, DeviceSafetyConfig, DeviceTelemetry, Endpoint, TelemetryValue,
+    listen, AdapterCodec, AdapterToBridge, AxisDef, Blueprint, BlueprintEvent, BlueprintState,
+    BridgeToAdapter, ControlSchema, DeviceCommand, DeviceDescriptor, DeviceInfo,
+    DeviceSafetyConfig, DeviceTelemetry, Endpoint, TelemetryValue, BLUEPRINT_CAPABILITY,
+    BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256,
 };
 
 use xr_bridge::adapter_client::AdapterClient;
 use xr_bridge::safety::{DeviceSafety, SafetyResult};
 
 fn test_descriptor() -> DeviceDescriptor {
-    DeviceDescriptor {
+    let mut descriptor = DeviceDescriptor {
         device: DeviceInfo {
             device_type: "test_arm".into(),
             name: "Mock Arm".into(),
@@ -51,7 +53,16 @@ fn test_descriptor() -> DeviceDescriptor {
             limits: HashMap::new(),
         },
         ..Default::default()
-    }
+    };
+    descriptor.capabilities.insert(
+        BLUEPRINT_CAPABILITY.to_string(),
+        serde_json::Value::Bool(true),
+    );
+    descriptor.capabilities.insert(
+        BLUEPRINT_SPEC_HASH_CAPABILITY.to_string(),
+        serde_json::Value::String(SPEC_SHA256.to_string()),
+    );
+    descriptor
 }
 
 /// Handle to a running mock adapter server.
@@ -107,6 +118,7 @@ async fn spawn_mock_adapter(descriptor: DeviceDescriptor) -> MockAdapter {
                     }
                 }
                 BridgeToAdapter::Stop { .. } | BridgeToAdapter::Shutdown => break,
+                BridgeToAdapter::BlueprintEvent { .. } => {}
             }
         }
     });
@@ -151,6 +163,7 @@ async fn spawn_bursting_adapter(descriptor: DeviceDescriptor, frames: u64) -> En
                 }
                 BridgeToAdapter::Stop { .. } | BridgeToAdapter::Shutdown => break,
                 BridgeToAdapter::Command(_) => {}
+                BridgeToAdapter::BlueprintEvent { .. } => {}
             }
         }
     });
@@ -275,6 +288,224 @@ async fn telemetry_watch_does_not_depend_on_unread_events_receiver() {
     })
     .await
     .expect("telemetry reader stalled behind unread events receiver");
+}
+
+#[tokio::test]
+async fn blueprint_streams_round_trip_across_adapter_client() {
+    let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+        .await
+        .expect("bind mock adapter");
+    let endpoint = listener.endpoint();
+    let blueprint: Blueprint = serde_json::from_str(
+        r#"{"schema":"operator.blueprint.v1","blueprint_id":"hosted","revision":1,"components":[{"id":"menu","type":"palm_menu","properties":{"title":"Test","action":"toggle"},"bindings":{"value":"ready"}}]}"#,
+    )
+    .unwrap();
+    let state: BlueprintState = serde_json::from_str(
+        r#"{"schema":"operator.blueprint_state.v1","blueprint_id":"hosted","blueprint_revision":1,"sequence":1,"timestamp_ns":2,"values":{"ready":true}}"#,
+    )
+    .unwrap();
+    let event: BlueprintEvent = serde_json::from_str(
+        r#"{"schema":"operator.blueprint_event.v1","blueprint_id":"hosted","blueprint_revision":1,"sequence":1,"timestamp_ns":3,"component_id":"menu","action":"toggle","value":true}"#,
+    )
+    .unwrap();
+    let sent_blueprint = blueprint.clone();
+    let sent_state = state.clone();
+    let (event_tx, event_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        let mut framed = Framed::new(conn, AdapterCodec);
+        while let Some(message) = framed.next().await {
+            match message.expect("decode") {
+                BridgeToAdapter::Hello => {
+                    framed
+                        .send(AdapterToBridge::Descriptor(Box::new(test_descriptor())))
+                        .await
+                        .unwrap();
+                    framed
+                        .send(AdapterToBridge::Blueprint {
+                            blueprint: Some(Box::new(sent_blueprint.clone())),
+                        })
+                        .await
+                        .unwrap();
+                    framed
+                        .send(AdapterToBridge::BlueprintState {
+                            state: Box::new(sent_state.clone()),
+                        })
+                        .await
+                        .unwrap();
+                }
+                BridgeToAdapter::BlueprintEvent { event } => {
+                    let _ = event_tx.send(*event);
+                    break;
+                }
+                BridgeToAdapter::Command(_)
+                | BridgeToAdapter::Stop { .. }
+                | BridgeToAdapter::Shutdown => {}
+            }
+        }
+    });
+
+    let mut client = AdapterClient::connect(&endpoint).await.unwrap();
+    let mut blueprint_rx = client.blueprint();
+    let mut state_rx = client.blueprint_state();
+    client.handshake().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), blueprint_rx.changed())
+        .await
+        .expect("blueprint did not arrive")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), state_rx.changed())
+        .await
+        .expect("state did not arrive")
+        .unwrap();
+    assert_eq!(
+        blueprint_rx.borrow_and_update().as_ref().unwrap().as_ref(),
+        &blueprint
+    );
+    assert_eq!(
+        state_rx.borrow_and_update().as_ref().unwrap().as_ref(),
+        &state
+    );
+
+    client.send_blueprint_event(event.clone()).await.unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), event_rx)
+            .await
+            .expect("event did not reach adapter")
+            .unwrap(),
+        event
+    );
+}
+
+#[tokio::test]
+async fn blueprint_replacement_clears_previous_state() {
+    let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+        .await
+        .expect("bind mock adapter");
+    let endpoint = listener.endpoint();
+    let initial_blueprint: Blueprint = serde_json::from_str(
+        r#"{"schema":"operator.blueprint.v1","blueprint_id":"hosted","revision":1,"components":[{"id":"menu","type":"palm_menu","properties":{"title":"Test","action":"toggle"},"bindings":{"value":"ready"}}]}"#,
+    )
+    .unwrap();
+    let replacement_blueprint = Blueprint {
+        revision: 2,
+        ..initial_blueprint.clone()
+    };
+    let initial_state: BlueprintState = serde_json::from_str(
+        r#"{"schema":"operator.blueprint_state.v1","blueprint_id":"hosted","blueprint_revision":1,"sequence":1,"timestamp_ns":2,"values":{"ready":true}}"#,
+    )
+    .unwrap();
+    let (replace_tx, replace_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        let mut framed = Framed::new(conn, AdapterCodec);
+        while let Some(message) = framed.next().await {
+            if matches!(message.expect("decode"), BridgeToAdapter::Hello) {
+                framed
+                    .send(AdapterToBridge::Descriptor(Box::new(test_descriptor())))
+                    .await
+                    .unwrap();
+                framed
+                    .send(AdapterToBridge::Blueprint {
+                        blueprint: Some(Box::new(initial_blueprint)),
+                    })
+                    .await
+                    .unwrap();
+                framed
+                    .send(AdapterToBridge::BlueprintState {
+                        state: Box::new(initial_state),
+                    })
+                    .await
+                    .unwrap();
+                replace_rx.await.expect("replacement trigger");
+                framed
+                    .send(AdapterToBridge::Blueprint {
+                        blueprint: Some(Box::new(replacement_blueprint)),
+                    })
+                    .await
+                    .unwrap();
+                break;
+            }
+        }
+    });
+
+    let mut client = AdapterClient::connect(&endpoint).await.unwrap();
+    let mut blueprint_rx = client.blueprint();
+    let mut state_rx = client.blueprint_state();
+    client.handshake().await.unwrap();
+    blueprint_rx.changed().await.unwrap();
+    state_rx.changed().await.unwrap();
+    assert_eq!(
+        blueprint_rx.borrow_and_update().as_ref().unwrap().revision,
+        1
+    );
+    assert_eq!(
+        state_rx
+            .borrow_and_update()
+            .as_ref()
+            .unwrap()
+            .blueprint_revision,
+        1
+    );
+
+    replace_tx.send(()).unwrap();
+    state_rx.changed().await.unwrap();
+    assert!(state_rx.borrow_and_update().is_none());
+    blueprint_rx.changed().await.unwrap();
+    assert_eq!(
+        blueprint_rx.borrow_and_update().as_ref().unwrap().revision,
+        2
+    );
+}
+
+#[tokio::test]
+async fn incompatible_adapter_blueprint_spec_is_rejected() {
+    let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+        .await
+        .expect("bind mock adapter");
+    let endpoint = listener.endpoint();
+    tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        let mut framed = Framed::new(conn, AdapterCodec);
+        if matches!(
+            framed.next().await.unwrap().unwrap(),
+            BridgeToAdapter::Hello
+        ) {
+            let mut descriptor = test_descriptor();
+            descriptor.capabilities.insert(
+                BLUEPRINT_SPEC_HASH_CAPABILITY.to_string(),
+                serde_json::Value::String("different-spec".to_string()),
+            );
+            framed
+                .send(AdapterToBridge::Descriptor(Box::new(descriptor)))
+                .await
+                .unwrap();
+            framed
+                .send(AdapterToBridge::Blueprint {
+                    blueprint: Some(Box::new(
+                        serde_json::from_str(
+                            r#"{"schema":"operator.blueprint.v1","blueprint_id":"stale","revision":1,"components":[]}"#,
+                        )
+                        .unwrap(),
+                    )),
+                })
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+
+    let mut client = AdapterClient::connect(&endpoint).await.unwrap();
+    let mut blueprint_rx = client.blueprint();
+    client.handshake().await.unwrap();
+    assert!(!client.blueprint_compatible());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), blueprint_rx.changed())
+            .await
+            .is_err()
+    );
+    assert!(blueprint_rx.borrow().is_none());
 }
 
 /// Poll the mock's received-command buffer until at least one command lands.
