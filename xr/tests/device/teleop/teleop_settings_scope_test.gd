@@ -30,6 +30,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var groups: Array = _group_keys(panel)
 	t.contains(groups, "robot", "the robot configuration group exists")
 	t.contains(groups, "video", "the video configuration group exists")
+	t.contains(groups, "blueprint", "the robot-authored UI group exists")
 	t.eq(groups.find("video"), groups.find("robot") + 1, "Video follows Robot in the sidebar")
 	t.is_false(groups.has("target"), "the separate embodiment-location group is gone")
 	t.is_false(groups.has("connection"), "robot service is no longer its own group")
@@ -65,6 +66,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"protocol selection belongs to Outside Robot settings"
 	)
 	_test_video_settings(panel, groups, t)
+	_test_blueprint_settings(panel, t)
 
 	# Every robot is its own always-visible button: a dropdown popup cannot
 	# render in this panel's composition viewport, so the operator would never
@@ -327,6 +329,36 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_dispose(panel)
 
 
+func _test_blueprint_settings(panel: TestPanel, t: OperatorTestAssertions) -> void:
+	var group_buttons: Dictionary = panel.get("_group_buttons")
+	var blueprint_button: Button = group_buttons.get("blueprint")
+	t.is_true(blueprint_button != null, "robot UI has a sidebar button")
+	t.is_false(blueprint_button.visible, "robot UI stays hidden without a blueprint")
+	var requests: Array = []
+	panel.blueprint_visibility_override_requested.connect(
+		func(component_id: String, visible: Variant) -> void:
+			requests.append({"id": component_id, "visible": visible})
+	)
+	panel.set_blueprint_visibility_options([
+		{"id": "hand_control", "label": "Hand control", "override": null},
+		{"id": "status", "label": "Robot status", "override": false},
+	])
+	t.is_true(blueprint_button.visible, "robot UI appears when overridable components exist")
+	var rows: Dictionary = panel.get("_blueprint_override_buttons")
+	t.eq(rows.size(), 2, "one override selector is built per component")
+	var hand_buttons: Dictionary = rows.get("hand_control")
+	t.is_true((hand_buttons["follow"] as Button).button_pressed, "default choice follows robot")
+	(hand_buttons["hide"] as Button).emit_signal("pressed")
+	t.eq(requests.size(), 1, "changing a robot UI choice emits one request")
+	t.eq(requests[0].get("id"), "hand_control", "override request identifies the component")
+	t.eq(requests[0].get("visible"), false, "hide emits a local false override")
+	(hand_buttons["follow"] as Button).emit_signal("pressed")
+	t.eq(requests.size(), 2, "returning to robot control emits another request")
+	t.eq(requests[1].get("visible"), null, "follow clears the local override")
+	panel.set_blueprint_visibility_options([])
+	t.is_false(blueprint_button.visible, "robot UI hides again when the blueprint clears")
+
+
 func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssertions) -> void:
 	var containers: Dictionary = panel.get("_group_containers")
 	var video_group: Control = containers.get("video")
@@ -338,6 +370,7 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 	var video_sbs_toggle: CheckButton = panel.get("_video_sbs_toggle")
 	var video_face_toggle: CheckButton = panel.get("_video_face_toggle")
 	var show_video_panel_toggle: CheckButton = panel.get("_show_video_panel_toggle")
+	var operation_trajectory_toggle: CheckButton = panel.get("_show_operation_trajectory_toggle")
 	var connect_button: Button = panel.get("_video_connect_button")
 	var status_label: Label = panel.get("_video_status_label")
 	if not t.is_true(
@@ -350,6 +383,7 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		and video_sbs_toggle != null
 		and video_face_toggle != null
 		and show_video_panel_toggle != null
+		and operation_trajectory_toggle != null
 		and connect_button != null
 		and status_label != null,
 		"Video exposes all configuration and action controls"
@@ -373,6 +407,24 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		display_group.is_ancestor_of(show_video_panel_toggle),
 		"Display no longer owns video visibility"
 	)
+	t.is_false(
+		(show_video_panel_toggle.get_parent() as Control).visible,
+		"native Operator hides the legacy video visibility toggle",
+	)
+	t.is_false(
+		(video_face_toggle.get_parent() as Control).visible,
+		"native Operator hides the legacy video placement toggle",
+	)
+	t.is_false(
+		(operation_trajectory_toggle.get_parent() as Control).visible,
+		"native Operator hides the legacy trajectory toggle",
+	)
+	panel._on_protocol_pressed("xrobot_toolkit_v1")
+	t.is_true(
+		(show_video_panel_toggle.get_parent() as Control).visible,
+		"XRoboToolkit keeps its local video visibility control",
+	)
+	panel._on_protocol_pressed("operator")
 
 	var legacy_options := _options("outside")
 	for key in ["video_protocol", "video_ip", "video_port", "video_sbs"]:

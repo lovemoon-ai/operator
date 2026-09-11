@@ -19,6 +19,9 @@ class FakeNative:
         self.payload = json.dumps(sample_frame(3))
         self.wait_calls = []
         self.close_calls = 0
+        self.blueprints = []
+        self.blueprint_states = []
+        self.blueprint_events = []
 
     def start(self) -> None:
         self.running = True
@@ -49,6 +52,18 @@ class FakeNative:
                 "last_error": "bad frame",
             }
         )
+
+    def set_blueprint_json(self, payload: str) -> None:
+        self.blueprints.append(payload)
+
+    def clear_blueprint(self) -> None:
+        self.blueprints.clear()
+
+    def publish_blueprint_state_json(self, payload: str) -> None:
+        self.blueprint_states.append(payload)
+
+    def poll_blueprint_event_json(self, _timeout):
+        return self.blueprint_events.pop(0) if self.blueprint_events else None
 
 
 class SessionReplayTests(unittest.TestCase):

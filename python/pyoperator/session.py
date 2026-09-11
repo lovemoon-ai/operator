@@ -8,6 +8,7 @@ import json
 from typing import Any, Callable, Iterator
 
 from .models import BridgeStats, XrFrame, frame_from_json
+from .blueprint import BlueprintClient
 
 try:
     from ._native import NativeSession as _NativeSession
@@ -49,6 +50,7 @@ class XrSession:
             telemetry_port=self.config.telemetry_port,
             discovery_unicast_targets=list(self.config.discovery_unicast_targets),
         )
+        self.blueprint = BlueprintClient(self._native, lambda: self.is_running)
 
     def start(self) -> "XrSession":
         self._native.start()

@@ -5,6 +5,7 @@ extends Node3D
 ## claiming calibrated force while preserving both light and strong contacts.
 
 const SIDES := ["left", "right"]
+const TACTILE_FIELDS := ["normal", "tangential", "direction", "proximity", "status"]
 const FINGERTIP_JOINTS := [5, 10, 15, 20, 25]
 const FINGER_DISTAL_JOINTS := [4, 9, 14, 19, 24]
 const STALE_AFTER_USEC := 800_000
@@ -45,6 +46,7 @@ var _tracked_joints := {"left": [], "right": []}
 var _sample_reported := {"left": false, "right": false}
 var _tracking_reported := {"left": false, "right": false}
 var _visible_reported := {"left": false, "right": false}
+var _bound_sample: Variant = null
 
 
 func _ready() -> void:
@@ -98,6 +100,7 @@ func clear() -> void:
 	_last_update_usec = {"left": 0, "right": 0}
 	_samples = {"left": {}, "right": {}}
 	_tracked_joints = {"left": [], "right": []}
+	_bound_sample = null
 	visible = false
 	_hide_all()
 
@@ -119,6 +122,29 @@ func update_telemetry(telemetry: Dictionary) -> void:
 			# the explicit stale state before hiding it at HIDE_AFTER_USEC.
 			_samples[side] = {}
 			_last_update_usec[side] = 0
+
+
+func update_bound_values(
+	values: Dictionary,
+	bindings: Dictionary,
+	refresh_binding: String = "",
+) -> void:
+	var sample_key := str(bindings.get(refresh_binding, ""))
+	if not sample_key.is_empty():
+		if not values.has(sample_key):
+			return
+		var sample: Variant = values[sample_key]
+		if _bound_sample != null and sample == _bound_sample:
+			return
+		_bound_sample = sample
+	var telemetry_values := {}
+	for side in SIDES:
+		for field in TACTILE_FIELDS:
+			var binding_key := str(bindings.get("%s_%s" % [side, field], ""))
+			if binding_key.is_empty() or not values.has(binding_key):
+				continue
+			telemetry_values["revo2_%s_touch_%s" % [side, field]] = values[binding_key]
+	update_telemetry({"values": telemetry_values})
 
 
 static func parse_telemetry(telemetry: Dictionary) -> Dictionary:

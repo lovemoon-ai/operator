@@ -91,6 +91,48 @@ def _pinch_hand() -> HandState:
 
 
 class Revo2IntegrationTests(unittest.TestCase):
+    def test_udp_adapter_keeps_shared_transport_until_last_client_disconnects(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def setsockopt(self, *_args) -> None:
+                pass
+
+            def bind(self, _address) -> None:
+                pass
+
+            def settimeout(self, _timeout) -> None:
+                pass
+
+            def recvfrom(self, _size):
+                raise OSError("done")
+
+            def close(self) -> None:
+                self.closed = True
+
+        sockets = [FakeSocket(), FakeSocket()]
+        adapter = Revo2UdpHostedAdapter(
+            command_host="127.0.0.1",
+            socket_factory=lambda *_args: sockets.pop(0),
+        )
+        adapter.connect()
+        command_socket = adapter._command_socket
+        telemetry_socket = adapter._telemetry_socket
+        adapter.connect()
+
+        adapter.disconnect()
+        self.assertIs(adapter._command_socket, command_socket)
+        self.assertIs(adapter._telemetry_socket, telemetry_socket)
+        self.assertFalse(command_socket.closed)
+        self.assertFalse(telemetry_socket.closed)
+
+        adapter.disconnect()
+        self.assertIsNone(adapter._command_socket)
+        self.assertIsNone(adapter._telemetry_socket)
+        self.assertTrue(command_socket.closed)
+        self.assertTrue(telemetry_socket.closed)
+
     def test_gesture_mapping_and_controller_fallback(self) -> None:
         open_targets = gesture_targets(_hand(False))
         closed_targets = gesture_targets(_hand(True))
@@ -298,6 +340,7 @@ class Revo2IntegrationTests(unittest.TestCase):
         adapter._value_received_ns = {
             "revo2_left_position": time.monotonic_ns(),
         }
+        adapter.set_control_enabled(True)
         adapter.handle_command(
             {
                 "axes": {axis_name("left", channel): 0.5 for channel in CHANNELS},
@@ -306,15 +349,14 @@ class Revo2IntegrationTests(unittest.TestCase):
         )
         adapter.handle_command({"axes": {}, "buttons": {"left_enable": False}})
         adapter.handle_command({"axes": {}, "buttons": {"left_enable": False}})
-        self.assertEqual(len(capture.sent), 5)
+        self.assertEqual(len(capture.sent), 4)
+        self.assertFalse(adapter.control_enabled)
         active = struct.unpack("<4sBBHIQ12f", capture.sent[0][0])
         hold = struct.unpack("<4sBBHIQ12f", capture.sent[1][0])
-        repeated_hold = struct.unpack("<4sBBHIQ12f", capture.sent[4][0])
         self.assertEqual(active[1], 3)
         self.assertEqual(hold[1], 3)
         self.assertEqual(active[3], 0)
         self.assertEqual(hold[3], COMMAND_FLAG_HOLD)
-        self.assertEqual(repeated_hold[3], COMMAND_FLAG_HOLD)
         self.assertEqual(active[6:12], (0.5,) * 6)
         for actual, expected in zip(hold[6:12], (0.11, 0.21, 0.31, 0.41, 0.51, 0.61)):
             self.assertAlmostEqual(actual, expected)
@@ -369,6 +411,7 @@ class Revo2IntegrationTests(unittest.TestCase):
         adapter = Revo2UdpHostedAdapter(command_host="192.0.2.10")
         capture = CaptureSocket()
         adapter._command_socket = capture
+        adapter.set_control_enabled(True)
         adapter.handle_command(
             {
                 "axes": {axis_name("right", channel): 0.6 for channel in CHANNELS},
@@ -381,6 +424,42 @@ class Revo2IntegrationTests(unittest.TestCase):
         self.assertEqual(hold[3], COMMAND_FLAG_HOLD)
         for actual in hold[6:12]:
             self.assertAlmostEqual(actual, 0.6)
+
+    def test_udp_adapter_robot_side_gate_safes_motion(self) -> None:
+        class CaptureSocket:
+            def __init__(self) -> None:
+                self.sent = []
+
+            def sendto(self, payload, address) -> None:
+                self.sent.append((payload, address))
+
+        changes = []
+        adapter = Revo2UdpHostedAdapter(
+            command_host="192.0.2.10",
+            control_state_callback=lambda enabled, reason: changes.append(
+                (enabled, reason)
+            ),
+        )
+        capture = CaptureSocket()
+        adapter._command_socket = capture
+        command = {
+            "axes": {axis_name("left", channel): 0.5 for channel in CHANNELS},
+            "buttons": {"left_enable": True},
+        }
+
+        adapter.handle_command(command)
+        self.assertFalse(capture.sent)
+        adapter.set_control_enabled(True, "menu")
+        adapter.handle_command(command)
+        adapter.set_control_enabled(False, "menu")
+
+        self.assertFalse(adapter.control_enabled)
+        self.assertEqual(changes, [(True, "menu"), (False, "menu")])
+        self.assertEqual(len(capture.sent), 4)
+        for payload, _address in capture.sent[-3:]:
+            self.assertEqual(
+                struct.unpack("<4sBBHIQ12f", payload)[3], COMMAND_FLAG_HOLD
+            )
 
     def test_udp_adapter_filters_stale_and_invalid_telemetry(self) -> None:
         class ReceiveSocket:

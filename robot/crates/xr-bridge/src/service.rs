@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use teleop_protocol::{
     ControlSchema, DeviceDescriptor, DeviceInfo, DeviceTelemetry, VideoFeedInfo,
@@ -17,11 +17,13 @@ use teleop_protocol::{
 use crate::adapter_client::AdapterClient;
 use crate::config::{BridgeConfig, VideoFeedConfig};
 use crate::pose_udp_server::UdpDropStats;
+use crate::sdk::BlueprintStreams;
 use crate::video::{Codec, VideoFeed};
 use crate::wire_runtime::TimedCommand;
 use crate::{
     discovery, forward, latency, pose_server, pose_udp_server, runtime, telemetry_server, video,
 };
+use teleop_protocol::{BLUEPRINT_CAPABILITY, BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256};
 
 /// Run the normal adapter-backed XR bridge mode.
 pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
@@ -40,6 +42,21 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
 
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
     descriptor.normalize_for_outside();
+    let blueprint_compatible = client.blueprint_compatible();
+    descriptor.capabilities.insert(
+        BLUEPRINT_CAPABILITY.to_string(),
+        serde_json::Value::Bool(blueprint_compatible),
+    );
+    if blueprint_compatible {
+        descriptor.capabilities.insert(
+            BLUEPRINT_SPEC_HASH_CAPABILITY.to_string(),
+            serde_json::Value::String(SPEC_SHA256.to_string()),
+        );
+    } else {
+        descriptor
+            .capabilities
+            .remove(BLUEPRINT_SPEC_HASH_CAPABILITY);
+    }
     let video_feeds = video_feed_relays(&config.video.feeds);
     log_video_feeds(&video_feeds);
 
@@ -48,6 +65,14 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
     let descriptor = Arc::new(descriptor);
 
     let adapter_telemetry = client.telemetry();
+    let blueprint_rx = client.blueprint();
+    let blueprint_state_rx = client.blueprint_state();
+    let (blueprint_event_tx, blueprint_event_rx) = mpsc::channel(256);
+    let blueprint = BlueprintStreams {
+        blueprint_rx: blueprint_rx,
+        state_rx: blueprint_state_rx,
+        event_tx: blueprint_event_tx,
+    };
 
     let (device_cmd_tx, device_cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
     let (telemetry_tx, telemetry_rx) = watch::channel(DeviceTelemetry::default());
@@ -68,12 +93,13 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
 
     tokio::try_join!(
         discovery::run(&config, &device_type, &device_name),
-        pose_server::run(
+        pose_server::run_with_blueprint(
             config.pose_port,
             descriptor.clone(),
             device_cmd_tx.clone(),
             telemetry_rx.clone(),
             latency.clone(),
+            blueprint,
         ),
         pose_udp_server::run(
             config.pose_udp_port,
@@ -83,7 +109,13 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
             udp_stats,
         ),
         telemetry_server::run(config.telemetry_port, telemetry_rx),
-        forward::run(descriptor, device_cmd_rx, client, latency.clone()),
+        forward::run_with_blueprint_events(
+            descriptor,
+            device_cmd_rx,
+            client,
+            latency.clone(),
+            blueprint_event_rx,
+        ),
         latency::run_aggregator(latency.clone()),
         video::run(video_feeds),
     )?;

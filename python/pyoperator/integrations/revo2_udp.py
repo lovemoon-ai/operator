@@ -96,6 +96,7 @@ class Revo2UdpHostedAdapter:
         command_speed_gain: float = 1.0,
         telemetry_timeout_seconds: float = 0.5,
         socket_factory: Callable[..., socket.socket] = socket.socket,
+        control_state_callback: Callable[[bool, str], None] | None = None,
     ) -> None:
         if not 0.0 < command_speed <= max_command_speed <= 1.0:
             raise ValueError("command speeds must satisfy 0 < minimum <= maximum <= 1")
@@ -114,6 +115,9 @@ class Revo2UdpHostedAdapter:
         self.command_speed_gain = command_speed_gain
         self.telemetry_timeout_ns = int(telemetry_timeout_seconds * 1_000_000_000)
         self._socket_factory = socket_factory
+        self._control_state_callback = control_state_callback
+        self._lifecycle_lock = threading.Lock()
+        self._connection_count = 0
         self._command_socket: socket.socket | None = None
         self._telemetry_socket: socket.socket | None = None
         self._receiver: threading.Thread | None = None
@@ -123,6 +127,7 @@ class Revo2UdpHostedAdapter:
         self._value_received_ns: dict[str, int] = {}
         self._timestamp_ns = 0
         self._allowed_telemetry_sources: set[str] = set()
+        self._control_enabled = False
         self._enabled = {side: False for side in SIDES}
         self._motion_started = {side: False for side in SIDES}
         self._sequence = {side: 0 for side in SIDES}
@@ -132,46 +137,76 @@ class Revo2UdpHostedAdapter:
         self._last_command_ns: dict[str, int | None] = {side: None for side in SIDES}
 
     def connect(self) -> None:
-        if self._command_socket is not None:
-            return
-        self._closed.clear()
-        self._allowed_telemetry_sources = _resolve_ipv4(self.command_host)
-        self._command_socket = self._socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
-        telemetry_socket = self._socket_factory(socket.AF_INET, socket.SOCK_DGRAM)
-        telemetry_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        telemetry_socket.bind(self.telemetry_address)
-        telemetry_socket.settimeout(0.2)
-        self._telemetry_socket = telemetry_socket
-        self._receiver = threading.Thread(
-            target=self._receive_telemetry,
-            name="revo2-telemetry",
-            daemon=True,
-        )
-        self._receiver.start()
+        with self._lifecycle_lock:
+            self._connection_count += 1
+            if self._connection_count > 1:
+                return
+            try:
+                self._closed.clear()
+                self._allowed_telemetry_sources = _resolve_ipv4(self.command_host)
+                self._command_socket = self._socket_factory(
+                    socket.AF_INET, socket.SOCK_DGRAM
+                )
+                telemetry_socket = self._socket_factory(
+                    socket.AF_INET, socket.SOCK_DGRAM
+                )
+                telemetry_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                telemetry_socket.bind(self.telemetry_address)
+                telemetry_socket.settimeout(0.2)
+                self._telemetry_socket = telemetry_socket
+                self._receiver = threading.Thread(
+                    target=self._receive_telemetry,
+                    name="revo2-telemetry",
+                    daemon=True,
+                )
+                self._receiver.start()
+            except BaseException:
+                self._connection_count = 0
+                self._closed.set()
+                for active_socket in (self._telemetry_socket, self._command_socket):
+                    if active_socket is not None:
+                        active_socket.close()
+                self._telemetry_socket = None
+                self._command_socket = None
+                self._receiver = None
+                raise
 
     def disconnect(self) -> None:
-        try:
-            self.stop("adapter disconnect")
-        except OSError:
-            pass
-        self._closed.set()
-        for active_socket in (self._telemetry_socket, self._command_socket):
-            if active_socket is not None:
-                active_socket.close()
-        self._telemetry_socket = None
-        self._command_socket = None
-        receiver = self._receiver
-        self._receiver = None
-        if receiver is not None and receiver is not threading.current_thread():
-            receiver.join(timeout=1.0)
-        with self._lock:
-            self._values.clear()
-            self._value_received_ns.clear()
-            self._timestamp_ns = 0
+        with self._lifecycle_lock:
+            if self._connection_count <= 0:
+                return
+            self._connection_count -= 1
+            if self._connection_count > 0:
+                return
+            try:
+                self.stop("adapter disconnect")
+            except OSError:
+                pass
+            self._closed.set()
+            for active_socket in (self._telemetry_socket, self._command_socket):
+                if active_socket is not None:
+                    active_socket.close()
+            self._telemetry_socket = None
+            self._command_socket = None
+            receiver = self._receiver
+            self._receiver = None
+            if receiver is not None and receiver is not threading.current_thread():
+                receiver.join(timeout=1.0)
+            with self._lock:
+                self._values.clear()
+                self._value_received_ns.clear()
+                self._timestamp_ns = 0
 
     def handle_command(self, command: Mapping[str, Any]) -> None:
+        requested_enabled = {
+            side: hand_enabled(command, side)
+            for side in SIDES
+        }
+        if self._control_enabled and not any(requested_enabled.values()):
+            self.set_control_enabled(False, "XR hand stream disabled")
+            return
         for side in SIDES:
-            enabled = hand_enabled(command, side)
+            enabled = self._control_enabled and requested_enabled[side]
             if enabled:
                 self._send(side, command_targets(command, side))
                 self._motion_started[side] = True
@@ -195,7 +230,28 @@ class Revo2UdpHostedAdapter:
                 "timestamp_ns": self._timestamp_ns or time.time_ns(),
             }
 
-    def stop(self, _reason: str) -> None:
+    @property
+    def control_enabled(self) -> bool:
+        return self._control_enabled
+
+    def set_control_enabled(self, enabled: bool, reason: str = "blueprint") -> None:
+        enabled = bool(enabled)
+        if enabled == self._control_enabled:
+            return
+        self._control_enabled = enabled
+        if not enabled:
+            self._hold_motion()
+        if self._control_state_callback is not None:
+            self._control_state_callback(enabled, reason)
+
+    def stop(self, reason: str) -> None:
+        was_enabled = self._control_enabled
+        self._control_enabled = False
+        self._hold_motion()
+        if was_enabled and self._control_state_callback is not None:
+            self._control_state_callback(False, reason)
+
+    def _hold_motion(self) -> None:
         for side in SIDES:
             if self._motion_started[side]:
                 for _attempt in range(3):

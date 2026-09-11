@@ -24,13 +24,14 @@
 //! that would need shared access to the client. The timeout/period constants
 //! mirror that module and `robot/src/device/control_loop.rs`.
 
+use std::future::pending;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 
-use teleop_protocol::DeviceDescriptor;
+use teleop_protocol::{BlueprintEvent, DeviceDescriptor};
 
 use crate::adapter_client::AdapterClient;
 use crate::latency::{self, LatencyFrame, LatencyRecorder};
@@ -51,9 +52,37 @@ fn watchdog_period(timeout: Duration) -> Duration {
 /// shutdown after a final safing `Stop`).
 pub async fn run(
     descriptor: Arc<DeviceDescriptor>,
+    cmd_rx: watch::Receiver<Option<TimedCommand>>,
+    client: AdapterClient,
+    latency: Arc<LatencyRecorder>,
+) -> Result<()> {
+    run_inner(descriptor, cmd_rx, client, latency, None).await
+}
+
+/// Run the control loop and forward robot-authored blueprint interactions.
+pub async fn run_with_blueprint_events(
+    descriptor: Arc<DeviceDescriptor>,
+    cmd_rx: watch::Receiver<Option<TimedCommand>>,
+    client: AdapterClient,
+    latency: Arc<LatencyRecorder>,
+    blueprint_event_rx: mpsc::Receiver<BlueprintEvent>,
+) -> Result<()> {
+    run_inner(
+        descriptor,
+        cmd_rx,
+        client,
+        latency,
+        Some(blueprint_event_rx),
+    )
+    .await
+}
+
+async fn run_inner(
+    descriptor: Arc<DeviceDescriptor>,
     mut cmd_rx: watch::Receiver<Option<TimedCommand>>,
     mut client: AdapterClient,
     latency: Arc<LatencyRecorder>,
+    mut blueprint_event_rx: Option<mpsc::Receiver<BlueprintEvent>>,
 ) -> Result<()> {
     let mut safety = DeviceSafety::new(&descriptor);
 
@@ -73,6 +102,16 @@ pub async fn run(
 
     loop {
         tokio::select! {
+            event = receive_blueprint_event(&mut blueprint_event_rx) => {
+                match event {
+                    Some(event) => {
+                        if let Err(error) = client.send_blueprint_event(event).await {
+                            tracing::error!("Forwarding blueprint event to adapter failed: {error}");
+                        }
+                    }
+                    None => blueprint_event_rx = None,
+                }
+            }
             // Incoming command from the headset (via pose_server / pose_udp_server).
             changed = cmd_rx.changed() => {
                 if changed.is_err() {
@@ -144,6 +183,15 @@ pub async fn run(
     }
 }
 
+async fn receive_blueprint_event(
+    receiver: &mut Option<mpsc::Receiver<BlueprintEvent>>,
+) -> Option<BlueprintEvent> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => pending().await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,6 +246,7 @@ mod tests {
                     BridgeToAdapter::Stop { .. } => {
                         state_task.lock().await.stops += 1;
                     }
+                    BridgeToAdapter::BlueprintEvent { .. } => {}
                     BridgeToAdapter::Shutdown => break,
                 }
             }

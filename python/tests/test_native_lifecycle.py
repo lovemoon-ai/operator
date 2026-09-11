@@ -9,6 +9,8 @@ import uuid
 
 import pytest
 
+from pyoperator._blueprint_spec import SPEC_CAPABILITY
+from pyoperator.blueprint import BlueprintComponent, Blueprint
 from pyoperator.session import BridgeConfig, XrSession
 
 try:
@@ -67,14 +69,36 @@ def _recv_command(sock: socket.socket) -> tuple[str, bytes]:
     return command, _recv_exact(sock, data_size)
 
 
-def _connect_fake_headset(port: int) -> tuple[socket.socket, dict]:
+def _connect_fake_headset(
+    port: int, capabilities: list[str] | None = None
+) -> tuple[socket.socket, dict]:
     """Connect a host socket that imitates the headset wire protocol."""
     sock = socket.create_connection(("127.0.0.1", port), timeout=2.0)
-    _send_frame(sock, "Hello", {"version": "2.0", "capabilities": ["xr_state_v1"]})
+    _send_frame(
+        sock,
+        "Hello",
+        {
+            "version": "2.0",
+            "capabilities": ["xr_state_v1"] if capabilities is None else capabilities,
+        },
+    )
     command, payload = _recv_command(sock)
     if command != "DeviceDescriptor":
         raise AssertionError(f"unexpected handshake response: {command}")
     return sock, json.loads(payload)
+
+
+def _recv_named(sock: socket.socket, expected: str) -> bytes:
+    deadline = time.monotonic() + 2.0
+    sock.settimeout(0.25)
+    while time.monotonic() < deadline:
+        try:
+            command, payload = _recv_command(sock)
+        except socket.timeout:
+            continue
+        if command == expected:
+            return payload
+    raise AssertionError(f"timed out waiting for {expected}")
 
 
 def _wait_for_socket_close(sock: socket.socket, timeout: float = 2.0) -> bool:
@@ -124,6 +148,67 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 @unittest.skipUnless(HAS_NATIVE, "requires the built pyoperator native extension")
 class NativeLifecycleTests(unittest.TestCase):
+    @pytest.mark.fake_headset
+    def test_blueprint_round_trips_through_native_bridge(self) -> None:
+        config = _config()
+        session = XrSession(config)
+        session.blueprint.set_blueprint(
+            Blueprint(
+                blueprint_id="native.blueprint",
+                components=(
+                    BlueprintComponent.palm_menu(
+                        "hand_control",
+                        title="Hand control",
+                        action="toggle_unlock",
+                        value_binding="hand.unlocked",
+                        available_binding="hand.available",
+                    ),
+                ),
+            )
+        )
+        session.blueprint.update(
+            {"hand.unlocked": False, "hand.available": True}, timestamp_ns=10
+        )
+        session.start()
+        headset = None
+        try:
+            headset, descriptor = _connect_fake_headset(
+                config.pose_port,
+                ["xr_state_v1", "blueprint_v1", SPEC_CAPABILITY],
+            )
+            self.assertTrue(descriptor["capabilities"]["blueprint_v1"])
+            blueprint = json.loads(_recv_named(headset, "Blueprint"))
+            state = json.loads(_recv_named(headset, "BlueprintState"))
+            self.assertEqual(blueprint["blueprint_id"], "native.blueprint")
+            self.assertEqual(state["values"]["hand.available"], True)
+
+            _send_frame(
+                headset,
+                "BlueprintEvent",
+                {
+                    "schema": "operator.blueprint_event.v1",
+                    "blueprint_id": "native.blueprint",
+                    "blueprint_revision": 1,
+                    "sequence": 1,
+                    "timestamp_ns": 20,
+                    "component_id": "hand_control",
+                    "action": "toggle_unlock",
+                    "value": True,
+                },
+            )
+            event = session.blueprint.poll_event(timeout=1.0)
+            self.assertIsNotNone(event)
+            assert event is not None
+            self.assertEqual(event.component_id, "hand_control")
+            self.assertTrue(event.value)
+
+            session.blueprint.clear()
+            self.assertIsNone(json.loads(_recv_named(headset, "Blueprint")))
+        finally:
+            if headset is not None:
+                headset.close()
+            session.close()
+
     def test_start_raises_when_pose_port_is_in_use(self) -> None:
         with socket.socket() as occupied:
             occupied.bind(("0.0.0.0", 0))

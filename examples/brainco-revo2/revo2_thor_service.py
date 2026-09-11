@@ -33,12 +33,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 for dependency_dir in (
     SCRIPT_DIR / "lib",
     SCRIPT_DIR / "sdk",
-    SCRIPT_DIR.parent / "python",
+    SCRIPT_DIR.parents[1] / "python",
 ):
     if dependency_dir.is_dir():
         sys.path.insert(0, str(dependency_dir))
 
-from pyoperator.hosted import create_server
+from pyoperator import BlueprintComponent, BlueprintTransform, Blueprint
+from pyoperator.hosted import HostedBlueprint, create_server
 from pyoperator.integrations.revo2 import (
     COMMAND_PACKET_VERSION as ADAPTER_COMMAND_PACKET_VERSION,
     Revo2TactileFeedback,
@@ -65,6 +66,182 @@ CHANNEL_NAMES = (
     "ring",
     "pinky",
 )
+REVO2_BLUEPRINT_ID = "brainco.revo2.dual_hand"
+REVO2_CONTROL_COMPONENT_ID = "revo2_control"
+REVO2_CONTROL_ACTION = "toggle_control"
+REVO2_TACTILE_COMPONENT_ID = "revo2_fingertip_tactile"
+TACTILE_FIELDS = ("normal", "tangential", "direction", "proximity", "status")
+
+
+def build_revo2_blueprint() -> Blueprint:
+    return Blueprint(
+        blueprint_id=REVO2_BLUEPRINT_ID,
+        components=(
+            BlueprintComponent.label(
+                "revo2_status",
+                anchor="head",
+                transform=BlueprintTransform(position=(0.0, -0.16, -0.75)),
+                text_binding="service.status_text",
+                properties={
+                    "font_size": 28,
+                    "settings_label": "Revo2 service status",
+                },
+            ),
+            BlueprintComponent.status_lamp(
+                "left_hand_status",
+                anchor="left_palm",
+                transform=BlueprintTransform(position=(-0.05, 0.06, 0.02)),
+                state_binding="left.status",
+                properties={"settings_label": "Left Revo2 status"},
+            ),
+            BlueprintComponent.status_lamp(
+                "right_hand_status",
+                anchor="right_palm",
+                transform=BlueprintTransform(position=(0.05, 0.06, 0.02)),
+                state_binding="right.status",
+                properties={"settings_label": "Right Revo2 status"},
+            ),
+            BlueprintComponent.palm_menu(
+                REVO2_CONTROL_COMPONENT_ID,
+                title="BrainCo Revo2",
+                action=REVO2_CONTROL_ACTION,
+                value_binding="control.enabled",
+                available_binding="control.available",
+                locked_text="解锁",
+                unlocked_text="锁定",
+                unavailable_text="不可用",
+                properties={"settings_label": "Revo2 control menu"},
+            ),
+            BlueprintComponent.fingertip_tactile(
+                REVO2_TACTILE_COMPONENT_ID,
+                left_bindings={
+                    field: f"left.touch_{field}" for field in TACTILE_FIELDS
+                },
+                right_bindings={
+                    field: f"right.touch_{field}" for field in TACTILE_FIELDS
+                },
+                sample_binding="tactile.sample_ns",
+                properties={"settings_label": "Revo2 fingertip tactile feedback"},
+            ),
+        ),
+    )
+
+
+def revo2_blueprint_values(
+    adapter: Revo2UdpHostedAdapter,
+    *,
+    allow_commands: bool,
+    command_side: str,
+    runtime_ready: bool,
+) -> Dict[str, Any]:
+    telemetry = adapter.telemetry()
+    values = telemetry.get("values", {})
+    if not isinstance(values, dict):
+        values = {}
+    connected = {
+        side: f"revo2_{side}_position" in values
+        for side in ("left", "right")
+    }
+    required_sides = (
+        (command_side,) if command_side in ("left", "right") else ("left", "right")
+    )
+    control_available = runtime_ready and all(
+        connected[side] for side in required_sides
+    )
+    control_enabled = adapter.control_enabled and control_available
+    if not allow_commands:
+        status_text = (
+            "Revo2 read-only · input preview unlocked"
+            if control_enabled
+            else "Revo2 read-only · input locked"
+        )
+    elif not runtime_ready or not all(connected[side] for side in required_sides):
+        status_text = "Waiting for Revo2 hand telemetry"
+    elif control_enabled:
+        status_text = "Revo2 control unlocked"
+    else:
+        status_text = "Revo2 connected · control locked"
+    result: Dict[str, Any] = {
+        "service.status_text": status_text,
+        "control.available": control_available,
+        "control.enabled": control_enabled,
+    }
+    for side in ("left", "right"):
+        side_connected = connected[side]
+        side_controllable = command_side in ("both", side)
+        if side_connected:
+            if not allow_commands:
+                result[f"{side}.status"] = "active"
+            else:
+                result[f"{side}.status"] = (
+                    "warning" if control_enabled and side_controllable else "active"
+                )
+        else:
+            result[f"{side}.status"] = "warning" if runtime_ready else "inactive"
+    tactile_present = False
+    for side in ("left", "right"):
+        for field in TACTILE_FIELDS:
+            source_key = f"revo2_{side}_touch_{field}"
+            if source_key in values:
+                samples = values[source_key]
+                if field == "status":
+                    samples = [int(value) for value in samples]
+                result[f"{side}.touch_{field}"] = samples
+                tactile_present = True
+    if tactile_present:
+        result["tactile.sample_ns"] = int(
+            telemetry.get("timestamp_ns", time.time_ns())
+        )
+    return result
+
+
+async def run_revo2_blueprint(
+    blueprint: HostedBlueprint,
+    adapter: Revo2UdpHostedAdapter,
+    args: argparse.Namespace,
+    runtime_ready: asyncio.Event,
+    stopping: asyncio.Event,
+) -> None:
+    previous_values: Dict[str, Any] | None = None
+    while not stopping.is_set():
+        while True:
+            event = blueprint.poll_event(timeout=0.0)
+            if event is None:
+                break
+            if (
+                event.blueprint_id == REVO2_BLUEPRINT_ID
+                and event.component_id == REVO2_CONTROL_COMPONENT_ID
+                and event.action == REVO2_CONTROL_ACTION
+            ):
+                current_values = revo2_blueprint_values(
+                    adapter,
+                    allow_commands=args.allow_commands,
+                    command_side=args.command_side,
+                    runtime_ready=runtime_ready.is_set(),
+                )
+                requested = bool(event.value)
+                adapter.set_control_enabled(
+                    requested and bool(current_values["control.available"]),
+                    "Revo2 palm menu",
+                )
+        values = revo2_blueprint_values(
+            adapter,
+            allow_commands=args.allow_commands,
+            command_side=args.command_side,
+            runtime_ready=runtime_ready.is_set(),
+        )
+        if adapter.control_enabled and not bool(values["control.available"]):
+            adapter.set_control_enabled(False, "Revo2 telemetry unavailable")
+            values = revo2_blueprint_values(
+                adapter,
+                allow_commands=args.allow_commands,
+                command_side=args.command_side,
+                runtime_ready=runtime_ready.is_set(),
+            )
+        if values != previous_values:
+            blueprint.update(values)
+            previous_values = values
+        await asyncio.sleep(0.05)
 
 
 def validate_protocol_version(
@@ -828,6 +1005,8 @@ async def run_service(args: argparse.Namespace, paths: ServicePaths) -> int:
         with suppress(NotImplementedError):
             loop.add_signal_handler(signal_name, stopping.set)
 
+    blueprint = HostedBlueprint()
+    blueprint.set_blueprint(build_revo2_blueprint())
     adapter = Revo2UdpHostedAdapter(
         command_host="127.0.0.1",
         command_port=args.command_port,
@@ -844,17 +1023,29 @@ async def run_service(args: argparse.Namespace, paths: ServicePaths) -> int:
     server: asyncio.AbstractServer | None = None
     runtime_task: asyncio.Task[None] | None = None
     runtime_ready_task: asyncio.Task[bool] | None = None
+    blueprint_task: asyncio.Task[None] | None = None
     process: asyncio.subprocess.Process | None = None
     bridge_task: asyncio.Task[int] | None = None
     stop_task: asyncio.Task[bool] | None = None
     runtime_ready = asyncio.Event()
     try:
+        blueprint_task = asyncio.create_task(
+            run_revo2_blueprint(
+                blueprint,
+                adapter,
+                args,
+                runtime_ready,
+                stopping,
+            ),
+            name="revo2-blueprint",
+        )
         server = await create_server(
             adapter,
             make_revo2_descriptor(),
             host="127.0.0.1",
             port=args.adapter_port,
             telemetry_hz=args.telemetry_rate,
+            blueprint=blueprint,
         )
         runtime_task = asyncio.create_task(
             run_hand_runtime(
@@ -871,6 +1062,9 @@ async def run_service(args: argparse.Namespace, paths: ServicePaths) -> int:
             (runtime_task, runtime_ready_task),
             return_when=asyncio.FIRST_COMPLETED,
         )
+        if blueprint_task.done():
+            await blueprint_task
+            raise RuntimeError("Revo2 Blueprint publisher stopped before runtime ready")
         if runtime_task in done:
             await runtime_task
             raise RuntimeError("Revo2 runtime stopped before becoming ready")
@@ -895,7 +1089,7 @@ async def run_service(args: argparse.Namespace, paths: ServicePaths) -> int:
         )
 
         done, _pending = await asyncio.wait(
-            (runtime_task, bridge_task, stop_task),
+            (runtime_task, bridge_task, blueprint_task, stop_task),
             return_when=asyncio.FIRST_COMPLETED,
         )
         if runtime_task in done:
@@ -906,11 +1100,16 @@ async def run_service(args: argparse.Namespace, paths: ServicePaths) -> int:
             bridge_status = bridge_task.result()
             if not stopping.is_set():
                 failure = RuntimeError(f"xr-bridge exited with status {bridge_status}")
+        elif blueprint_task in done:
+            failure = blueprint_task.exception()
+            if failure is None and not stopping.is_set():
+                failure = RuntimeError("Revo2 Blueprint publisher stopped unexpectedly")
         stopping.set()
     except BaseException as exc:
         failure = exc
         stopping.set()
     finally:
+        adapter.stop("service shutdown")
         if process is not None:
             await _stop_process(process)
         if server is not None:
@@ -931,6 +1130,11 @@ async def run_service(args: argparse.Namespace, paths: ServicePaths) -> int:
         if stop_task is not None:
             stop_task.cancel()
             await asyncio.gather(stop_task, return_exceptions=True)
+        if blueprint_task is not None:
+            blueprint_task.cancel()
+            await asyncio.gather(blueprint_task, return_exceptions=True)
+        blueprint.clear()
+        blueprint.close()
 
     if failure is not None:
         print(f"Revo2 Thor service failed: {failure}", file=sys.stderr, flush=True)

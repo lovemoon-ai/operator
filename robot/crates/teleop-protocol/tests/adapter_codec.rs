@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use bytes::BytesMut;
 use teleop_protocol::{
-    AdapterCodec, AdapterToBridge, BridgeCodec, BridgeToAdapter, DeviceCommand, DeviceDescriptor,
-    DeviceTelemetry, Pose6D, TelemetryValue,
+    AdapterCodec, AdapterToBridge, Blueprint, BlueprintEvent, BlueprintState, BridgeCodec,
+    BridgeToAdapter, DeviceCommand, DeviceDescriptor, DeviceTelemetry, Pose6D, TelemetryValue,
 };
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -45,6 +45,27 @@ fn sample_telemetry() -> DeviceTelemetry {
     }
 }
 
+fn sample_blueprint() -> Blueprint {
+    serde_json::from_str(
+        r#"{"schema":"operator.blueprint.v1","blueprint_id":"test","revision":1,"components":[]}"#,
+    )
+    .unwrap()
+}
+
+fn sample_blueprint_state() -> BlueprintState {
+    serde_json::from_str(
+        r#"{"schema":"operator.blueprint_state.v1","blueprint_id":"test","blueprint_revision":1,"sequence":1,"timestamp_ns":2,"values":{}}"#,
+    )
+    .unwrap()
+}
+
+fn sample_blueprint_event() -> BlueprintEvent {
+    serde_json::from_str(
+        r#"{"schema":"operator.blueprint_event.v1","blueprint_id":"test","blueprint_revision":1,"sequence":1,"timestamp_ns":2,"component_id":"menu","action":"toggle","value":true}"#,
+    )
+    .unwrap()
+}
+
 /// Encode each BridgeToAdapter variant with the BridgeCodec (encoder side),
 /// then decode it with the AdapterCodec (decoder side) — must match.
 #[test]
@@ -54,6 +75,9 @@ fn bridge_to_adapter_roundtrip_all_variants() {
         BridgeToAdapter::Command(sample_command()),
         BridgeToAdapter::Stop {
             reason: "watchdog".to_string(),
+        },
+        BridgeToAdapter::BlueprintEvent {
+            event: Box::new(sample_blueprint_event()),
         },
         BridgeToAdapter::Shutdown,
     ];
@@ -82,6 +106,13 @@ fn adapter_to_bridge_roundtrip_all_variants() {
     let variants = vec![
         AdapterToBridge::Descriptor(Box::new(sample_descriptor())),
         AdapterToBridge::Telemetry(sample_telemetry()),
+        AdapterToBridge::Blueprint {
+            blueprint: Some(Box::new(sample_blueprint())),
+        },
+        AdapterToBridge::Blueprint { blueprint: None },
+        AdapterToBridge::BlueprintState {
+            state: Box::new(sample_blueprint_state()),
+        },
         AdapterToBridge::Event {
             kind: "warn".to_string(),
             msg: "low battery".to_string(),

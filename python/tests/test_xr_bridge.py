@@ -39,6 +39,10 @@ class FakeSession:
         self.calls.append(("stats",))
         return BridgeStats(running=self.is_running)
 
+    @property
+    def blueprint(self):
+        return "blueprint"
+
 
 class XrBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -63,6 +67,7 @@ class XrBridgeTests(unittest.TestCase):
             self.assertEqual(xr_bridge.wait_next(7, timeout=0.2), "next")
             self.assertEqual(list(xr_bridge.frames(timeout=0.3)), ["one", "two"])
             self.assertTrue(xr_bridge.stats().running)
+            self.assertEqual(xr_bridge.blueprint(), "blueprint")
             xr_bridge.stop()
             self.assertTrue(started.closed)
             self.assertIsNone(xr_bridge._default_session)

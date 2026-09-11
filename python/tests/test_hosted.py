@@ -6,6 +6,7 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 from pyoperator.hosted import (
+    HostedBlueprint,
     RobotHostedAdapter,
     _client,
     _read_frame,
@@ -15,6 +16,8 @@ from pyoperator.hosted import (
     serve,
     serve_async,
 )
+from pyoperator.blueprint import BlueprintComponent, Blueprint
+from pyoperator._blueprint_spec import SPEC_SHA256, WIRE
 from pyoperator.robot import JointTarget, RobotState
 
 
@@ -102,6 +105,103 @@ def reader_with(payload: bytes) -> asyncio.StreamReader:
 
 
 class HostedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replacing_blueprint_discards_stale_events(self) -> None:
+        blueprint = HostedBlueprint()
+        blueprint._push_event(
+            {
+                "schema": "operator.blueprint_event.v1",
+                "blueprint_id": "old",
+                "blueprint_revision": 1,
+                "sequence": 1,
+                "timestamp_ns": 1,
+                "component_id": "control",
+                "action": "toggle_control",
+                "value": True,
+            }
+        )
+        blueprint.set_blueprint(Blueprint(blueprint_id="new", components=()))
+        self.assertIsNone(blueprint.poll_event(timeout=0.0))
+        blueprint.close()
+
+    async def test_hosted_blueprint_roundtrip(self) -> None:
+        adapter = FakeAdapter()
+        blueprint = HostedBlueprint()
+        blueprint.set_blueprint(
+            Blueprint(
+                blueprint_id="test.hosted",
+                components=(
+                    BlueprintComponent.palm_menu(
+                        "control",
+                        title="Control",
+                        action="toggle_control",
+                        value_binding="control.enabled",
+                    ),
+                ),
+            )
+        )
+        blueprint.update({"control.enabled": False})
+        server = await create_server(
+            adapter,
+            make_descriptor(name="Blueprint Bot"),
+            host="127.0.0.1",
+            port=0,
+            telemetry_hz=100.0,
+            blueprint=blueprint,
+        )
+        address = server.sockets[0].getsockname()
+        reader, writer = await asyncio.open_connection(*address)
+        lock = asyncio.Lock()
+        await _write_frame(writer, lock, {"type": "Hello"})
+
+        received = {}
+        required = {"Descriptor", "Blueprint", "BlueprintState"}
+        while not required.issubset(received):
+            message = await asyncio.wait_for(_read_frame(reader), timeout=1.0)
+            assert message is not None
+            received[message["type"]] = message
+        self.assertEqual(received["Descriptor"]["device"]["name"], "Blueprint Bot")
+        self.assertTrue(received["Descriptor"]["capabilities"][WIRE["capability"]])
+        self.assertEqual(
+            received["Descriptor"]["capabilities"][WIRE["spec_hash_capability"]],
+            SPEC_SHA256,
+        )
+        self.assertEqual(
+            received["Blueprint"]["blueprint"]["blueprint_id"],
+            "test.hosted",
+        )
+        self.assertFalse(
+            received["BlueprintState"]["state"]["values"]["control.enabled"]
+        )
+
+        await _write_frame(
+            writer,
+            lock,
+            {
+                "type": "BlueprintEvent",
+                "event": {
+                    "schema": "operator.blueprint_event.v1",
+                    "blueprint_id": "test.hosted",
+                    "blueprint_revision": 1,
+                    "sequence": 1,
+                    "timestamp_ns": 10,
+                    "component_id": "control",
+                    "action": "toggle_control",
+                    "value": True,
+                },
+            },
+        )
+        event = await asyncio.to_thread(blueprint.poll_event, 1.0)
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertTrue(event.value)
+
+        await _write_frame(writer, lock, {"type": "Shutdown"})
+        writer.close()
+        await writer.wait_closed()
+        server.close()
+        await server.wait_closed()
+        blueprint.close()
+
     async def test_existing_adapter_wire_protocol(self) -> None:
         adapter = FakeAdapter()
         descriptor = make_descriptor(name="Python Bot")
@@ -119,6 +219,9 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
         response = await _read_frame(reader)
         self.assertEqual(response["type"], "Descriptor")
         self.assertEqual(response["device"]["name"], "Python Bot")
+        self.assertNotIn(WIRE["capability"], response["capabilities"])
+        self.assertNotIn(WIRE["spec_hash_capability"], response["capabilities"])
+        self.assertEqual(descriptor["capabilities"], {})
 
         await _write_frame(
             writer,

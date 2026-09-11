@@ -85,6 +85,17 @@ class FakeXrtTarget:
 		starts.append(options.duplicate(true))
 
 
+class FakeBlueprint:
+	extends Node
+	var clear_calls := 0
+
+	func clear() -> void:
+		clear_calls += 1
+
+	func user_visibility_options() -> Array:
+		return []
+
+
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_stream_exclusivity(t)
 	_test_protocol_aware_outside_start(t)
@@ -160,12 +171,14 @@ func _test_protocol_aware_outside_start(t: OperatorTestAssertions) -> void:
 	var command_sender := FakeCommandSender.new()
 	var outside_target := FakeOutsideTarget.new()
 	var xrt_target := FakeXrtTarget.new()
+	var blueprint := FakeBlueprint.new()
 	controller._robot_control_sink = robot_sink
 	controller._xr_state_sender = xr_sender
 	controller._tcp_handler = tcp
 	controller._command_sender = command_sender
 	controller._outside_target = outside_target
 	controller._xrt_target = xrt_target
+	controller._blueprint_runtime = blueprint
 
 	var started := bool(controller._start_outside_with_options({
 		"protocol": "xrobot_toolkit_v1",
@@ -185,6 +198,8 @@ func _test_protocol_aware_outside_start(t: OperatorTestAssertions) -> void:
 		"XRoboToolkit selection does not start the Operator target")
 	t.eq(tcp.disconnect_calls, 1,
 		"XRoboToolkit selection closes any Operator protocol connection")
+	t.eq(blueprint.clear_calls, 1,
+		"XRoboToolkit selection clears the Operator blueprint runtime")
 
 	started = bool(controller._start_outside_with_options({
 		"protocol": "operator",
@@ -207,6 +222,7 @@ func _test_protocol_aware_outside_start(t: OperatorTestAssertions) -> void:
 	command_sender.free()
 	outside_target.free()
 	xrt_target.free()
+	blueprint.free()
 
 
 func _test_protocol_aware_discovery_identity(t: OperatorTestAssertions) -> void:

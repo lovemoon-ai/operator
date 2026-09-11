@@ -2,7 +2,7 @@ extends "res://scripts/ui/composition_viewport_ui.gd"
 class_name HandUnlockButton
 
 signal toggled(unlocked: bool)
-signal action_triggered(action_id: StringName)
+signal action_triggered(action_id: StringName, value: Variant)
 
 const PalmMenuVisibilityStateScript = preload(
 	"res://scripts/ui/palm_menu_visibility_state.gd"
@@ -39,6 +39,12 @@ var _flash_remaining := 0.0
 var _flash_action := &""
 var _visibility_state := PalmMenuVisibilityStateScript.new()
 var _has_smoothed_transform := false
+var _remote_state_driven := false
+var _blueprint_title := "手部控制"
+var _blueprint_locked_text := "解锁控制"
+var _blueprint_unlocked_text := "锁定控制"
+var _blueprint_unavailable_text := "不可用"
+var _blueprint_anchor_offset := Transform3D.IDENTITY
 
 
 func _init() -> void:
@@ -62,7 +68,7 @@ func _build_menu(viewport: SubViewport) -> void:
 	_title.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_title.position = TITLE_RECT.position
 	_title.size = TITLE_RECT.size
-	_title.text = "手部控制"
+	_title.text = _blueprint_title
 	_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_title.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_title.add_theme_font_size_override("font_size", 24)
@@ -72,6 +78,27 @@ func _build_menu(viewport: SubViewport) -> void:
 	root.add_child(_title)
 
 	_add_action_button(root, ACTION_TOGGLE_LOCK, BUTTON_RECT)
+	_refresh()
+
+
+func configure_blueprint(
+	properties: Dictionary,
+	anchor_offset: Transform3D = Transform3D.IDENTITY,
+) -> void:
+	_remote_state_driven = true
+	_blueprint_anchor_offset = anchor_offset
+	_blueprint_title = str(properties.get("title", _blueprint_title))
+	_blueprint_locked_text = str(
+		properties.get("locked_text", _blueprint_locked_text)
+	)
+	_blueprint_unlocked_text = str(
+		properties.get("unlocked_text", _blueprint_unlocked_text)
+	)
+	_blueprint_unavailable_text = str(
+		properties.get("unavailable_text", _blueprint_unavailable_text)
+	)
+	if _title != null:
+		_title.text = _blueprint_title
 	_refresh()
 
 
@@ -147,7 +174,7 @@ func update_palm_menu(
 			and transform_is_safe(head_transform as Transform3D):
 		var target := face_head_transform(
 			anchor_v as Vector3, head_transform as Transform3D
-		)
+		) * _blueprint_anchor_offset
 		if transform_is_safe(target):
 			_update_smoothed_transform(target, delta)
 		else:
@@ -249,12 +276,15 @@ func _update_smoothed_transform(target: Transform3D, delta: float) -> void:
 
 
 func _trigger_action(action_id: StringName) -> void:
-	action_triggered.emit(action_id)
 	if action_id == ACTION_TOGGLE_LOCK:
-		_unlocked = not _unlocked
-		_play_feedback(feedback_event_for_state(_unlocked), 0.0, self)
-		toggled.emit(_unlocked)
+		var requested_unlocked := not _unlocked
+		action_triggered.emit(action_id, requested_unlocked)
+		_play_feedback(feedback_event_for_state(requested_unlocked), 0.0, self)
+		if not _remote_state_driven:
+			_unlocked = requested_unlocked
+			toggled.emit(_unlocked)
 	else:
+		action_triggered.emit(action_id, null)
 		_play_feedback("click", 0.0, self)
 
 
@@ -294,7 +324,7 @@ func _refresh(phase: String = "idle", active_action: StringName = ACTION_TOGGLE_
 		var glow := glow_v as Panel
 		var flash := flash_v as Panel
 		var rect := rect_v as Rect2
-		button.text = status_text(_unlocked, _available)
+		button.text = _blueprint_status_text()
 		button.disabled = not _available
 		var action_phase := phase if active_action == action_id else "idle"
 		var base_color := status_color(_unlocked, _available)
@@ -318,6 +348,14 @@ func _refresh(phase: String = "idle", active_action: StringName = ACTION_TOGGLE_
 		flash.visible = action_id == _flash_action and _flash_remaining > 0.0
 		if flash.visible:
 			flash.modulate.a = clampf(_flash_remaining / TRIGGER_FLASH_SEC, 0.0, 1.0)
+
+
+func _blueprint_status_text() -> String:
+	if not _remote_state_driven:
+		return status_text(_unlocked, _available)
+	if not _available:
+		return _blueprint_unavailable_text
+	return _blueprint_unlocked_text if _unlocked else _blueprint_locked_text
 
 
 func _button_style(bg_color: Color) -> StyleBoxFlat:
