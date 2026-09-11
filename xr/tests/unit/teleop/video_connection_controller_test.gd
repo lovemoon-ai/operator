@@ -3,6 +3,7 @@ extends RefCounted
 
 const CASE_ID := "teleop.video_connection_controller"
 const TeleopControllerScript = preload("res://scripts/app/modes/teleop_controller.gd")
+const EEPoseTrajectoryScript = preload("res://scripts/ui/ee_pose_trajectory.gd")
 
 
 class FakeVideoHandler:
@@ -46,6 +47,7 @@ class FakeRobotView:
 	var show_values: Array[bool] = []
 	var clear_calls := 0
 	var receiving_video := false
+	var panel_distances: Array[float] = []
 
 	func configure_video_stream(feed: Dictionary) -> void:
 		feeds.append(feed.duplicate(true))
@@ -58,6 +60,10 @@ class FakeRobotView:
 
 	func set_show_video_panel(value: bool) -> void:
 		show_values.append(value)
+
+	func set_panel_distance(value: float) -> void:
+		follow_distance = value
+		panel_distances.append(value)
 
 	func clear_video_stream() -> void:
 		clear_calls += 1
@@ -92,6 +98,17 @@ class FakeSettingsButton:
 		preview_modes.append(enabled)
 
 
+class FakeControllerPanel:
+	extends Node3D
+	var blueprint_enabled_values: Array[bool] = []
+
+	func set_blueprint_enabled(enabled: bool) -> void:
+		blueprint_enabled_values.append(enabled)
+
+	func is_blueprint_enabled() -> bool:
+		return blueprint_enabled_values.back() if not blueprint_enabled_values.is_empty() else false
+
+
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var controller = TeleopControllerScript.new()
 	var tcp := FakeVideoHandler.new()
@@ -100,6 +117,10 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var robot_view := FakeRobotView.new()
 	var settings := FakeSettingsPanel.new()
 	var settings_button := FakeSettingsButton.new()
+	var controller_panel := FakeControllerPanel.new()
+	var trajectory := EEPoseTrajectoryScript.new()
+	var control_frame_gizmo := Node3D.new()
+	control_frame_gizmo.visible = true
 	settings.visible = true
 	settings_button.visible = false
 	controller._video_tcp_handler = tcp
@@ -109,6 +130,9 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	controller._settings_panel = settings
 	controller._settings_ui = settings
 	controller._settings_button = settings_button
+	controller._teleop_controller_panel = controller_panel
+	controller._ee_pose_trajectory = trajectory
+	controller._control_frame_gizmos = {0: control_frame_gizmo}
 	var close_offset: Transform3D = controller._video_preview_close_button_offset()
 	t.is_true(
 		close_offset.origin.is_equal_approx(Vector3(1.47, 0.77, -2.96)),
@@ -126,14 +150,85 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(launch_options.get("show_video_panel"), false,
 		"an absent launch override preserves the persisted setting")
 
+	robot_view.follow_distance = 4.25
 	controller._apply_runtime_settings({
+		"target_scope": "outside",
+		"protocol": "operator",
+		"video_face_locked": false,
+		"show_video_panel": true,
+	})
+	t.is_true(robot_view.follow_camera,
+		"native Operator ignores local video placement until Blueprint declares it")
+	t.eq(robot_view.show_values.back(), false,
+		"native Operator cannot show video from a persisted local toggle")
+	t.eq(controller_panel.blueprint_enabled_values.back(), false,
+		"native Operator cannot auto-enable controller help")
+
+	controller._apply_runtime_settings({
+		"target_scope": "outside",
+		"protocol": "xrobot_toolkit_v1",
 		"video_face_locked": false,
 		"show_video_panel": true,
 	})
 	t.is_false(robot_view.follow_camera,
-		"runtime launch settings apply world-locked video placement")
+		"XRoboToolkit compatibility keeps its legacy world-locked placement")
 	t.eq(robot_view.show_values.back(), true,
-		"runtime launch settings reach the shared video view")
+		"XRoboToolkit compatibility keeps its local video visibility setting")
+	t.eq(controller_panel.blueprint_enabled_values.back(), true,
+		"XRoboToolkit compatibility keeps legacy controller help")
+
+	controller._apply_runtime_settings({
+		"target_scope": "outside",
+		"protocol": "operator",
+		"video_face_locked": true,
+		"show_video_panel": false,
+	})
+	controller._on_blueprint_external_view_changed(
+		"fpv",
+		"video_panel",
+		true,
+		{"follow_camera": true, "distance": 2.5},
+	)
+	t.is_true(robot_view.follow_camera, "Blueprint configures the existing video view")
+	t.eq(robot_view.panel_distances.back(), 2.5, "Blueprint applies video placement once")
+	t.eq(robot_view.show_values.back(), true, "Blueprint opens the existing video panel")
+	controller._apply_runtime_settings({
+		"target_scope": "outside",
+		"protocol": "xrobot_toolkit_v1",
+		"video_face_locked": false,
+		"show_video_panel": true,
+	})
+	t.is_true(is_equal_approx(robot_view.follow_distance, 4.25),
+		"leaving Blueprint ownership restores the prior local video distance")
+	t.eq(robot_view.panel_distances.back(), 4.25,
+		"the restored local video distance is applied through the shared view API")
+	controller._on_blueprint_external_view_changed("fpv", "video_panel", false, {})
+	var hidden_packet := {
+		"frame_id": 3,
+		"nal_index": 0,
+		"nal_count": 1,
+		"nal_data": PackedByteArray([0, 0, 0, 1, 0x65]),
+	}
+	controller._on_video_frame_received(hidden_packet)
+	t.eq(robot_view.show_values.back(), false, "Blueprint can hide the video blueprint")
+	t.eq(robot_view.packets.back(), hidden_packet,
+		"hidden video still follows the unchanged packet and decoder path")
+	robot_view.packets.clear()
+	controller_panel.blueprint_enabled_values.clear()
+	controller._on_blueprint_external_view_changed(
+		"controller_help", "controller_help", true, {}
+	)
+	t.eq(controller_panel.blueprint_enabled_values, [true],
+		"Blueprint enables controller help through the existing renderer")
+	controller._on_blueprint_external_view_changed(
+		"trajectory", "operation_trajectory", true, {}
+	)
+	t.is_true(trajectory.is_enabled(), "Blueprint enables the existing trajectory renderer")
+	control_frame_gizmo.visible = true
+	controller._on_blueprint_external_view_changed(
+		"control_frame", "control_frame", false, {}
+	)
+	t.is_false(control_frame_gizmo.visible, "Blueprint gate hides existing control-frame gizmos")
 
 	controller._on_video_connect_requested({
 		"video_protocol": "operator_timed_h264",
@@ -224,10 +319,23 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"a successful preview ticks the settings toggle so Confirm persists it")
 	robot_view.receiving_video = false
 
+	var outside_target := Node.new()
+	controller._outside_target = outside_target
+	controller._active_target = outside_target
+	controller._blueprint_external_view_visibility["video_panel"] = false
+	controller._begin_video_test({"show_video_panel": true})
+	controller._end_video_test()
+	t.eq(robot_view.show_values.back(), false,
+		"native Operator preview restores Blueprint visibility, not local settings")
+
 	controller.free()
+	outside_target.free()
 	tcp.free()
 	udp.free()
 	xrt.free()
 	robot_view.free()
 	settings.free()
 	settings_button.free()
+	controller_panel.free()
+	trajectory.free()
+	control_frame_gizmo.free()

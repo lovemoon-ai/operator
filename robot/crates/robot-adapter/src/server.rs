@@ -173,6 +173,9 @@ async fn handle_message(
                     .await?;
             }
         }
+        BridgeToAdapter::BlueprintEvent { .. } => {
+            tracing::debug!("Ignoring Blueprint event for adapter without UI support");
+        }
         BridgeToAdapter::Shutdown => {
             tracing::info!("Shutdown received");
             return Ok(true);

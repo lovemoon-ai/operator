@@ -38,6 +38,15 @@ Required host state:
 `make build-*` runs `verify-host-tools` first, which checks all of the above
 and points at the SDK's bundled ninja without letting its cmake shadow yours.
 
+Godot can still write an APK while reporting a GDScript parse failure. The
+Android export targets therefore reject logs containing `SCRIPT ERROR`,
+`Parse Error`, or `Could not resolve class`. After adding or rewiring any XR
+script, run the relevant `make build-*` target; the presence of an APK alone is
+not validation. Across dynamic GDScript boundaries (`call`, `get`, dynamically
+loaded scripts, untyped dictionaries, or nullable ternaries), explicitly
+declare `Variant` or the intended concrete type instead of relying on `:=`.
+See `claw/lessons/008-gdscript-strict-typing-and-export-validation.md`.
+
 ```bash
 make deps
 make build-pico

@@ -6,6 +6,12 @@
 # it cannot run unattended. For the automated, human-free version of this same
 # vertical slice, see cicd/07_so101_synthetic_teleop.sh.
 #
+# This script intentionally exercises the Rust robot-service / robot-adapter
+# compatibility stack. It does not own a pyoperator session and therefore does
+# not publish a Blueprint, so the native Operator work page intentionally
+# shows only its settings button. Use python/examples/custom_robot.py as the
+# reference for robot-authored Teleop UI and event handling.
+#
 # It starts everything, proves the headset can see the host, and then tails the
 # logs while you drive. Ctrl-C tears it all down and de-energises every arm.
 #

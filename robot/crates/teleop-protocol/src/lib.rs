@@ -20,6 +20,8 @@
 //!   client and the legacy `robo-agent`.
 //! * [`descriptor`] — `DeviceDescriptor` and friends; how a device describes
 //!   its controls, telemetry, video feeds, and safety policy.
+//! * [`blueprint`] — mode-independent Blueprint definitions, latest state
+//!   snapshots, and headset interaction events.
 //! * [`adapter`] — the boundary message enums [`BridgeToAdapter`] /
 //!   [`AdapterToBridge`] plus the paired [`BridgeCodec`] / [`AdapterCodec`]
 //!   that frame them as `[4B len LE][JSON]`.
@@ -31,12 +33,16 @@
 //! the public API here is the verbatim integration surface they depend on.
 
 pub mod adapter;
+pub mod blueprint;
+pub mod blueprint_spec;
 pub mod descriptor;
 pub mod transport;
 pub mod wire;
 pub mod xr_state;
 
 pub use adapter::*;
+pub use blueprint::*;
+pub use blueprint_spec::*;
 pub use descriptor::*;
 pub use transport::*;
 pub use wire::*;

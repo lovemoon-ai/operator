@@ -1,0 +1,501 @@
+extends RefCounted
+
+const CASE_ID := "blueprint.runtime"
+const RuntimeScript = preload(
+	"res://scripts/blueprint/blueprint_runtime.gd"
+)
+const TeleopControllerScript = preload(
+	"res://scripts/app/modes/teleop_controller.gd"
+)
+const SessionScript = preload("res://scripts/network/session.gd")
+
+
+func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
+	t.is_true(
+		SessionScript.descriptor_supports_blueprint({
+			"capabilities": {
+				BlueprintPrimitiveSpec.CAPABILITY: true,
+				BlueprintPrimitiveSpec.SPEC_HASH_CAPABILITY: BlueprintPrimitiveSpec.SPEC_SHA256,
+			},
+		}),
+		"headset accepts only the exact generated descriptor spec hash",
+	)
+	t.is_false(
+		SessionScript.descriptor_supports_blueprint({
+			"capabilities": {
+				BlueprintPrimitiveSpec.CAPABILITY: true,
+				BlueprintPrimitiveSpec.SPEC_HASH_CAPABILITY: "stale",
+			},
+		}),
+		"headset rejects a stale descriptor spec hash",
+	)
+	for value_type_v in BlueprintPrimitiveSpec.VALUE_TYPE_CONFORMANCE:
+		var value_type := str(value_type_v)
+		var cases := BlueprintPrimitiveSpec.VALUE_TYPE_CONFORMANCE[value_type_v] as Dictionary
+		for value_v in cases.get("valid", []) as Array:
+			t.is_true(
+				BlueprintContract.value_matches_type(value_v, value_type),
+				"generated %s valid case is accepted" % value_type,
+			)
+		for value_v in cases.get("invalid", []) as Array:
+			t.is_false(
+				BlueprintContract.value_matches_type(value_v, value_type),
+				"generated %s invalid case is rejected" % value_type,
+				)
+	for value_v in BlueprintPrimitiveSpec.WIRE_INTEGER_CONFORMANCE.get("valid", []) as Array:
+		t.is_true(
+			BlueprintContract.wire_integer_matches_type(value_v),
+			"generated valid wire integer is accepted",
+		)
+	for value_v in BlueprintPrimitiveSpec.WIRE_INTEGER_CONFORMANCE.get("invalid", []) as Array:
+		t.is_false(
+			BlueprintContract.wire_integer_matches_type(value_v),
+			"generated invalid wire integer is rejected",
+		)
+	for anchor_v in BlueprintPrimitiveSpec.ANCHORS:
+		t.is_true(
+			str(anchor_v) in RuntimeScript.ANCHOR_IMPLEMENTATIONS,
+			"every generated anchor is registered by BlueprintRuntime",
+		)
+		t.eq(
+			RuntimeScript.ANCHOR_IMPLEMENTATIONS.get(str(anchor_v)),
+			(BlueprintPrimitiveSpec.ANCHOR_SPECS[anchor_v] as Dictionary).get("tracking"),
+			"every registered anchor keeps the generated tracking contract",
+		)
+	for primitive_name_v in BlueprintPrimitiveSpec.PRIMITIVES:
+		var primitive := BlueprintPrimitiveSpec.PRIMITIVES[primitive_name_v] as Dictionary
+		var implementation := str(primitive.get("implementation", ""))
+		var implementation_contract: Dictionary = {}
+		if str(primitive.get("host", "")) == "node3d":
+			t.is_true(
+				implementation in RuntimeScript.NODE_IMPLEMENTATIONS,
+				"every generated node implementation is registered by BlueprintRuntime",
+			)
+			implementation_contract = RuntimeScript.NODE_IMPLEMENTATIONS.get(
+				implementation, {}
+			) as Dictionary
+		elif str(primitive.get("host", "")) == "external_view":
+			t.is_true(
+				implementation \
+					in TeleopControllerScript.BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS,
+				"every generated external view implementation is registered by its host",
+			)
+			implementation_contract = TeleopControllerScript.BLUEPRINT_EXTERNAL_VIEW_CONTRACTS.get(
+				implementation, {}
+			) as Dictionary
+		t.eq(
+			_sorted_strings(implementation_contract.get("properties", [])),
+			_sorted_strings((primitive.get("properties", {}) as Dictionary).keys()),
+			"the implementation consumes every generated property",
+		)
+		t.eq(
+			_sorted_strings(implementation_contract.get("bindings", [])),
+			_sorted_strings((primitive.get("bindings", {}) as Dictionary).keys()),
+			"the implementation consumes every generated binding",
+		)
+		t.eq(
+			_sorted_strings(implementation_contract.get("events", [])),
+			_sorted_strings((primitive.get("events", {}) as Dictionary).keys()),
+			"the implementation consumes every generated event",
+		)
+		for event_name_v in (primitive.get("events", {}) as Dictionary):
+			t.is_true(
+				str(event_name_v) in RuntimeScript.EVENT_IMPLEMENTATIONS,
+				"every generated event implementation is registered by BlueprintRuntime",
+			)
+
+	var compatible_bindings := {
+		"schema": BlueprintContract.BLUEPRINT_SCHEMA,
+		"blueprint_id": "compatible-bindings",
+		"revision": 1,
+		"components": [
+			{"id": "label", "type": "label", "bindings": {"text": "shared"}},
+			{"id": "status", "type": "status_lamp", "bindings": {"state": "shared"}},
+		],
+	}
+	t.is_true(
+		(BlueprintContract.parse_blueprint(compatible_bindings).get("errors", []) as Array).is_empty(),
+		"binding requiredness does not change the shared state value contract",
+	)
+	var conflicting_bindings := compatible_bindings.duplicate(true)
+	conflicting_bindings["blueprint_id"] = "conflicting-bindings"
+	(conflicting_bindings["components"] as Array).append({
+		"id": "menu",
+		"type": "palm_menu",
+		"properties": {"title": "Menu", "action": "toggle"},
+		"bindings": {"value": "shared"},
+	})
+	t.is_false(
+		(BlueprintContract.parse_blueprint(conflicting_bindings).get("errors", []) as Array).is_empty(),
+		"one state key cannot have conflicting generated value contracts",
+	)
+	t.is_false(
+		BlueprintContract.validate_bound_values(
+			(compatible_bindings.get("components", []) as Array),
+			{"shared_typo": "ready"},
+		).is_empty(),
+		"state keys not declared by any binding are rejected",
+	)
+	var invalid_transform := compatible_bindings.duplicate(true)
+	invalid_transform["blueprint_id"] = "invalid-transform"
+	((invalid_transform["components"] as Array)[0] as Dictionary)["transform"] = "identity"
+	t.is_false(
+		(BlueprintContract.parse_blueprint(invalid_transform).get("errors", []) as Array).is_empty(),
+		"a non-object transform cannot be replaced silently by generated defaults",
+	)
+	var origin := XROrigin3D.new()
+	var camera := XRCamera3D.new()
+	var left_controller := XRController3D.new()
+	var right_controller := XRController3D.new()
+	var tracking_provider := Node.new()
+	var runtime := RuntimeScript.new()
+	origin.add_child(camera)
+	origin.add_child(left_controller)
+	origin.add_child(right_controller)
+	origin.add_child(tracking_provider)
+	origin.add_child(runtime)
+	runtime.configure(
+		origin,
+		camera,
+		left_controller,
+		right_controller,
+		tracking_provider,
+		TeleopControllerScript.BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS,
+	)
+	var builtin_changes: Array[Dictionary] = []
+	runtime.external_view_changed.connect(
+		func(
+			component_id: String,
+			component_type: String,
+			visible: bool,
+			properties: Dictionary,
+		) -> void:
+			builtin_changes.append({
+				"id": component_id,
+				"type": component_type,
+				"visible": visible,
+				"properties": properties.duplicate(true),
+			})
+	)
+
+	var blueprint_id := "unit.blueprint.%d" % Time.get_ticks_usec()
+	var blueprint := {
+		"schema": BlueprintContract.BLUEPRINT_SCHEMA,
+		"blueprint_id": blueprint_id,
+		"revision": 2,
+		"components": [
+			{
+				"id": "message",
+				"type": "label",
+				"anchor": "world",
+				"properties": {"text": "Waiting", "visible": true, "font_size": 28},
+				"bindings": {"text": "robot.message", "visible": "ui.message_visible"},
+				"user_overridable": true,
+			},
+			{
+				"id": "status",
+				"type": "status_lamp",
+				"anchor": "right_controller",
+				"properties": {"text": "Robot"},
+				"bindings": {"state": "robot.state", "text": "robot.name"},
+				"user_overridable": false,
+			},
+			{
+				"id": "hand_control",
+				"type": "palm_menu",
+				"properties": {"title": "Hand control", "action": "toggle_unlock"},
+				"bindings": {"value": "hand.unlocked", "available": "hand.available"},
+				"user_overridable": true,
+			},
+			{
+				"id": "touch",
+				"type": "fingertip_tactile",
+				"anchor": "world",
+				"properties": {"settings_label": "Fingertip touch"},
+				"bindings": {
+					"left_normal": "left.touch.normal",
+					"left_tangential": "left.touch.tangential",
+					"left_direction": "left.touch.direction",
+					"left_proximity": "left.touch.proximity",
+					"left_status": "left.touch.status",
+					"sample": "touch.sample_ns",
+				},
+				"user_overridable": true,
+			},
+			{
+				"id": "fpv",
+				"type": "video_panel",
+				"anchor": "world",
+				"properties": {
+					"follow_camera": true,
+					"settings_label": "First-person video",
+				},
+				"bindings": {
+					"visible": "video.visible",
+					"follow_camera": "video.follow_camera",
+				},
+				"user_overridable": true,
+			},
+			{
+				"id": "controller_help",
+				"type": "controller_help",
+				"anchor": "world",
+				"properties": {"settings_label": "Controller help"},
+				"bindings": {},
+				"user_overridable": true,
+			},
+			{
+				"id": "control_frame",
+				"type": "control_frame",
+				"anchor": "world",
+				"properties": {"settings_label": "Control frame"},
+				"bindings": {},
+				"user_overridable": true,
+			},
+			{
+				"id": "trajectory",
+				"type": "operation_trajectory",
+				"anchor": "world",
+				"properties": {"settings_label": "Operation trajectory"},
+				"bindings": {},
+				"user_overridable": true,
+			},
+		],
+	}
+	var wire_blueprint_v: Variant = JSON.parse_string(JSON.stringify(blueprint))
+	t.is_true(wire_blueprint_v is Dictionary, "wire Blueprint JSON decodes to an object")
+	var wire_blueprint := wire_blueprint_v as Dictionary
+	var declared_types: Array[String] = []
+	for component_v in wire_blueprint.get("components", []) as Array:
+		declared_types.append(str((component_v as Dictionary).get("type", "")))
+	declared_types.sort()
+	var spec_types: Array[String] = []
+	for primitive_name_v in BlueprintPrimitiveSpec.PRIMITIVES:
+		spec_types.append(str(primitive_name_v))
+	spec_types.sort()
+	t.eq(declared_types, spec_types, "runtime fixture covers every generated primitive")
+	t.is_true(
+		runtime.apply_blueprint(wire_blueprint),
+		"wire Blueprint accepts integral JSON numbers for integer properties",
+	)
+	t.eq(
+		BlueprintContract.resolved_anchor(wire_blueprint["components"][2]),
+		"left_palm",
+		"palm menu anchor default comes from the generated spec",
+	)
+	t.eq(runtime.component_count(), 8, "blueprint registers rendered and XR-owned components")
+	t.is_true(runtime.has_blueprint(), "runtime records the active blueprint")
+	t.eq(builtin_changes.size(), 4, "XR-owned views emit one initial gate update each")
+	t.is_true(runtime.component_visible("fpv"), "declared video view is initially visible")
+	t.eq(runtime.component_node("fpv"), null, "XR-owned views reuse existing scene nodes")
+	var visibility_options := runtime.user_visibility_options()
+	t.eq(visibility_options.size(), 7, "all overridable components reach user settings")
+	t.eq(visibility_options[0].get("id"), "message", "visibility options preserve blueprint order")
+	t.eq(visibility_options[1].get("id"), "hand_control", "non-overridable UI is omitted")
+	t.eq(visibility_options[2].get("id"), "touch", "tactile visibility is user-overridable")
+	t.eq(visibility_options[3].get("id"), "fpv", "video visibility is user-overridable")
+
+	var wrong_revision := _state(blueprint_id, 1, 1, {"robot.message": "wrong"})
+	t.is_false(runtime.apply_state(wrong_revision), "state for another revision is rejected")
+	t.is_false(
+		runtime.apply_state(_state(blueprint_id, 2, 0, {"robot.message": "zero"})),
+		"zero state sequence is rejected",
+	)
+	var current := _state(
+		blueprint_id,
+		2,
+		1,
+		{
+			"robot.message": "Ready",
+			"ui.message_visible": true,
+			"robot.state": "active",
+			"robot.name": "Dexterous hand",
+			"hand.unlocked": false,
+			"hand.available": true,
+			"left.touch.normal": [0, 10, 100, 1000, 10000],
+			"left.touch.tangential": [0, 20, 200, 2000, 20000],
+			"left.touch.direction": [0, 45, 90, 180, 270],
+			"left.touch.proximity": [0, 100, 1000, 10000, 100000],
+			"left.touch.status": [0, 0, 0, 0, 0],
+			"touch.sample_ns": 123456,
+			"video.visible": true,
+			"video.follow_camera": false,
+		},
+	)
+	var wire_state_v: Variant = JSON.parse_string(JSON.stringify(current))
+	t.is_true(wire_state_v is Dictionary, "wire BlueprintState JSON decodes to an object")
+	t.is_true(
+		runtime.apply_state(wire_state_v as Dictionary),
+		"wire BlueprintState accepts integral JSON numbers in integer arrays",
+	)
+	t.eq(builtin_changes.size(), 5, "only the changed built-in view emits another gate update")
+	var video_change := builtin_changes.back() as Dictionary
+	t.eq(video_change.get("type"), "video_panel", "video gate identifies its built-in view")
+	t.is_false(
+		bool((video_change.get("properties", {}) as Dictionary).get("follow_camera", true)),
+		"built-in properties follow blueprint state bindings",
+	)
+	var label := runtime.component_node("message") as Label3D
+	t.eq(label.text, "Ready", "label text follows its state binding")
+	var status := runtime.component_node("status")
+	var status_label := status.get_child(1) as Label3D
+	t.eq(status_label.text, "Dexterous hand", "status label follows its text binding")
+	var status_mesh := status.get_child(0) as MeshInstance3D
+	var status_material := status_mesh.material_override as StandardMaterial3D
+	t.almost_eq(status_material.emission.g, 1.0, 0.001, "active state updates lamp color")
+	var tactile := runtime.component_node("touch")
+	var tactile_samples := tactile.get("_samples") as Dictionary
+	t.is_true(
+		bool((tactile_samples.get("left", {}) as Dictionary).get("valid", false)),
+		"fingertip tactile component receives its bound five-finger sample",
+	)
+	(tactile.get("_last_update_usec") as Dictionary)["left"] = 123
+	t.is_false(
+		runtime.apply_state(_state(blueprint_id, 2, 2, {
+			"left.touch.status": [0, 0, 0, 0],
+		})),
+		"fingertip arrays with the wrong length are rejected from the generated spec",
+	)
+	var unchanged_tactile := (current.get("values", {}) as Dictionary).duplicate(true)
+	unchanged_tactile["robot.message"] = "Still ready"
+	t.is_true(
+		runtime.apply_state(_state(blueprint_id, 2, 2, unchanged_tactile)),
+		"unrelated state changes with the same tactile sample remain valid",
+	)
+	t.eq(
+		int((tactile.get("_last_update_usec") as Dictionary)["left"]),
+		123,
+		"an unchanged sample token does not refresh stale tactile data",
+	)
+	var refreshed_tactile := unchanged_tactile.duplicate(true)
+	refreshed_tactile["touch.sample_ns"] = 123457
+	t.is_true(
+		runtime.apply_state(_state(blueprint_id, 2, 3, refreshed_tactile)),
+		"a new tactile sample token refreshes the bound sample",
+	)
+	t.is_true(
+		int((tactile.get("_last_update_usec") as Dictionary)["left"]) > 123,
+		"a changed sample token advances tactile freshness",
+	)
+	t.is_false(
+		BlueprintContract.parse_state({
+			"schema": BlueprintContract.STATE_SCHEMA,
+			"blueprint_id": blueprint_id,
+			"blueprint_revision": 2,
+			"sequence": 2.0,
+			"timestamp_ns": 2,
+			"values": {},
+		}).get("errors", []).is_empty(),
+		"wire envelope integers reject integral JSON floats",
+	)
+	t.is_false(
+		runtime.apply_state(_state(blueprint_id, 2, 3, {"robot.message": "stale"})),
+		"duplicate state sequence is rejected",
+	)
+	t.eq(label.text, "Ready", "rejected state cannot mutate component values")
+
+	runtime.set_user_visibility_override("message", false)
+	t.is_false(runtime.component_visible("message"), "user override hides an overridable component")
+	t.eq(
+		runtime.user_visibility_options()[0].get("override"),
+		false,
+		"visibility settings report the persisted local choice",
+	)
+	t.is_true(
+		runtime.apply_state(_state(blueprint_id, 2, 4, {"ui.message_visible": true})),
+		"newer state remains accepted while overridden",
+	)
+	t.is_false(runtime.component_visible("message"), "robot state cannot replace user visibility")
+	runtime.set_user_visibility_override("message", null)
+	t.is_true(runtime.component_visible("message"), "clearing the override restores robot visibility")
+	runtime.set_user_visibility_override("status", false)
+	t.is_true(runtime.component_visible("status"), "non-overridable components ignore user changes")
+	var builtin_override_change_count := builtin_changes.size()
+	runtime.set_user_visibility_override("fpv", false)
+	t.is_false(runtime.component_visible("fpv"), "user override hides an XR-owned view")
+	t.eq(
+		builtin_changes.size(),
+		builtin_override_change_count + 1,
+		"an XR-owned visibility override emits exactly one gate update",
+	)
+	runtime.set_user_visibility_override("fpv", null)
+	t.is_true(runtime.component_visible("fpv"), "clearing override restores the robot video gate")
+	runtime.set_suspended(true)
+	t.is_false(runtime.component_visible("message"), "suspending the host hides Blueprint UI")
+	t.is_false(runtime.component_visible("fpv"), "suspending the host closes external views")
+	runtime.set_suspended(false)
+	t.is_true(runtime.component_visible("message"), "resuming the host restores visible components")
+	t.is_true(runtime.component_visible("fpv"), "resuming the host restores declared external views")
+
+	var events: Array = []
+	runtime.event_emitted.connect(func(event: Dictionary) -> void: events.append(event))
+	var palm_menu := runtime.component_node("hand_control")
+	palm_menu.call("_trigger_action", &"toggle_hand_lock")
+	t.eq(events.size(), 1, "palm menu action emits one blueprint event")
+	var event := events[0] as Dictionary
+	t.eq(event.get("component_id"), "hand_control", "event identifies its component")
+	t.eq(event.get("action"), "toggle_unlock", "event uses the robot-authored action")
+	t.eq(event.get("value"), true, "toggle event proposes the inverse bound value")
+	t.is_false(
+		bool(palm_menu.get("_unlocked")),
+		"remote-driven palm menu waits for authoritative BlueprintState",
+	)
+	t.is_true(
+		runtime.apply_state(_state(blueprint_id, 2, 5, {
+			"hand.unlocked": true,
+			"hand.available": true,
+		})),
+		"authoritative state accepts the requested hand transition",
+	)
+	runtime._process(0.0)
+	t.is_true(
+		bool(palm_menu.get("_unlocked")),
+		"remote-driven palm menu updates after authoritative BlueprintState",
+	)
+
+	var duplicate_builtin := blueprint.duplicate(true)
+	duplicate_builtin["blueprint_id"] = "%s.invalid" % blueprint_id
+	var duplicate_components: Array = duplicate_builtin.get("components", [])
+	duplicate_components.append({
+		"id": "second_video",
+		"type": "video_panel",
+		"anchor": "world",
+		"properties": {},
+		"bindings": {},
+		"user_overridable": true,
+	})
+	duplicate_builtin["components"] = duplicate_components
+	t.is_false(
+		runtime.apply_blueprint(duplicate_builtin),
+		"a Blueprint cannot ambiguously declare the same XR-owned view twice",
+	)
+	t.eq(runtime.component_count(), 8, "invalid replacement leaves the active Blueprint intact")
+
+	runtime.clear()
+	t.is_false(bool((builtin_changes.back() as Dictionary).get("visible", true)),
+		"clear closes every XR-owned view")
+	t.eq(runtime.component_count(), 0, "clear removes all blueprint components")
+	t.is_false(runtime.has_blueprint(), "clear removes active blueprint identity")
+	origin.free()
+
+
+func _state(
+	blueprint_id: String,
+	blueprint_revision: int,
+	sequence: int,
+	values: Dictionary,
+) -> Dictionary:
+	return {
+		"schema": BlueprintContract.STATE_SCHEMA,
+		"blueprint_id": blueprint_id,
+		"blueprint_revision": blueprint_revision,
+		"sequence": sequence,
+		"timestamp_ns": sequence * 1000,
+		"values": values,
+	}
+
+
+func _sorted_strings(values: Array) -> Array:
+	var result := values.duplicate()
+	result.sort()
+	return result

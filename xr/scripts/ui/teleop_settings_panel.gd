@@ -5,6 +5,7 @@ signal settings_applied(options: Dictionary)
 signal close_requested
 signal pico_body_calibration_requested
 signal video_connect_requested(options: Dictionary)
+signal blueprint_visibility_override_requested(component_id: String, visible: Variant)
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
 const SECTION := "settings"
@@ -37,6 +38,11 @@ const DEFAULT_SHOW_OPERATION_TRAJECTORY: bool = false
 const DEFAULT_SHOW_VR_POSE: bool = false
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
+const BLUEPRINT_OVERRIDE_LABEL_KEYS := {
+	"follow": "UI_BLUEPRINT_FOLLOW",
+	"show": "UI_BLUEPRINT_SHOW",
+	"hide": "UI_BLUEPRINT_HIDE",
+}
 
 class DiscoverySpinner:
 	extends Control
@@ -119,6 +125,10 @@ var _show_video_panel_toggle: CheckButton
 var _show_operation_trajectory_toggle: CheckButton
 var _show_vr_pose_toggle: CheckButton
 var _show_on_launch_toggle: CheckButton
+var _blueprint_group: VBoxContainer
+var _blueprint_rows: VBoxContainer
+var _blueprint_override_buttons: Dictionary = {}
+var _blueprint_override_modes: Dictionary = {}
 var _status_label: Label
 var _discovery_spinner: DiscoverySpinner
 var _discovery_active := false
@@ -443,6 +453,22 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# Inside robot; off by default, on when the operator wants to inspect input.
 	_show_vr_pose_toggle = add_toggle(display, tr("UI_SHOW_VR_POSE"), DEFAULT_SHOW_VR_POSE, 22)
 
+	# --- Robot-authored UI group -------------------------------------------
+	_blueprint_group = register_group(
+		"blueprint", "UI_GROUP_BLUEPRINT", "settings"
+	)
+	var blueprint_help := Label.new()
+	blueprint_help.text = tr("UI_BLUEPRINT_HELP")
+	blueprint_help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	blueprint_help.add_theme_font_size_override("font_size", 18)
+	blueprint_help.add_theme_color_override("font_color", COL_STATUS)
+	_blueprint_group.add_child(blueprint_help)
+	_blueprint_rows = VBoxContainer.new()
+	_blueprint_rows.add_theme_constant_override("separation", 16)
+	_blueprint_rows.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_blueprint_group.add_child(_blueprint_rows)
+	_set_blueprint_group_available(false)
+
 	# --- Startup group -----------------------------------------------------
 	var startup := register_group("startup", "UI_GROUP_STARTUP", "power")
 	_show_on_launch_toggle = add_toggle(startup, tr("UI_SHOW_SETTINGS_ON_LAUNCH"), DEFAULT_SHOW_ON_LAUNCH, 22)
@@ -450,6 +476,87 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# The robot group is shown by default (first registered).
 	call_deferred("_refresh_scope_ui")
 	call_deferred("_refresh_video_protocol_ui")
+
+
+func set_blueprint_visibility_options(options: Array) -> void:
+	if _blueprint_rows == null:
+		return
+	for child in _blueprint_rows.get_children():
+		_blueprint_rows.remove_child(child)
+		child.queue_free()
+	_blueprint_override_buttons.clear()
+	_blueprint_override_modes.clear()
+	for option_v in options:
+		if not option_v is Dictionary:
+			continue
+		var option := option_v as Dictionary
+		var component_id := str(option.get("id", "")).strip_edges()
+		if component_id.is_empty():
+			continue
+		var section := VBoxContainer.new()
+		section.add_theme_constant_override("separation", 8)
+		section.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_blueprint_rows.add_child(section)
+		var label := Label.new()
+		label.text = str(option.get("label", component_id))
+		label.clip_text = true
+		label.tooltip_text = component_id
+		label.add_theme_font_size_override("font_size", 19)
+		label.add_theme_color_override("font_color", COL_SECTION)
+		section.add_child(label)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 8)
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		section.add_child(row)
+		var buttons := {}
+		for mode in BLUEPRINT_OVERRIDE_LABEL_KEYS:
+			buttons[mode] = _add_choice_button(
+				row,
+				tr(str(BLUEPRINT_OVERRIDE_LABEL_KEYS[mode])),
+				_on_blueprint_override_pressed.bind(component_id, mode),
+			)
+		_blueprint_override_buttons[component_id] = buttons
+		var override_v: Variant = option.get("override", null)
+		var selected_mode := "follow"
+		if override_v != null:
+			selected_mode = "show" if bool(override_v) else "hide"
+		_blueprint_override_modes[component_id] = selected_mode
+		_refresh_blueprint_override_buttons(component_id)
+	_set_blueprint_group_available(not _blueprint_override_buttons.is_empty())
+
+
+func _on_blueprint_override_pressed(component_id: String, mode: String) -> void:
+	if not _blueprint_override_buttons.has(component_id):
+		return
+	_blueprint_override_modes[component_id] = mode
+	_refresh_blueprint_override_buttons(component_id)
+	var visible: Variant = null
+	if mode == "show":
+		visible = true
+	elif mode == "hide":
+		visible = false
+	blueprint_visibility_override_requested.emit(component_id, visible)
+
+
+func _refresh_blueprint_override_buttons(component_id: String) -> void:
+	var buttons_v: Variant = _blueprint_override_buttons.get(component_id, null)
+	if not buttons_v is Dictionary:
+		return
+	var buttons := buttons_v as Dictionary
+	var selected_mode := str(_blueprint_override_modes.get(component_id, "follow"))
+	for mode in buttons:
+		_set_choice_selected(
+			buttons[mode] as Button,
+			str(mode) == selected_mode,
+		)
+
+
+func _set_blueprint_group_available(available: bool) -> void:
+	var button_v: Variant = _group_buttons.get("blueprint", null)
+	if button_v is Button:
+		(button_v as Button).visible = available
+	if not available and _active_group == "blueprint":
+		select_group("display")
 
 
 ## One always-visible choice button. Every selection on this page uses these
@@ -946,6 +1053,20 @@ func _refresh_xrobot_toolkit_controls() -> void:
 		_target_scope == DEFAULT_TARGET_SCOPE
 		and _selected_protocol == PROTOCOL_XROBOT_TOOLKIT_V1
 	)
+	var robot_authored_blueprint := (
+		_target_scope == DEFAULT_TARGET_SCOPE
+		and _selected_protocol == PROTOCOL_OPERATOR
+	)
+	for legacy_toggle in [
+		_video_face_toggle,
+		_show_video_panel_toggle,
+		_show_operation_trajectory_toggle,
+	]:
+		if legacy_toggle == null:
+			continue
+		var slot := legacy_toggle.get_parent() as Control
+		if slot != null:
+			slot.visible = not robot_authored_blueprint
 	if _xrobot_toolkit_device_sn_input != null:
 		_xrobot_toolkit_device_sn_input.visible = show_xrobot_controls
 	if _pico_body_calibration_button != null:

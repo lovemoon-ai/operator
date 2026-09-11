@@ -20,6 +20,9 @@ const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
 const HandPalmMenuScript = preload("res://scripts/ui/hand_unlock_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
+const BlueprintRuntimeScript = preload(
+	"res://scripts/blueprint/blueprint_runtime.gd"
+)
 const OUTSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/outside_robot_target.gd"
 const XROBOT_TOOLKIT_TARGET_PATH := "res://scripts/teleop/targets/xrobot_toolkit_target.gd"
 const XROBOT_TOOLKIT_VIDEO_SESSION_PATH := (
@@ -45,6 +48,31 @@ const TELEMETRY_PORT_OFFSET := 2
 const TELEMETRY_RETRY_DELAY_SEC := 1.0
 const REVO2_DEVICE_TYPE := "revo2_dual_hand"
 const PASSTHROUGH_BACKGROUND_MODE := Environment.BG_COLOR
+const BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS := [
+	"video_panel", "controller_help", "control_frame", "operation_trajectory"
+]
+const BLUEPRINT_EXTERNAL_VIEW_CONTRACTS := {
+	"video_panel": {
+		"properties": ["visible", "settings_label", "follow_camera", "distance"],
+		"bindings": ["visible", "follow_camera"],
+		"events": [],
+	},
+	"controller_help": {
+		"properties": ["visible", "settings_label"],
+		"bindings": ["visible"],
+		"events": [],
+	},
+	"control_frame": {
+		"properties": ["visible", "settings_label"],
+		"bindings": ["visible"],
+		"events": [],
+	},
+	"operation_trajectory": {
+		"properties": ["visible", "settings_label"],
+		"bindings": ["visible"],
+		"events": [],
+	},
+}
 const REVO2_HAND_CHANNELS := [
 	"thumb_aux",
 	"thumb_flex",
@@ -95,6 +123,7 @@ var _revo2_hand_control_unlocked := false
 
 ## v2 nodes (created programmatically)
 var _session: Session
+var _blueprint_runtime: BlueprintRuntime
 ## WP5: teleop command emission goes through RobotControlSink (sinks/
 ## robot_control). The sink wraps the scene-owned CommandSender by
 ## composition — wire JSON, 72 Hz rate, enable prints all unchanged.
@@ -137,6 +166,10 @@ var _settings_button: Node3D
 var _hand_palm_menu: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
+var _blueprint_external_view_visibility: Dictionary = {}
+var _robot_authored_views_active := false
+var _local_video_panel_distance := 3.0
+var _control_frame_visualization_enabled := false
 var _manual_video_protocol := ""
 var _manual_video_options: Dictionary = {}
 var _video_test_active := false
@@ -274,6 +307,11 @@ func _ready() -> void:
 	_session.device_connected.connect(_on_device_connected)
 	_session.device_disconnected.connect(_on_device_disconnected)
 	_session.telemetry_received.connect(_on_telemetry_received)
+	_session.blueprint_received.connect(_on_blueprint_received)
+	_session.blueprint_cleared.connect(_clear_blueprint_runtime)
+	_session.blueprint_state_received.connect(
+		_on_blueprint_runtime_state_received
+	)
 
 	# Configure command sender references
 	_command_sender.tracking_provider = _tracking_provider
@@ -335,12 +373,10 @@ func _process(_delta: float) -> void:
 				_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
-	_update_hand_palm_menu(_delta)
 	_tick_telemetry_reconnect(_delta)
 	# Position refreshes every frame so the gizmo tracks the controller smoothly;
 	# its orientation only changes when telemetry reports a new captured frame.
 	_update_control_frame_gizmo()
-	_update_hand_control_indicators()
 
 
 # Push the detected input source down to the teleop settings panel so the
@@ -455,6 +491,20 @@ func _create_v2_nodes() -> void:
 	_session.name = "Session"
 	_session.tcp_handler = _tcp_handler
 	add_child(_session)
+	_blueprint_runtime = BlueprintRuntimeScript.new()
+	_blueprint_runtime.name = "BlueprintRuntime"
+	_blueprint_runtime.configure(
+		_origin,
+		_camera,
+		_left_controller,
+		_right_controller,
+		_tracking_provider,
+		BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS,
+	)
+	_blueprint_runtime.event_emitted.connect(_on_blueprint_runtime_event)
+	_blueprint_runtime.warning_raised.connect(_on_blueprint_runtime_warning)
+	_blueprint_runtime.external_view_changed.connect(_on_blueprint_external_view_changed)
+	_origin.add_child(_blueprint_runtime)
 
 	# WP6: command emission stack built by the teleop composition root
 	# (CommandSender Node + RobotControlSink wrapper, behavior unchanged).
@@ -542,6 +592,9 @@ func _create_settings_ui_nodes() -> void:
 	_settings_panel.pico_body_calibration_requested.connect(
 		_on_pico_body_calibration_requested
 	)
+	_settings_panel.blueprint_visibility_override_requested.connect(
+		_on_blueprint_visibility_override_requested
+	)
 	_settings_panel.exit_requested.connect(_on_settings_exit_requested)
 	_origin.add_child(_settings_panel)
 	_settings_ui = _settings_panel
@@ -580,6 +633,11 @@ func _update_teleop_controller_panel() -> void:
 	if _teleop_controller_panel == null:
 		return
 	if _teleop_suspended:
+		return
+	if (
+		_teleop_controller_panel.has_method("is_blueprint_enabled")
+		and not bool(_teleop_controller_panel.call("is_blueprint_enabled"))
+	):
 		return
 	var controller_active := _is_right_controller_mode_active()
 	_teleop_controller_panel.call("set_controller_active", controller_active)
@@ -746,11 +804,12 @@ func _on_settings_applied(options: Dictionary) -> void:
 		else:
 			_manual_video_options = options.duplicate(true)
 
+	_stop_active_target()
 	# A per-item Test action is only a preview. Confirm is the ownership
 	# boundary where every persisted option becomes part of the working page.
+	# Apply after stopping the old target: clearing its Blueprint emits hide
+	# gates, which must not overwrite the newly selected Inside/XRT settings.
 	_apply_runtime_settings(options)
-
-	_stop_active_target()
 	if target_scope == "inside":
 		_set_revo2_hand_runtime_enabled(false)
 		if _inside_target == null:
@@ -770,21 +829,47 @@ func _on_settings_applied(options: Dictionary) -> void:
 
 
 func _apply_runtime_settings(options: Dictionary) -> void:
+	var robot_authored_views := _options_use_robot_authored_blueprint(options)
 	# `_end_video_test()` can only flip the panel toggle for the *next* read of
 	# the form; `options` was captured when Confirm was pressed. OR in the flag
 	# so a preview that proved video works still reaches the work page even on
 	# that path.
-	var show_video_panel := (
-		bool(options.get("show_video_panel", false)) or _video_test_saw_video
-	)
+	var show_video_panel := false
+	if not robot_authored_views:
+		show_video_panel = (
+			bool(options.get("show_video_panel", false)) or _video_test_saw_video
+		)
 	if _robot_view:
-		_robot_view.follow_camera = bool(options.get("video_face_locked", true))
+		if robot_authored_views and not _robot_authored_views_active:
+			var distance_value: Variant = _robot_view.get("follow_distance")
+			if distance_value is float or distance_value is int:
+				_local_video_panel_distance = float(distance_value)
+		elif not robot_authored_views and _robot_authored_views_active \
+				and _robot_view.has_method("set_panel_distance"):
+			_robot_view.call("set_panel_distance", _local_video_panel_distance)
+		if not robot_authored_views:
+			_robot_view.follow_camera = bool(options.get("video_face_locked", true))
 		if _robot_view.has_method("set_show_video_panel"):
 			_robot_view.set_show_video_panel(show_video_panel)
+	_robot_authored_views_active = robot_authored_views
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.set_enabled(
-			bool(options.get("show_operation_trajectory", false))
+			false
+			if robot_authored_views
+			else bool(options.get("show_operation_trajectory", false))
 		)
+	_control_frame_visualization_enabled = not robot_authored_views
+	if not _control_frame_visualization_enabled:
+		_hide_control_frame_gizmos()
+	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_blueprint_enabled"):
+		_teleop_controller_panel.call("set_blueprint_enabled", not robot_authored_views)
+
+
+static func _options_use_robot_authored_blueprint(options: Dictionary) -> bool:
+	return (
+		str(options.get("target_scope", "outside")) == "outside"
+		and str(options.get("protocol", "operator")) == "operator"
+	)
 
 
 func _on_settings_button_pressed() -> void:
@@ -797,7 +882,6 @@ func _on_hand_unlock_toggled(unlocked: bool) -> void:
 
 
 func _set_revo2_hand_control_unlocked(unlocked: bool) -> void:
-	var was_unlocked := _revo2_hand_control_unlocked
 	var transport_connected: bool = (
 		_active_target == _outside_target
 		and _tcp_handler != null
@@ -815,25 +899,48 @@ func _set_revo2_hand_control_unlocked(unlocked: bool) -> void:
 		and target_ready
 		and not _teleop_suspended
 	)
-	var mode = _active_control_mode()
-	if mode != null and mode.has_method("set_hand_control_unlocked"):
-		mode.call("set_hand_control_unlocked", _revo2_hand_control_unlocked)
-	if was_unlocked and not _revo2_hand_control_unlocked and _command_sender != null:
-		_command_sender.send_immediate_command()
+	_sync_revo2_hand_command_gate()
 	_update_hand_palm_menu()
 	print("[Operator] Revo2 hand control unlocked=%s" % str(_revo2_hand_control_unlocked))
+
+
+func _revo2_uses_robot_authored_blueprint() -> bool:
+	return (
+		_revo2_hand_runtime_enabled
+		and _blueprint_runtime != null
+		and _blueprint_runtime.has_blueprint()
+	)
+
+
+func _sync_revo2_hand_command_gate() -> void:
+	var mode = _active_control_mode()
+	if mode != null and mode.has_method("set_hand_control_unlocked"):
+		var was_streaming: bool = (
+			mode.has_method("is_hand_control_unlocked")
+			and bool(mode.call("is_hand_control_unlocked"))
+		)
+		var authored_stream_enabled: bool = (
+			_revo2_uses_robot_authored_blueprint()
+			and _active_target == _outside_target
+			and not _teleop_suspended
+			and _tcp_handler != null
+			and _tcp_handler.is_connected_to_robot()
+			and _outside_target != null
+			and _outside_target.has_method("is_ready")
+			and _outside_target.is_ready()
+		)
+		var should_stream: bool = authored_stream_enabled or _revo2_hand_control_unlocked
+		mode.call("set_hand_control_unlocked", should_stream)
+		if was_streaming and not should_stream and _command_sender != null:
+			_command_sender.send_immediate_command()
 
 
 func _update_hand_palm_menu(delta: float = 0.0) -> void:
 	if _hand_palm_menu == null:
 		return
-	var show_menu: bool = (
-		_revo2_hand_runtime_enabled
-		and _active_target == _outside_target
-		and not _synthetic
-		and _current_interaction_mode() == "hands"
-		and (_settings_panel == null or not _settings_panel.visible)
-	)
+	# Native Operator blueprint is robot-authored. The legacy Revo2 palm menu
+	# remains instantiated for compatibility tests, but never owns the work page.
+	var show_menu := false
 	var available: bool = (
 		show_menu
 		and not _teleop_suspended
@@ -877,15 +984,25 @@ func _set_revo2_hand_runtime_enabled(enabled: bool) -> void:
 			_hand_feedback_overlay.clear()
 		if _hand_tactile_overlay:
 			_hand_tactile_overlay.clear()
-	if _hand_feedback_overlay:
-		_hand_feedback_overlay.set_enabled(enabled)
-	if _hand_tactile_overlay:
-		_hand_tactile_overlay.set_enabled(enabled)
+	_refresh_revo2_visualization_ownership()
 	if not enabled:
 		for indicator_v in _hand_control_indicators.values():
 			var indicator = indicator_v
 			if indicator != null:
 				indicator.update_state(null, false, false, false)
+	_update_hand_palm_menu()
+
+
+func _refresh_revo2_visualization_ownership() -> void:
+	if _hand_feedback_overlay:
+		_hand_feedback_overlay.set_enabled(false)
+	if _hand_tactile_overlay:
+		_hand_tactile_overlay.set_enabled(false)
+	for indicator_v in _hand_control_indicators.values():
+		var indicator = indicator_v
+		if indicator != null:
+			indicator.update_state(null, false, false, false)
+	_sync_revo2_hand_command_gate()
 	_update_hand_palm_menu()
 
 
@@ -1002,6 +1119,7 @@ func _on_pico_body_calibration_requested() -> void:
 ## what actually quits the process.
 func _on_settings_exit_requested() -> void:
 	print("[Operator] Settings exit requested — returning to mode select")
+	_clear_blueprint_runtime()
 	_set_revo2_hand_control_unlocked(false)
 	_cancel_launch_window()
 	if _robot_control_sink:
@@ -1057,9 +1175,12 @@ func _sync_app_focus() -> void:
 func _set_teleop_suspended(suspended: bool) -> void:
 	if suspended:
 		_set_revo2_hand_control_unlocked(false)
+	if _blueprint_runtime:
+		_blueprint_runtime.set_suspended(suspended)
 	if _teleop_suspended == suspended:
 		return
 	_teleop_suspended = suspended
+	_sync_revo2_hand_command_gate()
 	_sync_stream_senders()
 	if suspended and _ee_pose_trajectory:
 		# Do not bridge the hand motion performed while settings owns the
@@ -1400,6 +1521,7 @@ func _on_command_sent(command: Dictionary) -> void:
 
 func _connect_to_robot(ip: String, port: int) -> void:
 	_set_revo2_hand_control_unlocked(false)
+	_clear_blueprint_runtime()
 	_prepare_outside_runtime_features(ip, port)
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.clear()
@@ -1423,6 +1545,7 @@ func _start_outside_with_options(options: Dictionary) -> bool:
 			_show_settings_panel_with_status(tr("UI_XROBOT_TOOLKIT_RUNTIME_UNAVAILABLE"))
 			return false
 		_active_target = _xrt_target
+		_clear_blueprint_runtime()
 		_command_sender.transport = null
 		_robot_control_sink.set_sending(false)
 		_xr_state_sender.set_sending(false)
@@ -1455,6 +1578,7 @@ func _on_connected() -> void:
 
 func _on_disconnected() -> void:
 	_set_revo2_hand_control_unlocked(false)
+	_clear_blueprint_runtime()
 	_set_status(tr("UI_DISCONNECTED"))
 	_robot_control_sink.set_sending(false)
 	_xr_state_sender.set_sending(false)
@@ -1480,6 +1604,7 @@ func _on_disconnected() -> void:
 
 func _on_connection_failed(reason: String) -> void:
 	_set_revo2_hand_control_unlocked(false)
+	_clear_blueprint_runtime()
 	_telemetry_tcp_handler.disconnect_from_robot()
 	_set_status(tr("UI_CONNECTION_FAILED") % reason)
 	if _outside_target:
@@ -1498,6 +1623,120 @@ func _on_command_received(command: String, data: PackedByteArray) -> void:
 			pass
 		_:
 			print("[Operator] Unknown command: %s" % command)
+
+
+func _on_blueprint_received(blueprint: Dictionary) -> void:
+	if _active_target != _outside_target or _blueprint_runtime == null:
+		print(
+			"[Operator] Dropped Blueprint before runtime ownership target_outside=%s runtime=%s"
+			% [str(_active_target == _outside_target), str(_blueprint_runtime != null)]
+		)
+		return
+	if _blueprint_runtime.apply_blueprint(blueprint):
+		print(
+			"[Operator] Blueprint active components=%d suspended=%s"
+			% [_blueprint_runtime.component_count(), str(_teleop_suspended)]
+		)
+		_refresh_revo2_visualization_ownership()
+		_sync_blueprint_visibility_options()
+
+
+func _on_blueprint_runtime_state_received(state: Dictionary) -> void:
+	if _active_target != _outside_target or _blueprint_runtime == null:
+		print(
+			"[Operator] Dropped BlueprintState before runtime ownership target_outside=%s runtime=%s"
+			% [str(_active_target == _outside_target), str(_blueprint_runtime != null)]
+		)
+		return
+	var applied := _blueprint_runtime.apply_state(state)
+	if int(state.get("sequence", 0)) == 1:
+		print("[Operator] Initial BlueprintState applied=%s" % str(applied))
+
+
+func _on_blueprint_runtime_event(event: Dictionary) -> void:
+	if (
+		_active_target != _outside_target
+		or _teleop_suspended
+		or _session == null
+	):
+		return
+	var error := _session.send_blueprint_event(event)
+	if error != OK:
+		push_warning("[Operator] Could not send BlueprintEvent: %s" % error_string(error))
+
+
+func _on_blueprint_runtime_warning(message: String) -> void:
+	push_warning("[Operator] %s" % message)
+
+
+func _on_blueprint_external_view_changed(
+	component_id: String,
+	component_type: String,
+	visible: bool,
+	properties: Dictionary,
+) -> void:
+	var primitive_spec := BlueprintContract.primitive(component_type)
+	var implementation := str(primitive_spec.get("implementation", ""))
+	_blueprint_external_view_visibility[implementation] = visible
+	match implementation:
+		"video_panel":
+			_apply_blueprint_video_panel(visible, properties)
+		"controller_help":
+			if (
+				_teleop_controller_panel
+				and _teleop_controller_panel.has_method("set_blueprint_enabled")
+			):
+				_teleop_controller_panel.call("set_blueprint_enabled", visible)
+		"control_frame":
+			_control_frame_visualization_enabled = visible
+			if not visible:
+				_hide_control_frame_gizmos()
+		"operation_trajectory":
+			if _ee_pose_trajectory:
+				_ee_pose_trajectory.set_enabled(visible)
+		_:
+			push_warning(
+				"[Operator] Ignoring unknown external Blueprint implementation %s for %s (%s)"
+				% [implementation, component_type, component_id]
+			)
+
+
+func _apply_blueprint_video_panel(visible: bool, properties: Dictionary) -> void:
+	if _robot_view == null:
+		return
+	if properties.has("follow_camera"):
+		_robot_view.follow_camera = bool(properties["follow_camera"])
+	if properties.has("distance") and _robot_view.has_method("set_panel_distance"):
+		_robot_view.call("set_panel_distance", float(properties["distance"]))
+	if not _video_test_active and _robot_view.has_method("set_show_video_panel"):
+		_robot_view.call("set_show_video_panel", visible)
+
+
+func _on_blueprint_visibility_override_requested(
+	component_id: String,
+	visible: Variant,
+) -> void:
+	if _blueprint_runtime == null:
+		return
+	_blueprint_runtime.set_user_visibility_override(component_id, visible)
+	_sync_blueprint_visibility_options()
+
+
+func _sync_blueprint_visibility_options() -> void:
+	if _settings_ui == null or not _settings_ui.has_method("set_blueprint_visibility_options"):
+		return
+	var options: Array = []
+	if _blueprint_runtime != null:
+		options = _blueprint_runtime.user_visibility_options()
+	_settings_ui.call("set_blueprint_visibility_options", options)
+
+
+func _clear_blueprint_runtime() -> void:
+	if _blueprint_runtime != null:
+		_blueprint_runtime.clear()
+	_blueprint_external_view_visibility.clear()
+	_refresh_revo2_visualization_ownership()
+	_sync_blueprint_visibility_options()
 
 
 func _connect_telemetry_stream(ip: String) -> void:
@@ -1742,7 +1981,10 @@ func _end_video_test() -> void:
 	_video_test_active = false
 	_video_test_generation += 1
 	if _robot_view and _robot_view.has_method("set_show_video_panel"):
-		_robot_view.set_show_video_panel(_video_test_restore_show_panel)
+		var restore_visible := _video_test_restore_show_panel
+		if _active_target == _outside_target:
+			restore_visible = bool(_blueprint_external_view_visibility.get("video_panel", false))
+		_robot_view.set_show_video_panel(restore_visible)
 	if _settings_button and _settings_button.has_method("set_video_preview_mode"):
 		_settings_button.call("set_video_preview_mode", false)
 
@@ -1884,6 +2126,7 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 
 func _on_device_disconnected() -> void:
 	_set_revo2_hand_control_unlocked(false)
+	_clear_blueprint_runtime()
 	_sdk_mode = false
 	_robot_control_sink.set_sending(false)
 	_xr_state_sender.set_sending(false)
@@ -1903,10 +2146,6 @@ func _on_telemetry_received(_data: Dictionary) -> void:
 	# section. For now we just drop the data so the signal stays connected
 	# (Session still parses telemetry frames so consumer can subscribe).
 	_capture_control_frame(_data)
-	if _hand_feedback_overlay and _revo2_hand_runtime_enabled:
-		_hand_feedback_overlay.update_telemetry(_data)
-	if _hand_tactile_overlay and _revo2_hand_runtime_enabled:
-		_hand_tactile_overlay.update_telemetry(_data)
 	if _synthetic:
 		_synth_capture_telemetry(_data)
 
@@ -1966,45 +2205,18 @@ func _capture_control_frame_for_hand(
 
 
 func _update_control_frame_gizmo() -> void:
+	if not _control_frame_visualization_enabled:
+		return
 	for hand in [HAND_LEFT, HAND_RIGHT]:
 		_update_control_frame_gizmo_for_hand(hand)
-
-
-func _update_hand_control_indicators() -> void:
-	var mode = _active_control_mode()
-	var transport_connected: bool = (
-		_active_target == _outside_target
-		and _tcp_handler != null
-		and _tcp_handler.is_connected_to_robot()
-	)
-	for hand in [HAND_LEFT, HAND_RIGHT]:
-		var indicator = _hand_control_indicators.get(hand, null)
-		if indicator == null:
-			continue
-		if not _revo2_hand_runtime_enabled or mode == null \
-				or not mode.has_method("get_hand_control_state"):
-			indicator.update_state(null, false, false, false)
-			continue
-		var state: Dictionary = mode.get_hand_control_state(hand)
-		if _hand_tactile_overlay:
-			_hand_tactile_overlay.update_hand_joints(
-				"left" if hand == HAND_LEFT else "right",
-				state.get("joints", []) as Array,
-			)
-		var shown: bool = bool(state.get("tracked", false))
-		var control_enabled: bool = (
-			transport_connected
-			and not _teleop_suspended
-			and bool(state.get("control_enabled", false))
-		)
-		indicator.update_state(
-			state.get("position", null), transport_connected, control_enabled, shown
-		)
 
 
 func _update_control_frame_gizmo_for_hand(hand: int) -> void:
 	var gizmo: Node3D = _control_frame_gizmos.get(hand, null)
 	if gizmo == null:
+		return
+	if not _control_frame_visualization_enabled:
+		gizmo.visible = false
 		return
 	# Hide the moment the operator lets go. We use the LOCAL deadman state rather
 	# than waiting for the next telemetry frame to drop `operator_frame`, so the
@@ -2027,6 +2239,13 @@ func _update_control_frame_gizmo_for_hand(hand: int) -> void:
 			bool(_control_frame_mirror.get(hand, true)),
 		)
 	)
+
+
+func _hide_control_frame_gizmos() -> void:
+	for gizmo_v in _control_frame_gizmos.values():
+		var gizmo := gizmo_v as Node3D
+		if gizmo != null:
+			gizmo.visible = false
 
 
 ## ControlMode owns both the driving-hand latch and the deadman hysteresis, so
@@ -2395,6 +2614,7 @@ func _on_target_fault(code: String, message: String, target: Node) -> void:
 
 
 func _stop_active_target() -> void:
+	_clear_blueprint_runtime()
 	_robot_control_sink.set_sending(false)
 	_xr_state_sender.set_sending(false)
 	if _xrt_target != null:

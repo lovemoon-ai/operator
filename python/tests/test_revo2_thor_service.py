@@ -8,12 +8,18 @@ import stat
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).parents[2] / "scripts" / "revo2_thor_service.py"
+SCRIPT = (
+    Path(__file__).parents[2]
+    / "examples"
+    / "brainco-revo2"
+    / "revo2_thor_service.py"
+)
 SPEC = importlib.util.spec_from_file_location("revo2_thor_service", SCRIPT)
 service = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -54,6 +60,208 @@ class Revo2ThorServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime = service.runtime_args(args, self._paths(Path(directory)))
         self.assertTrue(runtime.allow_commands)
+
+    def test_blueprint_uses_builtin_components(self) -> None:
+        blueprint = service.build_revo2_blueprint().to_dict()
+        self.assertEqual(blueprint["blueprint_id"], service.REVO2_BLUEPRINT_ID)
+        components = {
+            component["id"]: component for component in blueprint["components"]
+        }
+        self.assertEqual(components["left_hand_status"]["type"], "status_lamp")
+        self.assertEqual(components["right_hand_status"]["anchor"], "right_palm")
+        self.assertNotIn("text", components["left_hand_status"]["bindings"])
+        self.assertNotIn("text", components["right_hand_status"]["bindings"])
+        self.assertEqual(
+            components[service.REVO2_CONTROL_COMPONENT_ID]["type"], "palm_menu"
+        )
+        self.assertTrue(
+            components[service.REVO2_CONTROL_COMPONENT_ID]["user_overridable"]
+        )
+        tactile = components[service.REVO2_TACTILE_COMPONENT_ID]
+        self.assertEqual(tactile["type"], "fingertip_tactile")
+        self.assertEqual(
+            tactile["bindings"]["left_normal"], "left.touch_normal"
+        )
+        self.assertEqual(
+            tactile["bindings"]["right_status"], "right.touch_status"
+        )
+
+    def test_blueprint_state_requires_allowed_connected_hands(self) -> None:
+        adapter = service.Revo2UdpHostedAdapter(command_host="127.0.0.1")
+        now_ns = time.monotonic_ns()
+        adapter._values = {
+            "revo2_left_position": [0.0] * 6,
+            "revo2_right_position": [0.0] * 6,
+        }
+        adapter._value_received_ns = {
+            "revo2_left_position": now_ns,
+            "revo2_right_position": now_ns,
+        }
+        values = service.revo2_blueprint_values(
+            adapter,
+            allow_commands=True,
+            command_side="both",
+            runtime_ready=True,
+        )
+        service.build_revo2_blueprint().validate_state_values(values)
+        self.assertTrue(values["control.available"])
+        self.assertFalse(values["control.enabled"])
+        self.assertEqual(values["left.status"], "active")
+        self.assertNotIn("left.status_text", values)
+        self.assertNotIn("right.status_text", values)
+
+        read_only = service.revo2_blueprint_values(
+            adapter,
+            allow_commands=False,
+            command_side="both",
+            runtime_ready=True,
+        )
+        self.assertTrue(read_only["control.available"])
+        self.assertFalse(read_only["control.enabled"])
+        self.assertIn("read-only", read_only["service.status_text"])
+
+    def test_blueprint_state_carries_fingertip_tactile_feedback(self) -> None:
+        adapter = service.Revo2UdpHostedAdapter(command_host="127.0.0.1")
+        now_ns = time.monotonic_ns()
+        adapter._values = {
+            "revo2_left_position": [0.0] * 6,
+            "revo2_right_position": [0.0] * 6,
+            "revo2_left_touch_normal": [1, 2, 3, 4, 5],
+            "revo2_left_touch_tangential": [6, 7, 8, 9, 10],
+            "revo2_left_touch_direction": [0, 45, 90, 180, 270],
+            "revo2_left_touch_proximity": [11, 12, 13, 14, 15],
+            "revo2_left_touch_status": [0.0, 1.0, 2.0, 3.0, 4.0],
+        }
+        adapter._value_received_ns = {
+            key: now_ns for key in adapter._values
+        }
+        adapter._timestamp_ns = 123456
+        values = service.revo2_blueprint_values(
+            adapter,
+            allow_commands=False,
+            command_side="both",
+            runtime_ready=True,
+        )
+        service.build_revo2_blueprint().validate_state_values(values)
+        self.assertEqual(values["left.touch_normal"], [1, 2, 3, 4, 5])
+        self.assertEqual(values["left.touch_status"], [0, 1, 2, 3, 4])
+        self.assertTrue(
+            all(isinstance(value, int) for value in values["left.touch_status"])
+        )
+        self.assertNotIn("right.touch_normal", values)
+        self.assertEqual(values["tactile.sample_ns"], 123456)
+        blueprint = service.HostedBlueprint()
+        blueprint.set_blueprint(service.build_revo2_blueprint())
+        self.assertEqual(blueprint.update(values), 1)
+        blueprint.close()
+
+    def test_blueprint_event_controls_server_side_gate(self) -> None:
+        async def exercise() -> None:
+            args = service.build_parser().parse_args(["--allow-commands"])
+            adapter = service.Revo2UdpHostedAdapter(command_host="127.0.0.1")
+            now_ns = time.monotonic_ns()
+            adapter._values = {
+                "revo2_left_position": [0.0] * 6,
+                "revo2_right_position": [0.0] * 6,
+            }
+            adapter._value_received_ns = {
+                "revo2_left_position": now_ns,
+                "revo2_right_position": now_ns,
+            }
+            blueprint = service.HostedBlueprint()
+            blueprint.set_blueprint(service.build_revo2_blueprint())
+            runtime_ready = asyncio.Event()
+            runtime_ready.set()
+            stopping = asyncio.Event()
+            task = asyncio.create_task(
+                service.run_revo2_blueprint(
+                    blueprint,
+                    adapter,
+                    args,
+                    runtime_ready,
+                    stopping,
+                )
+            )
+            blueprint._push_event(
+                {
+                    "schema": "operator.blueprint_event.v1",
+                    "blueprint_id": service.REVO2_BLUEPRINT_ID,
+                    "blueprint_revision": 1,
+                    "sequence": 1,
+                    "timestamp_ns": 1,
+                    "component_id": service.REVO2_CONTROL_COMPONENT_ID,
+                    "action": service.REVO2_CONTROL_ACTION,
+                    "value": True,
+                }
+            )
+            await asyncio.sleep(0.06)
+            self.assertTrue(adapter.control_enabled)
+            adapter._value_received_ns = {
+                "revo2_left_position": 0,
+                "revo2_right_position": 0,
+            }
+            await asyncio.sleep(0.06)
+            self.assertFalse(adapter.control_enabled)
+            stopping.set()
+            await asyncio.wait_for(task, timeout=0.2)
+            blueprint.close()
+
+        asyncio.run(exercise())
+
+    def test_read_only_palm_event_unlocks_input_preview_only(self) -> None:
+        async def exercise() -> None:
+            args = service.build_parser().parse_args([])
+            adapter = service.Revo2UdpHostedAdapter(command_host="127.0.0.1")
+            now_ns = time.monotonic_ns()
+            adapter._values = {
+                "revo2_left_position": [0.0] * 6,
+                "revo2_right_position": [0.0] * 6,
+            }
+            adapter._value_received_ns = {
+                "revo2_left_position": now_ns,
+                "revo2_right_position": now_ns,
+            }
+            blueprint = service.HostedBlueprint()
+            blueprint.set_blueprint(service.build_revo2_blueprint())
+            runtime_ready = asyncio.Event()
+            runtime_ready.set()
+            stopping = asyncio.Event()
+            task = asyncio.create_task(
+                service.run_revo2_blueprint(
+                    blueprint,
+                    adapter,
+                    args,
+                    runtime_ready,
+                    stopping,
+                )
+            )
+            blueprint._push_event(
+                {
+                    "schema": "operator.blueprint_event.v1",
+                    "blueprint_id": service.REVO2_BLUEPRINT_ID,
+                    "blueprint_revision": 1,
+                    "sequence": 1,
+                    "timestamp_ns": 1,
+                    "component_id": service.REVO2_CONTROL_COMPONENT_ID,
+                    "action": service.REVO2_CONTROL_ACTION,
+                    "value": True,
+                }
+            )
+            await asyncio.sleep(0.06)
+            self.assertTrue(adapter.control_enabled)
+            values = service.revo2_blueprint_values(
+                adapter,
+                allow_commands=False,
+                command_side="both",
+                runtime_ready=True,
+            )
+            self.assertTrue(values["control.enabled"])
+            self.assertIn("read-only", values["service.status_text"])
+            stopping.set()
+            await asyncio.wait_for(task, timeout=0.2)
+            blueprint.close()
+
+        asyncio.run(exercise())
 
     def test_bridge_uses_local_adapter_and_shared_config(self) -> None:
         args = service.build_parser().parse_args(["--adapter-port", "64010"])

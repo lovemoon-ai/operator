@@ -64,12 +64,104 @@ to the headset process and may reset after reconnect, so consumers treat a
 different id as the next snapshot rather than assuming it is globally
 monotonic.
 
+### Robot-authored Blueprint
+
+An Operator session may also advertise `blueprint_v1`. Both the embedded
+`XrSession` path and the standalone `xr-bridge` + pyoperator hosted adapter path
+support it. The protocol is mode-independent. Outside Robot is the first
+integration; VR operation or Realtime Feed can reuse the same contract through
+their own lifecycle adapters. Inside Robot does not currently use it because it
+has no external robot session.
+
+Capability negotiation is content-addressed. A Blueprint-producing descriptor
+must contain both `blueprint_v1: true` and
+`blueprint_spec_sha256: <generated digest>`. The headset advertises
+`blueprint_v1` plus `blueprint_v1@sha256:<generated digest>` in `Hello`.
+`xr-bridge` enables the stream only when both hashes equal its own generated
+digest. A hosted adapter without a `HostedBlueprint` does not advertise either
+descriptor capability. A mismatch is logged and disables only Blueprint; the
+control, telemetry, and video paths remain connected. The headset also verifies
+the descriptor hash itself instead of relying only on the bridge's forwarding
+decision.
+
+Blueprint uses the command TCP connection and three versioned JSON payloads:
+
+- `Blueprint` (`operator.blueprint.v1`) replaces the complete
+  component tree. A JSON `null` payload clears it.
+- `BlueprintState` (`operator.blueprint_state.v1`) replaces
+  the complete binding-value snapshot for one blueprint id and revision.
+  Sequence numbers are strictly increasing within that revision; XR rejects
+  stale or mismatched states.
+- `BlueprintEvent` (`operator.blueprint_event.v1`) carries
+  ordered interaction events from XR to Python. The bridge rejects events for
+  a blueprint id or revision that is no longer active.
+
+Version 1 intentionally accepts only built-in XR primitives. Their complete,
+normative definitions live in `specs/blueprint/v1.json`; generated Python,
+Rust, and GDScript bindings keep callers, transport validation, and the headset
+runtime aligned. Payloads cannot contain GDScript, scenes, shaders, model URLs,
+or executable callbacks. In particular, `DeviceDescriptor.video_feeds`
+negotiates the transport and decoder input, while `video_panel` controls
+Blueprint-driven visibility.
+Hiding or omitting `video_panel` does not disconnect, stop decoding, or alter
+the packet path.
+
+Revision, sequence, and timestamp fields are non-negative JSON integers (not
+integral JSON floats) and must not exceed `9223372036854775807`, the common
+signed 64-bit range accepted by Python, Rust, and Godot. Blueprint color strings
+are limited to HTML hexadecimal forms (`#rgb`, `#rgba`, `#rrggbb`, or
+`#rrggbbaa`); colors may also be encoded as three- or four-element numeric
+arrays.
+
+The v1 limits and all primitive properties, bindings, anchors, defaults,
+constraints, events, host kinds, and singleton rules come from the canonical
+spec. Python validates authored definitions and bound values, Rust validates
+the transport payload, and XR revalidates untrusted wire data before creating
+nodes or changing an external view. All three execute generated value-type
+conformance cases. Binding ranges and array lengths are enforced before state
+is forwarded, state keys not declared by any component binding are rejected,
+and reuse of one state key with incompatible value contracts is rejected. The
+spec generator rejects unknown semantic keys so a spec extension cannot be
+accepted until its consumers are intentionally updated.
+
+`user_overridable` controls local precedence. For overridable components, a
+visibility choice stored on the headset under the blueprint id wins over the
+robot-provided `visible` property or binding. Teleop settings exposes Follow
+Robot, Show, and Hide choices; `properties.settings_label` may provide the
+human-readable row name. Non-overridable components ignore local visibility
+changes. Opening Teleop settings suspends Blueprint rendering
+interaction and rendering without discarding the blueprint; disconnecting,
+switching targets, clearing from Python, or leaving Teleop removes it.
+
+The data path is designed not to become a control-loop bottleneck. Blueprints
+are low-frequency structural updates. Embedded Blueprint state is a Rust
+`watch` value; hosted pyoperator uses the same latest-snapshot semantics and a
+single coalesced wake-up per connected bridge. A slow socket writer therefore
+does not build an unbounded state queue. The socket reader remains a separate
+task, and XR state/control sampling does not wait for Blueprint rendering.
+On the headset, bound properties are recomputed only when state changes; each
+render frame updates only dynamic head/controller/palm anchors, while palm
+gesture work stays entirely local.
+
+For the standalone bridge path, the local adapter boundary carries
+`Blueprint` and `BlueprintState` from adapter to bridge, and
+`BlueprintEvent` from bridge to adapter. These frames are optional;
+adapters that do not publish a blueprint retain control and media transport,
+but native Operator Teleop renders no robot visualization. The system-owned
+settings launcher remains available for reconnecting or changing targets.
+
 ### XRoboToolkit compatibility TCP
 
 Outside Robot settings may select `xrobot_toolkit_v1` instead of the Operator
 session protocol. This is a separate wire format and a separate TCP connection;
 it is never nested inside `XRoboProtocol` and cannot be active at the same time
 as `DeviceCommand` or `XrStateFrame`.
+
+`blueprint_v1` is not part of the XRoboToolkit v1 compatibility
+protocol. Selecting XRoboToolkit clears any active Operator Blueprint, and
+the XRT connection carries no Blueprint, Blueprint state, or UI event
+messages. Supporting robot-authored UI there would require a separately
+versioned XRT extension or an additional side channel.
 
 ```text
 u8      0x3F
