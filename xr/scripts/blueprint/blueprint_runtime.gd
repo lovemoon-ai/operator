@@ -667,9 +667,9 @@ static func _parse_transform(value: Variant) -> Transform3D:
 		return Transform3D.IDENTITY
 	var data := value as Dictionary
 	var transform_spec := BlueprintPrimitiveSpec.TRANSFORM
-	var position_default := (transform_spec["position"] as Dictionary)["default"]
-	var rotation_default := (transform_spec["rotation"] as Dictionary)["default"]
-	var scale_default := (transform_spec["scale"] as Dictionary)["default"]
+	var position_default: Variant = (transform_spec["position"] as Dictionary)["default"]
+	var rotation_default: Variant = (transform_spec["rotation"] as Dictionary)["default"]
+	var scale_default: Variant = (transform_spec["scale"] as Dictionary)["default"]
 	var position := _vector3(data.get("position", position_default), Vector3.ZERO)
 	var rotation_values: Variant = data.get("rotation", rotation_default)
 	var rotation := Quaternion.IDENTITY
