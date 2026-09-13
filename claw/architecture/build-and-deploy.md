@@ -120,8 +120,10 @@ Do not use desktop headless Godot to run or test the XR project.
 An APK artifact does not by itself prove that the exported GDScript dependency
 graph is valid. Godot may write the APK while logging a parser failure, with a
 downstream `Could not resolve class` hiding the original type error. Every
-Android export target captures the Godot log and fails on `SCRIPT ERROR`,
-`Parse Error`, or `Could not resolve class`. When diagnosing a failure, fix the
+Android export target streams and captures the Godot log and fails on
+`SCRIPT ERROR`, `Parse Error`, `Could not resolve class`, or
+`Failed to load script` (`OPERATOR_ALLOW_SCRIPT_ERRORS=1` overrides). When
+diagnosing a failure, fix the
 earliest parser error first. Dynamic GDScript results should use explicit
 `Variant` or concrete annotations rather than ambiguous `:=` inference.
 
