@@ -2,7 +2,7 @@
 name = "xr-bridge"
 version = "0.1.0"
 edition = "2021"
-description = "XR-facing bridge: serves the XR wire protocol for adapter-backed control or standalone RTSP video relay"
+description = "XR-facing bridge for adapter-backed control and Annex-B video relay"
 
 [[bin]]
 name = "xr-bridge"

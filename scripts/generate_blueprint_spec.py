@@ -421,6 +421,7 @@ def python_source(spec: dict, digest: str) -> str:
     return (
         '"""Generated from specs/blueprint/v1.json. Do not edit."""\n\n'
         f'SPEC_SHA256 = "{digest}"\n'
+        f'SPEC_VERSION = {spec["version"]}\n'
         f"SPEC = {rendered}\n"
         'WIRE = SPEC["wire"]\n'
         f'SPEC_CAPABILITY = WIRE["capability"] + "@sha256:{digest}"\n'
@@ -456,6 +457,7 @@ def rust_source(spec: dict, digest: str) -> str:
     spec_json = json.dumps(spec, separators=(",", ":"), ensure_ascii=True)
     return f'''//! Generated from specs/blueprint/v1.json. Do not edit.\n\n\
 pub const SPEC_SHA256: &str = "{digest}";\n\
+pub const SPEC_VERSION: u32 = {spec["version"]};\n\
 pub const BLUEPRINT_SCHEMA: &str = {json.dumps(wire["blueprint_schema"])};\n\
 pub const BLUEPRINT_STATE_SCHEMA: &str = {json.dumps(wire["state_schema"])};\n\
 pub const BLUEPRINT_EVENT_SCHEMA: &str = {json.dumps(wire["event_schema"])};\n\
@@ -517,6 +519,7 @@ def godot_source(spec: dict, digest: str) -> str:
 extends RefCounted\n\n\
 ## Generated from specs/blueprint/v1.json. Do not edit.\n\
 const SPEC_SHA256 := "{digest}"\n\
+const SPEC_VERSION := {spec["version"]}\n\
 const BLUEPRINT_SCHEMA := {json.dumps(wire["blueprint_schema"])}\n\
 const STATE_SCHEMA := {json.dumps(wire["state_schema"])}\n\
 const EVENT_SCHEMA := {json.dumps(wire["event_schema"])}\n\

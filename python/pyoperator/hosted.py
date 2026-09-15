@@ -11,9 +11,17 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
 
-from ._blueprint_spec import SPEC_SHA256, WIRE
+from ._blueprint_spec import WIRE
 from .blueprint import BlueprintClient
 from .robot import Robot, RobotCommand
+
+try:
+    from ._native import NativeBlueprintPublisher as _NativeBlueprintPublisher
+except ImportError as error:
+    _NativeBlueprintPublisher = None
+    _native_import_error = error
+else:
+    _native_import_error = None
 
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 
@@ -69,13 +77,19 @@ def _signal_blueprint_update(queue: asyncio.Queue[None]) -> None:
 
 class _HostedBlueprintBackend:
     def __init__(self) -> None:
+        if _NativeBlueprintPublisher is None:
+            raise RuntimeError(
+                "pyoperator native extension is not installed; run "
+                "`pip install -e ./python` from the Operator repository"
+            ) from _native_import_error
+        self._native = _NativeBlueprintPublisher()
         self._lock = threading.Lock()
         self._event_ready = threading.Condition(self._lock)
         self._running = True
         self._blueprint_version = 0
-        self._blueprint: dict[str, Any] | None = None
+        self._has_blueprint = False
         self._state_version = 0
-        self._state: dict[str, Any] | None = None
+        self._has_state = False
         self._events: deque[str] = deque(maxlen=256)
         self._next_subscriber = 1
         self._subscribers: dict[
@@ -87,15 +101,16 @@ class _HostedBlueprintBackend:
             return self._running
 
     def blueprint_spec_sha256(self) -> str:
-        return SPEC_SHA256
+        return str(self._native.blueprint_spec_sha256())
+
+    def blueprint_spec_version(self) -> int:
+        return int(self._native.blueprint_spec_version())
 
     def set_blueprint_json(self, payload: str) -> None:
-        blueprint = json.loads(payload)
-        if not isinstance(blueprint, dict):
-            raise ValueError("Blueprint must be a JSON object")
         with self._lock:
-            self._blueprint = blueprint
-            self._state = None
+            self._native.set_blueprint_json(payload)
+            self._has_blueprint = True
+            self._has_state = False
             self._events.clear()
             self._blueprint_version += 1
             self._state_version += 1
@@ -103,21 +118,30 @@ class _HostedBlueprintBackend:
 
     def clear_blueprint(self) -> None:
         with self._lock:
-            self._blueprint = None
-            self._state = None
+            self._native.clear_blueprint()
+            self._has_blueprint = False
+            self._has_state = False
             self._blueprint_version += 1
             self._state_version += 1
             self._events.clear()
             self._notify_subscribers_locked()
 
     def publish_blueprint_state_json(self, payload: str) -> None:
-        state = json.loads(payload)
-        if not isinstance(state, dict):
-            raise ValueError("BlueprintState must be a JSON object")
         with self._lock:
-            self._state = state
+            self._native.publish_blueprint_state_json(payload)
+            self._has_state = True
             self._state_version += 1
             self._notify_subscribers_locked()
+
+    def update_blueprint_values_json(self, payload: str, timestamp_ns: int) -> int:
+        with self._lock:
+            sequence = int(
+                self._native.update_blueprint_values_json(payload, timestamp_ns)
+            )
+            self._has_state = True
+            self._state_version += 1
+            self._notify_subscribers_locked()
+            return sequence
 
     def poll_blueprint_event_json(self, timeout: float | None) -> str | None:
         if timeout is not None and (timeout < 0.0 or not float(timeout) < float("inf")):
@@ -132,11 +156,15 @@ class _HostedBlueprintBackend:
             return self._events.popleft() if self._events else None
 
     def push_event(self, event: Mapping[str, Any]) -> None:
-        payload = json.dumps(dict(event), separators=(",", ":"))
+        message = json.dumps(
+            {"type": WIRE["commands"]["event"], "event": dict(event)},
+            separators=(",", ":"),
+            allow_nan=False,
+        )
         with self._event_ready:
             if not self._running:
                 return
-            self._events.append(payload)
+            self._events.append(self._native.parse_event_message_json(message))
             self._event_ready.notify()
 
     def subscribe(self) -> tuple[int, asyncio.Queue[None]]:
@@ -157,13 +185,29 @@ class _HostedBlueprintBackend:
         self,
     ) -> tuple[int, dict[str, Any] | None, int, dict[str, Any] | None, bool]:
         with self._lock:
+            blueprint = None
+            state = None
+            if self._has_blueprint:
+                message = json.loads(self._native.definition_message_json())
+                blueprint = message["blueprint"]
+            if self._has_state:
+                message = json.loads(self._native.state_message_json())
+                state = message["state"]
             return (
                 self._blueprint_version,
-                self._blueprint,
+                blueprint,
                 self._state_version,
-                self._state,
+                state,
                 self._running,
             )
+
+    def descriptor_message(self, descriptor: Mapping[str, Any]) -> dict[str, Any]:
+        payload = json.dumps(dict(descriptor), separators=(",", ":"), allow_nan=False)
+        with self._lock:
+            message = json.loads(self._native.descriptor_message_json(payload))
+        if not isinstance(message, dict):
+            raise RuntimeError("Rust Operator SDK returned a non-object descriptor")
+        return message
 
     def close(self) -> None:
         with self._event_ready:
@@ -203,6 +247,9 @@ class HostedBlueprint(BlueprintClient):
     def _push_event(self, event: Mapping[str, Any]) -> None:
         self._hosted_backend.push_event(event)
 
+    def _descriptor_message(self, descriptor: Mapping[str, Any]) -> dict[str, Any]:
+        return self._hosted_backend.descriptor_message(descriptor)
+
 
 def make_descriptor(
     *,
@@ -229,17 +276,11 @@ def make_descriptor(
     }
 
 
-def _descriptor_for_client(
-    descriptor: Mapping[str, Any], *, blueprint_enabled: bool
-) -> dict[str, Any]:
+def _descriptor_without_blueprint(descriptor: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(descriptor)
     capabilities = dict(result.get("capabilities", {}))
-    if blueprint_enabled:
-        capabilities[WIRE["capability"]] = True
-        capabilities[WIRE["spec_hash_capability"]] = SPEC_SHA256
-    else:
-        capabilities.pop(WIRE["capability"], None)
-        capabilities.pop(WIRE["spec_hash_capability"], None)
+    capabilities.pop(WIRE["capability"], None)
+    capabilities.pop(WIRE["spec_hash_capability"], None)
     result["capabilities"] = capabilities
     return result
 
@@ -331,11 +372,14 @@ async def _client(
         hello = await _read_frame(reader)
         if hello is None or hello.get("type") != "Hello":
             raise ValueError("expected adapter Hello")
-        advertised_descriptor = _descriptor_for_client(
-            descriptor,
-            blueprint_enabled=blueprint is not None,
-        )
-        await _write_frame(writer, lock, {"type": "Descriptor", **advertised_descriptor})
+        if blueprint is None:
+            advertised_descriptor = {
+                "type": "Descriptor",
+                **_descriptor_without_blueprint(descriptor),
+            }
+        else:
+            advertised_descriptor = blueprint._descriptor_message(descriptor)
+        await _write_frame(writer, lock, advertised_descriptor)
         if blueprint is not None:
             blueprint_task = asyncio.create_task(
                 _blueprint_loop(writer, lock, blueprint),

@@ -179,7 +179,7 @@ async fn run_sdk_mode_inner(
         );
     }
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
-    let video_feeds = video_feed_relays(&config.video.feeds);
+    let video_feeds = video_feed_relays(&config.video.feeds)?;
     log_video_feeds(&video_feeds);
 
     let device_type = descriptor.device.device_type.clone();

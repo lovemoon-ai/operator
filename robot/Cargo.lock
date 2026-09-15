@@ -592,6 +592,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "operator"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "teleop-protocol",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "operator-c"
+version = "0.1.0"
+dependencies = [
+ "operator",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -724,6 +741,7 @@ dependencies = [
 name = "pyoperator-native"
 version = "0.1.0"
 dependencies = [
+ "operator",
  "pyo3",
  "serde_json",
  "teleop-protocol",

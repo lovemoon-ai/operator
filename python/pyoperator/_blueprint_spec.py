@@ -1,6 +1,7 @@
 """Generated from specs/blueprint/v1.json. Do not edit."""
 
 SPEC_SHA256 = "a69dce013dd149209be713bf3a063d75347e22777a0ffd51fc5704eae9c943b0"
+SPEC_VERSION = 1
 SPEC = {'schema': 'operator.blueprint_primitive_spec.v1',
  'version': 1,
  'wire': {'capability': 'blueprint_v1',

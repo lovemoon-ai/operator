@@ -124,6 +124,7 @@ var _submitted_video_packets: Array[Dictionary] = []
 ## park a placeholder quad in front of the operator before they've connected
 ## to anything.
 @export var show_video_panel: bool = false
+@export var panel_distance_locked: bool = true
 
 var _xr_camera: XRCamera3D = null
 var _default_panel_distance := DEFAULT_PANEL_DISTANCE
@@ -179,7 +180,11 @@ func _ensure_panel_sidecar() -> void:
 	_panel_sidecar.name = "VideoPanelSidecar"
 	if _panel_sidecar.has_signal("reset_requested"):
 		_panel_sidecar.connect("reset_requested", reset_panel_position)
+	if _panel_sidecar.has_signal("distance_lock_changed"):
+		_panel_sidecar.connect("distance_lock_changed", set_panel_distance_locked)
 	add_child(_panel_sidecar)
+	if _panel_sidecar.has_method("set_distance_locked"):
+		_panel_sidecar.call("set_distance_locked", panel_distance_locked)
 	_sync_sidecar_transform()
 
 
@@ -257,6 +262,10 @@ func captures_teleop_input() -> bool:
 	return true
 
 
+func captures_teleop_scroll() -> bool:
+	return not panel_distance_locked
+
+
 ## The video panel is a passive display: set_pointer_pressed() is a no-op and
 ## the only input it consumes is the scroll axis used to adjust its distance.
 ## Reporting press capture here would zero every controller key -- the grip
@@ -315,10 +324,20 @@ func scroll_by_pixels(delta_pixels: float) -> void:
 
 
 func adjust_panel_distance_from_scroll(delta_pixels: float) -> void:
-	if absf(delta_pixels) < 0.001:
+	if panel_distance_locked or absf(delta_pixels) < 0.001:
 		return
 	var current_distance := _current_panel_distance()
-	set_panel_distance(current_distance + delta_pixels * DISTANCE_METERS_PER_SCROLL_PIXEL)
+	set_panel_distance(current_distance - delta_pixels * DISTANCE_METERS_PER_SCROLL_PIXEL)
+
+
+func set_panel_distance_locked(locked: bool) -> void:
+	panel_distance_locked = locked
+	if _panel_sidecar != null and _panel_sidecar.has_method("set_distance_locked"):
+		_panel_sidecar.call("set_distance_locked", locked)
+
+
+func is_panel_distance_locked() -> bool:
+	return panel_distance_locked
 
 
 func set_panel_distance(distance_m: float) -> void:

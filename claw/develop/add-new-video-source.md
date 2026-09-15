@@ -36,9 +36,26 @@ Robot-side producers:
 
 3. Add or configure the `xr-bridge` video source.
 
-   Keep source-specific capture in `robot/crates/xr-bridge/src/video/`. The
-   bridge should attach timing metadata and publish the same timed packet
-   format as existing sources.
+   Use `rtsp_url` for an RTSP stream. For robot-specific capture, use a trusted
+   local `command` whose stdout is an Annex-B stream:
+
+   ```yaml
+   video:
+     feeds:
+       - name: main
+         command: [/opt/operator/camera-source, --fps, "30"]
+         tcp_port: 12345
+         udp_port: 12345
+         width: 640
+         height: 480
+         fps: 30
+         transport: auto
+         codec: h264
+   ```
+
+   Configure exactly one of `rtsp_url` or `command`. Commands are executed
+   directly without a shell and are supervised with reconnect backoff. Keep
+   source-specific capture beside its robot example unless it is reusable.
 
 4. Update the device descriptor.
 

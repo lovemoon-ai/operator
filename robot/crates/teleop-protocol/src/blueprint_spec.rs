@@ -1,6 +1,7 @@
 //! Generated from specs/blueprint/v1.json. Do not edit.
 
 pub const SPEC_SHA256: &str = "a69dce013dd149209be713bf3a063d75347e22777a0ffd51fc5704eae9c943b0";
+pub const SPEC_VERSION: u32 = 1;
 pub const BLUEPRINT_SCHEMA: &str = "operator.blueprint.v1";
 pub const BLUEPRINT_STATE_SCHEMA: &str = "operator.blueprint_state.v1";
 pub const BLUEPRINT_EVENT_SCHEMA: &str = "operator.blueprint_event.v1";

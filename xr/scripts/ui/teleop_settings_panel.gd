@@ -2,6 +2,7 @@ extends "res://scripts/ui/two_column_settings_panel.gd"
 class_name TeleopSettingsPanel
 
 signal settings_applied(options: Dictionary)
+signal disconnect_requested
 signal close_requested
 signal pico_body_calibration_requested
 signal video_connect_requested(options: Dictionary)
@@ -78,11 +79,6 @@ class DiscoverySpinner:
 		draw_arc(center, radius, 0.0, PI * 2.0, 40, base_color, 3.0, true)
 		draw_arc(center, radius, _angle, _angle + PI * 1.45, 28, accent_color, 3.4, true)
 
-const IP_TEST_TIMEOUT_MSEC := 2000
-const IP_TEST_RESULT_SECS := 3.0
-const COL_IP_TEST_OK := Color(0.14, 0.82, 0.45)
-const COL_IP_TEST_FAIL := Color(1.0, 0.36, 0.30)
-
 ## Time between two trigger presses inside the IP field that counts as a
 ## double-click and enters edit mode. Longer than a mouse double-click because
 ## an XR trigger is coarser than a mouse button and users pump it slower.
@@ -109,10 +105,7 @@ var _retargeting_port_input: LineEdit
 var _retargeting_tls_toggle: CheckButton
 var _retargeting_status_label: Label
 var _ip_input: LineEdit
-var _ip_test_button: Button
-var _ip_test_peer: StreamPeerTCP
-var _ip_test_deadline_msec := 0
-var _ip_test_token := 0
+var _connect_button: Button
 ## Inline list of discovered hosts, expanded under the IP row on single-click.
 ## A VBoxContainer of Buttons rather than a PopupMenu so it renders reliably
 ## inside CompositionViewportUI's SubViewport (see `_add_choice_button`).
@@ -128,6 +121,7 @@ var _ip_click_timer: Timer
 ## handler can resolve an item id back to a `_discovered` endpoint id.
 var _ip_dropdown_endpoint_ids: PackedStringArray = PackedStringArray()
 var _port_input: LineEdit
+var _disconnect_button: Button
 var _xrobot_toolkit_device_sn_input: LineEdit
 var _pico_body_calibration_button: Button
 var _video_protocol_row: HBoxContainer
@@ -292,13 +286,18 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_ip_input.focus_exited.connect(_on_ip_input_focus_exited)
 	add_interactive(ip_row, _ip_input)
 
-	_ip_test_button = Button.new()
-	_ip_test_button.text = tr("UI_TEST_IP")
-	_ip_test_button.focus_mode = Control.FOCUS_NONE
-	_ip_test_button.custom_minimum_size = Vector2(96, 55)
-	_ip_test_button.add_theme_font_size_override("font_size", 21)
-	_ip_test_button.pressed.connect(_on_ip_test_pressed)
-	ip_row.add_child(_ip_test_button)
+	_connect_button = Button.new()
+	_connect_button.text = tr("UI_CONNECT")
+	_connect_button.focus_mode = Control.FOCUS_NONE
+	_connect_button.custom_minimum_size = Vector2(112, 55)
+	_connect_button.add_theme_font_size_override("font_size", 21)
+	_connect_button.pressed.connect(_on_confirm_requested)
+	ip_row.add_child(_connect_button)
+
+	var port_row := HBoxContainer.new()
+	port_row.add_theme_constant_override("separation", 10)
+	port_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	connection.add_child(port_row)
 
 	# Hint under the IP row. Empty-discovery state prompts the operator to
 	# double-click; a non-empty state advertises how many hosts are on offer.
@@ -338,7 +337,15 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_port_input.custom_minimum_size.y = 55
 	_port_input.add_theme_font_size_override("font_size", 21)
 	_port_input.text_changed.connect(_on_manual_endpoint_changed)
-	add_interactive(connection, _port_input)
+	add_interactive(port_row, _port_input)
+
+	_disconnect_button = Button.new()
+	_disconnect_button.text = tr("UI_DISCONNECT")
+	_disconnect_button.focus_mode = Control.FOCUS_NONE
+	_disconnect_button.custom_minimum_size = Vector2(112, 55)
+	_disconnect_button.add_theme_font_size_override("font_size", 21)
+	_disconnect_button.pressed.connect(_on_disconnect_pressed)
+	port_row.add_child(_disconnect_button)
 
 	_xrobot_toolkit_device_sn_input = LineEdit.new()
 	_xrobot_toolkit_device_sn_input.placeholder_text = tr("UI_XROBOT_TOOLKIT_DEVICE_SN")
@@ -684,6 +691,11 @@ func _on_confirm_requested() -> void:
 	settings_applied.emit(options)
 
 
+func _on_disconnect_pressed() -> void:
+	_play_ui_sound("click")
+	disconnect_requested.emit()
+
+
 func set_discovery_state(
 	known_robots: Dictionary,
 	prefer_ip: String = "",
@@ -1015,84 +1027,6 @@ func _refresh_ip_hint(force_empty_prompt: bool = false) -> void:
 		_ip_hint_label.text = tr("UI_IP_HINT_TAP_TO_PICK") % count
 	else:
 		_ip_hint_label.text = tr("UI_IP_HINT_DOUBLE_CLICK_TO_EDIT")
-
-
-# --- IP reachability test ----------------------------------------------------
-#
-# One-shot TCP probe of the current ip:port. The command server accepts
-# multiple connections (one task per client), so probing never disturbs an
-# active teleop session. Result (✓/✗) shows for IP_TEST_RESULT_SECS, then the
-# button reverts to its label.
-
-func _process(delta: float) -> void:
-	super._process(delta)
-	_poll_ip_test()
-
-
-func _exit_tree() -> void:
-	# Scene teardown (e.g. Exit → change_scene) can land here mid-probe. The
-	# RefCounted peer would close on free anyway, but drop it explicitly so we
-	# never depend on GC timing for the socket.
-	if _ip_test_peer != null:
-		_ip_test_peer.disconnect_from_host()
-		_ip_test_peer = null
-
-
-func _on_ip_test_pressed() -> void:
-	if _ip_test_peer != null:
-		return  # probe already in flight
-	_ip_test_token += 1
-	var ip := _ip_input.text.strip_edges()
-	var port := _port_input.text.strip_edges().to_int()
-	if ip.is_empty() or port <= 0 or port > 65535:
-		_show_ip_test_result(false)
-		return
-	var peer := StreamPeerTCP.new()
-	if peer.connect_to_host(ip, port) != OK:
-		_show_ip_test_result(false)
-		return
-	_ip_test_peer = peer
-	_ip_test_deadline_msec = Time.get_ticks_msec() + IP_TEST_TIMEOUT_MSEC
-	_ip_test_button.text = "…"
-
-
-func _poll_ip_test() -> void:
-	if _ip_test_peer == null:
-		return
-	_ip_test_peer.poll()
-	var status := _ip_test_peer.get_status()
-	if status == StreamPeerTCP.STATUS_CONNECTED:
-		_finish_ip_test(true)
-	elif status == StreamPeerTCP.STATUS_ERROR \
-			or Time.get_ticks_msec() >= _ip_test_deadline_msec:
-		_finish_ip_test(false)
-
-
-func _finish_ip_test(reachable: bool) -> void:
-	if _ip_test_peer != null:
-		_ip_test_peer.disconnect_from_host()
-		_ip_test_peer = null
-	_show_ip_test_result(reachable)
-
-
-func _show_ip_test_result(reachable: bool) -> void:
-	_ip_test_token += 1
-	var token := _ip_test_token
-	var color := COL_IP_TEST_OK if reachable else COL_IP_TEST_FAIL
-	_ip_test_button.text = "✓" if reachable else "✗"
-	for theme_key in ["font_color", "font_hover_color", "font_pressed_color"]:
-		_ip_test_button.add_theme_color_override(theme_key, color)
-	get_tree().create_timer(IP_TEST_RESULT_SECS).timeout.connect(func() -> void:
-		# A newer press/result owns the button now; leave it alone.
-		if token == _ip_test_token:
-			_reset_ip_test_button()
-	)
-
-
-func _reset_ip_test_button() -> void:
-	_ip_test_button.text = tr("UI_TEST_IP")
-	for theme_key in ["font_color", "font_hover_color", "font_pressed_color"]:
-		_ip_test_button.remove_theme_color_override(theme_key)
 
 
 func _format_robot_label(rname: String, info: Dictionary) -> String:
