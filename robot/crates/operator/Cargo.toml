@@ -1,0 +1,11 @@
+[package]
+name = "operator"
+version = "0.1.0"
+edition = "2021"
+description = "Shared multi-language Operator SDK core"
+
+[dependencies]
+teleop-protocol = { path = "../teleop-protocol" }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["sync"] }

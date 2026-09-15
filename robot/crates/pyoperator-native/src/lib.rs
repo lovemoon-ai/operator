@@ -8,13 +8,86 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use teleop_protocol::{Blueprint, BlueprintEvent, BlueprintState, XrStateFrame, SPEC_SHA256};
+use operator::BlueprintPublisher;
+use teleop_protocol::{Blueprint, BlueprintEvent, BlueprintState, XrStateFrame};
 use xr_bridge::config::BridgeConfig;
 use xr_bridge::sdk::{
     run_sdk_mode_with_startup_and_blueprint, state_channel, BlueprintStreams, XrStateStats,
 };
 
 const MAX_PENDING_BLUEPRINT_EVENTS: usize = 256;
+
+#[pyclass]
+struct NativeBlueprintPublisher {
+    publisher: BlueprintPublisher,
+}
+
+#[pymethods]
+impl NativeBlueprintPublisher {
+    #[new]
+    fn new() -> Self {
+        Self {
+            publisher: BlueprintPublisher::new(),
+        }
+    }
+
+    fn blueprint_spec_sha256(&self) -> &'static str {
+        operator::SPEC_SHA256
+    }
+
+    fn blueprint_spec_version(&self) -> u32 {
+        operator::SPEC_VERSION
+    }
+
+    fn set_blueprint_json(&self, payload: &str) -> PyResult<()> {
+        self.publisher
+            .set_blueprint_json(payload)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn clear_blueprint(&self) -> PyResult<()> {
+        self.publisher
+            .clear()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn publish_blueprint_state_json(&self, payload: &str) -> PyResult<()> {
+        self.publisher
+            .publish_state_json(payload)
+            .map(|_| ())
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn update_blueprint_values_json(&self, payload: &str, timestamp_ns: u64) -> PyResult<u64> {
+        self.publisher
+            .update_values_json(payload, timestamp_ns)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn definition_message_json(&self) -> PyResult<String> {
+        self.publisher
+            .definition_message_json()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn state_message_json(&self) -> PyResult<String> {
+        self.publisher
+            .state_message_json()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+    }
+
+    fn descriptor_message_json(&self, payload: &str) -> PyResult<String> {
+        self.publisher
+            .descriptor_message_json(payload)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn parse_event_message_json(&self, payload: &str) -> PyResult<String> {
+        self.publisher
+            .parse_event_message_json(payload)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
 
 #[derive(Default)]
 struct LatestState {
@@ -36,14 +109,46 @@ struct SharedState {
 struct BlueprintEventState {
     events: VecDeque<BlueprintEvent>,
     running: bool,
+    active_blueprint: Option<BlueprintTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlueprintTarget {
+    blueprint_id: String,
+    blueprint_revision: u64,
+}
+
+impl BlueprintEventState {
+    fn replace_blueprint(&mut self, blueprint: Option<&Blueprint>) {
+        self.events.clear();
+        self.active_blueprint = blueprint.map(|blueprint| BlueprintTarget {
+            blueprint_id: blueprint.blueprint_id.clone(),
+            blueprint_revision: blueprint.revision,
+        });
+    }
+
+    fn push_if_current(&mut self, event: BlueprintEvent) -> bool {
+        let Some(active) = &self.active_blueprint else {
+            return false;
+        };
+        if event.blueprint_id != active.blueprint_id
+            || event.blueprint_revision != active.blueprint_revision
+        {
+            return false;
+        }
+        if self.events.len() >= MAX_PENDING_BLUEPRINT_EVENTS {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+        true
+    }
 }
 
 #[pyclass]
 struct NativeSession {
     config: BridgeConfig,
     shared: Arc<SharedState>,
-    blueprint_tx: watch::Sender<Option<Arc<Blueprint>>>,
-    blueprint_state_tx: watch::Sender<Option<Arc<BlueprintState>>>,
+    blueprint: Arc<BlueprintPublisher>,
     shutdown: Mutex<Option<watch::Sender<bool>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -84,13 +189,10 @@ impl NativeSession {
             discovery_unicast_targets: targets,
             ..BridgeConfig::default()
         };
-        let (blueprint_tx, _) = watch::channel(None);
-        let (blueprint_state_tx, _) = watch::channel(None);
         Ok(Self {
             config,
             shared: Arc::new(SharedState::default()),
-            blueprint_tx,
-            blueprint_state_tx,
+            blueprint: Arc::new(BlueprintPublisher::new()),
             shutdown: Mutex::new(None),
             thread: Mutex::new(None),
         })
@@ -113,8 +215,8 @@ impl NativeSession {
 
         let config = self.config.clone();
         let shared = self.shared.clone();
-        let blueprint_rx = self.blueprint_tx.subscribe();
-        let blueprint_state_rx = self.blueprint_state_tx.subscribe();
+        let blueprint_rx = self.blueprint.blueprint_receiver();
+        let blueprint_state_rx = self.blueprint.state_receiver();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let mut shutdown_slot = self
             .shutdown
@@ -204,7 +306,11 @@ impl NativeSession {
     }
 
     fn blueprint_spec_sha256(&self) -> &'static str {
-        SPEC_SHA256
+        operator::SPEC_SHA256
+    }
+
+    fn blueprint_spec_version(&self) -> u32 {
+        operator::SPEC_VERSION
     }
 
     fn latest_json(&self) -> PyResult<Option<String>> {
@@ -240,37 +346,47 @@ impl NativeSession {
     }
 
     fn set_blueprint_json(&self, payload: &str) -> PyResult<()> {
-        let blueprint: Blueprint = serde_json::from_str(payload)
-            .map_err(|error| PyValueError::new_err(format!("invalid Blueprint JSON: {error}")))?;
-        blueprint
-            .validate()
-            .map_err(|error| PyValueError::new_err(format!("invalid Blueprint: {error}")))?;
-        clear_pending_blueprint_events(&self.shared)?;
-        self.blueprint_state_tx.send_replace(None);
-        self.blueprint_tx.send_replace(Some(Arc::new(blueprint)));
+        let mut events = self
+            .shared
+            .blueprint_events
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("native blueprint event lock poisoned"))?;
+        self.blueprint
+            .set_blueprint_json(payload)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let blueprint = self
+            .blueprint
+            .active_blueprint()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
+            .ok_or_else(|| PyRuntimeError::new_err("Blueprint disappeared after publication"))?;
+        events.replace_blueprint(Some(blueprint.as_ref()));
         Ok(())
     }
 
     fn clear_blueprint(&self) -> PyResult<()> {
-        clear_pending_blueprint_events(&self.shared)?;
-        self.blueprint_tx.send_replace(None);
-        self.blueprint_state_tx.send_replace(None);
+        let mut events = self
+            .shared
+            .blueprint_events
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("native blueprint event lock poisoned"))?;
+        self.blueprint
+            .clear()
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        events.replace_blueprint(None);
         Ok(())
     }
 
     fn publish_blueprint_state_json(&self, payload: &str) -> PyResult<()> {
-        let state: BlueprintState = serde_json::from_str(payload).map_err(|error| {
-            PyValueError::new_err(format!("invalid BlueprintState JSON: {error}"))
-        })?;
-        let active_blueprint =
-            self.blueprint_tx.borrow().clone().ok_or_else(|| {
-                PyValueError::new_err("invalid BlueprintState: no active Blueprint")
-            })?;
-        active_blueprint
-            .validate_state(&state)
-            .map_err(|error| PyValueError::new_err(format!("invalid BlueprintState: {error}")))?;
-        self.blueprint_state_tx.send_replace(Some(Arc::new(state)));
-        Ok(())
+        self.blueprint
+            .publish_state_json(payload)
+            .map(|_| ())
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn update_blueprint_values_json(&self, payload: &str, timestamp_ns: u64) -> PyResult<u64> {
+        self.blueprint
+            .update_values_json(payload, timestamp_ns)
+            .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
     #[pyo3(signature = (timeout_seconds = None))]
@@ -333,16 +449,6 @@ impl NativeSession {
         serde_json::to_string(&value)
             .map_err(|error| PyRuntimeError::new_err(format!("serializing stats: {error}")))
     }
-}
-
-fn clear_pending_blueprint_events(shared: &SharedState) -> PyResult<()> {
-    shared
-        .blueprint_events
-        .lock()
-        .map_err(|_| PyRuntimeError::new_err("native blueprint event lock poisoned"))?
-        .events
-        .clear();
-    Ok(())
 }
 
 impl Drop for NativeSession {
@@ -411,11 +517,9 @@ fn run_background(
                         continue;
                     };
                     if let Ok(mut state) = shared.blueprint_events.lock() {
-                        if state.events.len() >= MAX_PENDING_BLUEPRINT_EVENTS {
-                            state.events.pop_front();
+                        if state.push_if_current(event) {
+                            shared.blueprint_event_changed.notify_all();
                         }
-                        state.events.push_back(event);
-                        shared.blueprint_event_changed.notify_all();
                     }
                 }
                 changed = frame_rx.changed() => {
@@ -550,9 +654,53 @@ fn serialize_frame(frame: &Arc<XrStateFrame>) -> PyResult<String> {
         .map_err(|error| PyRuntimeError::new_err(format!("serializing XR state: {error}")))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(blueprint_id: &str, blueprint_revision: u64) -> BlueprintEvent {
+        BlueprintEvent {
+            schema: teleop_protocol::BLUEPRINT_EVENT_SCHEMA.to_string(),
+            blueprint_id: blueprint_id.to_string(),
+            blueprint_revision,
+            sequence: 1,
+            timestamp_ns: 1,
+            component_id: "control".to_string(),
+            action: "toggle".to_string(),
+            value: serde_json::Value::Bool(true),
+        }
+    }
+
+    #[test]
+    fn blueprint_event_state_drops_events_from_replaced_blueprints() {
+        let old = Blueprint {
+            schema: teleop_protocol::BLUEPRINT_SCHEMA.to_string(),
+            blueprint_id: "old".to_string(),
+            revision: 1,
+            components: Vec::new(),
+        };
+        let new = Blueprint {
+            schema: teleop_protocol::BLUEPRINT_SCHEMA.to_string(),
+            blueprint_id: "new".to_string(),
+            revision: 1,
+            components: Vec::new(),
+        };
+        let mut state = BlueprintEventState::default();
+        state.replace_blueprint(Some(&old));
+        assert!(state.push_if_current(event("old", 1)));
+        state.replace_blueprint(Some(&new));
+        assert!(state.events.is_empty());
+        assert!(!state.push_if_current(event("old", 1)));
+        assert!(state.push_if_current(event("new", 1)));
+    }
+}
+
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<NativeBlueprintPublisher>()?;
     module.add_class::<NativeSession>()?;
+    module.add("BLUEPRINT_SPEC_SHA256", operator::SPEC_SHA256)?;
+    module.add("BLUEPRINT_SPEC_VERSION", operator::SPEC_VERSION)?;
     module.add(
         "XR_STATE_SCHEMA_VERSION",
         teleop_protocol::XR_STATE_SCHEMA_VERSION,

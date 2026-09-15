@@ -1,0 +1,12 @@
+[package]
+name = "operator-c"
+version = "0.1.0"
+edition = "2021"
+description = "Stable C ABI for the Operator SDK"
+
+[lib]
+name = "operator"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+operator-core = { package = "operator", path = "../operator" }

@@ -3,6 +3,7 @@ extends RefCounted
 
 ## Generated from specs/blueprint/v1.json. Do not edit.
 const SPEC_SHA256 := "a69dce013dd149209be713bf3a063d75347e22777a0ffd51fc5704eae9c943b0"
+const SPEC_VERSION := 1
 const BLUEPRINT_SCHEMA := "operator.blueprint.v1"
 const STATE_SCHEMA := "operator.blueprint_state.v1"
 const EVENT_SCHEMA := "operator.blueprint_event.v1"

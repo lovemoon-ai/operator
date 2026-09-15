@@ -62,6 +62,7 @@ const NODE_IMPLEMENTATIONS := {
 	},
 }
 const EVENT_IMPLEMENTATIONS := ["action"]
+const RUNTIME_REVISION := 2
 
 var _origin: XROrigin3D
 var _camera: XRCamera3D
@@ -100,7 +101,9 @@ func configure(
 	_left_controller = left_controller
 	_right_controller = right_controller
 	_tracking_provider = tracking_provider
-	_external_view_implementations = external_view_implementations.duplicate()
+	_external_view_implementations.clear()
+	for implementation in external_view_implementations:
+		_external_view_implementations.append(str(implementation))
 
 
 func apply_blueprint(blueprint: Dictionary) -> bool:
@@ -155,8 +158,9 @@ func apply_blueprint(blueprint: Dictionary) -> bool:
 	_refresh_components()
 	_refresh_dynamic_processing()
 	print(
-		"[Blueprint] Applied id=%s revision=%d declared=%d created=%d overrides=%s suspended=%s"
+		"[Blueprint] Applied runtime=%d id=%s revision=%d declared=%d created=%d overrides=%s suspended=%s"
 		% [
+			RUNTIME_REVISION,
 			_blueprint_id,
 			_blueprint_revision,
 			_blueprint_components.size(),
@@ -406,6 +410,7 @@ func _create_status_lamp(spec: Dictionary, entry: Dictionary) -> Node3D:
 	label.font_size = int(properties["font_size"])
 	label.pixel_size = float(properties["pixel_size"])
 	label.no_depth_test = true
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	root.add_child(label)
 	entry["material"] = material
 	entry["label"] = label
@@ -666,10 +671,10 @@ static func _parse_transform(value: Variant) -> Transform3D:
 	if not value is Dictionary:
 		return Transform3D.IDENTITY
 	var data := value as Dictionary
-	var transform_spec := BlueprintPrimitiveSpec.TRANSFORM
-	var position_default := (transform_spec["position"] as Dictionary)["default"]
-	var rotation_default := (transform_spec["rotation"] as Dictionary)["default"]
-	var scale_default := (transform_spec["scale"] as Dictionary)["default"]
+	var transform_spec: Dictionary = BlueprintPrimitiveSpec.TRANSFORM
+	var position_default: Variant = (transform_spec["position"] as Dictionary)["default"]
+	var rotation_default: Variant = (transform_spec["rotation"] as Dictionary)["default"]
+	var scale_default: Variant = (transform_spec["scale"] as Dictionary)["default"]
 	var position := _vector3(data.get("position", position_default), Vector3.ZERO)
 	var rotation_values: Variant = data.get("rotation", rotation_default)
 	var rotation := Quaternion.IDENTITY

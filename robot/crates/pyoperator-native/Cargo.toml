@@ -9,6 +9,7 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
+operator = { path = "../operator" }
 xr-bridge = { path = "../xr-bridge" }
 teleop-protocol = { path = "../teleop-protocol" }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }

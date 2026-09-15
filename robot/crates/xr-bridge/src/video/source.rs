@@ -1,10 +1,8 @@
 //! Video sources that feed relayed H.264 NALs into a feed's broadcast channel.
 //!
-//! The relay swaps the legacy "camera capture + encode" producer for "pull an
-//! RTSP stream Isaac already encoded". [`RtspSource`] does that via an ffmpeg
-//! subprocess (stream-copy, no transcode). A thin [`VideoSource`] trait leaves
-//! a seam for a future pure-Rust impl (e.g. `retina`) without touching the
-//! fan-out or supervisor.
+//! [`RtspSource`] pulls an encoded stream through ffmpeg without transcoding.
+//! [`AnnexBCommandSource`] runs a trusted local producer for robot-specific
+//! capture paths. Both feed the same parser, cache, and network fan-out.
 
 use std::time::Duration;
 
@@ -97,6 +95,24 @@ impl VideoSource for RtspSource {
     }
 }
 
+/// Runs a trusted local process that writes Annex-B H.264/H.265 to stdout.
+pub struct AnnexBCommandSource {
+    pub command: Vec<String>,
+}
+
+impl AnnexBCommandSource {
+    pub fn new(command: Vec<String>) -> Self {
+        Self { command }
+    }
+}
+
+#[async_trait]
+impl VideoSource for AnnexBCommandSource {
+    async fn run(self: Box<Self>, ctx: SourceCtx) -> Result<()> {
+        run_command_source(self.command, ctx).await
+    }
+}
+
 /// Backoff bounds for the reconnect loop.
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(2);
@@ -120,21 +136,34 @@ pub async fn run_rtsp_source(url: &str, ctx: SourceCtx) -> Result<()> {
 /// tests use this directly with a self-contained `lavfi` input so the live
 /// ffmpeg→relay path is exercised without an external RTSP server.
 pub async fn run_ffmpeg_source(args: Vec<String>, ctx: SourceCtx) -> Result<()> {
+    run_process_source("ffmpeg".to_string(), args, ctx).await
+}
+
+/// Supervised ingest loop for a trusted local process that emits an Annex-B
+/// bytestream on stdout.
+pub async fn run_command_source(command: Vec<String>, ctx: SourceCtx) -> Result<()> {
+    let (program, args) = command
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("video command must contain an executable"))?;
+    run_process_source(program.clone(), args.to_vec(), ctx).await
+}
+
+async fn run_process_source(program: String, args: Vec<String>, ctx: SourceCtx) -> Result<()> {
     let mut backoff = BACKOFF_MIN;
     let mut frame_id: u64 = 0;
 
     loop {
-        match ingest_once(&args, &ctx, &mut frame_id).await {
+        match ingest_once(&program, &args, &ctx, &mut frame_id).await {
             Ok(()) => {
                 tracing::warn!(
-                    "[{}] ffmpeg stream ended (stdout EOF); reconnecting in {:?}",
+                    "[{}] video source ended (stdout EOF); reconnecting in {:?}",
                     ctx.name,
                     backoff
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    "[{}] ffmpeg ingest failed: {e}; reconnecting in {:?}",
+                    "[{}] video source failed: {e}; reconnecting in {:?}",
                     ctx.name,
                     backoff
                 );
@@ -146,14 +175,24 @@ pub async fn run_ffmpeg_source(args: Vec<String>, ctx: SourceCtx) -> Result<()> 
     }
 }
 
-/// One ffmpeg lifetime: spawn, read stdout, relay NALs until EOF/exit.
+/// One source-process lifetime: spawn, read stdout, relay NALs until EOF/exit.
 ///
 /// Returns `Ok(())` on a clean stdout EOF (stream gap / Isaac restart) and
-/// `Err` if ffmpeg couldn't be spawned or stdout couldn't be taken.
-async fn ingest_once(args: &[String], ctx: &SourceCtx, frame_id: &mut u64) -> Result<()> {
-    tracing::info!("[{}] Starting ffmpeg: ffmpeg {}", ctx.name, args.join(" "));
+/// `Err` if the process couldn't be spawned or stdout couldn't be taken.
+async fn ingest_once(
+    program: &str,
+    args: &[String],
+    ctx: &SourceCtx,
+    frame_id: &mut u64,
+) -> Result<()> {
+    tracing::info!(
+        "[{}] Starting video source: {} {}",
+        ctx.name,
+        program,
+        args.join(" ")
+    );
 
-    let mut child = Command::new("ffmpeg")
+    let mut child = Command::new(program)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -170,7 +209,7 @@ async fn ingest_once(args: &[String], ctx: &SourceCtx, frame_id: &mut u64) -> Re
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if !line.trim().is_empty() {
-                    tracing::debug!("[{name}] ffmpeg: {line}");
+                    tracing::debug!("[{name}] video source: {line}");
                 }
             }
         });

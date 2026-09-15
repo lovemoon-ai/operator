@@ -493,13 +493,16 @@ func _create_v2_nodes() -> void:
 	add_child(_session)
 	_blueprint_runtime = BlueprintRuntimeScript.new()
 	_blueprint_runtime.name = "BlueprintRuntime"
+	var blueprint_external_views: Array[String] = []
+	for implementation_v in BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS:
+		blueprint_external_views.append(str(implementation_v))
 	_blueprint_runtime.configure(
 		_origin,
 		_camera,
 		_left_controller,
 		_right_controller,
 		_tracking_provider,
-		BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS,
+		blueprint_external_views,
 	)
 	_blueprint_runtime.event_emitted.connect(_on_blueprint_runtime_event)
 	_blueprint_runtime.warning_raised.connect(_on_blueprint_runtime_warning)
@@ -588,6 +591,7 @@ func _create_settings_ui_nodes() -> void:
 	_settings_panel = SettingsUI.new()
 	_settings_panel.name = "TeleopSettingsPanel"
 	_settings_panel.settings_applied.connect(_on_settings_applied)
+	_settings_panel.disconnect_requested.connect(_on_settings_disconnect_requested)
 	_settings_panel.video_connect_requested.connect(_on_video_connect_requested)
 	_settings_panel.pico_body_calibration_requested.connect(
 		_on_pico_body_calibration_requested
@@ -1091,6 +1095,23 @@ static func _descriptor_supports_revo2_hand_runtime(descriptor: Dictionary) -> b
 ## the user can reopen later.
 func _on_settings_close_requested() -> void:
 	_hide_settings_panel()
+
+
+func _on_settings_disconnect_requested() -> void:
+	print("[Operator] Settings disconnect requested")
+	_end_video_test()
+	_cancel_launch_window()
+	_inside_resume_options = {}
+	_set_revo2_hand_control_unlocked(false)
+	_stop_active_target()
+	_disconnect_outside_media()
+	if _clock_sync:
+		_clock_sync.stop()
+	if _command_sender:
+		_command_sender.transport = null
+	_active_target = null
+	_sdk_mode = false
+	_set_status(tr("UI_DISCONNECTED"))
 
 
 func _on_pico_body_calibration_requested() -> void:
