@@ -452,24 +452,29 @@ func _create_v2_nodes() -> void:
 	_bind_target_signals(_outside_target)
 	add_child(_outside_target)
 
-	var xrt_script := load(XROBOT_TOOLKIT_TARGET_PATH)
-	if xrt_script == null:
-		push_error("[Operator] Cannot load XRoboToolkit-compatible target")
-	else:
-		var xrt_instance: Variant = xrt_script.new()
-		if xrt_instance == null:
-			push_error("[Operator] Cannot instantiate XRoboToolkit-compatible target")
+	# XRoboToolkit compatibility is Pico-only. Elsewhere the target simply
+	# does not exist, so a stale persisted setting or a
+	# `--operator-teleop-protocol xrobot_toolkit_v1` launch extra degrades to
+	# the "runtime unavailable" status instead of opening a dead TCP stream.
+	if PicoPlatformAdapter.is_pico_build():
+		var xrt_script := load(XROBOT_TOOLKIT_TARGET_PATH)
+		if xrt_script == null:
+			push_error("[Operator] Cannot load XRoboToolkit-compatible target")
 		else:
-			_xrt_target = xrt_instance
-	if _xrt_target != null:
-		_xrt_target.name = "XRobotToolkitTarget"
-		_xrt_target.configure(_tracking_provider)
-		_bind_target_signals(_xrt_target)
-		add_child(_xrt_target)
-		# The target can be built after a pause/focus notification has already
-		# landed, so hand it the current lifecycle state instead of letting it
-		# assume focus until the next transition.
-		_sync_app_focus()
+			var xrt_instance: Variant = xrt_script.new()
+			if xrt_instance == null:
+				push_error("[Operator] Cannot instantiate XRoboToolkit-compatible target")
+			else:
+				_xrt_target = xrt_instance
+		if _xrt_target != null:
+			_xrt_target.name = "XRobotToolkitTarget"
+			_xrt_target.configure(_tracking_provider)
+			_bind_target_signals(_xrt_target)
+			add_child(_xrt_target)
+			# The target can be built after a pause/focus notification has already
+			# landed, so hand it the current lifecycle state instead of letting it
+			# assume focus until the next transition.
+			_sync_app_focus()
 
 	var inside_script := load(INSIDE_ROBOT_TARGET_PATH)
 	if inside_script == null:
@@ -553,24 +558,27 @@ func _create_v2_nodes() -> void:
 	_video_udp_handler.name = "VideoUdpHandler"
 	add_child(_video_udp_handler)
 
-	var xrt_video_script := load(XROBOT_TOOLKIT_VIDEO_SESSION_PATH)
-	if xrt_video_script == null:
-		push_error("[Operator] Cannot load XRobotToolkit video session")
-	else:
-		var xrt_video_instance: Variant = xrt_video_script.new()
-		if xrt_video_instance == null:
-			push_error("[Operator] Cannot instantiate XRobotToolkit video session")
+	# Same Pico-only gate as the XRT target above: no FPV session object at
+	# all on other platforms.
+	if PicoPlatformAdapter.is_pico_build():
+		var xrt_video_script := load(XROBOT_TOOLKIT_VIDEO_SESSION_PATH)
+		if xrt_video_script == null:
+			push_error("[Operator] Cannot load XRobotToolkit video session")
 		else:
-			_xrt_video_session = xrt_video_instance
-	if _xrt_video_session != null:
-		_xrt_video_session.name = "XRobotToolkitVideoSession"
-		_xrt_video_session.connect("connected", Callable(self, "_on_xrt_video_connected"))
-		_xrt_video_session.connect("disconnected", Callable(self, "_on_xrt_video_disconnected"))
-		_xrt_video_session.connect("failed", Callable(self, "_on_xrt_video_failed"))
-		_xrt_video_session.connect(
-			"video_frame_received", Callable(self, "_on_xrt_video_frame_received")
-		)
-		add_child(_xrt_video_session)
+			var xrt_video_instance: Variant = xrt_video_script.new()
+			if xrt_video_instance == null:
+				push_error("[Operator] Cannot instantiate XRobotToolkit video session")
+			else:
+				_xrt_video_session = xrt_video_instance
+		if _xrt_video_session != null:
+			_xrt_video_session.name = "XRobotToolkitVideoSession"
+			_xrt_video_session.connect("connected", Callable(self, "_on_xrt_video_connected"))
+			_xrt_video_session.connect("disconnected", Callable(self, "_on_xrt_video_disconnected"))
+			_xrt_video_session.connect("failed", Callable(self, "_on_xrt_video_failed"))
+			_xrt_video_session.connect(
+				"video_frame_received", Callable(self, "_on_xrt_video_frame_received")
+			)
+			add_child(_xrt_video_session)
 
 	# [opt 5] Clock-sync helper. Sends ClockPing on the command channel
 	# every second; the offset it learns is read by VideoLatencyTracker
@@ -1312,7 +1320,10 @@ func _begin_launch_window() -> void:
 		print("[Operator] Inside Robot selected — opening embodiment setup")
 		_show_settings_panel_with_status(tr("UI_INSIDE_ROBOT"))
 		return
-	if str(persisted.get("protocol", "operator")) == "xrobot_toolkit_v1":
+	if (
+		PicoPlatformAdapter.is_pico_build()
+		and str(persisted.get("protocol", "operator")) == "xrobot_toolkit_v1"
+	):
 		var saved_host := str(persisted.get("ip", "")).strip_edges()
 		var show_on_launch := bool(persisted.get("show_on_launch", false))
 		if show_on_launch or _is_loopback_host(saved_host):
@@ -2378,6 +2389,10 @@ func _on_robot_found(
 ## no ports, no device type. Everything else is filled from the protocol's fixed
 ## service port so the entry can sit in the same dropdown as native robots.
 func _start_xrt_discovery() -> void:
+	# XRoboToolkit compatibility is Pico-only; other platforms never listen for
+	# its beacon, so its hosts never appear in the discovery dropdown.
+	if not PicoPlatformAdapter.is_pico_build():
+		return
 	var script: Variant = load(XROBOT_TOOLKIT_DISCOVERY_PATH)
 	if script == null:
 		push_warning("[Operator] Cannot load the XRoboToolkit discovery listener")

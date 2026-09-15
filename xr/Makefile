@@ -7,7 +7,7 @@
 # pulled in via `include` below. Anything that ships *inside* the APK as
 # a Godot addon or native GDExtension belongs there.
 
-.PHONY: verify-host-tools verify-ndk setup-vendors-patched log build-quest build-quest-teleop build-quest-test build-pico build-pico-teleop build-androidxr build-mujoco-quest build-mujoco-pico print-build-profile install-quest install-pico install-androidxr run run-live-feed run-live-capture run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
+.PHONY: verify-host-tools verify-ndk setup-vendors-patched log build-quest build-quest-teleop build-quest-test build-pico build-pico-teleop build-pico-test build-androidxr build-mujoco-quest build-mujoco-pico print-build-profile install-quest install-pico install-androidxr run run-live-feed run-live-capture run-teleop run-ego run-mujoco stop clean godot reverse ship-fast ship-quest ship-pico ship-pico-fast crash uninstall build-install-quest build-install-pico
 
 ADB?=$(firstword $(wildcard $(HOME)/Library/Android/sdk/platform-tools/adb) $(wildcard $(HOME)/Android/Sdk/platform-tools/adb) adb)
 ADB_BASE:=$(ADB)
@@ -184,6 +184,7 @@ verify-host-tools:
 apk_quest=build/quest/Operator.apk
 apk_quest_test=build/quest_test/Operator.apk
 apk_pico=build/pico/Operator.apk
+apk_pico_test=build/pico_test/Operator.apk
 apk_androidxr=build/androidxr/Operator.apk
 package=com.lovemoon.operator
 activity=com.godot.game.GodotApp
@@ -274,6 +275,17 @@ build-pico: $(PICO_BUILD_DEPS)
 
 build-pico-teleop:
 	$(MAKE) build-pico OPERATOR_QUICK_ENTRY=teleop OPERATOR_BUILD_PROFILE=teleop
+
+# Test-harness APK (export preset "Pico Test"), the Pico counterpart of
+# build-quest-test: operator_feature_test_harness=true and res://tests/**
+# shipped, on top of the Pico OpenXR stack. Consumed by
+# tests/xr_module_harness.sh --platform pico. `override` pins the full profile
+# against a command-line OPERATOR_BUILD_PROFILE=teleop, same as build-quest-test.
+build-pico-test: override OPERATOR_BUILD_PROFILE := full
+build-pico-test: override OPERATOR_QUICK_ENTRY := launcher
+build-pico-test: $(FULL_PICO_BUILD_DEPS)
+	@mkdir -p $(dir $(apk_pico_test)) $(GRADLE_USER_HOME)
+	$(call godot_export_release,PICO_OPENXR_LOADER_ENABLED=1 GRADLE_USER_HOME=$(GRADLE_USER_HOME),Pico Test,$(apk_pico_test))
 
 print-build-profile:
 	@echo "OPERATOR_BUILD_PROFILE=$(OPERATOR_BUILD_PROFILE)"

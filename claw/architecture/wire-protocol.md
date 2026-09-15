@@ -219,7 +219,9 @@ The receive path accepts server frames headed by `0xcf`; the legacy `0x5f`
 The implementation lives under `xr/scripts/compat/xrobot_toolkit/` and requires
 no robot-side changes or gateway process. This compatibility target covers TCP
 `63901` and the UDP `29888` robot beacon below; Episode HTTP remains an
-independent scope.
+independent scope. The whole compatibility surface is gated to Pico builds:
+non-Pico exports never show the protocol choices, never start the beacon
+listener, and normalize persisted XRT settings back to Operator.
 
 XRoboToolkit FPV is a second, independently selectable video transport. It is
 not sent through the Tracking connection. XR automatically binds the first
