@@ -85,15 +85,18 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(panel.get_options().get("target_scope", ""), "outside", "outside selection round-trips")
 	t.eq(
 		panel.get_options().get("protocol", ""),
-		"operator",
-		"legacy settings without protocol default to Operator"
+		"xrobot_toolkit_v1",
+		"legacy settings without protocol default to XRoboToolkit Compatible"
 	)
 	t.is_true(outside_box.visible, "outside shows the robot-service settings")
 	t.is_true(protocol_row.visible, "outside shows protocol selection")
-	t.is_false(xrobot_device_sn_input.visible, "Operator protocol hides the PICO device SN")
-	t.is_false(
+	t.is_true(
+		xrobot_device_sn_input.visible,
+		"XRoboToolkit Compatible default reveals the PICO device SN"
+	)
+	t.is_true(
 		pico_body_calibration_button.visible,
-		"Operator protocol hides PICO Body Calibration"
+		"XRoboToolkit Compatible default reveals PICO Body Calibration"
 	)
 	t.is_false(inside_box.visible, "outside hides the inside settings")
 	var discovery_option: OptionButton = panel.get("_discovery_option")
@@ -407,6 +410,13 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		display_group.is_ancestor_of(show_video_panel_toggle),
 		"Display no longer owns video visibility"
 	)
+	# The assertions below all describe the native Operator wire-protocol
+	# branch, so bake the protocol into the options that will land on the
+	# panel rather than switching first and having the next set_options
+	# overwrite it back to the XRoboToolkit default.
+	var operator_options := _options("outside")
+	operator_options["protocol"] = "operator"
+	panel.set_options(operator_options)
 	t.is_false(
 		(show_video_panel_toggle.get_parent() as Control).visible,
 		"native Operator hides the legacy video visibility toggle",
