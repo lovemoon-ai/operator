@@ -128,7 +128,12 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"same-IP cross-protocol and same-name Operator services are all listed")
 	t.eq(discovery_option.selected, 0,
 		"discovery without an explicitly saved endpoint leaves Manual selected")
-	t.is_true(ip_input.editable, "manual robot IP remains editable when services are discovered")
+	# The IP field is read-only until the operator double-clicks into edit
+	# mode; the port field, which has no discovery UX, stays freely editable.
+	t.is_false(ip_input.editable, "IP field is read-only until the operator double-clicks it")
+	panel.call("_enter_ip_edit_mode")
+	t.is_true(ip_input.editable, "double-click flips the IP field editable")
+	panel.call("_leave_ip_edit_mode")
 	t.is_true(port_input.editable, "manual robot port remains editable when services are discovered")
 	panel.set_discovery_state(discovered, shared_ip, "xrobot_toolkit_v1", 63901)
 	t.eq(
