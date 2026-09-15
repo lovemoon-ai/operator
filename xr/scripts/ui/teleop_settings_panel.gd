@@ -83,6 +83,11 @@ const IP_TEST_RESULT_SECS := 3.0
 const COL_IP_TEST_OK := Color(0.14, 0.82, 0.45)
 const COL_IP_TEST_FAIL := Color(1.0, 0.36, 0.30)
 
+## Time between two trigger presses inside the IP field that counts as a
+## double-click and enters edit mode. Longer than a mouse double-click because
+## an XR trigger is coarser than a mouse button and users pump it slower.
+const IP_DOUBLE_CLICK_MSEC := 450
+
 var _discovery_option: OptionButton
 var _inside_scope_button: Button
 var _outside_scope_button: Button
@@ -108,6 +113,20 @@ var _ip_test_button: Button
 var _ip_test_peer: StreamPeerTCP
 var _ip_test_deadline_msec := 0
 var _ip_test_token := 0
+## Inline list of discovered hosts, expanded under the IP row on single-click.
+## A VBoxContainer of Buttons rather than a PopupMenu so it renders reliably
+## inside CompositionViewportUI's SubViewport (see `_add_choice_button`).
+var _ip_dropdown: VBoxContainer
+## Hint under the IP field. Reads either "Tap to pick from N" or
+## "No discovered hosts — double-click to edit", depending on discovery state.
+var _ip_hint_label: Label
+## Single-shot debounce timer that separates single-click (open dropdown) from
+## double-click (enter edit mode). A second trigger arriving before this
+## expires cancels it and starts editing instead.
+var _ip_click_timer: Timer
+## Metadata list mirroring `_ip_dropdown` items 1:1 so the item-selected
+## handler can resolve an item id back to a `_discovered` endpoint id.
+var _ip_dropdown_endpoint_ids: PackedStringArray = PackedStringArray()
 var _port_input: LineEdit
 var _xrobot_toolkit_device_sn_input: LineEdit
 var _pico_body_calibration_button: Button
@@ -237,7 +256,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_discovery_option.add_theme_font_size_override("font_size", 23)
 	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 	_discovery_option.item_selected.connect(_on_discovery_selected)
-	add_interactive(connection, _discovery_option)
+	# Kept alive (populated by `set_discovery_state`, still the source of truth
+	# for the currently selected endpoint) but no longer rendered: the IP row
+	# below now owns the pick-a-host interaction. Made a child of the panel so
+	# `set_discovery_state` still runs; hidden so it takes no visual space.
+	_discovery_option.visible = false
+	connection.add_child(_discovery_option)
 
 	var ip_row := HBoxContainer.new()
 	ip_row.add_theme_constant_override("separation", 10)
@@ -249,7 +273,14 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_ip_input.text = DEFAULT_IP
 	_ip_input.custom_minimum_size.y = 55
 	_ip_input.add_theme_font_size_override("font_size", 21)
+	# Read-only by default. A single trigger pops the discovery list; a
+	# double-trigger flips this back on and summons the virtual keyboard. The
+	# soft keyboard checks `editable` on its focused field, so leaving this
+	# false is what keeps the keyboard down on plain taps.
+	_ip_input.editable = false
 	_ip_input.text_changed.connect(_on_manual_endpoint_changed)
+	_ip_input.gui_input.connect(_on_ip_input_gui_input)
+	_ip_input.focus_exited.connect(_on_ip_input_focus_exited)
 	add_interactive(ip_row, _ip_input)
 
 	_ip_test_button = Button.new()
@@ -259,6 +290,38 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_ip_test_button.add_theme_font_size_override("font_size", 21)
 	_ip_test_button.pressed.connect(_on_ip_test_pressed)
 	ip_row.add_child(_ip_test_button)
+
+	# Hint under the IP row. Empty-discovery state prompts the operator to
+	# double-click; a non-empty state advertises how many hosts are on offer.
+	_ip_hint_label = Label.new()
+	_ip_hint_label.add_theme_font_size_override("font_size", 17)
+	_ip_hint_label.add_theme_color_override("font_color", COL_STATUS)
+	_ip_hint_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	connection.add_child(_ip_hint_label)
+
+	# Debounce timer for double-click detection. `create_timer` cannot be
+	# cancelled, and the XR trigger cannot deliver an `InputEventMouseButton`
+	# with `double_click = true` (see `composition_viewport_ui.gd`), so we
+	# reconstruct the gesture from press timing here.
+	_ip_click_timer = Timer.new()
+	_ip_click_timer.one_shot = true
+	_ip_click_timer.wait_time = IP_DOUBLE_CLICK_MSEC / 1000.0
+	_ip_click_timer.timeout.connect(_on_ip_click_timer_timeout)
+	add_child(_ip_click_timer)
+
+	# Inline dropdown, expanded in place under the IP row. A PopupMenu (i.e.
+	# what OptionButton uses internally) is a native Window and does not
+	# render inside a CompositionViewportUI SubViewport — see
+	# `_add_choice_button` a few pages down for the same warning. Using a
+	# plain VBoxContainer of Buttons sidesteps the whole subwindow-embed
+	# question and pushes the rest of the form down while visible.
+	_ip_dropdown = VBoxContainer.new()
+	_ip_dropdown.add_theme_constant_override("separation", 4)
+	_ip_dropdown.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_ip_dropdown.visible = false
+	connection.add_child(_ip_dropdown)
+
+	_refresh_ip_hint()
 
 	_port_input = LineEdit.new()
 	_port_input.placeholder_text = tr("UI_PORT")
@@ -653,6 +716,11 @@ func set_discovery_state(
 
 	_discovery_option.select(idx_to_select)
 	_on_discovery_selected(idx_to_select)
+	# The inline list was built from the previous `_discovered` snapshot;
+	# rebuild it lazily on the next open rather than mutating it live under
+	# the operator's finger.
+	_hide_ip_dropdown()
+	_refresh_ip_hint()
 
 
 func add_discovered(endpoint_id: String, info: Dictionary) -> void:
@@ -768,10 +836,13 @@ func _on_discovery_selected(idx: int) -> void:
 func _apply_mode_lock() -> void:
 	if _discovery_option == null:
 		return
-	# Discovery is a shortcut, not an ownership lock. Keeping the endpoint fields
-	# editable lets an operator recover when a different service was discovered
-	# first, and editing either field switches the picker back to Manual.
-	_ip_input.editable = true
+	# Discovery is a shortcut, not an ownership lock. The IP field is
+	# read-only by default so a single trigger opens the discovered-hosts
+	# popup instead of the virtual keyboard; a second trigger within
+	# IP_DOUBLE_CLICK_MSEC flips it editable and the keyboard appears.
+	# `_port_input` stays freely editable — it has no discovery UX, and users
+	# occasionally need to override the default port even when they picked a
+	# discovered host.
 	_port_input.editable = true
 	refresh_keyboard()
 
@@ -784,6 +855,150 @@ func _on_manual_endpoint_changed(_value: String) -> void:
 	_discovery_option.select(0)
 	_apply_mode_lock()
 	set_status(tr("UI_MANUAL_ENTRY_STATUS"))
+
+
+# --- IP field click routing --------------------------------------------------
+#
+# Single trigger on the IP field opens the discovered-hosts popup; two triggers
+# within IP_DOUBLE_CLICK_MSEC flip the field editable and summon the virtual
+# keyboard. Both gestures are reconstructed here from bare mouse-button events
+# because the XR trigger cannot synthesize `InputEventMouseButton.double_click`
+# (see `composition_viewport_ui.gd::set_pointer_pressed`).
+
+func _on_ip_input_gui_input(event: InputEvent) -> void:
+	if not (event is InputEventMouseButton):
+		return
+	var mouse := event as InputEventMouseButton
+	if not mouse.pressed:
+		return
+	if mouse.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if _ip_input.editable:
+		# Already in edit mode. Let LineEdit's own handler run so caret
+		# positioning still works; do not re-arm the debounce timer.
+		return
+	if _ip_click_timer != null and _ip_click_timer.time_left > 0.0:
+		# Second click inside the double-click window → edit mode.
+		_ip_click_timer.stop()
+		_enter_ip_edit_mode()
+		# Consume so the LineEdit's own click handler does not also focus
+		# and immediately blur when the popup would have opened.
+		_ip_input.accept_event()
+		return
+	# First click. Defer the popup so a rapid second click can cancel it.
+	if _ip_click_timer != null:
+		_ip_click_timer.start()
+	_ip_input.accept_event()
+
+
+func _on_ip_click_timer_timeout() -> void:
+	if _ip_input == null or _ip_input.editable:
+		return
+	_show_ip_dropdown()
+
+
+func _show_ip_dropdown() -> void:
+	if _ip_dropdown == null or _ip_input == null:
+		return
+	# Toggle if already open: a second single-click on the IP field is a
+	# natural "put it away" gesture and cheaper than hunting for the
+	# "manual entry" row.
+	if _ip_dropdown.visible:
+		_hide_ip_dropdown()
+		return
+	# Rebuild every open — the discovery set can change between opens and the
+	# button list is cheap.
+	for child in _ip_dropdown.get_children():
+		_ip_dropdown.remove_child(child)
+		child.queue_free()
+	_ip_dropdown_endpoint_ids.clear()
+	var endpoint_ids: Array = _discovered.keys()
+	endpoint_ids.sort()
+	if endpoint_ids.is_empty():
+		# Nothing to pick from — surface the double-click affordance through
+		# the hint label rather than opening an empty list. An empty
+		# VBoxContainer would still consume separator space.
+		_refresh_ip_hint(true)
+		return
+	for endpoint_id_v in endpoint_ids:
+		var endpoint_id := String(endpoint_id_v)
+		var info: Dictionary = _discovered.get(endpoint_id, {})
+		var rname := String(info.get("name", endpoint_id))
+		var row := Button.new()
+		row.text = _format_robot_label(rname, info)
+		row.focus_mode = Control.FOCUS_NONE
+		row.custom_minimum_size.y = 48
+		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_theme_font_size_override("font_size", 20)
+		# Copy the endpoint_id into the callable so item indices don't
+		# matter across rebuilds — the dropdown owns its own listing but
+		# defers to the endpoint_id for state.
+		row.pressed.connect(_on_ip_dropdown_pick.bind(endpoint_id))
+		_ip_dropdown.add_child(row)
+		_ip_dropdown_endpoint_ids.append(endpoint_id)
+	_ip_dropdown.visible = true
+
+
+func _hide_ip_dropdown() -> void:
+	if _ip_dropdown == null:
+		return
+	_ip_dropdown.visible = false
+
+
+func _on_ip_dropdown_pick(endpoint_id: String) -> void:
+	_hide_ip_dropdown()
+	# Reuse the existing selection path by pointing `_discovery_option` at
+	# the same endpoint. Everything downstream — protocol lock, status
+	# text, port sync — is already handled there.
+	for idx in range(_discovery_option.item_count):
+		if String(_discovery_option.get_item_metadata(idx)) == endpoint_id:
+			_discovery_option.select(idx)
+			_on_discovery_selected(idx)
+			break
+	_refresh_ip_hint()
+
+
+func _enter_ip_edit_mode() -> void:
+	if _ip_input == null:
+		return
+	_hide_ip_dropdown()
+	_ip_input.editable = true
+	_ip_input.grab_focus()
+	# Select all so a fresh double-click behaves like "start over".
+	_ip_input.select_all()
+	refresh_keyboard()
+	_refresh_ip_hint()
+
+
+func _on_ip_input_focus_exited() -> void:
+	if _ip_input == null:
+		return
+	# Snap back to read-only when the user commits/blurs. Deferred so the
+	# focus transition (and any concurrent keyboard-hide) settle first —
+	# otherwise flipping `editable` mid-signal can leave the keyboard bar
+	# stuck visible against an inert field.
+	call_deferred("_leave_ip_edit_mode")
+
+
+func _leave_ip_edit_mode() -> void:
+	if _ip_input == null:
+		return
+	_ip_input.editable = false
+	refresh_keyboard()
+	_refresh_ip_hint()
+
+
+func _refresh_ip_hint(force_empty_prompt: bool = false) -> void:
+	if _ip_hint_label == null:
+		return
+	if _ip_input != null and _ip_input.editable:
+		_ip_hint_label.text = tr("UI_IP_HINT_EDITING")
+		return
+	var count := _discovered.size()
+	if count > 0 and not force_empty_prompt:
+		_ip_hint_label.text = tr("UI_IP_HINT_TAP_TO_PICK") % count
+	else:
+		_ip_hint_label.text = tr("UI_IP_HINT_DOUBLE_CLICK_TO_EDIT")
 
 
 # --- IP reachability test ----------------------------------------------------
