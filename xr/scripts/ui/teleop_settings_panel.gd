@@ -233,10 +233,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_protocol_row.add_theme_constant_override("separation", 10)
 	_protocol_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	connection.add_child(_protocol_row)
-	for protocol in [
-		[PROTOCOL_OPERATOR, tr("UI_PROTOCOL_OPERATOR")],
-		[PROTOCOL_XROBOT_TOOLKIT_V1, tr("UI_PROTOCOL_XROBOT_TOOLKIT_V1")],
-	]:
+	# XRoboToolkit compatibility is Pico-only; other platforms (Quest, …) never
+	# see the choice at all.
+	var wire_protocols := [[PROTOCOL_OPERATOR, tr("UI_PROTOCOL_OPERATOR")]]
+	if _xrt_available():
+		wire_protocols.append([PROTOCOL_XROBOT_TOOLKIT_V1, tr("UI_PROTOCOL_XROBOT_TOOLKIT_V1")])
+	for protocol in wire_protocols:
 		var protocol_id := str(protocol[0])
 		_protocol_buttons[protocol_id] = _add_choice_button(
 			_protocol_row,
@@ -445,10 +447,10 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_video_protocol_row.add_theme_constant_override("separation", 10)
 	_video_protocol_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	video.add_child(_video_protocol_row)
-	for protocol in [
-		[VIDEO_PROTOCOL_OPERATOR, "UI_VIDEO_PROTOCOL_OPERATOR"],
-		[VIDEO_PROTOCOL_XROBOT_TOOLKIT, "UI_VIDEO_PROTOCOL_XROBOT_TOOLKIT"],
-	]:
+	var video_protocols := [[VIDEO_PROTOCOL_OPERATOR, "UI_VIDEO_PROTOCOL_OPERATOR"]]
+	if _xrt_available():
+		video_protocols.append([VIDEO_PROTOCOL_XROBOT_TOOLKIT, "UI_VIDEO_PROTOCOL_XROBOT_TOOLKIT"])
+	for protocol in video_protocols:
 		var protocol_id := str(protocol[0])
 		_video_protocol_buttons[protocol_id] = _add_choice_button(
 			_video_protocol_row,
@@ -1291,14 +1293,20 @@ func _refresh_xrobot_toolkit_controls() -> void:
 			slot.visible = show_xrobot_controls
 
 
+## XRoboToolkit compatibility rides Pico vendor APIs, so only Pico builds may
+## offer or keep it; anywhere else the setting normalizes back to Operator.
+static func _xrt_available() -> bool:
+	return PicoPlatformAdapter.is_pico_build()
+
+
 static func _normalized_protocol(protocol: String) -> String:
-	if protocol == PROTOCOL_XROBOT_TOOLKIT_V1:
+	if protocol == PROTOCOL_XROBOT_TOOLKIT_V1 and _xrt_available():
 		return PROTOCOL_XROBOT_TOOLKIT_V1
 	return PROTOCOL_OPERATOR
 
 
 static func _normalized_video_protocol(protocol: String) -> String:
-	if protocol == VIDEO_PROTOCOL_XROBOT_TOOLKIT:
+	if protocol == VIDEO_PROTOCOL_XROBOT_TOOLKIT and _xrt_available():
 		return VIDEO_PROTOCOL_XROBOT_TOOLKIT
 	return VIDEO_PROTOCOL_OPERATOR
 

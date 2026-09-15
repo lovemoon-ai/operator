@@ -532,13 +532,14 @@ def main():
     # `override` is load-bearing: a plain target-specific assignment loses to a
     # command-line OPERATOR_BUILD_PROFILE=teleop and silently strips the
     # harness out of the test APK.
-    for variable, expected in (
-        ("OPERATOR_BUILD_PROFILE", "full"),
-        ("OPERATOR_QUICK_ENTRY", "launcher"),
-    ):
-        declaration = "build-quest-test: override %s := %s" % (variable, expected)
-        if declaration not in makefile_text:
-            errors.append("(i) build-quest-test does not force %s=%s" % (variable, expected))
+    for target in ("build-quest-test", "build-pico-test"):
+        for variable, expected in (
+            ("OPERATOR_BUILD_PROFILE", "full"),
+            ("OPERATOR_QUICK_ENTRY", "launcher"),
+        ):
+            declaration = "%s: override %s := %s" % (target, variable, expected)
+            if declaration not in makefile_text:
+                errors.append("(i) %s does not force %s=%s" % (target, variable, expected))
     teleop_quest_deps = parse_make_words(makefile_text, "TELEOP_QUEST_BUILD_DEPS")
     teleop_pico_deps = parse_make_words(makefile_text, "TELEOP_PICO_BUILD_DEPS")
     for label, deps in (

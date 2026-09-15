@@ -23,6 +23,7 @@ make build-quest
 make build-pico
 make build-glassxr
 make build-quest-test
+make build-pico-test
 ```
 
 Output APKs:
@@ -33,6 +34,7 @@ Output APKs:
 | `build-pico` | `xr/build/pico/Operator.apk` |
 | `build-glassxr` | `xr/build/glassxr/Operator.apk` |
 | `build-quest-test` | `xr/build/quest_test/Operator.apk` |
+| `build-pico-test` | `xr/build/pico_test/Operator.apk` |
 
 ### XR Build Profiles
 
@@ -111,8 +113,9 @@ Inspect the resolved configuration without building:
 OPERATOR_BUILD_PROFILE=teleop make print-build-profile
 ```
 
-`build-quest-test` pins `full` with Make `override`, so it keeps the test harness
-even when a command-line `OPERATOR_BUILD_PROFILE=teleop` is passed.
+`build-quest-test` and `build-pico-test` pin `full` with Make `override`, so they
+keep the test harness even when a command-line `OPERATOR_BUILD_PROFILE=teleop` is
+passed.
 
 The export process may invoke `godot --headless`; that is export tooling only.
 Do not use desktop headless Godot to run or test the XR project.
@@ -201,6 +204,8 @@ python3 cicd/validate_xr_features.py
 python3 cicd/validate_xr_test_manifests.py
 bash cicd/03_godot_mujoco_static.sh
 bash cicd/xr_module_harness.sh --suite capture.pipeline --serial <serial>
+# Same suite on a Pico build (preset "Pico Test"), for Pico-only branches:
+bash cicd/xr_module_harness.sh --platform pico --suite teleop.settings --serial <serial>
 ```
 
 Device E2E tests:
