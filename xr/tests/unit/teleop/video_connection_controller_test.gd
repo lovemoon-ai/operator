@@ -298,27 +298,29 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(settings.video_status, "Video preview timed out waiting for a decoded frame",
 		"first-frame timeout explains why preview closed")
 
-	# Regression: a preview that actually decoded frames proved the endpoint
-	# works, so the operator must not land in the work page with the panel
-	# hidden just because `show_video_panel` defaults to false. Closing a
-	# successful preview keeps the panel up and ticks the settings toggle so
-	# Confirm persists it.
+	# Regression: the video panel is only meant to be visible during a running
+	# preview or after the operator confirms to start teleop. A preview that
+	# decoded frames used to force the panel on and silently tick the settings
+	# toggle, which meant closing the preview with × (or dismissing the
+	# settings panel) left video visible even though the operator did not ask
+	# for it. Closing a successful preview must now hide the panel and must
+	# not mutate the settings toggle.
 	settings.visible = false
 	robot_view.show_values.clear()
 	settings.show_video_panel_enabled.clear()
 	controller._begin_video_test({"show_video_panel": false})
-	# Pin the restore target to the failing default so the assertions below
-	# measure the fix and not whatever this host happens to have persisted.
-	controller._video_test_restore_show_panel = false
 	robot_view.receiving_video = true
 	controller._end_video_test()
-	t.is_true(controller._video_test_saw_video, "a decoded preview is recorded as a success")
-	t.eq(robot_view.show_values.back(), true,
-		"closing a successful preview keeps the video panel visible")
-	t.eq(settings.show_video_panel_enabled, [true],
-		"a successful preview ticks the settings toggle so Confirm persists it")
+	t.eq(robot_view.show_values.back(), false,
+		"closing a successful preview hides the video panel")
+	t.eq(settings.show_video_panel_enabled, [],
+		"a successful preview does not silently tick the settings toggle")
 	robot_view.receiving_video = false
 
+	# Blueprint-owned visibility survives the preview: outside/operator
+	# sessions restore what `_apply_blueprint_video_panel` last declared, in
+	# both directions (blueprint hides → stays hidden; blueprint shows →
+	# stays shown).
 	var outside_target := Node.new()
 	controller._outside_target = outside_target
 	controller._active_target = outside_target
@@ -326,7 +328,13 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	controller._begin_video_test({"show_video_panel": true})
 	controller._end_video_test()
 	t.eq(robot_view.show_values.back(), false,
-		"native Operator preview restores Blueprint visibility, not local settings")
+		"native Operator preview restores Blueprint visibility (hidden)")
+
+	controller._blueprint_external_view_visibility["video_panel"] = true
+	controller._begin_video_test({"show_video_panel": false})
+	controller._end_video_test()
+	t.eq(robot_view.show_values.back(), true,
+		"native Operator preview restores Blueprint visibility (visible)")
 
 	controller.free()
 	outside_target.free()
