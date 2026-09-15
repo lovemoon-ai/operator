@@ -173,9 +173,6 @@ var _control_frame_visualization_enabled := false
 var _manual_video_protocol := ""
 var _manual_video_options: Dictionary = {}
 var _video_test_active := false
-var _video_test_restore_show_panel := false
-## True once a video test in this settings visit actually decoded frames.
-var _video_test_saw_video := false
 var _video_test_generation := 0
 # True while the settings panel is open: teleop is suspended — DeviceCommand,
 # XrStateFrame, and XRoboToolkit Tracking are all disabled, and the controller
@@ -830,15 +827,16 @@ func _on_settings_applied(options: Dictionary) -> void:
 
 func _apply_runtime_settings(options: Dictionary) -> void:
 	var robot_authored_views := _options_use_robot_authored_blueprint(options)
-	# `_end_video_test()` can only flip the panel toggle for the *next* read of
-	# the form; `options` was captured when Confirm was pressed. OR in the flag
-	# so a preview that proved video works still reaches the work page even on
-	# that path.
+	# Owners of `show_video_panel`:
+	#   - `_begin_video_test` (visible while a Test Video preview is running)
+	#   - this function (visible after the operator confirms to start teleop,
+	#     iff the form's `show_video_panel` toggle is on)
+	#   - `_apply_blueprint_video_panel` (a robot-authored blueprint declares
+	#     `video_panel` visibility for outside/operator sessions; that path is
+	#     skipped here so blueprint decisions are not clobbered by Confirm).
 	var show_video_panel := false
 	if not robot_authored_views:
-		show_video_panel = (
-			bool(options.get("show_video_panel", false)) or _video_test_saw_video
-		)
+		show_video_panel = bool(options.get("show_video_panel", false))
 	if _robot_view:
 		if robot_authored_views and not _robot_authored_views_active:
 			var distance_value: Variant = _robot_view.get("follow_distance")
@@ -1927,18 +1925,7 @@ func _connect_configured_video(options: Dictionary, show_test: bool) -> void:
 		_begin_video_test(options)
 
 
-func _begin_video_test(options: Dictionary) -> void:
-	if not _video_test_active:
-		_video_test_saw_video = false
-		# Restore the *persisted* preference, not the live form value.
-		# `options` is the unsaved settings dialog: an operator who ticks
-		# "show video panel" purely to run this preview and then leaves
-		# without saving would otherwise be left with the panel switched on,
-		# contradicting the preference actually stored on disk.
-		var persisted: Dictionary = SettingsUI.load_settings()
-		_video_test_restore_show_panel = bool(
-			persisted.get("show_video_panel", options.get("show_video_panel", false))
-		)
+func _begin_video_test(_options: Dictionary) -> void:
 	_video_test_active = true
 	_video_test_generation += 1
 	if _robot_view and _robot_view.has_method("set_show_video_panel"):
@@ -1966,7 +1953,8 @@ func _handle_video_test_first_frame_timeout(generation: int) -> void:
 	if not _video_test_active or generation != _video_test_generation:
 		return
 	if _video_is_streaming():
-		_note_video_test_success()
+		# Streaming means the preview succeeded; leave the operator in test
+		# mode with video visible until they dismiss it with × or Confirm.
 		return
 	_set_video_status(tr("UI_VIDEO_STATUS_TEST_TIMEOUT"))
 	_end_video_test()
@@ -1976,14 +1964,19 @@ func _handle_video_test_first_frame_timeout(generation: int) -> void:
 func _end_video_test() -> void:
 	if not _video_test_active:
 		return
-	if _video_is_streaming():
-		_note_video_test_success()
 	_video_test_active = false
 	_video_test_generation += 1
+	# The video panel should only be visible while a test is running, while the
+	# operator has confirmed to start teleop (see `_apply_runtime_settings`), or
+	# when a robot-authored blueprint declares it visible. Ending the test drops
+	# it back to hidden unless a blueprint owns visibility for the active
+	# outside/operator session — in that case restore what the blueprint said.
 	if _robot_view and _robot_view.has_method("set_show_video_panel"):
-		var restore_visible := _video_test_restore_show_panel
+		var restore_visible := false
 		if _active_target == _outside_target:
-			restore_visible = bool(_blueprint_external_view_visibility.get("video_panel", false))
+			restore_visible = bool(
+				_blueprint_external_view_visibility.get("video_panel", false)
+			)
 		_robot_view.set_show_video_panel(restore_visible)
 	if _settings_button and _settings_button.has_method("set_video_preview_mode"):
 		_settings_button.call("set_video_preview_mode", false)
@@ -1995,21 +1988,6 @@ func _video_is_streaming() -> bool:
 		and _robot_view.has_method("is_receiving_video")
 		and bool(_robot_view.call("is_receiving_video"))
 	)
-
-
-## A video test that decoded real frames proves the endpoint works, so switch
-## the panel preference on. The whole point of the test button is that a
-## successful debug carries through to the work page -- previously the preview
-## was force-shown for the test and then restored to a preference that defaults
-## to false, so the operator watched video work and then confirmed into a work
-## page with no video panel at all.
-func _note_video_test_success() -> void:
-	if _video_test_saw_video:
-		return
-	_video_test_saw_video = true
-	_video_test_restore_show_panel = true
-	if _settings_ui and _settings_ui.has_method("set_show_video_panel_enabled"):
-		_settings_ui.call("set_show_video_panel_enabled", true)
 
 
 func _return_from_failed_video_test() -> void:
