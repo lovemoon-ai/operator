@@ -89,17 +89,25 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 
 	panel.set_options(_options("outside"))
 	t.eq(panel.get_options().get("target_scope", ""), "outside", "outside selection round-trips")
+	# On Pico the left-column (default) protocol is XRoboToolkit Compatible;
+	# non-Pico builds only expose Operator, so the load-time default lands
+	# there instead.
 	t.eq(
 		panel.get_options().get("protocol", ""),
-		"operator",
-		"legacy settings without protocol default to Operator"
+		"xrobot_toolkit_v1" if xrt_available else "operator",
+		"legacy settings without protocol default to the platform's left-column choice"
 	)
 	t.is_true(outside_box.visible, "outside shows the robot-service settings")
 	t.is_true(protocol_row.visible, "outside shows protocol selection")
-	t.is_false(xrobot_device_sn_input.visible, "Operator protocol hides the PICO device SN")
-	t.is_false(
+	t.eq(
+		xrobot_device_sn_input.visible,
+		xrt_available,
+		"PICO device SN visibility follows the default protocol"
+	)
+	t.eq(
 		pico_body_calibration_button.visible,
-		"Operator protocol hides PICO Body Calibration"
+		xrt_available,
+		"PICO Body Calibration visibility follows the default protocol"
 	)
 	t.is_false(inside_box.visible, "outside hides the inside settings")
 	var discovery_option: OptionButton = panel.get("_discovery_option")
@@ -444,6 +452,13 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		display_group.is_ancestor_of(show_video_panel_toggle),
 		"Display no longer owns video visibility"
 	)
+	# The assertions below all describe the native Operator wire-protocol
+	# branch, so bake the protocol into the options that will land on the
+	# panel rather than switching first and having the next set_options
+	# overwrite it back to the XRoboToolkit default.
+	var operator_options := _options("outside")
+	operator_options["protocol"] = "operator"
+	panel.set_options(operator_options)
 	t.is_false(
 		(show_video_panel_toggle.get_parent() as Control).visible,
 		"native Operator hides the legacy video visibility toggle",

@@ -16,10 +16,10 @@ const RobotProfileRegistryScript := preload(
 const DEFAULT_IP: String = "127.0.0.1"
 const DEFAULT_PORT: int = 63901
 const DEFAULT_TARGET_SCOPE := "outside"
-const DEFAULT_PROTOCOL := "operator"
-const DEFAULT_XROBOT_TOOLKIT_DEVICE_SN := ""
 const PROTOCOL_OPERATOR := "operator"
 const PROTOCOL_XROBOT_TOOLKIT_V1 := "xrobot_toolkit_v1"
+const DEFAULT_PROTOCOL := PROTOCOL_XROBOT_TOOLKIT_V1
+const DEFAULT_XROBOT_TOOLKIT_DEVICE_SN := ""
 const DEFAULT_RETARGETING_BACKEND := "native"
 const DEFAULT_RETARGETING_HOST := "127.0.0.1"
 const DEFAULT_RETARGETING_PORT := 8000
@@ -183,7 +183,7 @@ func _settings_section() -> String:
 
 
 func _settings_defaults() -> Dictionary:
-	return _default_options()
+	return _load_defaults()
 
 
 func _settings_loaded_key() -> String:
@@ -213,8 +213,8 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	type_row.add_theme_constant_override("separation", 10)
 	type_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	robot.add_child(type_row)
-	_inside_scope_button = _add_scope_button(type_row, tr("UI_INSIDE_ROBOT"), "inside")
 	_outside_scope_button = _add_scope_button(type_row, tr("UI_OUTSIDE_ROBOT"), "outside")
+	_inside_scope_button = _add_scope_button(type_row, tr("UI_INSIDE_ROBOT"), "inside")
 
 	# --- Outside Robot (robot-service) -------------------------------------
 	var connection := VBoxContainer.new()
@@ -233,11 +233,18 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_protocol_row.add_theme_constant_override("separation", 10)
 	_protocol_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	connection.add_child(_protocol_row)
-	# XRoboToolkit compatibility is Pico-only; other platforms (Quest, …) never
-	# see the choice at all.
-	var wire_protocols := [[PROTOCOL_OPERATOR, tr("UI_PROTOCOL_OPERATOR")]]
+	# XRoboToolkit compatibility is Pico-only; other platforms (Quest, …)
+	# never see the choice at all. On Pico the default sits on the left, so
+	# XRoboToolkit Compatible appears first there; on non-Pico only Operator
+	# is offered.
+	var wire_protocols: Array
 	if _xrt_available():
-		wire_protocols.append([PROTOCOL_XROBOT_TOOLKIT_V1, tr("UI_PROTOCOL_XROBOT_TOOLKIT_V1")])
+		wire_protocols = [
+			[PROTOCOL_XROBOT_TOOLKIT_V1, tr("UI_PROTOCOL_XROBOT_TOOLKIT_V1")],
+			[PROTOCOL_OPERATOR, tr("UI_PROTOCOL_OPERATOR")],
+		]
+	else:
+		wire_protocols = [[PROTOCOL_OPERATOR, tr("UI_PROTOCOL_OPERATOR")]]
 	for protocol in wire_protocols:
 		var protocol_id := str(protocol[0])
 		_protocol_buttons[protocol_id] = _add_choice_button(
@@ -707,9 +714,16 @@ func set_discovery_state(
 		if endpoint_id == previously_selected_id:
 			idx_to_select = idx
 		elif idx_to_select == 0 and not prefer_ip.is_empty():
+			# A beacon that does not declare its wire protocol predates the
+			# field entirely, so we cannot use it as a mismatch reason — treat
+			# it as a wildcard for auto-select purposes, otherwise older robot
+			# agents stop auto-selecting for any user whose saved preference
+			# is XRoboToolkit Compatible.
+			var beacon_declares_protocol := info.has("protocol")
 			var endpoint_protocol := _normalized_protocol(String(info.get("protocol", PROTOCOL_OPERATOR)))
 			var protocol_matches := (
 				prefer_protocol.is_empty()
+				or not beacon_declares_protocol
 				or endpoint_protocol == _normalized_protocol(prefer_protocol)
 			)
 			var port_matches := prefer_port <= 0 or int(info.get("pose_port", 0)) == prefer_port
@@ -1135,7 +1149,7 @@ func _add_option_item(option: OptionButton, label: String, metadata: Variant, ic
 
 
 static func load_settings() -> Dictionary:
-	return BaseSettingsPanel.load_settings_from_config(SETTINGS_PATH, SECTION, _default_options(), "loaded")
+	return BaseSettingsPanel.load_settings_from_config(SETTINGS_PATH, SECTION, _load_defaults(), "loaded")
 
 
 ## The first robot this build ships, so a fresh install lands on something
@@ -1145,10 +1159,28 @@ static func _default_inside_profile() -> String:
 	return str(offered[0]) if not offered.is_empty() else ""
 
 
+## Defaults used when merging a saved config on load. Fresh installs (no file
+## on disk) get `_default_options()` verbatim, so the panel opens on
+## XRoboToolkit Compatible per the current UI default. But a config written by
+## an older build has no `protocol` field, and silently switching those users
+## to XRoboToolkit on upgrade would break auto-connect for anyone whose robot
+## only speaks the Operator wire protocol — so when a file exists, missing
+## keys fall back to the pre-diff Operator behavior instead.
+static func _load_defaults() -> Dictionary:
+	var defaults := _default_options()
+	if FileAccess.file_exists(SETTINGS_PATH):
+		defaults["protocol"] = PROTOCOL_OPERATOR
+	return defaults
+
+
 static func _default_options() -> Dictionary:
 	return {
 		"target_scope": DEFAULT_TARGET_SCOPE,
-		"protocol": DEFAULT_PROTOCOL,
+		# `DEFAULT_PROTOCOL` is the Pico fresh-install default (XRoboToolkit
+		# Compatible sits on the left of the row and is what a fresh Pico
+		# install lands on). Non-Pico builds have no XRoboToolkit button at
+		# all, so route through the normalizer to get Operator there.
+		"protocol": _normalized_protocol(DEFAULT_PROTOCOL),
 		"ip": DEFAULT_IP,
 		"port": DEFAULT_PORT,
 		"xrobot_toolkit_device_sn": DEFAULT_XROBOT_TOOLKIT_DEVICE_SN,
@@ -1300,6 +1332,11 @@ static func _xrt_available() -> bool:
 
 
 static func _normalized_protocol(protocol: String) -> String:
+	# Whitelist form: any string we do not recognise — including empty values
+	# and future labels like "xrobot_toolkit_v2" — falls back to the Operator
+	# wire protocol rather than silently being coerced into a v1 session.
+	# XRoboToolkit is also Pico-only, so non-Pico builds always normalize back
+	# to Operator regardless of the persisted value.
 	if protocol == PROTOCOL_XROBOT_TOOLKIT_V1 and _xrt_available():
 		return PROTOCOL_XROBOT_TOOLKIT_V1
 	return PROTOCOL_OPERATOR
