@@ -29,6 +29,19 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		}),
 		"headset rejects a stale descriptor spec hash",
 	)
+	var json_envelope := {
+		"revision": 2.0,
+		"sequence": 3.0,
+		"timestamp_ns": 4.0,
+		"fraction": 1.5,
+	}
+	SessionScript._normalize_json_wire_integers(
+		json_envelope, ["revision", "sequence", "timestamp_ns", "fraction"]
+	)
+	t.is_true(json_envelope["revision"] is int, "JSON revision is normalized to int")
+	t.is_true(json_envelope["sequence"] is int, "JSON sequence is normalized to int")
+	t.is_true(json_envelope["timestamp_ns"] is int, "JSON timestamp is normalized to int")
+	t.is_true(json_envelope["fraction"] is float, "fractional JSON numbers stay floats")
 	for value_type_v in BlueprintPrimitiveSpec.VALUE_TYPE_CONFORMANCE:
 		var value_type := str(value_type_v)
 		var cases := BlueprintPrimitiveSpec.VALUE_TYPE_CONFORMANCE[value_type_v] as Dictionary

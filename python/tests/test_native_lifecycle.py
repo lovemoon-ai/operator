@@ -148,6 +148,40 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 @unittest.skipUnless(HAS_NATIVE, "requires the built pyoperator native extension")
 class NativeLifecycleTests(unittest.TestCase):
+    def test_standalone_blueprint_publisher_uses_rust_core(self) -> None:
+        publisher = _native.NativeBlueprintPublisher()
+        self.assertEqual(publisher.blueprint_spec_version(), 1)
+        self.assertEqual(len(publisher.blueprint_spec_sha256()), 64)
+        publisher.set_blueprint_json(
+            json.dumps(
+                {
+                    "schema": "operator.blueprint.v1",
+                    "blueprint_id": "native.publisher",
+                    "revision": 1,
+                    "components": [
+                        {
+                            "id": "status",
+                            "type": "status_lamp",
+                            "bindings": {"state": "status"},
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertEqual(
+            publisher.update_blueprint_values_json('{"status":"active"}', 10), 1
+        )
+        with self.assertRaisesRegex(ValueError, "not bound"):
+            publisher.update_blueprint_values_json('{"unknown":true}', 11)
+        self.assertEqual(
+            publisher.update_blueprint_values_json('{"status":"idle"}', 12), 2
+        )
+        state = json.loads(publisher.state_message_json())
+        self.assertEqual(state["state"]["values"], {"status": "idle"})
+        publisher.clear_blueprint()
+        with self.assertRaisesRegex(RuntimeError, "no active Blueprint"):
+            publisher.definition_message_json()
+
     @pytest.mark.fake_headset
     def test_blueprint_round_trips_through_native_bridge(self) -> None:
         config = _config()

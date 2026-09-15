@@ -147,6 +147,8 @@ func is_teleop_input_captured() -> bool:
 	# so such a target still captures while it is being actively adjusted.
 	if _pressed_target != null and _target_captures_teleop_press(_pressed_target):
 		return true
+	if not _target_captures_teleop_scroll(target):
+		return false
 	var pointer := _active_controller_pointer()
 	return pointer != null and absf(_scroll_axis(pointer)) >= scroll_dead_zone
 
@@ -168,6 +170,14 @@ static func _target_captures_teleop_press(target: Object) -> bool:
 	if not target.has_method("captures_teleop_press"):
 		return true
 	return bool(target.call("captures_teleop_press"))
+
+
+static func _target_captures_teleop_scroll(target: Object) -> bool:
+	if target == null:
+		return false
+	if not target.has_method("captures_teleop_scroll"):
+		return _target_captures_teleop_input(target)
+	return bool(target.call("captures_teleop_scroll"))
 
 
 static func _is_finite_vector(value: Vector3) -> bool:

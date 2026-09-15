@@ -2,6 +2,8 @@
 # New code lives under crates/. The legacy `robo-agent` package and its
 # deprecated/ workspace member have been retired and removed.
 members = [
+    "crates/operator",
+    "crates/operator-c",
     "crates/teleop-protocol",
     "crates/robot-adapter",
     "crates/xr-bridge",

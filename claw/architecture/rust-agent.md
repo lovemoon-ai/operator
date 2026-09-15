@@ -14,6 +14,8 @@ robot/
     so101_dual_real.yaml
     so101_dual_real_descriptor.yaml
   crates/
+    operator/
+    operator-c/
     teleop-protocol/
     robot-service/
     xr-bridge/
@@ -24,9 +26,27 @@ robot/
 
 ## Crates
 
+### `operator`
+
+Public Rust SDK facade and the single implementation point for behavior shared
+across language SDKs. Blueprint parsing, validation, state patching, sequence
+management, capability injection, adapter-envelope serialization, and event
+validation live here. Rust callers use it directly; Python and C++ call the
+same implementation through bindings.
+
+Key paths:
+
+- `robot/crates/operator/src/lib.rs`
+- `robot/crates/operator-c/src/lib.rs`
+- `cpp/liboperator/include/operator/operator.hpp`
+
+`operator-c` exports the stable C ABI as `liboperator.a` and `liboperator.so`.
+The C++ SDK target is `operator::operator`; its namespace is `operator_sdk`
+because `operator` is a C++ keyword.
+
 ### `teleop-protocol`
 
-Shared protocol crate. It owns:
+Internal protocol crate used by the public SDK and robot services. It owns:
 
 - command frame encoding and decoding;
 - device descriptor parsing;
@@ -39,7 +59,7 @@ Key paths:
 - `robot/crates/teleop-protocol/src/wire.rs`
 - `robot/crates/teleop-protocol/src/descriptor.rs`
 - `robot/crates/teleop-protocol/src/transport.rs`
-- `robot/crates/teleop-protocol/src/adapter/`
+- `robot/crates/teleop-protocol/src/adapter.rs`
 - `robot/crates/teleop-protocol/src/xr_state.rs`
 
 ### `robot-service`
@@ -80,9 +100,10 @@ Key paths:
 
 ### `pyoperator-native`
 
-PyO3 `abi3` extension loaded by the `python/pyoperator` package. It starts
-the shared `xr-bridge` SDK service on a background Tokio runtime inside the
-Python process. It owns no robot policy: Python receives serialized immutable
+PyO3 `abi3` extension loaded by the `python/pyoperator` package. It exposes the
+Rust `operator::BlueprintPublisher` to both embedded and hosted Python paths,
+and starts the shared `xr-bridge` SDK service on a background Tokio runtime for
+`XrSession`. It owns no robot policy: Python receives serialized immutable
 frames and applies the public `Robot`, `Retargeter`, and `IKSolver` contracts.
 `NativeSession.close()` signals shutdown and joins the runtime thread; no
 visible `xr-bridge` subprocess is launched.
@@ -116,6 +137,35 @@ Key paths:
 
 Rust integration tests for bridge/adapter round trips and network behavior.
 
+## External Native Adapters
+
+Robots whose vendor SDK has a native toolchain can implement the same
+`teleop-protocol` adapter boundary outside the Rust workspace. The native
+process owns vendor SDK calls, robot-specific state machines, and local safety;
+the existing Rust `xr-bridge` remains the only XR network bridge. Native
+adapters use `liboperator` for shared SDK behavior and follow the adapter wire
+boundary as it evolves; unknown messages must not be mistaken for motion
+commands.
+
+`examples/unitree-g1d/` is the first such client. It is a C++17 process
+using Unitree SDK2/DDS and serves the standard `[4-byte little-endian
+length][JSON]` protocol over UDS or TCP. The initial hardware scope is the
+mobile base and lift. G1-D upper-body state is telemetry-only until its
+robot-specific URDF, IK, and low-command takeover sequence are validated. It
+also publishes a read-only robot-authored Blueprint for connection and safety
+status. Motion authorization remains local to the adapter and is never granted
+by Blueprint UI state.
+
+Key paths:
+
+- `examples/unitree-g1d/README.md`
+- `examples/unitree-g1d/src/main.cpp`
+- `examples/unitree-g1d/src/unitree_backend.cpp`
+- `examples/unitree-g1d/config/unitree_g1d_descriptor.json`
+- `examples/unitree-g1d/config/unitree_g1d_blueprint.json`
+- `examples/unitree-g1d/config/unitree_g1d_bridge.yaml`
+- `cpp/liboperator/include/operator/operator.hpp`
+
 ## Runtime Responsibilities
 
 The robot side keeps these concerns separate even when they run inside
@@ -125,6 +175,8 @@ The robot side keeps these concerns separate even when they run inside
 - process composition belongs in `robot-service`;
 - network fan-out and video transport belong in `xr-bridge`;
 - device control and safety belong in `robot-adapter`;
+- vendor-native device control may live in `examples/`, behind the same
+  adapter protocol boundary;
 - Python process embedding belongs in `pyoperator-native` and `python/`;
 - scenario-level verification belongs in `e2e-tests` or top-level shell tests.
 
@@ -169,6 +221,20 @@ Run the SO-101 simulator robot service:
 
 ```bash
 cargo run -p robot-service -- --config configs/mujoco_so101.yaml
+```
+
+Run the G1-D native adapter and the existing bridge as two processes:
+
+```bash
+# Terminal 1, from the repository root
+examples/unitree-g1d/build/operator-g1d-client \
+  --backend mock \
+  --descriptor examples/unitree-g1d/config/unitree_g1d_descriptor.json \
+  --blueprint examples/unitree-g1d/config/unitree_g1d_blueprint.json
+
+# Terminal 2, from the repository root
+cargo run --manifest-path robot/Cargo.toml -p xr-bridge -- \
+  --config examples/unitree-g1d/config/unitree_g1d_bridge.yaml
 ```
 
 The real SO-101 path runs as **two processes**: `robot-service` does not touch

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import struct
+import threading
 import unittest
 from types import MappingProxyType
 from unittest.mock import patch
@@ -105,8 +106,32 @@ def reader_with(payload: bytes) -> asyncio.StreamReader:
 
 
 class HostedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_attached_blueprint_advertises_capability_before_definition(self) -> None:
+        blueprint = HostedBlueprint()
+        try:
+            descriptor = blueprint._descriptor_message(make_descriptor(name="Blueprint Bot"))
+            self.assertTrue(descriptor["capabilities"][WIRE["capability"]])
+            self.assertEqual(
+                descriptor["capabilities"][WIRE["spec_hash_capability"]], SPEC_SHA256
+            )
+        finally:
+            blueprint.close()
+
     async def test_replacing_blueprint_discards_stale_events(self) -> None:
         blueprint = HostedBlueprint()
+        blueprint.set_blueprint(
+            Blueprint(
+                blueprint_id="old",
+                components=(
+                    BlueprintComponent.palm_menu(
+                        "control",
+                        title="Control",
+                        action="toggle_control",
+                        value_binding="control.enabled",
+                    ),
+                ),
+            )
+        )
         blueprint._push_event(
             {
                 "schema": "operator.blueprint_event.v1",
@@ -122,6 +147,56 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
         blueprint.set_blueprint(Blueprint(blueprint_id="new", components=()))
         self.assertIsNone(blueprint.poll_event(timeout=0.0))
         blueprint.close()
+
+    async def test_in_flight_event_is_discarded_after_blueprint_replacement(self) -> None:
+        blueprint = HostedBlueprint()
+        blueprint.set_blueprint(
+            Blueprint(
+                blueprint_id="old",
+                components=(
+                    BlueprintComponent.palm_menu(
+                        "control",
+                        title="Control",
+                        action="toggle_control",
+                        value_binding="control.enabled",
+                    ),
+                ),
+            )
+        )
+        blueprint._push_event(
+            {
+                "schema": "operator.blueprint_event.v1",
+                "blueprint_id": "old",
+                "blueprint_revision": 1,
+                "sequence": 1,
+                "timestamp_ns": 1,
+                "component_id": "control",
+                "action": "toggle_control",
+                "value": True,
+            }
+        )
+        original_poll = blueprint._native.poll_blueprint_event_json
+        event_popped = threading.Event()
+        resume_poll = threading.Event()
+
+        def delayed_poll(timeout: float | None) -> str | None:
+            payload = original_poll(timeout)
+            event_popped.set()
+            resume_poll.wait(1.0)
+            return payload
+
+        blueprint._native.poll_blueprint_event_json = delayed_poll
+        poll_task = asyncio.create_task(asyncio.to_thread(blueprint.poll_event, 1.0))
+        try:
+            self.assertTrue(await asyncio.to_thread(event_popped.wait, 1.0))
+            blueprint.set_blueprint(Blueprint(blueprint_id="new", components=()))
+            resume_poll.set()
+            self.assertIsNone(await poll_task)
+        finally:
+            resume_poll.set()
+            if not poll_task.done():
+                await poll_task
+            blueprint.close()
 
     async def test_hosted_blueprint_roundtrip(self) -> None:
         adapter = FakeAdapter()

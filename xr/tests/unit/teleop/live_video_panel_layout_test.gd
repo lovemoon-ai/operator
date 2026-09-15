@@ -16,6 +16,16 @@ class PressCapturingTarget:
 		return true
 
 
+class LockedControlSurface:
+	extends RefCounted
+
+	func captures_teleop_input() -> bool:
+		return true
+
+	func captures_teleop_scroll() -> bool:
+		return false
+
+
 class RestartingDecoder:
 	extends RefCounted
 	var running := false
@@ -49,6 +59,20 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.is_true(is_equal_approx(view.follow_distance, 2.0), "view-locked distance is adjustable")
 	t.is_true(display.position.is_equal_approx(Vector3(0.0, 0.0, -2.0)),
 		"view-locked panel moves in front of the camera")
+	t.is_true(view.is_panel_distance_locked(), "video distance starts locked")
+	t.is_true(view.captures_teleop_input(),
+		"video panel remains an interaction target while locked")
+	t.is_false(view.captures_teleop_scroll(),
+		"a locked video panel does not capture robot joystick input")
+	view.adjust_panel_distance_from_scroll(-100.0)
+	t.is_true(is_equal_approx(view.follow_distance, 2.0),
+		"a locked panel ignores joystick distance changes")
+	view.set_panel_distance_locked(false)
+	t.is_true(view.captures_teleop_scroll(),
+		"an unlocked video panel captures joystick input while adjusting")
+	view.adjust_panel_distance_from_scroll(-100.0)
+	t.is_true(is_equal_approx(view.follow_distance, 2.15),
+		"joystick-up scroll moves the video panel farther away")
 
 	view.follow_camera = false
 	var world_locked_basis := Basis(Vector3.UP, deg_to_rad(15.0))
@@ -185,7 +209,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	display.position = camera.position + Vector3(0.0, 0.0, -8.0)
 	t.is_true(is_equal_approx(view._current_panel_distance(), 8.0),
 		"an out-of-range panel reports its true distance, unclamped")
-	view.adjust_panel_distance_from_scroll(-100.0)
+	view.adjust_panel_distance_from_scroll(100.0)
 	t.is_true(is_equal_approx(view.follow_distance, 6.0),
 		"pulling an out-of-range panel closer stops exactly at the far limit")
 
@@ -216,6 +240,14 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	router._pressed_target = control_surface
 	t.is_true(router.is_teleop_input_captured(),
 		"a real control surface still captures teleop input on press")
+	var locked_control := LockedControlSurface.new()
+	router._pressed_target = locked_control
+	t.is_true(router.is_teleop_input_captured(),
+		"locked sidecar buttons capture press input without enabling scroll capture")
+	t.is_false(
+		SettingsInteractionRouterScript._target_captures_teleop_scroll(locked_control),
+		"locked sidecar does not capture joystick scrolling",
+	)
 	router.free()
 
 	view.free()

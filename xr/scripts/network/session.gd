@@ -52,6 +52,7 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 			var json_str = data.get_string_from_utf8()
 			var parsed = JSON.parse_string(json_str)
 			if parsed and parsed is Dictionary:
+				_normalize_json_wire_integers(parsed as Dictionary, ["descriptor_version"])
 				# WP2: validate against the v2 descriptor contract. The emitted
 				# payload stays the raw parsed dictionary (wire-compatible);
 				# contract violations are diagnostics only.
@@ -88,6 +89,7 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 				return true
 			var parsed_blueprint: Variant = JSON.parse_string(blueprint_json)
 			if parsed_blueprint is Dictionary:
+				_normalize_json_wire_integers(parsed_blueprint as Dictionary, ["revision"])
 				var blueprint_result := BlueprintContract.parse_blueprint(
 					parsed_blueprint as Dictionary
 				)
@@ -115,6 +117,10 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 				return true
 			var parsed_state: Variant = JSON.parse_string(data.get_string_from_utf8())
 			if parsed_state is Dictionary:
+				_normalize_json_wire_integers(
+					parsed_state as Dictionary,
+					["blueprint_revision", "sequence", "timestamp_ns"],
+				)
 				var state_result := BlueprintContract.parse_state(parsed_state as Dictionary)
 				var state_errors: Array = state_result.get("errors", [])
 				if state_errors.is_empty():
@@ -136,6 +142,22 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 			push_warning("[Session] BlueprintState payload must be an object")
 			return true
 	return false
+
+
+static func _normalize_json_wire_integers(value: Dictionary, fields: Array) -> void:
+	for field_v in fields:
+		var field := str(field_v)
+		var candidate: Variant = value.get(field)
+		if not candidate is float:
+			continue
+		var number := float(candidate)
+		if (
+			is_finite(number)
+			and number >= 0.0
+			and number <= float(BlueprintPrimitiveSpec.MAX_WIRE_INTEGER)
+			and number == floorf(number)
+		):
+			value[field] = int(number)
 
 
 func send_blueprint_event(event: Dictionary) -> Error:

@@ -113,6 +113,41 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var discovery_option: OptionButton = panel.get("_discovery_option")
 	var ip_input: LineEdit = panel.get("_ip_input")
 	var port_input: LineEdit = panel.get("_port_input")
+	var endpoint_connect_button: Button = panel.get("_connect_button")
+	t.is_true(endpoint_connect_button != null, "Outside settings expose a Connect button")
+	if endpoint_connect_button != null:
+		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "IP action is labeled Connect")
+		t.eq(
+			ip_input.get_parent().get_parent(),
+			endpoint_connect_button.get_parent(),
+			"Connect is placed beside the robot IP input",
+		)
+	var disconnect_button: Button = panel.get("_disconnect_button")
+	t.is_true(disconnect_button != null, "Outside settings expose a Disconnect button")
+	if disconnect_button != null:
+		t.eq(disconnect_button.text, panel.tr("UI_DISCONNECT"), "Disconnect uses the localized label")
+		if endpoint_connect_button != null:
+			t.eq(
+				endpoint_connect_button.custom_minimum_size.x,
+				disconnect_button.custom_minimum_size.x,
+				"Connect and Disconnect use the same width",
+			)
+		t.eq(
+			port_input.get_parent().get_parent(),
+			disconnect_button.get_parent(),
+			"Disconnect is placed beside the robot port input",
+		)
+		var disconnect_requests: Array = []
+		panel.disconnect_requested.connect(func() -> void:
+			disconnect_requests.append(true)
+		)
+		disconnect_button.emit_signal("pressed")
+		t.eq(disconnect_requests.size(), 1, "Disconnect emits one request")
+	var action_row: HBoxContainer = panel.get("_actions_row")
+	var confirm_button := _first_button(action_row)
+	t.is_true(confirm_button != null, "settings expose the primary Confirm action")
+	if confirm_button != null:
+		t.eq(confirm_button.text, panel.tr("UI_OK"), "bottom action remains Confirm")
 	var shared_ip := "192.168.1.40"
 	var discovered := {
 		"operator|%s|63901" % shared_ip: {
@@ -608,6 +643,18 @@ func _options(scope: String) -> Dictionary:
 func _group_keys(panel: Node) -> Array:
 	var containers: Dictionary = panel.get("_group_containers")
 	return containers.keys() if containers != null else []
+
+
+func _first_button(node: Node) -> Button:
+	if node == null:
+		return null
+	if node is Button:
+		return node as Button
+	for child in node.get_children():
+		var found := _first_button(child)
+		if found != null:
+			return found
+	return null
 
 
 func _dispose(panel: Node) -> void:
