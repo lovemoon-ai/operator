@@ -12,8 +12,9 @@ from .blueprint import BlueprintClient
 
 try:
     from ._native import NativeSession as _NativeSession
-except ImportError as _native_import_error:  # pure-Python tools still import cleanly
+except ImportError as error:  # pure-Python tools still import cleanly
     _NativeSession = None
+    _native_import_error = error
 else:
     _native_import_error = None
 

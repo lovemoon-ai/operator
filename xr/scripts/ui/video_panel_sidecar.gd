@@ -2,6 +2,7 @@ extends "res://scripts/ui/composition_viewport_ui.gd"
 class_name VideoPanelSidecar
 
 signal reset_requested
+signal distance_lock_changed(locked: bool)
 
 const RESET_ICON := preload("res://assets/icons/reset.svg")
 const VIEWPORT_SIZE := Vector2i(1280, 180)
@@ -12,6 +13,8 @@ const COL_TEXT := Color(0.94, 0.96, 0.98, 1.0)
 
 var _performance_label: Label
 var _reset_button: Button
+var _lock_button: Button
+var _distance_locked := true
 
 
 func _init() -> void:
@@ -37,7 +40,13 @@ func captures_teleop_input() -> bool:
 	return true
 
 
+func captures_teleop_scroll() -> bool:
+	return not _distance_locked
+
+
 func scroll_by_pixels(delta_pixels: float) -> void:
+	if _distance_locked:
+		return
 	var host := get_parent()
 	if host != null and host.has_method("adjust_panel_distance_from_scroll"):
 		host.call("adjust_panel_distance_from_scroll", delta_pixels)
@@ -106,6 +115,20 @@ func _build_content(viewport: SubViewport) -> void:
 	_reset_button.pressed.connect(_on_reset_pressed)
 	reset_container.add_child(_reset_button)
 
+	var lock_container := CenterContainer.new()
+	lock_container.custom_minimum_size.x = 164
+	lock_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	content.add_child(lock_container)
+
+	_lock_button = Button.new()
+	_lock_button.focus_mode = Control.FOCUS_NONE
+	_lock_button.custom_minimum_size = Vector2(152, 92)
+	_lock_button.add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+	_lock_button.mouse_entered.connect(func() -> void: _play_feedback("hover", -5.0, self))
+	_lock_button.pressed.connect(_on_lock_pressed)
+	lock_container.add_child(_lock_button)
+	_refresh_lock_button()
+
 
 func _make_performance_label() -> Label:
 	var label := Label.new()
@@ -121,6 +144,40 @@ func _make_performance_label() -> Label:
 func _on_reset_pressed() -> void:
 	_play_feedback("click", 0.0, self)
 	reset_requested.emit()
+
+
+func set_distance_locked(locked: bool) -> void:
+	_distance_locked = locked
+	_refresh_lock_button()
+
+
+func is_distance_locked() -> bool:
+	return _distance_locked
+
+
+func _on_lock_pressed() -> void:
+	_play_feedback("click", 0.0, self)
+	set_distance_locked(not _distance_locked)
+	distance_lock_changed.emit(_distance_locked)
+
+
+func _refresh_lock_button() -> void:
+	if _lock_button == null:
+		return
+	_lock_button.text = tr("UI_VIDEO_DISTANCE_LOCKED") if _distance_locked \
+		else tr("UI_VIDEO_DISTANCE_ADJUSTABLE")
+	_lock_button.tooltip_text = tr("UI_VIDEO_UNLOCK_DISTANCE") if _distance_locked \
+		else tr("UI_VIDEO_LOCK_DISTANCE")
+	var normal_color := Color(0.32, 0.13, 0.08, 0.98) if _distance_locked \
+		else Color(0.10, 0.12, 0.14, 0.98)
+	_lock_button.add_theme_stylebox_override("normal", _button_style(normal_color))
+	_lock_button.add_theme_stylebox_override(
+		"hover", _button_style(Color(0.38, 0.18, 0.10, 1.0) if _distance_locked \
+		else Color(0.16, 0.18, 0.20, 1.0))
+	)
+	_lock_button.add_theme_stylebox_override(
+		"pressed", _button_style(Color(0.22, 0.20, 0.14, 1.0))
+	)
 
 
 func _panel_style() -> StyleBoxFlat:

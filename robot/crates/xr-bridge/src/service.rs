@@ -18,7 +18,7 @@ use crate::adapter_client::AdapterClient;
 use crate::config::{BridgeConfig, VideoFeedConfig};
 use crate::pose_udp_server::UdpDropStats;
 use crate::sdk::BlueprintStreams;
-use crate::video::{Codec, VideoFeed};
+use crate::video::{Codec, VideoFeed, VideoFeedSource};
 use crate::wire_runtime::TimedCommand;
 use crate::{
     discovery, forward, latency, pose_server, pose_udp_server, runtime, telemetry_server, video,
@@ -57,7 +57,7 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
             .capabilities
             .remove(BLUEPRINT_SPEC_HASH_CAPABILITY);
     }
-    let video_feeds = video_feed_relays(&config.video.feeds);
+    let video_feeds = video_feed_relays(&config.video.feeds)?;
     log_video_feeds(&video_feeds);
 
     let device_type = descriptor.device.device_type.clone();
@@ -126,7 +126,7 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
 /// Run without a robot adapter and expose only configured video feeds.
 pub async fn run_video_only_mode(config: BridgeConfig) -> Result<()> {
     let descriptor = build_video_only_descriptor(&config)?;
-    let video_feeds = video_feed_relays(&config.video.feeds);
+    let video_feeds = video_feed_relays(&config.video.feeds)?;
     log_video_feeds(&video_feeds);
 
     let device_type = descriptor.device.device_type.clone();
@@ -195,7 +195,7 @@ fn build_video_only_descriptor(config: &BridgeConfig) -> Result<DeviceDescriptor
     Ok(descriptor)
 }
 
-pub(crate) fn video_feed_relays(feeds: &[VideoFeedConfig]) -> Vec<VideoFeed> {
+pub(crate) fn video_feed_relays(feeds: &[VideoFeedConfig]) -> Result<Vec<VideoFeed>> {
     feeds.iter().map(feed_config_to_relay).collect()
 }
 
@@ -205,6 +205,11 @@ pub(crate) fn append_video_feed_infos(
 ) {
     for fc in feeds {
         descriptor.video_feeds.push(feed_config_to_info(fc));
+    }
+    if !feeds.is_empty() {
+        descriptor
+            .capabilities
+            .insert("video".to_string(), serde_json::Value::Bool(true));
     }
 }
 
@@ -222,14 +227,27 @@ pub(crate) fn log_video_feeds(video_feeds: &[VideoFeed]) {
     }
 }
 
-fn feed_config_to_relay(fc: &VideoFeedConfig) -> VideoFeed {
-    VideoFeed {
+fn feed_config_to_relay(fc: &VideoFeedConfig) -> Result<VideoFeed> {
+    let source = match (&fc.rtsp_url, fc.command.as_slice()) {
+        (Some(url), []) if !url.trim().is_empty() => VideoFeedSource::Rtsp(url.clone()),
+        (None, [program, args @ ..]) if !program.trim().is_empty() => {
+            let mut command = Vec::with_capacity(args.len() + 1);
+            command.push(program.clone());
+            command.extend_from_slice(args);
+            VideoFeedSource::Command(command)
+        }
+        _ => bail!(
+            "video feed {:?} must configure exactly one of rtsp_url or command",
+            fc.name
+        ),
+    };
+    Ok(VideoFeed {
         name: fc.name.clone(),
-        rtsp_url: fc.rtsp_url.clone(),
+        source,
         tcp_port: fc.tcp_port,
         udp_port: fc.udp_port.filter(|&p| p != 0),
         codec: Codec::parse(&fc.codec),
-    }
+    })
 }
 
 fn feed_config_to_info(fc: &VideoFeedConfig) -> VideoFeedInfo {
@@ -298,5 +316,9 @@ video:
         assert_eq!(feed.height, 1080);
         assert_eq!(feed.fps, 60);
         assert_eq!(feed.transport, "udp");
+        assert_eq!(
+            descriptor.capabilities.get("video"),
+            Some(&serde_json::Value::Bool(true))
+        );
     }
 }

@@ -67,6 +67,28 @@ external views, including every property, binding, and event consumed by each
 implementation. A new primitive field or anchor cannot be added to the spec
 without a corresponding headset implementation and test update.
 
+## SDK Ownership
+
+`robot/crates/operator` is the authoritative publisher implementation. It owns
+Blueprint and state validation, patch merging, sequence allocation, descriptor
+capability injection, adapter-envelope serialization, and inbound event
+validation. `teleop-protocol` provides the internal wire data types; robot
+integrations should depend on the public `operator` facade instead of
+reimplementing those behaviors.
+
+The three language surfaces share that core:
+
+- Rust uses `operator::BlueprintPublisher` directly;
+- Python `XrSession.blueprint` and `HostedBlueprint` call it through
+  `pyoperator-native`;
+- C++ uses the `liboperator` C ABI and the RAII wrapper in
+  `cpp/liboperator/include/operator/operator.hpp`.
+
+Python dataclasses and C++ JSON builders remain language-level authoring
+ergonomics. The Rust core is the final authority before any descriptor,
+Blueprint, state, or event enters the adapter protocol. This keeps embedded
+Python, hosted Python, and native robot adapters behaviorally identical.
+
 ## Runtime Boundary
 
 `BlueprintRuntime` is a reusable XR host under `xr/scripts/blueprint/`. It
@@ -114,7 +136,8 @@ checkout whenever the canonical spec changes.
 
 Blueprint definitions are structural and expected to change rarely. State uses
 complete latest-wins snapshots: Rust `watch` channels and the hosted Python
-backend coalesce superseded updates instead of building an unbounded queue.
+wrapper around the same Rust publisher coalesce superseded updates instead of
+building an unbounded queue.
 A snapshot may omit a bound value to use the component's property/default
 fallback, but every key it does publish must be declared by at least one
 component binding and satisfy that generated value contract. Binding typos

@@ -31,8 +31,10 @@ bridge:
   # ── Video relay ──
   # Isaac Sim runs an RTSP server co-located with the bridge and exposes three
   # streams. The bridge pulls each (ffmpeg stream-copy, no transcode) and
-  # relays it to the headset over the existing XR video wire protocol. Each feed
-  # is independent: one RTSP URL -> one TCP fan-out port (+ optional UDP port).
+  # relays it to the headset over the existing XR video wire protocol. A feed
+  # may alternatively use `command: [program, arg, ...]` when a trusted local
+  # helper already writes Annex-B H.264/H.265 to stdout. Configure exactly one
+  # of `rtsp_url` or `command` per feed.
   # Remove or empty this block to run the bridge without video.
   #
   # `codec` declares what the upstream RTSP stream carries: "h264" (default) or

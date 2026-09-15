@@ -52,13 +52,12 @@ pub struct BridgeConfig {
     pub pose_udp_port: u16,
     /// TCP port for the dedicated telemetry stream.
     pub telemetry_port: u16,
-    /// Video relay configuration (RTSP → XR wire protocol). Empty = no video.
+    /// Video relay configuration (Annex-B source → XR wire protocol).
     pub video: VideoConfig,
 }
 
-/// Video relay configuration: a list of feeds the bridge pulls over RTSP and
-/// re-publishes over the XR video wire protocol. Empty by default so a no-video
-/// bridge run behaves exactly as before.
+/// Video relay configuration: a list of RTSP or command-backed feeds that the
+/// bridge re-publishes over the XR video wire protocol.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoConfig {
     /// One entry per concurrent feed (e.g. wrist_left / wrist_right / head).
@@ -72,7 +71,12 @@ pub struct VideoFeedConfig {
     /// Feed identifier (e.g. "wrist_left"); surfaced to the headset.
     pub name: String,
     /// RTSP URL to pull from (e.g. `rtsp://127.0.0.1:8554/wrist_left`).
-    pub rtsp_url: String,
+    #[serde(default)]
+    pub rtsp_url: Option<String>,
+    /// External process that writes Annex-B H.264/H.265 to stdout. The first
+    /// item is the executable and the remaining items are argv entries.
+    #[serde(default)]
+    pub command: Vec<String>,
     /// TCP port the headset connects to for this feed.
     pub tcp_port: u16,
     /// Optional UDP fan-out port. Omit (or 0) for TCP-only.
@@ -90,11 +94,9 @@ pub struct VideoFeedConfig {
     /// Preferred transport advertised in the descriptor ("tcp" | "udp" | "auto").
     #[serde(default = "default_video_transport")]
     pub transport: String,
-    /// Codec family the upstream RTSP stream carries: "h264" (default) or
-    /// "hevc". The bridge never transcodes — this tells the relay which
-    /// bitstream filter / muxer to copy through and how to classify NALs, and
-    /// is advertised to the headset so it spins up the matching decoder. Omit
-    /// for H.264 (back-compat with configs that pre-date the field).
+    /// Codec family emitted by the source: "h264" (default) or "hevc". For
+    /// RTSP this selects the matching stream-copy filter and muxer. The value
+    /// is also advertised so the headset starts the correct decoder.
     #[serde(default = "default_video_codec")]
     pub codec: String,
 }
@@ -207,14 +209,36 @@ impl BridgeConfig {
             if let Some(link) = shared.adapter_link {
                 apply_adapter_link_config(&mut cfg, link)?;
             }
+            validate_video_feeds(&cfg.video.feeds)?;
             return Ok(cfg);
         }
 
         let file: BridgeConfigFile = serde_yaml::from_str(text).context("invalid YAML")?;
         let mut cfg = BridgeConfig::default();
         apply_bridge_config_file(&mut cfg, file)?;
+        validate_video_feeds(&cfg.video.feeds)?;
         Ok(cfg)
     }
+}
+
+fn validate_video_feeds(feeds: &[VideoFeedConfig]) -> Result<()> {
+    for feed in feeds {
+        let has_rtsp = feed
+            .rtsp_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty());
+        let has_command = feed
+            .command
+            .first()
+            .is_some_and(|program| !program.trim().is_empty());
+        if has_rtsp == has_command {
+            anyhow::bail!(
+                "video feed {:?} must configure exactly one of rtsp_url or command",
+                feed.name
+            );
+        }
+    }
+    Ok(())
 }
 
 fn apply_adapter_link_config(cfg: &mut BridgeConfig, link: AdapterLinkConfigFile) -> Result<()> {
@@ -312,7 +336,11 @@ video:
 
         let wl = &cfg.video.feeds[0];
         assert_eq!(wl.name, "wrist_left");
-        assert_eq!(wl.rtsp_url, "rtsp://127.0.0.1:8554/wrist_left");
+        assert_eq!(
+            wl.rtsp_url.as_deref(),
+            Some("rtsp://127.0.0.1:8554/wrist_left")
+        );
+        assert!(wl.command.is_empty());
         assert_eq!(wl.tcp_port, 12345);
         assert_eq!(wl.udp_port, Some(22345));
         assert_eq!(wl.width, 640);
@@ -331,6 +359,54 @@ video:
         assert_eq!(head.fps, 30);
         assert_eq!(head.transport, "tcp");
         assert_eq!(head.codec, "h264");
+    }
+
+    #[test]
+    fn parses_annexb_command_video_feed() {
+        let yaml = r#"
+video:
+  feeds:
+    - name: head
+      command:
+        - /usr/bin/python3
+        - /opt/operator/camera.py
+        - --fps
+        - "30"
+      tcp_port: 12345
+"#;
+        let cfg = BridgeConfig::from_yaml_str(yaml).unwrap();
+        let feed = &cfg.video.feeds[0];
+        assert_eq!(feed.rtsp_url, None);
+        assert_eq!(
+            feed.command,
+            ["/usr/bin/python3", "/opt/operator/camera.py", "--fps", "30"]
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_video_source() {
+        let yaml = r#"
+video:
+  feeds:
+    - name: head
+      rtsp_url: rtsp://127.0.0.1:8554/head
+      command: [/usr/bin/camera-source]
+      tcp_port: 12345
+"#;
+        let error = BridgeConfig::from_yaml_str(yaml).unwrap_err().to_string();
+        assert!(error.contains("exactly one of rtsp_url or command"));
+    }
+
+    #[test]
+    fn rejects_missing_video_source() {
+        let yaml = r#"
+video:
+  feeds:
+    - name: head
+      tcp_port: 12345
+"#;
+        let error = BridgeConfig::from_yaml_str(yaml).unwrap_err().to_string();
+        assert!(error.contains("exactly one of rtsp_url or command"));
     }
 
     #[test]
@@ -414,7 +490,10 @@ bridge:
 
         let head = &cfg.video.feeds[0];
         assert_eq!(head.name, "head");
-        assert_eq!(head.rtsp_url, "rtsp://10.79.252.23:8554/head");
+        assert_eq!(
+            head.rtsp_url.as_deref(),
+            Some("rtsp://10.79.252.23:8554/head")
+        );
         assert_eq!(head.tcp_port, 12345);
         assert_eq!(head.udp_port, Some(22345));
         assert_eq!(head.width, 1920);

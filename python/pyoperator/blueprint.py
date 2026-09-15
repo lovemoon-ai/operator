@@ -774,18 +774,27 @@ class BlueprintClient:
                 if field_spec is None:
                     raise ValueError(f"Blueprint state key {key!r} is not bound")
                 _validate_value(key, value, field_spec)
-            sequence = self._sequence + 1
-            state = BlueprintState(
-                blueprint_id=self._blueprint_id,
-                blueprint_revision=self._blueprint_revision,
-                sequence=sequence,
-                timestamp_ns=time.time_ns() if timestamp_ns is None else timestamp_ns,
-                values=next_values,
-            )
-            serialized = json.dumps(
-                state.to_dict(), separators=(",", ":"), allow_nan=False
-            )
-            self._native.publish_blueprint_state_json(serialized)
+            serialized = json.dumps(values, separators=(",", ":"), allow_nan=False)
+            update_native = getattr(self._native, "update_blueprint_values_json", None)
+            if callable(update_native):
+                sequence = int(
+                    update_native(
+                        serialized,
+                        time.time_ns() if timestamp_ns is None else timestamp_ns,
+                    )
+                )
+            else:
+                sequence = self._sequence + 1
+                state = BlueprintState(
+                    blueprint_id=self._blueprint_id,
+                    blueprint_revision=self._blueprint_revision,
+                    sequence=sequence,
+                    timestamp_ns=time.time_ns() if timestamp_ns is None else timestamp_ns,
+                    values=next_values,
+                )
+                self._native.publish_blueprint_state_json(
+                    json.dumps(state.to_dict(), separators=(",", ":"), allow_nan=False)
+                )
             self._values = next_values
             self._sequence = sequence
             return sequence
@@ -800,7 +809,12 @@ class BlueprintClient:
         event = BlueprintEvent.from_dict(value)
         with self._lock:
             if self._blueprint is None:
-                raise ValueError("received Blueprint event without an active Blueprint")
+                return None
+            if (
+                event.blueprint_id != self._blueprint_id
+                or event.blueprint_revision != self._blueprint_revision
+            ):
+                return None
             self._blueprint.validate_event(event)
         return event
 

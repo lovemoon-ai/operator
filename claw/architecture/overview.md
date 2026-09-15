@@ -1,9 +1,10 @@
 # Architecture Overview
 
-Operator has four runtime surfaces:
+Operator has five runtime surfaces:
 
 - `xr/` - in-headset Godot Android client.
-- `robot/` - Rust robot-side bridge, protocol, and adapter crates.
+- `robot/` - Rust Operator SDK core, bridge, protocol, and adapter crates.
+- `cpp/` - `liboperator`, the C++ SDK over the Rust core's stable C ABI.
 - `python/` - Python-first in-process XR, robot, retargeting, and IK API.
 - `web/` - local ingest and review app for ego recordings.
 
@@ -21,11 +22,16 @@ samples to a server and receives algorithm results for in-headset rendering.
 
 ```text
 robot/
-  crates/teleop-protocol   shared Rust protocol types and codecs
+  crates/operator          public Rust SDK and shared behavior
+  crates/operator-c        stable C ABI used by liboperator
+  crates/teleop-protocol   internal wire types and codecs
   crates/robot-service     robot-side service entry point
   crates/xr-bridge         discovery, video relay, pose/control bridge
   crates/robot-adapter     device abstraction and robot drivers
-  crates/pyoperator-native PyO3 in-process bridge binding
+  crates/pyoperator-native PyO3 bindings over operator and xr-bridge
+
+cpp/
+  liboperator/             C++17 headers and CMake target
 
 python/
   pyoperator/              immutable frames, session, robot/control APIs
