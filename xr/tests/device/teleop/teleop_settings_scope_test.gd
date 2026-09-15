@@ -55,11 +55,17 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	):
 		_dispose(panel)
 		return
-	t.eq(protocol_buttons.size(), 2, "outside offers both wire protocols")
+	var xrt_available := PicoPlatformAdapter.is_pico_build()
+	t.eq(
+		protocol_buttons.size(),
+		2 if xrt_available else 1,
+		"outside offers the wire protocols this platform supports"
+	)
 	t.is_true(protocol_buttons.has("operator"), "Operator protocol is offered")
-	t.is_true(
+	t.eq(
 		protocol_buttons.has("xrobot_toolkit_v1"),
-		"XRoboToolkit-compatible protocol is offered"
+		xrt_available,
+		"XRoboToolkit-compatible protocol is Pico-only"
 	)
 	t.is_true(
 		outside_box.is_ancestor_of(protocol_row),
@@ -108,13 +114,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			"device_type": "unitree_g1d",
 			"protocol": "operator",
 		},
-		"xrobot_toolkit_v1|%s|63901" % shared_ip: {
-			"name": "XRoboToolkit %s" % shared_ip,
-			"ip": shared_ip,
-			"pose_port": 63901,
-			"device_type": "xrobot_toolkit",
-			"protocol": "xrobot_toolkit_v1",
-		},
 		"operator|192.168.1.41|63901": {
 			"name": "G1-D Debug",
 			"ip": "192.168.1.41",
@@ -123,8 +122,16 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			"protocol": "operator",
 		},
 	}
+	if xrt_available:
+		discovered["xrobot_toolkit_v1|%s|63901" % shared_ip] = {
+			"name": "XRoboToolkit %s" % shared_ip,
+			"ip": shared_ip,
+			"pose_port": 63901,
+			"device_type": "xrobot_toolkit",
+			"protocol": "xrobot_toolkit_v1",
+		}
 	panel.set_discovery_state(discovered)
-	t.eq(discovery_option.item_count, 4,
+	t.eq(discovery_option.item_count, 4 if xrt_available else 3,
 		"same-IP cross-protocol and same-name Operator services are all listed")
 	t.eq(discovery_option.selected, 0,
 		"discovery without an explicitly saved endpoint leaves Manual selected")
@@ -135,93 +142,112 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.is_true(ip_input.editable, "double-click flips the IP field editable")
 	panel.call("_leave_ip_edit_mode")
 	t.is_true(port_input.editable, "manual robot port remains editable when services are discovered")
-	panel.set_discovery_state(discovered, shared_ip, "xrobot_toolkit_v1", 63901)
-	t.eq(
-		str(discovery_option.get_item_metadata(discovery_option.selected)),
-		"xrobot_toolkit_v1|%s|63901" % shared_ip,
-		"saved protocol disambiguates services that share an IP and port"
-	)
-	t.eq(panel.get_options().get("protocol", ""), "xrobot_toolkit_v1",
-		"selecting the HoloMotion-compatible entry switches the wire protocol")
-	ip_input.text = "192.168.1.41"
-	panel.call("_on_manual_endpoint_changed", ip_input.text)
-	t.eq(discovery_option.selected, 0, "editing a discovered endpoint switches back to Manual")
-
-	var xrobot_options := _options("outside")
-	xrobot_options["protocol"] = "xrobot_toolkit_v1"
-	xrobot_options["xrobot_toolkit_device_sn"] = "PICO-SN-123"
-	panel.set_options(xrobot_options)
-	t.eq(
-		panel.get_options().get("protocol", ""),
-		"xrobot_toolkit_v1",
-		"XRoboToolkit-compatible protocol round-trips"
-	)
-	var operator_button: Button = protocol_buttons["operator"]
-	var xrobot_button: Button = protocol_buttons["xrobot_toolkit_v1"]
-	t.is_true(xrobot_button.button_pressed, "XRoboToolkit-compatible choice stays selected")
-	t.is_false(operator_button.button_pressed, "Operator choice is released")
-	t.is_true(xrobot_device_sn_input.visible, "XRoboToolkit protocol shows the PICO device SN")
-	t.is_true(
-		pico_body_calibration_button.visible,
-		"XRoboToolkit-compatible Outside settings show PICO Body Calibration"
-	)
-	t.eq(
-		panel.get_options().get("xrobot_toolkit_device_sn", ""),
-		"PICO-SN-123",
-		"PICO device SN round-trips through settings"
-	)
-	var calibration_requests: Array = []
-	panel.pico_body_calibration_requested.connect(func() -> void:
-		calibration_requests.append(true)
-	)
-	var options_before_calibration := panel.get_options()
-	pico_body_calibration_button.emit_signal("pressed")
-	t.eq(calibration_requests.size(), 1, "PICO Body Calibration emits one request")
-	t.eq(
-		panel.get_options(),
-		options_before_calibration,
-		"PICO Body Calibration does not alter settings"
-	)
-	t.is_true(panel.saved_options.is_empty(), "PICO Body Calibration does not save settings")
-	operator_button.emit_signal("pressed")
-	t.eq(panel.get_options().get("protocol", ""), "operator", "Operator button changes protocol")
-	t.is_false(
-		pico_body_calibration_button.visible,
-		"switching to Operator hides PICO Body Calibration"
-	)
-	xrobot_button.emit_signal("pressed")
-	t.eq(
-		panel.get_options().get("protocol", ""),
-		"xrobot_toolkit_v1",
-		"XRoboToolkit-compatible button changes protocol"
-	)
-	t.is_true(
-		pico_body_calibration_button.visible,
-		"switching back to XRoboToolkit Compatible shows PICO Body Calibration"
-	)
-
-	var applied: Array = []
-	panel.settings_applied.connect(func(options: Dictionary) -> void:
-		applied.append(options.duplicate(true))
-	)
-	panel.call("_on_confirm_requested")
-	t.eq(applied.size(), 1, "applying Outside settings emits one options dictionary")
-	if not applied.is_empty():
+	if xrt_available:
+		panel.set_discovery_state(discovered, shared_ip, "xrobot_toolkit_v1", 63901)
 		t.eq(
-			applied[0].get("protocol", ""),
+			str(discovery_option.get_item_metadata(discovery_option.selected)),
+			"xrobot_toolkit_v1|%s|63901" % shared_ip,
+			"saved protocol disambiguates services that share an IP and port"
+		)
+		t.eq(panel.get_options().get("protocol", ""), "xrobot_toolkit_v1",
+			"selecting the HoloMotion-compatible entry switches the wire protocol")
+		ip_input.text = "192.168.1.41"
+		panel.call("_on_manual_endpoint_changed", ip_input.text)
+		t.eq(discovery_option.selected, 0, "editing a discovered endpoint switches back to Manual")
+
+	if xrt_available:
+		var xrobot_options := _options("outside")
+		xrobot_options["protocol"] = "xrobot_toolkit_v1"
+		xrobot_options["xrobot_toolkit_device_sn"] = "PICO-SN-123"
+		panel.set_options(xrobot_options)
+		t.eq(
+			panel.get_options().get("protocol", ""),
 			"xrobot_toolkit_v1",
-			"settings_applied includes the selected protocol"
+			"XRoboToolkit-compatible protocol round-trips"
+		)
+		var operator_button: Button = protocol_buttons["operator"]
+		var xrobot_button: Button = protocol_buttons["xrobot_toolkit_v1"]
+		t.is_true(xrobot_button.button_pressed, "XRoboToolkit-compatible choice stays selected")
+		t.is_false(operator_button.button_pressed, "Operator choice is released")
+		t.is_true(xrobot_device_sn_input.visible, "XRoboToolkit protocol shows the PICO device SN")
+		t.is_true(
+			pico_body_calibration_button.visible,
+			"XRoboToolkit-compatible Outside settings show PICO Body Calibration"
 		)
 		t.eq(
-			applied[0].get("xrobot_toolkit_device_sn", ""),
+			panel.get_options().get("xrobot_toolkit_device_sn", ""),
 			"PICO-SN-123",
-			"settings_applied includes the configured PICO device SN"
+			"PICO device SN round-trips through settings"
 		)
-	t.eq(
-		panel.saved_options.get("protocol", ""),
-		"xrobot_toolkit_v1",
-		"saved settings include the selected protocol"
-	)
+		var calibration_requests: Array = []
+		panel.pico_body_calibration_requested.connect(func() -> void:
+			calibration_requests.append(true)
+		)
+		var options_before_calibration := panel.get_options()
+		pico_body_calibration_button.emit_signal("pressed")
+		t.eq(calibration_requests.size(), 1, "PICO Body Calibration emits one request")
+		t.eq(
+			panel.get_options(),
+			options_before_calibration,
+			"PICO Body Calibration does not alter settings"
+		)
+		t.is_true(panel.saved_options.is_empty(), "PICO Body Calibration does not save settings")
+		operator_button.emit_signal("pressed")
+		t.eq(panel.get_options().get("protocol", ""), "operator", "Operator button changes protocol")
+		t.is_false(
+			pico_body_calibration_button.visible,
+			"switching to Operator hides PICO Body Calibration"
+		)
+		xrobot_button.emit_signal("pressed")
+		t.eq(
+			panel.get_options().get("protocol", ""),
+			"xrobot_toolkit_v1",
+			"XRoboToolkit-compatible button changes protocol"
+		)
+		t.is_true(
+			pico_body_calibration_button.visible,
+			"switching back to XRoboToolkit Compatible shows PICO Body Calibration"
+		)
+
+		var applied: Array = []
+		panel.settings_applied.connect(func(options: Dictionary) -> void:
+			applied.append(options.duplicate(true))
+		)
+		panel.call("_on_confirm_requested")
+		t.eq(applied.size(), 1, "applying Outside settings emits one options dictionary")
+		if not applied.is_empty():
+			t.eq(
+				applied[0].get("protocol", ""),
+				"xrobot_toolkit_v1",
+				"settings_applied includes the selected protocol"
+			)
+			t.eq(
+				applied[0].get("xrobot_toolkit_device_sn", ""),
+				"PICO-SN-123",
+				"settings_applied includes the configured PICO device SN"
+			)
+		t.eq(
+			panel.saved_options.get("protocol", ""),
+			"xrobot_toolkit_v1",
+			"saved settings include the selected protocol"
+		)
+	else:
+		var xrobot_options := _options("outside")
+		xrobot_options["protocol"] = "xrobot_toolkit_v1"
+		panel.set_options(xrobot_options)
+		t.eq(
+			panel.get_options().get("protocol", ""),
+			"operator",
+			"XRoboToolkit-compatible protocol normalizes to Operator off Pico"
+		)
+		t.is_false(
+			xrobot_device_sn_input.visible,
+			"non-Pico builds never show the PICO device SN"
+		)
+		t.is_false(
+			pico_body_calibration_button.visible,
+			"non-Pico builds never show PICO Body Calibration"
+		)
 
 	var invalid_protocol_options := _options("outside")
 	invalid_protocol_options["protocol"] = "unknown"
@@ -396,14 +422,20 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		return
 
 	t.eq(groups.find("display"), groups.find("video") + 1, "Display follows Video")
-	t.eq(protocol_buttons.size(), 2, "Video offers both stream protocols")
+	var xrt_available := PicoPlatformAdapter.is_pico_build()
+	t.eq(
+		protocol_buttons.size(),
+		2 if xrt_available else 1,
+		"Video offers the stream protocols this platform supports"
+	)
 	t.is_true(
 		protocol_buttons.has("operator_timed_h264"),
 		"Operator Timed H.264 video protocol is offered"
 	)
-	t.is_true(
+	t.eq(
 		protocol_buttons.has("xrobot_toolkit_fpv"),
-		"XRobotToolkit FPV video protocol is offered"
+		xrt_available,
+		"XRobotToolkit FPV video protocol is Pico-only"
 	)
 	t.is_true(video_group.is_ancestor_of(video_face_toggle), "face lock moved into Video")
 	t.is_true(video_group.is_ancestor_of(show_video_panel_toggle), "video visibility moved into Video")
@@ -424,12 +456,13 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		(operation_trajectory_toggle.get_parent() as Control).visible,
 		"native Operator hides the legacy trajectory toggle",
 	)
-	panel._on_protocol_pressed("xrobot_toolkit_v1")
-	t.is_true(
-		(show_video_panel_toggle.get_parent() as Control).visible,
-		"XRoboToolkit keeps its local video visibility control",
-	)
-	panel._on_protocol_pressed("operator")
+	if xrt_available:
+		panel._on_protocol_pressed("xrobot_toolkit_v1")
+		t.is_true(
+			(show_video_panel_toggle.get_parent() as Control).visible,
+			"XRoboToolkit keeps its local video visibility control",
+		)
+		panel._on_protocol_pressed("operator")
 
 	var legacy_options := _options("outside")
 	for key in ["video_protocol", "video_ip", "video_port", "video_sbs"]:
@@ -462,53 +495,65 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		)
 		t.eq(connect_requests[0].get("video_port", 0), 12345, "Connect includes the video port")
 
-	var xrt_button: Button = protocol_buttons["xrobot_toolkit_fpv"]
-	var operator_button: Button = protocol_buttons["operator_timed_h264"]
-	xrt_button.emit_signal("pressed")
-	t.is_true(xrt_button.button_pressed, "XRobotToolkit FPV choice stays selected")
-	t.is_false(operator_button.button_pressed, "Operator video choice is released")
-	t.eq(panel.get_options().get("video_port", 0), 13579, "XRT switches a default port to 13579")
-	t.eq(video_port_label.text, panel.tr("UI_VIDEO_COMMAND_PORT"), "XRT labels the command port")
+	var expected_requests := 1
+	if xrt_available:
+		var xrt_button: Button = protocol_buttons["xrobot_toolkit_fpv"]
+		var operator_button: Button = protocol_buttons["operator_timed_h264"]
+		xrt_button.emit_signal("pressed")
+		t.is_true(xrt_button.button_pressed, "XRobotToolkit FPV choice stays selected")
+		t.is_false(operator_button.button_pressed, "Operator video choice is released")
+		t.eq(panel.get_options().get("video_port", 0), 13579, "XRT switches a default port to 13579")
+		t.eq(video_port_label.text, panel.tr("UI_VIDEO_COMMAND_PORT"), "XRT labels the command port")
 
-	var xrt_options := _options("outside")
-	xrt_options["video_protocol"] = "xrobot_toolkit_fpv"
-	xrt_options["video_ip"] = "10.42.0.8"
-	xrt_options["video_port"] = 14000
-	# Old saved settings may still contain this key; it must be ignored.
-	xrt_options["video_receive_port"] = 12350
-	xrt_options["video_sbs"] = true
-	xrt_options["video_face_locked"] = false
-	xrt_options["show_video_panel"] = true
-	panel.set_options(xrt_options)
-	var round_trip := panel.get_options()
-	t.eq(round_trip.get("video_protocol", ""), "xrobot_toolkit_fpv", "XRT video protocol round-trips")
-	t.eq(round_trip.get("video_ip", ""), "10.42.0.8", "video IP round-trips independently")
-	t.eq(round_trip.get("video_port", 0), 14000, "video command port round-trips")
-	t.is_false(round_trip.has("video_receive_port"), "legacy receive-port settings are ignored")
-	t.is_true(bool(round_trip.get("video_sbs", false)), "SBS round-trips")
-	t.is_false(bool(round_trip.get("video_face_locked", true)), "face lock key remains compatible")
-	t.is_true(bool(round_trip.get("show_video_panel", false)), "show video key remains compatible")
-	t.eq(round_trip.get("ip", ""), "127.0.0.1", "video IP does not overwrite robot IP")
+		var xrt_options := _options("outside")
+		xrt_options["video_protocol"] = "xrobot_toolkit_fpv"
+		xrt_options["video_ip"] = "10.42.0.8"
+		xrt_options["video_port"] = 14000
+		# Old saved settings may still contain this key; it must be ignored.
+		xrt_options["video_receive_port"] = 12350
+		xrt_options["video_sbs"] = true
+		xrt_options["video_face_locked"] = false
+		xrt_options["show_video_panel"] = true
+		panel.set_options(xrt_options)
+		var round_trip := panel.get_options()
+		t.eq(round_trip.get("video_protocol", ""), "xrobot_toolkit_fpv", "XRT video protocol round-trips")
+		t.eq(round_trip.get("video_ip", ""), "10.42.0.8", "video IP round-trips independently")
+		t.eq(round_trip.get("video_port", 0), 14000, "video command port round-trips")
+		t.is_false(round_trip.has("video_receive_port"), "legacy receive-port settings are ignored")
+		t.is_true(bool(round_trip.get("video_sbs", false)), "SBS round-trips")
+		t.is_false(bool(round_trip.get("video_face_locked", true)), "face lock key remains compatible")
+		t.is_true(bool(round_trip.get("show_video_panel", false)), "show video key remains compatible")
+		t.eq(round_trip.get("ip", ""), "127.0.0.1", "video IP does not overwrite robot IP")
 
-	connect_button.emit_signal("pressed")
-	t.eq(connect_requests.size(), 2, "Connect emits the updated XRobotToolkit request")
-	if connect_requests.size() >= 2:
-		t.eq(connect_requests[1].get("video_ip", ""), "10.42.0.8", "Connect includes the video IP")
-		t.eq(connect_requests[1].get("video_port", 0), 14000, "Connect includes the command port")
-		t.is_false(connect_requests[1].has("video_receive_port"), "Connect leaves receive-port selection to PICO")
-		t.is_true(bool(connect_requests[1].get("video_sbs", false)), "Connect includes SBS")
-	t.is_true(panel.saved_options.is_empty(), "video connection does not save settings")
+		connect_button.emit_signal("pressed")
+		expected_requests = 2
+		t.eq(connect_requests.size(), 2, "Connect emits the updated XRobotToolkit request")
+		if connect_requests.size() >= 2:
+			t.eq(connect_requests[1].get("video_ip", ""), "10.42.0.8", "Connect includes the video IP")
+			t.eq(connect_requests[1].get("video_port", 0), 14000, "Connect includes the command port")
+			t.is_false(connect_requests[1].has("video_receive_port"), "Connect leaves receive-port selection to PICO")
+			t.is_true(bool(connect_requests[1].get("video_sbs", false)), "Connect includes SBS")
+		t.is_true(panel.saved_options.is_empty(), "video connection does not save settings")
+	else:
+		var xrt_options := _options("outside")
+		xrt_options["video_protocol"] = "xrobot_toolkit_fpv"
+		panel.set_options(xrt_options)
+		t.eq(
+			panel.get_options().get("video_protocol", ""),
+			"operator_timed_h264",
+			"XRT video protocol normalizes to Operator off Pico"
+		)
 	panel.set_video_status("Connected")
 	t.eq(status_label.text, "Connected", "Controller can update the public video status")
 
 	video_ip_input.text = ""
 	connect_button.emit_signal("pressed")
-	t.eq(connect_requests.size(), 2, "empty video IP blocks Connect")
+	t.eq(connect_requests.size(), expected_requests, "empty video IP blocks Connect")
 	t.eq(status_label.text, panel.tr("UI_VIDEO_IP_REQUIRED"), "empty video IP reports validation")
 	video_ip_input.text = "10.42.0.8"
 	video_port_input.text = "70000"
 	connect_button.emit_signal("pressed")
-	t.eq(connect_requests.size(), 2, "invalid video port blocks Connect")
+	t.eq(connect_requests.size(), expected_requests, "invalid video port blocks Connect")
 	t.eq(status_label.text, panel.tr("UI_VIDEO_INVALID_PORT"), "invalid video port reports validation")
 
 	var invalid_protocol_options := _options("outside")

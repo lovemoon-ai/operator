@@ -102,6 +102,10 @@ cd python && .venv/bin/python -m pytest -m xr_device --no-cov \
 
 # Teleop robot-configuration page (Inside/Outside switching, robot picker).
 bash cicd/xr_module_harness.sh --suite teleop.settings
+# The harness builds the "Meta Quest Test" preset by default; pass
+# --platform pico to run the same suite on the "Pico Test" preset, which is
+# what exercises Pico-only branches such as XRoboToolkit compatibility.
+bash cicd/xr_module_harness.sh --platform pico --suite teleop.settings
 
 # Every robot this build ships must start and render on the headset. One app
 # launch per robot: instantiating several in one frame kills the renderer.

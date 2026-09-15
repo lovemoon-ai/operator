@@ -174,7 +174,10 @@ robot session; that is a product boundary rather than a Blueprint limitation.
 
 Outside Robot can alternatively select `xrobot_toolkit_v1`. That target opens
 its own TCP connection and emits the legacy binary XRoboToolkit packets expected
-by existing HoloMotion deployments. It does not create an adapter gateway and
+by existing HoloMotion deployments. XRoboToolkit compatibility is offered only
+in Pico builds (`OS.has_feature("pico")`); other platforms hide the protocol
+choices, skip the UDP beacon listener, and normalize any persisted
+`xrobot_toolkit_v1` setting back to Operator. It does not create an adapter gateway and
 does not alter the Operator session, descriptor, video, or robot-side protocol.
 The Operator, SDK, and XRoboToolkit senders are mutually exclusive. This mode
 covers the HoloMotion RoboticsService tracking ingress on TCP `63901` and the

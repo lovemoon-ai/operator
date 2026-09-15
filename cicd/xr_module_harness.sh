@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # XR module test harness device runner (WP7).
 #
-# Installs the test-harness APK (export preset "Meta Quest Test",
-# operator_feature_test_harness=true), launches the in-app test runner via
-# intent extras, watches logcat for OPERATOR_TEST_* markers, and pulls the
-# JSON results from the device's external files dir.
+# Installs the test-harness APK (export preset "Meta Quest Test", or "Pico
+# Test" with --platform pico; both set operator_feature_test_harness=true),
+# launches the in-app test runner via intent extras, watches logcat for
+# OPERATOR_TEST_* markers, and pulls the JSON results from the device's
+# external files dir.
 #
 # Hard rules honored: APK build runs in the background (>10 min first
 # build); never uses `godot --headless` to run the XR project; requires a
@@ -12,14 +13,13 @@
 #
 # Usage:
 #   tests/xr_module_harness.sh --suite capture.pipeline [--case <case_id>]
-#       [--serial <adb_serial>] [--skip-build] [--skip-install]
-#       [--timeout <seconds>]
+#       [--platform quest|pico] [--serial <adb_serial>]
+#       [--skip-build] [--skip-install] [--timeout <seconds>]
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 XR_DIR="$ROOT/xr"
-APK="$XR_DIR/build/quest_test/Operator.apk"
 PACKAGE="com.lovemoon.operator"
 ACTIVITY="com.godot.game.GodotApp"
 RESULTS_REMOTE="/sdcard/Android/data/$PACKAGE/files/test_results"
@@ -27,6 +27,7 @@ RESULTS_LOCAL="$ROOT/tests/results/xr_module_harness"
 
 SUITE="all"
 CASE_ID=""
+PLATFORM="quest"
 SERIAL=""
 SKIP_BUILD=0
 SKIP_INSTALL=0
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --suite) SUITE="$2"; shift 2 ;;
     --case) CASE_ID="$2"; shift 2 ;;
+    --platform) PLATFORM="$2"; shift 2 ;;
     --serial) SERIAL="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --skip-install) SKIP_INSTALL=1; shift ;;
@@ -43,6 +45,13 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+case "$PLATFORM" in
+  quest) BUILD_TARGET="build-quest-test"; APK="$XR_DIR/build/quest_test/Operator.apk" ;;
+  pico)  BUILD_TARGET="build-pico-test";  APK="$XR_DIR/build/pico_test/Operator.apk" ;;
+  *) echo "unknown platform: $PLATFORM (quest|pico)" >&2; exit 2 ;;
+esac
+BUILD_LOG="$XR_DIR/build/${PLATFORM}_test_build.log"
 
 # Resolve adb the way xr/Makefile does, preferring the SDK's platform-tools.
 # This install needs --no-incremental, which only platform-tools >= 30 parses;
@@ -59,7 +68,7 @@ ADB_BIN="${ADB_BIN:-adb}"
 ADB=("$ADB_BIN")
 if [[ -n "$SERIAL" ]]; then ADB=("$ADB_BIN" -s "$SERIAL"); fi
 
-echo "== xr_module_harness: suite=$SUITE case=${CASE_ID:-<all>}"
+echo "== xr_module_harness: suite=$SUITE case=${CASE_ID:-<all>} platform=$PLATFORM"
 
 if ! "${ADB[@]}" get-state >/dev/null 2>&1; then
   echo "ERROR: no adb device available (real Android XR device required)" >&2
@@ -67,15 +76,15 @@ if ! "${ADB[@]}" get-state >/dev/null 2>&1; then
 fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "== building test APK (background, log: $XR_DIR/build/quest_test_build.log)"
+  echo "== building test APK (background, log: $BUILD_LOG)"
   mkdir -p "$XR_DIR/build"
-  ( cd "$XR_DIR" && make build-quest-test ) >"$XR_DIR/build/quest_test_build.log" 2>&1 &
+  ( cd "$XR_DIR" && make "$BUILD_TARGET" ) >"$BUILD_LOG" 2>&1 &
   BUILD_PID=$!
   while kill -0 "$BUILD_PID" 2>/dev/null; do
     sleep 10
     echo "   ... build running (pid $BUILD_PID)"
   done
-  wait "$BUILD_PID" || { echo "ERROR: test APK build failed; see $XR_DIR/build/quest_test_build.log" >&2; exit 1; }
+  wait "$BUILD_PID" || { echo "ERROR: test APK build failed; see $BUILD_LOG" >&2; exit 1; }
 fi
 
 if [[ ! -f "$APK" ]]; then
