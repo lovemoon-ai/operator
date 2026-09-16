@@ -7,6 +7,9 @@ signal close_requested
 signal pico_body_calibration_requested
 signal video_connect_requested(options: Dictionary)
 signal blueprint_visibility_override_requested(component_id: String, visible: Variant)
+## Display preferences are the live view, not a staged form: they are saved
+## and emitted the moment they change instead of waiting for a connection.
+signal display_options_changed(options: Dictionary)
 
 const SETTINGS_PATH := "user://teleop_settings.cfg"
 const SECTION := "settings"
@@ -20,7 +23,6 @@ const DEFAULT_TARGET_SCOPE := "outside"
 const PROTOCOL_OPERATOR := "operator"
 const PROTOCOL_XROBOT_TOOLKIT_V1 := "xrobot_toolkit_v1"
 const DEFAULT_PROTOCOL := PROTOCOL_XROBOT_TOOLKIT_V1
-const DEFAULT_XROBOT_TOOLKIT_DEVICE_SN := ""
 const DEFAULT_RETARGETING_BACKEND := "native"
 const DEFAULT_RETARGETING_HOST := "127.0.0.1"
 const DEFAULT_RETARGETING_PORT := 8000
@@ -37,8 +39,38 @@ const DEFAULT_FACE_LOCKED: bool = true
 const DEFAULT_SHOW_VIDEO_PANEL: bool = false
 const DEFAULT_SHOW_OPERATION_TRAJECTORY: bool = false
 const DEFAULT_SHOW_VR_POSE: bool = false
+const DEFAULT_MENU_WORLD_LOCKED: bool = false
 const DEFAULT_SHOW_ON_LAUNCH: bool = false
 const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
+## Panel width in viewport pixels. The layer opens at PANEL_WIDTH_PX and
+## grows up to PANEL_MAX_WIDTH_PX when a discovered host's label would not
+## otherwise fit — see `_fit_width_to_endpoints`.
+const PANEL_WIDTH_PX := 840
+const PANEL_MAX_WIDTH_PX := 1440
+## Width the page spends outside an endpoint row: the base panel's 38 px side
+## margins and 2 px border, the sidebar, the split's 14 px separation and the
+## detail padding. The row's own inset and a possible scrollbar are measured at
+## runtime. Rows clip instead of pushing the layout, so if this ever falls short
+## the operator sees a trailing ellipsis rather than a cropped page.
+const ENDPOINT_ROW_CHROME_PX := 2 * 38 + 2 * 2 + SIDEBAR_WIDTH + 14 + 2 * DETAIL_PADDING
+const ENDPOINT_ROW_FONT_SIZE := 20
+## Below this the link is up but nothing is leaving the headset.
+const SEND_RATE_IDLE_HZ := 0.5
+## Keys naming *which* link Connect starts. Only Connect persists them: launch
+## auto-connects to the saved endpoint, so letting Close or a Display toggle
+## save an endpoint the operator never connected to would hand that endpoint
+## control on the next launch.
+const LINK_OPTION_KEYS := [
+	"target_scope",
+	"protocol",
+	"ip",
+	"port",
+	"inside_profile",
+	"retargeting_backend",
+	"retargeting_host",
+	"retargeting_port",
+	"retargeting_tls",
+]
 const BLUEPRINT_OVERRIDE_LABEL_KEYS := {
 	"follow": "UI_BLUEPRINT_FOLLOW",
 	"show": "UI_BLUEPRINT_SHOW",
@@ -122,7 +154,6 @@ var _ip_click_timer: Timer
 var _ip_dropdown_endpoint_ids: PackedStringArray = PackedStringArray()
 var _port_input: LineEdit
 var _disconnect_button: Button
-var _xrobot_toolkit_device_sn_input: LineEdit
 var _pico_body_calibration_button: Button
 var _video_protocol_row: HBoxContainer
 var _video_protocol_buttons: Dictionary = {}
@@ -137,23 +168,47 @@ var _video_face_toggle: CheckButton
 var _show_video_panel_toggle: CheckButton
 var _show_operation_trajectory_toggle: CheckButton
 var _show_vr_pose_toggle: CheckButton
+var _menu_lock_buttons: Dictionary = {}
+var _menu_world_locked := DEFAULT_MENU_WORLD_LOCKED
 var _show_on_launch_toggle: CheckButton
 var _blueprint_group: VBoxContainer
 var _blueprint_rows: VBoxContainer
 var _blueprint_override_buttons: Dictionary = {}
 var _blueprint_override_modes: Dictionary = {}
 var _status_label: Label
+var _send_rate_label: Label
+var _link_active := false
+## Last `prefer_*` hints handed to `set_discovery_state`, replayed whenever
+## the endpoint list is rebuilt for a different wire protocol.
+var _discovery_prefer: Dictionary = {}
 var _discovery_spinner: DiscoverySpinner
 var _discovery_active := false
 var _discovered: Dictionary = {}
 var _applying_discovery_selection := false
+## True while `set_options` is writing the form. Loading persisted settings
+## flips the display toggles, and those now emit live — without this the
+## panel would save and re-broadcast its own state on construction.
+var _applying_options := false
 
 
 func _init() -> void:
-	# 840 wide gives ~430px of detail column after sidebar + margins,
-	# 720 tall replaces the legacy 884 — there's no longer a single tall
-	# scroll list, each group fits comfortably.
-	_setup_two_column_panel(Vector2i(840, 720), Vector2(0.63, 0.54), "UI_SETTINGS_TITLE", "UI_OK", 2, false)
+	# PANEL_WIDTH_PX leaves ~430px of detail column after sidebar + margins
+	# and is the floor, not a fixed width: `_fit_width_to_endpoints` grows it
+	# for a long host label. 720 tall replaces the legacy 884 — there's no
+	# longer a single tall scroll list, each group fits comfortably.
+	_setup_two_column_panel(
+		Vector2i(PANEL_WIDTH_PX, 720), Vector2(0.63, 0.54), "UI_SETTINGS_TITLE", "UI_CLOSE", 2, false
+	)
+	# Connection state belongs in the title bar rather than inside the Robot
+	# group: the link is global to the page, so the operator must see frames
+	# going out from whichever group they happen to be looking at.
+	_send_rate_label = Label.new()
+	_send_rate_label.add_theme_font_size_override("font_size", 20)
+	_send_rate_label.add_theme_color_override("font_color", COL_ACCENT)
+	_send_rate_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_send_rate_label.visible = false
+	_title_row.add_child(_send_rate_label)
+	_title_row.move_child(_send_rate_label, 1)
 	var settings := _load_settings()
 	set_options(settings)
 	set_status(tr("UI_LOADED_SETTINGS" if bool(settings.get("loaded", false)) else "UI_USING_DEFAULTS"))
@@ -286,14 +341,6 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_ip_input.focus_exited.connect(_on_ip_input_focus_exited)
 	add_interactive(ip_row, _ip_input)
 
-	_connect_button = Button.new()
-	_connect_button.text = tr("UI_CONNECT")
-	_connect_button.focus_mode = Control.FOCUS_NONE
-	_connect_button.custom_minimum_size = Vector2(112, 55)
-	_connect_button.add_theme_font_size_override("font_size", 21)
-	_connect_button.pressed.connect(_on_confirm_requested)
-	ip_row.add_child(_connect_button)
-
 	var port_row := HBoxContainer.new()
 	port_row.add_theme_constant_override("separation", 10)
 	port_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -338,21 +385,6 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_port_input.add_theme_font_size_override("font_size", 21)
 	_port_input.text_changed.connect(_on_manual_endpoint_changed)
 	add_interactive(port_row, _port_input)
-
-	_disconnect_button = Button.new()
-	_disconnect_button.text = tr("UI_DISCONNECT")
-	_disconnect_button.focus_mode = Control.FOCUS_NONE
-	_disconnect_button.custom_minimum_size = Vector2(112, 55)
-	_disconnect_button.add_theme_font_size_override("font_size", 21)
-	_disconnect_button.pressed.connect(_on_disconnect_pressed)
-	port_row.add_child(_disconnect_button)
-
-	_xrobot_toolkit_device_sn_input = LineEdit.new()
-	_xrobot_toolkit_device_sn_input.placeholder_text = tr("UI_XROBOT_TOOLKIT_DEVICE_SN")
-	_xrobot_toolkit_device_sn_input.custom_minimum_size.y = 55
-	_xrobot_toolkit_device_sn_input.add_theme_font_size_override("font_size", 21)
-	_xrobot_toolkit_device_sn_input.tooltip_text = tr("UI_XROBOT_TOOLKIT_DEVICE_SN_TOOLTIP")
-	add_interactive(connection, _xrobot_toolkit_device_sn_input)
 
 	_pico_body_calibration_button = Button.new()
 	_pico_body_calibration_button.text = tr("UI_PICO_BODY_CALIBRATION")
@@ -448,6 +480,33 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_retargeting_status_label.add_theme_color_override("font_color", COL_STATUS)
 	inside.add_child(_retargeting_status_label)
 
+	# Connect / Disconnect belong to the Robot Control group as a whole rather
+	# than to the Outside endpoint fields: an Inside embodiment is started and
+	# stopped by exactly the same pair, and living inside the Outside box would
+	# hide them — and with them the only way to start — for that scope.
+	var link_row := HBoxContainer.new()
+	link_row.add_theme_constant_override("separation", 10)
+	link_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	robot.add_child(link_row)
+
+	_connect_button = Button.new()
+	_connect_button.text = tr("UI_CONNECT")
+	_connect_button.focus_mode = Control.FOCUS_NONE
+	_connect_button.custom_minimum_size = Vector2(112, 58)
+	_connect_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_connect_button.add_theme_font_size_override("font_size", 22)
+	_connect_button.pressed.connect(_on_connect_pressed)
+	link_row.add_child(_connect_button)
+
+	_disconnect_button = Button.new()
+	_disconnect_button.text = tr("UI_DISCONNECT")
+	_disconnect_button.focus_mode = Control.FOCUS_NONE
+	_disconnect_button.custom_minimum_size = Vector2(112, 58)
+	_disconnect_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_disconnect_button.add_theme_font_size_override("font_size", 22)
+	_disconnect_button.pressed.connect(_on_disconnect_pressed)
+	link_row.add_child(_disconnect_button)
+
 	# --- Video group -------------------------------------------------------
 	var video := register_group("video", "UI_GROUP_VIDEO", "camera")
 
@@ -531,6 +590,29 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# The VR-pose skeleton is the operator's tracked body shown beside the
 	# Inside robot; off by default, on when the operator wants to inspect input.
 	_show_vr_pose_toggle = add_toggle(display, tr("UI_SHOW_VR_POSE"), DEFAULT_SHOW_VR_POSE, 22)
+
+	# Where the main menu sits once opened: following the head, or pinned to
+	# the spot it was opened at so the operator can step around it.
+	var menu_lock_label := Label.new()
+	menu_lock_label.text = tr("UI_MENU_LOCK")
+	menu_lock_label.add_theme_font_size_override("font_size", 19)
+	menu_lock_label.add_theme_color_override("font_color", COL_SECTION)
+	display.add_child(menu_lock_label)
+
+	var menu_lock_row := HBoxContainer.new()
+	menu_lock_row.add_theme_constant_override("separation", 10)
+	menu_lock_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	display.add_child(menu_lock_row)
+	for mode in [["view", "UI_MENU_LOCK_VIEW"], ["world", "UI_MENU_LOCK_WORLD"]]:
+		var mode_id := str(mode[0])
+		_menu_lock_buttons[mode_id] = _add_choice_button(
+			menu_lock_row, tr(str(mode[1])), _on_menu_lock_pressed.bind(mode_id)
+		)
+
+	# Nothing here is part of the connection decision, so each option applies
+	# (and persists) as it is flipped rather than waiting for Connect.
+	for display_toggle in [_show_operation_trajectory_toggle, _show_vr_pose_toggle]:
+		display_toggle.toggled.connect(_on_display_option_toggled)
 
 	# --- Robot-authored UI group -------------------------------------------
 	_blueprint_group = register_group(
@@ -659,7 +741,19 @@ func _add_scope_button(row: HBoxContainer, label: String, scope: String) -> Butt
 	return _add_choice_button(row, label, _on_scope_button_pressed.bind(scope))
 
 
+## Bottom action: leave the page. Closing is not a connection decision, so it
+## keeps the operator's preferences but not the endpoint (LINK_OPTION_KEYS) and
+## gets out of the way: whatever link Connect started keeps running, and a page
+## that was never connected stays so.
 func _on_confirm_requested() -> void:
+	_save_preferences(get_options())
+	close_requested.emit()
+
+
+## Connect: validate, persist, and start the link while staying on the page,
+## so the send rate in the title bar can show the operator that frames are
+## actually going out.
+func _on_connect_pressed() -> void:
 	var options := get_options()
 	var scope := str(options.get("target_scope", DEFAULT_TARGET_SCOPE))
 	if scope == "outside":
@@ -691,6 +785,77 @@ func _on_confirm_requested() -> void:
 	settings_applied.emit(options)
 
 
+## Connect/Disconnect own the link; opening or closing the page does not.
+## The controller drives these two so the indicator tracks the real stream.
+func set_link_active(active: bool) -> void:
+	_link_active = active
+	if _send_rate_label != null:
+		_send_rate_label.visible = active
+		_send_rate_label.text = tr("UI_SEND_RATE_IDLE") if active else ""
+
+
+## A link can be up with nothing leaving the headset (still connecting, dropped
+## by the robot, or faulted), so a rate this low says so instead of reading as
+## "Sending 0.0 Hz".
+func set_send_rate(hz: float) -> void:
+	if _send_rate_label == null or not _link_active:
+		return
+	if hz < SEND_RATE_IDLE_HZ:
+		_send_rate_label.text = tr("UI_SEND_RATE_IDLE")
+	else:
+		_send_rate_label.text = tr("UI_SEND_RATE") % hz
+
+
+## The pointer on this page is a UI gesture, never a robot one. While it rests
+## on or presses the page, TrackingProvider neutralises every controller key,
+## the grip deadman included, for every sender, so aiming at Connect with the
+## grip squeezed cannot steer the arm. Poses and frames keep flowing, which is
+## what keeps the send rate in the title bar honest while the page is open.
+func captures_teleop_input() -> bool:
+	return true
+
+
+func captures_teleop_hover() -> bool:
+	return true
+
+
+func _on_menu_lock_pressed(mode: String) -> void:
+	_menu_world_locked = mode == "world"
+	_refresh_menu_lock_buttons()
+	_emit_display_options()
+
+
+func _refresh_menu_lock_buttons() -> void:
+	for mode in _menu_lock_buttons:
+		_set_choice_selected(
+			_menu_lock_buttons[mode] as Button,
+			(str(mode) == "world") == _menu_world_locked,
+		)
+
+
+func _on_display_option_toggled(_pressed: bool) -> void:
+	_emit_display_options()
+
+
+func _emit_display_options() -> void:
+	if _applying_options:
+		return
+	var options := get_options()
+	_save_preferences(options)
+	display_options_changed.emit(options)
+
+
+## Persist everything the page shows except the link itself; the file keeps
+## whatever endpoint Connect last saved (or none, before the first Connect).
+func _save_preferences(options: Dictionary) -> Error:
+	var preference_defaults := _settings_defaults()
+	for key in LINK_OPTION_KEYS:
+		preference_defaults.erase(key)
+	return BaseSettingsPanel.save_settings_to_config(
+		_settings_path(), _settings_section(), preference_defaults, options, _settings_log_tag()
+	)
+
+
 func _on_disconnect_pressed() -> void:
 	_play_ui_sound("click")
 	disconnect_requested.emit()
@@ -703,17 +868,26 @@ func set_discovery_state(
 	prefer_port: int = 0
 ) -> void:
 	_discovered = known_robots.duplicate(true)
+	_discovery_prefer = {"ip": prefer_ip, "protocol": prefer_protocol, "port": prefer_port}
+	_rebuild_discovery_items()
+
+
+## Rebuild the endpoint list for the wire protocol that is currently selected.
+## A host only answers the protocol its beacon announced, so listing every
+## discovered host under both radio buttons only ever offered rows that cannot
+## connect. Called again whenever the protocol choice changes.
+func _rebuild_discovery_items() -> void:
+	var prefer_ip := str(_discovery_prefer.get("ip", ""))
+	var prefer_protocol := str(_discovery_prefer.get("protocol", ""))
+	var prefer_port := int(_discovery_prefer.get("port", 0))
 
 	var previously_selected_id := _selected_discovery_id()
 
 	_discovery_option.clear()
 	_add_option_item(_discovery_option, tr(MANUAL_LABEL_KEY), "", "signal")
 
-	var endpoint_ids: Array = _discovered.keys()
-	endpoint_ids.sort()
 	var idx_to_select := 0
-	for i in range(endpoint_ids.size()):
-		var endpoint_id: String = endpoint_ids[i]
+	for endpoint_id in _discovery_ids_for_selected_protocol():
 		var info: Dictionary = _discovered[endpoint_id]
 		var rname := String(info.get("name", endpoint_id))
 		var disp := _format_robot_label(rname, info)
@@ -726,17 +900,11 @@ func set_discovery_state(
 		if endpoint_id == previously_selected_id:
 			idx_to_select = idx
 		elif idx_to_select == 0 and not prefer_ip.is_empty():
-			# A beacon that does not declare its wire protocol predates the
-			# field entirely, so we cannot use it as a mismatch reason — treat
-			# it as a wildcard for auto-select purposes, otherwise older robot
-			# agents stop auto-selecting for any user whose saved preference
-			# is XRoboToolkit Compatible.
-			var beacon_declares_protocol := info.has("protocol")
-			var endpoint_protocol := _normalized_protocol(String(info.get("protocol", PROTOCOL_OPERATOR)))
+			# Every listed endpoint already speaks `_selected_protocol`, so the
+			# saved preference only has to agree with the protocol on screen.
 			var protocol_matches := (
 				prefer_protocol.is_empty()
-				or not beacon_declares_protocol
-				or endpoint_protocol == _normalized_protocol(prefer_protocol)
+				or _normalized_protocol(prefer_protocol) == _selected_protocol
 			)
 			var port_matches := prefer_port <= 0 or int(info.get("pose_port", 0)) == prefer_port
 			if String(info.get("ip", "")) == prefer_ip and protocol_matches and port_matches:
@@ -749,6 +917,59 @@ func set_discovery_state(
 	# the operator's finger.
 	_hide_ip_dropdown()
 	_refresh_ip_hint()
+	_fit_width_to_endpoints()
+
+
+## Endpoints the selected wire protocol can actually talk to, sorted by id. A
+## beacon that predates the `protocol` field comes from a robot agent that only
+## ever spoke Operator, so it is listed there.
+func _discovery_ids_for_selected_protocol() -> Array[String]:
+	var ids: Array[String] = []
+	for endpoint_id_v in _discovered.keys():
+		var endpoint_id := String(endpoint_id_v)
+		var info: Dictionary = _discovered[endpoint_id]
+		var endpoint_protocol := _normalized_protocol(
+			String(info.get("protocol", PROTOCOL_OPERATOR))
+		)
+		if endpoint_protocol != _selected_protocol:
+			continue
+		ids.append(endpoint_id)
+	ids.sort()
+	return ids
+
+
+## Grow the layer so the longest endpoint label fits whole. Robot names and
+## addresses are not length-bounded, and the inline host list is plain Buttons
+## inside a fixed-width composition layer, so without this a long
+## "name (type) — ip:port" row is cut off mid-address.
+func _fit_width_to_endpoints() -> void:
+	if _ip_dropdown == null:
+		return
+	# Measure with what the rows actually render: the Button theme's font and
+	# the widest inset among its state styleboxes.
+	var font := _ip_dropdown.get_theme_font("font", "Button")
+	if font == null:
+		return
+	var row_inset := 0.0
+	for state in ["normal", "hover", "pressed", "focus"]:
+		var style := _ip_dropdown.get_theme_stylebox(state, "Button")
+		if style != null:
+			row_inset = maxf(row_inset, style.get_minimum_size().x)
+	var scrollbar := 0.0
+	if _detail_scroll != null:
+		scrollbar = _detail_scroll.get_v_scroll_bar().get_combined_minimum_size().x
+	var widest := 0.0
+	for endpoint_id in _discovery_ids_for_selected_protocol():
+		var info: Dictionary = _discovered[endpoint_id]
+		var label := _format_robot_label(String(info.get("name", endpoint_id)), info)
+		widest = maxf(
+			widest,
+			font.get_string_size(
+				label, HORIZONTAL_ALIGNMENT_LEFT, -1, ENDPOINT_ROW_FONT_SIZE
+			).x
+		)
+	var needed := int(ceilf(widest + row_inset + scrollbar)) + ENDPOINT_ROW_CHROME_PX
+	set_viewport_width(clampi(needed, PANEL_WIDTH_PX, PANEL_MAX_WIDTH_PX))
 
 
 func add_discovered(endpoint_id: String, info: Dictionary) -> void:
@@ -782,7 +1003,6 @@ func get_options() -> Dictionary:
 		"protocol": _selected_protocol,
 		"ip": _ip_input.text.strip_edges(),
 		"port": _port_input.text.strip_edges().to_int(),
-		"xrobot_toolkit_device_sn": _xrobot_toolkit_device_sn_input.text.strip_edges(),
 		"inside_profile": _selected_profile,
 		"retargeting_backend": _selected_backend,
 		"retargeting_host": _retargeting_host_input.text.strip_edges(),
@@ -796,20 +1016,19 @@ func get_options() -> Dictionary:
 		"show_video_panel": _show_video_panel_toggle.button_pressed,
 		"show_operation_trajectory": _show_operation_trajectory_toggle.button_pressed,
 		"show_vr_pose": _show_vr_pose_toggle.button_pressed,
+		"menu_world_locked": _menu_world_locked,
 		"show_on_launch": _show_on_launch_toggle.button_pressed
 	}
 
 
 func set_options(options: Dictionary) -> void:
+	_applying_options = true
 	_target_scope = str(options.get("target_scope", DEFAULT_TARGET_SCOPE))
 	if _target_scope != "inside":
 		_target_scope = "outside"
 	_selected_protocol = _normalized_protocol(str(options.get("protocol", DEFAULT_PROTOCOL)))
 	_ip_input.text = str(options.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(options.get("port", DEFAULT_PORT)))
-	_xrobot_toolkit_device_sn_input.text = str(
-		options.get("xrobot_toolkit_device_sn", DEFAULT_XROBOT_TOOLKIT_DEVICE_SN)
-	).strip_edges()
 	_selected_profile = str(options.get("inside_profile", _default_inside_profile()))
 	_refresh_backend_options(str(options.get("retargeting_backend", DEFAULT_RETARGETING_BACKEND)))
 	_retargeting_host_input.text = str(options.get("retargeting_host", DEFAULT_RETARGETING_HOST))
@@ -829,10 +1048,15 @@ func set_options(options: Dictionary) -> void:
 		options.get("show_operation_trajectory", DEFAULT_SHOW_OPERATION_TRAJECTORY)
 	)
 	_show_vr_pose_toggle.button_pressed = bool(options.get("show_vr_pose", DEFAULT_SHOW_VR_POSE))
+	_menu_world_locked = bool(
+		options.get("menu_world_locked", DEFAULT_MENU_WORLD_LOCKED)
+	)
+	_refresh_menu_lock_buttons()
 	_show_on_launch_toggle.button_pressed = bool(options.get("show_on_launch", DEFAULT_SHOW_ON_LAUNCH))
 	_refresh_protocol_buttons()
 	_refresh_video_protocol_ui()
 	_refresh_scope_ui()
+	_applying_options = false
 
 
 func _on_discovery_selected(idx: int) -> void:
@@ -940,8 +1164,7 @@ func _show_ip_dropdown() -> void:
 		_ip_dropdown.remove_child(child)
 		child.queue_free()
 	_ip_dropdown_endpoint_ids.clear()
-	var endpoint_ids: Array = _discovered.keys()
-	endpoint_ids.sort()
+	var endpoint_ids: Array = _discovery_ids_for_selected_protocol()
 	if endpoint_ids.is_empty():
 		# Nothing to pick from — surface the double-click affordance through
 		# the hint label rather than opening an empty list. An empty
@@ -957,7 +1180,11 @@ func _show_ip_dropdown() -> void:
 		row.focus_mode = Control.FOCUS_NONE
 		row.custom_minimum_size.y = 48
 		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row.add_theme_font_size_override("font_size", 20)
+		row.add_theme_font_size_override("font_size", ENDPOINT_ROW_FONT_SIZE)
+		# Clip rather than widen: a row that outgrows the column must never push
+		# the whole page past its composition layer (see _fit_width_to_endpoints).
+		row.clip_text = true
+		row.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		# Copy the endpoint_id into the callable so item indices don't
 		# matter across rebuilds — the dropdown owns its own listing but
 		# defers to the endpoint_id for state.
@@ -1022,7 +1249,7 @@ func _refresh_ip_hint(force_empty_prompt: bool = false) -> void:
 	if _ip_input != null and _ip_input.editable:
 		_ip_hint_label.text = tr("UI_IP_HINT_EDITING")
 		return
-	var count := _discovered.size()
+	var count := _discovery_ids_for_selected_protocol().size()
 	if count > 0 and not force_empty_prompt:
 		_ip_hint_label.text = tr("UI_IP_HINT_TAP_TO_PICK") % count
 	else:
@@ -1083,7 +1310,24 @@ func _add_option_item(option: OptionButton, label: String, metadata: Variant, ic
 
 
 static func load_settings() -> Dictionary:
-	return BaseSettingsPanel.load_settings_from_config(SETTINGS_PATH, SECTION, _load_defaults(), "loaded")
+	var settings := BaseSettingsPanel.load_settings_from_config(
+		SETTINGS_PATH, SECTION, _load_defaults(), "loaded"
+	)
+	# `loaded` gates launch auto-connect, so it means "Connect saved a link",
+	# not merely "a settings file exists".
+	settings["loaded"] = bool(settings.get("loaded", false)) and _has_confirmed_link()
+	return settings
+
+
+func _load_settings() -> Dictionary:
+	return load_settings()
+
+
+## Close and the Display toggles can create the file with preferences alone
+## (see _save_preferences); only a file Connect wrote holds the endpoint.
+static func _has_confirmed_link() -> bool:
+	var cfg := ConfigFile.new()
+	return cfg.load(SETTINGS_PATH) == OK and cfg.has_section_key(SECTION, "ip")
 
 
 ## The first robot this build ships, so a fresh install lands on something
@@ -1093,16 +1337,16 @@ static func _default_inside_profile() -> String:
 	return str(offered[0]) if not offered.is_empty() else ""
 
 
-## Defaults used when merging a saved config on load. Fresh installs (no file
-## on disk) get `_default_options()` verbatim, so the panel opens on
+## Defaults used when merging a saved config on load. Fresh installs (no saved
+## link) get `_default_options()` verbatim, so the panel opens on
 ## XRoboToolkit Compatible per the current UI default. But a config written by
 ## an older build has no `protocol` field, and silently switching those users
 ## to XRoboToolkit on upgrade would break auto-connect for anyone whose robot
-## only speaks the Operator wire protocol — so when a file exists, missing
-## keys fall back to the pre-diff Operator behavior instead.
+## only speaks the Operator wire protocol — so once a link has been saved,
+## missing keys fall back to the pre-diff Operator behavior instead.
 static func _load_defaults() -> Dictionary:
 	var defaults := _default_options()
-	if FileAccess.file_exists(SETTINGS_PATH):
+	if _has_confirmed_link():
 		defaults["protocol"] = PROTOCOL_OPERATOR
 	return defaults
 
@@ -1117,7 +1361,6 @@ static func _default_options() -> Dictionary:
 		"protocol": _normalized_protocol(DEFAULT_PROTOCOL),
 		"ip": DEFAULT_IP,
 		"port": DEFAULT_PORT,
-		"xrobot_toolkit_device_sn": DEFAULT_XROBOT_TOOLKIT_DEVICE_SN,
 		"inside_profile": _default_inside_profile(),
 		"retargeting_backend": DEFAULT_RETARGETING_BACKEND,
 		"retargeting_host": DEFAULT_RETARGETING_HOST,
@@ -1131,6 +1374,7 @@ static func _default_options() -> Dictionary:
 		"show_video_panel": DEFAULT_SHOW_VIDEO_PANEL,
 		"show_operation_trajectory": DEFAULT_SHOW_OPERATION_TRAJECTORY,
 		"show_vr_pose": DEFAULT_SHOW_VR_POSE,
+		"menu_world_locked": DEFAULT_MENU_WORLD_LOCKED,
 		"show_on_launch": DEFAULT_SHOW_ON_LAUNCH
 	}
 
@@ -1142,17 +1386,16 @@ func _on_scope_button_pressed(scope: String) -> void:
 
 func _on_protocol_pressed(protocol: String) -> void:
 	var next_protocol := _normalized_protocol(protocol)
-	if _discovery_option != null and _discovery_option.selected > 0:
-		var endpoint_id := _selected_discovery_id()
-		var selected_info: Dictionary = _discovered.get(endpoint_id, {})
-		var announced_protocol := _normalized_protocol(
-			str(selected_info.get("protocol", PROTOCOL_OPERATOR))
-		)
-		if announced_protocol != next_protocol:
-			_discovery_option.select(0)
-			set_status(tr("UI_MANUAL_ENTRY_STATUS"))
+	if next_protocol == _selected_protocol:
+		return
 	_selected_protocol = next_protocol
 	_refresh_protocol_buttons()
+	if _discovery_option == null:
+		return
+	# The endpoint list belongs to one protocol at a time, so a host picked
+	# under the previous one cannot carry over.
+	_discovery_option.select(0)
+	_rebuild_discovery_items()
 
 
 func _on_pico_body_calibration_pressed() -> void:
@@ -1250,8 +1493,6 @@ func _refresh_xrobot_toolkit_controls() -> void:
 		var slot := legacy_toggle.get_parent() as Control
 		if slot != null:
 			slot.visible = not robot_authored_blueprint
-	if _xrobot_toolkit_device_sn_input != null:
-		_xrobot_toolkit_device_sn_input.visible = show_xrobot_controls
 	if _pico_body_calibration_button != null:
 		_pico_body_calibration_button.visible = show_xrobot_controls
 		var slot := _pico_body_calibration_button.get_parent() as Control

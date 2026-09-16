@@ -182,6 +182,11 @@ func is_teleop_input_captured() -> bool:
 	var target := _pressed_target if _pressed_target != null else _hover_target
 	if not _target_captures_teleop_input(target):
 		return false
+	# A page the operator works (as opposed to a passive display) owns the
+	# controllers while the pointer merely rests on it: aiming at a button with
+	# the grip still squeezed must not steer the arm between clicks.
+	if _target_captures_teleop_hover(target):
+		return true
 	# A press only captures teleop input for targets that actually act on it.
 	# A passive display (the video panel) implements set_pointer_pressed() as a
 	# no-op, so treating a press on it as capture would neutralize every
@@ -201,6 +206,17 @@ static func _target_captures_teleop_input(target: Object) -> bool:
 		target != null
 		and target.has_method("captures_teleop_input")
 		and bool(target.call("captures_teleop_input"))
+	)
+
+
+## Whether resting the pointer on this target, without pressing, captures
+## teleop input. Opt-in: targets that do not declare it capture on press or
+## scroll only.
+static func _target_captures_teleop_hover(target: Object) -> bool:
+	return (
+		target != null
+		and target.has_method("captures_teleop_hover")
+		and bool(target.call("captures_teleop_hover"))
 	)
 
 

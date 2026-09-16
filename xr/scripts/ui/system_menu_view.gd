@@ -59,8 +59,9 @@ func _build_slots() -> void:
 	_flashes.clear()
 	_action_rects.clear()
 	var expanded: bool = not _groups["robot"].is_empty()
-	_viewport_size = Vector2i(360, 500 if expanded else 280)
-	_viewport.size = _viewport_size
+	# Robot rows can arrive while the menu is open; resizing through the
+	# rebinding path keeps the panel from being drawn into its old swapchain.
+	set_viewport_size(Vector2i(360, 500 if expanded else 280))
 	var root := Control.new()
 	_viewport.add_child(root)
 	_title = _label(root, tr("UI_CONTROLLER_SESSION_MENU"), Rect2(18, 8, 324, 34), 25)

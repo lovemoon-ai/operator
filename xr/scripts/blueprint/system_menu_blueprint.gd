@@ -10,7 +10,7 @@ static func definition() -> Dictionary:
 		"properties": {
 			"title": "",
 			"action": "connection.toggle",
-			"locked_text": str(TranslationServer.translate("UI_CONNECT")),
+			"locked_text": str(TranslationServer.translate("UI_CONNECT_ROBOT")),
 			"unlocked_text": str(TranslationServer.translate("UI_DISCONNECT")),
 			"unavailable_text": str(TranslationServer.translate("UI_SELECT_ROBOT_FIRST")),
 		},

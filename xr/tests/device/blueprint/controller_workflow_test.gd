@@ -137,19 +137,29 @@ func _test_system_scope(origin: XROrigin3D, camera: XRCamera3D, controllers: Arr
 	var remote_events: Array = []
 	shell.connection_requested.connect(func(wanted: bool) -> void: connections.append(wanted))
 	remote.event_emitted.connect(func(event: Dictionary) -> void: remote_events.append(event))
-	shell.update_context(false, false, true, true)
+	shell.update_context(false, false, true)
 	var menu: Node3D = shell.menu
 	t.is_true(menu != null, "system menu exists before a remote Blueprint")
 	var buttons: Dictionary = menu.get("_buttons")
 	t.eq(buttons.size(), 2, "system menu has connect/disconnect and recenter, not reset")
-	shell.runtime.dispatch_menu(shell.runtime.menu_entries()[0]["token"], false)
-	t.eq(connections, [true], "connect is dispatched locally")
+	var connection_row: Dictionary = shell.runtime.menu_entries()[0]
+	t.eq(
+		str(connection_row["text"]),
+		str(TranslationServer.translate("UI_CONNECT_ROBOT")),
+		"disconnected, the connection row asks the operator to connect a robot"
+	)
+	t.is_true(
+		bool(connection_row["available"]),
+		"the row stays clickable so it can lead the operator to Settings"
+	)
+	shell.runtime.dispatch_menu(connection_row["token"], false)
+	t.eq(connections, [true], "connect is dispatched locally; the owner routes it to Settings")
 	t.eq(remote_events.size(), 0, "system actions are not sent to the robot")
-	shell.update_context(true, false, true, true)
+	shell.update_context(true, false, true)
 	shell.runtime.dispatch_menu(shell.runtime.menu_entries()[0]["token"], true)
 	t.eq(connections, [true, false], "same button disconnects the real session through local owner")
 	remote.clear()
-	shell.update_context(false, false, true, true)
+	shell.update_context(false, false, true)
 	t.is_true(shell.runtime.has_blueprint(), "disconnect clears robot scope but keeps the system Blueprint")
 	t.eq(shell.menu, menu, "disconnect does not destroy the reconnect menu")
 	trackers[0].set_input(&"menu_button", false)

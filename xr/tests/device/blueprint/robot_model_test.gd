@@ -240,7 +240,7 @@ func _test_recenter(properties: Dictionary, q: Array, base: Array, tree: SceneTr
 	var shell := Shell.new()
 	origin.add_child(shell)
 	shell.configure(origin, camera, null, null, null, runtime)
-	shell.update_context(true, false, true, true)
+	shell.update_context(true, false, true)
 	shell.runtime.dispatch_menu(shell.runtime.menu_entries()[1]["token"], false)
 	var after := root.global_transform
 	var forward := -camera.global_basis.z

@@ -12,7 +12,14 @@ const CASE_ID := "teleop.settings_scope"
 class TestPanel:
 	extends TeleopSettingsPanel
 
+	const PREFERENCES_PATH := "user://teleop_settings_scope_test.cfg"
+
 	var saved_options: Dictionary = {}
+
+	# Preference saves go through the real writer, into a scratch file, so the
+	# test can check what Close actually persists without touching user data.
+	func _settings_path() -> String:
+		return PREFERENCES_PATH
 
 	func _save_settings(options: Dictionary) -> Error:
 		saved_options = options.duplicate(true)
@@ -40,7 +47,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var inside_box: Control = panel.get("_inside_box")
 	var protocol_row: HBoxContainer = panel.get("_protocol_row")
 	var protocol_buttons: Dictionary = panel.get("_protocol_buttons")
-	var xrobot_device_sn_input: LineEdit = panel.get("_xrobot_toolkit_device_sn_input")
 	var pico_body_calibration_button: Button = panel.get("_pico_body_calibration_button")
 	var picker: Dictionary = panel.get("_profile_buttons")
 	if not t.is_true(
@@ -48,7 +54,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		and inside_box != null
 		and protocol_row != null
 		and protocol_buttons != null
-		and xrobot_device_sn_input != null
 		and pico_body_calibration_button != null
 		and picker != null,
 		"the page exposes both configuration sides"
@@ -99,10 +104,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	t.is_true(outside_box.visible, "outside shows the robot-service settings")
 	t.is_true(protocol_row.visible, "outside shows protocol selection")
-	t.eq(
-		xrobot_device_sn_input.visible,
-		xrt_available,
-		"PICO device SN visibility follows the default protocol"
+	# The XRoboToolkit sender identifies the headset by its own unique id; the
+	# page no longer offers (or persists) a hand-typed device SN.
+	t.is_false(
+		panel.get_options().has("xrobot_toolkit_device_sn"),
+		"the settings page carries no PICO device SN"
 	)
 	t.eq(
 		pico_body_calibration_button.visible,
@@ -114,16 +120,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var ip_input: LineEdit = panel.get("_ip_input")
 	var port_input: LineEdit = panel.get("_port_input")
 	var endpoint_connect_button: Button = panel.get("_connect_button")
-	t.is_true(endpoint_connect_button != null, "Outside settings expose a Connect button")
+	t.is_true(endpoint_connect_button != null, "the page exposes a Connect button")
 	if endpoint_connect_button != null:
-		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "IP action is labeled Connect")
-		t.eq(
-			ip_input.get_parent().get_parent(),
-			endpoint_connect_button.get_parent(),
-			"Connect is placed beside the robot IP input",
-		)
+		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "the link action is labeled Connect")
 	var disconnect_button: Button = panel.get("_disconnect_button")
-	t.is_true(disconnect_button != null, "Outside settings expose a Disconnect button")
+	t.is_true(disconnect_button != null, "the page exposes a Disconnect button")
 	if disconnect_button != null:
 		t.eq(disconnect_button.text, panel.tr("UI_DISCONNECT"), "Disconnect uses the localized label")
 		if endpoint_connect_button != null:
@@ -132,11 +133,17 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 				disconnect_button.custom_minimum_size.x,
 				"Connect and Disconnect use the same width",
 			)
-		t.eq(
-			port_input.get_parent().get_parent(),
-			disconnect_button.get_parent(),
-			"Disconnect is placed beside the robot port input",
-		)
+			t.eq(
+				endpoint_connect_button.get_parent(),
+				disconnect_button.get_parent(),
+				"Connect and Disconnect share one row",
+			)
+			# An Inside embodiment starts and stops with the same pair, so the
+			# row must outlive the scope switch that hides the Outside fields.
+			t.is_false(
+				outside_box.is_ancestor_of(endpoint_connect_button),
+				"the link row is not hidden with the Outside endpoint fields",
+			)
 		var disconnect_requests: Array = []
 		panel.disconnect_requested.connect(func() -> void:
 			disconnect_requests.append(true)
@@ -145,9 +152,13 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		t.eq(disconnect_requests.size(), 1, "Disconnect emits one request")
 	var action_row: HBoxContainer = panel.get("_actions_row")
 	var confirm_button := _first_button(action_row)
-	t.is_true(confirm_button != null, "settings expose the primary Confirm action")
+	t.is_true(confirm_button != null, "settings expose the primary bottom action")
 	if confirm_button != null:
-		t.eq(confirm_button.text, panel.tr("UI_OK"), "bottom action remains Confirm")
+		t.eq(
+			confirm_button.text,
+			panel.tr("UI_CLOSE"),
+			"the bottom action closes the page rather than owning the link",
+		)
 	var shared_ip := "192.168.1.40"
 	var discovered := {
 		"operator|%s|63901" % shared_ip: {
@@ -174,10 +185,50 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			"protocol": "xrobot_toolkit_v1",
 		}
 	panel.set_discovery_state(discovered)
-	t.eq(discovery_option.item_count, 4 if xrt_available else 3,
-		"same-IP cross-protocol and same-name Operator services are all listed")
+	# One protocol at a time: a host only answers the protocol its beacon
+	# announced, so offering the others' hosts only ever produced rows that
+	# cannot connect.
+	t.eq(discovery_option.item_count, 2 if xrt_available else 3,
+		"only hosts speaking the selected protocol are offered")
 	t.eq(discovery_option.selected, 0,
 		"discovery without an explicitly saved endpoint leaves Manual selected")
+	if xrt_available:
+		(protocol_buttons["operator"] as Button).emit_signal("pressed")
+		t.eq(discovery_option.item_count, 3,
+			"switching to Operator re-lists that protocol's hosts")
+		(protocol_buttons["xrobot_toolkit_v1"] as Button).emit_signal("pressed")
+		t.eq(discovery_option.item_count, 2,
+			"switching back offers the XRoboToolkit host again")
+
+	# A discovered host's name and address are not length-bounded, so the page
+	# grows to fit the longest row rather than clipping it.
+	var narrow_width := panel.quad_size.x
+	var selected_protocol := str(panel.get_options().get("protocol", "operator"))
+	var long_label_endpoints := discovered.duplicate(true)
+	long_label_endpoints["%s|192.168.1.42|63901" % selected_protocol] = {
+		"name": "Robot with an exceptionally long descriptive name on one row",
+		"ip": "192.168.1.42",
+		"pose_port": 63901,
+		"device_type": "robot_arm",
+		"protocol": selected_protocol,
+	}
+	panel.set_discovery_state(long_label_endpoints)
+	var wide_width := panel.quad_size.x
+	t.is_true(wide_width > narrow_width, "a long endpoint label widens the page")
+	t.eq(
+		panel.layer_viewport,
+		panel.get("_viewport"),
+		"a resized page is rebound to its viewport so the layer is rebuilt at the new size"
+	)
+	panel.call("_show_ip_dropdown")
+	var dropdown: VBoxContainer = panel.get("_ip_dropdown")
+	if t.is_true(dropdown.get_child_count() > 0, "the host list opens with the long endpoint"):
+		t.is_true(
+			(dropdown.get_child(0) as Button).clip_text,
+			"host rows clip instead of pushing the page past its layer"
+		)
+	panel.set_discovery_state(discovered)
+	t.is_true(panel.quad_size.x < wide_width, "the page narrows again without that host")
 	# The IP field is read-only until the operator double-clicks into edit
 	# mode; the port field, which has no discovery UX, stays freely editable.
 	t.is_false(ip_input.editable, "IP field is read-only until the operator double-clicks it")
@@ -201,7 +252,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	if xrt_available:
 		var xrobot_options := _options("outside")
 		xrobot_options["protocol"] = "xrobot_toolkit_v1"
-		xrobot_options["xrobot_toolkit_device_sn"] = "PICO-SN-123"
 		panel.set_options(xrobot_options)
 		t.eq(
 			panel.get_options().get("protocol", ""),
@@ -212,15 +262,9 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		var xrobot_button: Button = protocol_buttons["xrobot_toolkit_v1"]
 		t.is_true(xrobot_button.button_pressed, "XRoboToolkit-compatible choice stays selected")
 		t.is_false(operator_button.button_pressed, "Operator choice is released")
-		t.is_true(xrobot_device_sn_input.visible, "XRoboToolkit protocol shows the PICO device SN")
 		t.is_true(
 			pico_body_calibration_button.visible,
 			"XRoboToolkit-compatible Outside settings show PICO Body Calibration"
-		)
-		t.eq(
-			panel.get_options().get("xrobot_toolkit_device_sn", ""),
-			"PICO-SN-123",
-			"PICO device SN round-trips through settings"
 		)
 		var calibration_requests: Array = []
 		panel.pico_body_calibration_requested.connect(func() -> void:
@@ -256,18 +300,21 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		panel.settings_applied.connect(func(options: Dictionary) -> void:
 			applied.append(options.duplicate(true))
 		)
+		var closes: Array = []
+		panel.close_requested.connect(func() -> void: closes.append(true))
+		# Connect starts the link and stays put so the operator can watch the
+		# send rate come up; the bottom action only closes the page.
+		(panel.get("_connect_button") as Button).emit_signal("pressed")
+		t.eq(applied.size(), 1, "Connect emits one options dictionary")
+		t.eq(closes.size(), 0, "Connect leaves the page open")
 		panel.call("_on_confirm_requested")
-		t.eq(applied.size(), 1, "applying Outside settings emits one options dictionary")
+		t.eq(applied.size(), 1, "closing the page does not restart the link")
+		t.eq(closes.size(), 1, "the bottom action closes the page")
 		if not applied.is_empty():
 			t.eq(
 				applied[0].get("protocol", ""),
 				"xrobot_toolkit_v1",
 				"settings_applied includes the selected protocol"
-			)
-			t.eq(
-				applied[0].get("xrobot_toolkit_device_sn", ""),
-				"PICO-SN-123",
-				"settings_applied includes the configured PICO device SN"
 			)
 		t.eq(
 			panel.saved_options.get("protocol", ""),
@@ -282,10 +329,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			panel.get_options().get("protocol", ""),
 			"operator",
 			"XRoboToolkit-compatible protocol normalizes to Operator off Pico"
-		)
-		t.is_false(
-			xrobot_device_sn_input.visible,
-			"non-Pico builds never show the PICO device SN"
 		)
 		t.is_false(
 			pico_body_calibration_button.visible,
@@ -389,6 +432,85 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		bool(panel.get_options().get("show_vr_pose", false)),
 		"Display's Show VR Pose toggle round-trips"
 	)
+
+	# Main menu placement: view-locked by default, world-locked on request.
+	var menu_lock_buttons: Dictionary = panel.get("_menu_lock_buttons")
+	t.eq(menu_lock_buttons.size(), 2, "Display offers view- and world-locked placement")
+	t.is_false(
+		bool(panel.get_options().get("menu_world_locked", true)),
+		"the main menu is view locked by default"
+	)
+	var display_changes: Array = []
+	panel.display_options_changed.connect(func(options: Dictionary) -> void:
+		display_changes.append(options.duplicate(true))
+	)
+	(menu_lock_buttons["world"] as Button).emit_signal("pressed")
+	t.is_true(
+		bool(panel.get_options().get("menu_world_locked", false)),
+		"World locked round-trips through the options dictionary"
+	)
+	t.eq(display_changes.size(), 1, "a display change applies immediately, without Connect")
+	(menu_lock_buttons["view"] as Button).emit_signal("pressed")
+	t.is_false(
+		bool(panel.get_options().get("menu_world_locked", true)),
+		"View locked is selectable again"
+	)
+
+	# The send rate is the page's proof that frames are going out; it belongs
+	# to Connect/Disconnect, not to opening or closing the page.
+	var send_rate_label: Label = panel.get("_send_rate_label")
+	t.is_true(send_rate_label != null, "the page exposes a send-rate indicator")
+	if send_rate_label != null:
+		t.is_false(send_rate_label.visible, "the send rate is hidden while disconnected")
+		panel.set_link_active(true)
+		t.is_true(send_rate_label.visible, "Connect reveals the send rate")
+		t.eq(
+			send_rate_label.text,
+			panel.tr("UI_SEND_RATE_IDLE"),
+			"a link with nothing flowing yet says it is not sending"
+		)
+		panel.set_send_rate(72.0)
+		t.is_true(
+			send_rate_label.text.contains("72"),
+			"the indicator reports the measured rate"
+		)
+		panel.set_send_rate(0.0)
+		t.eq(
+			send_rate_label.text,
+			panel.tr("UI_SEND_RATE_IDLE"),
+			"a link whose frames stopped says so instead of Sending 0.0 Hz"
+		)
+		panel.set_link_active(false)
+		t.is_false(send_rate_label.visible, "Disconnect hides the send rate again")
+
+	# Pointing at or clicking the page must never also drive the robot.
+	t.is_true(
+		panel.captures_teleop_input() and panel.captures_teleop_hover(),
+		"the page neutralises teleop controller input while the pointer is on it"
+	)
+
+	# Close and the Display toggles keep preferences but never the endpoint:
+	# launch auto-connects to a saved endpoint, so only Connect may save one.
+	var preferences_path: String = TestPanel.PREFERENCES_PATH
+	if FileAccess.file_exists(preferences_path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(preferences_path))
+	var unconfirmed := _options("outside")
+	unconfirmed["ip"] = "192.168.1.50"
+	unconfirmed["show_vr_pose"] = true
+	panel.set_options(unconfirmed)
+	panel.call("_on_confirm_requested")
+	var saved := ConfigFile.new()
+	if t.is_true(saved.load(preferences_path) == OK, "Close persists the operator's preferences"):
+		t.is_true(
+			bool(saved.get_value(TeleopSettingsPanel.SECTION, "show_vr_pose", false)),
+			"Close keeps a display preference"
+		)
+		for link_key in TeleopSettingsPanel.LINK_OPTION_KEYS:
+			t.is_false(
+				saved.has_section_key(TeleopSettingsPanel.SECTION, str(link_key)),
+				"Close does not save the unconfirmed %s" % link_key
+			)
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(preferences_path))
 
 	# Pressing the Type buttons is what the operator actually does.
 	var outside_button: Button = panel.get("_outside_scope_button")
@@ -622,7 +744,6 @@ func _options(scope: String) -> Dictionary:
 		"target_scope": scope,
 		"ip": "127.0.0.1",
 		"port": 63901,
-		"xrobot_toolkit_device_sn": "",
 		"inside_profile": str(offered[0]) if not offered.is_empty() else "",
 		"retargeting_backend": "native",
 		"retargeting_host": "127.0.0.1",

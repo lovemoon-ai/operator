@@ -168,21 +168,47 @@ proof that a ray was actually displayed.
   sends canonical tracking frames to the pyoperator retargeting service; only
   the solve is remote and the embodiment remains in XR.
 
-The settings page has one `Robot` group. Its first row picks the type —
-`Inside` or `Outside` — and only that side's settings are shown: the robot
-picker and retargeting backend for Inside, or discovery, address, and
+The settings page has one `Robot Control` group. Its first row picks the
+type — `Inside` or `Outside` — and only that side's settings are shown: the
+robot picker and retargeting backend for Inside, or discovery, address, and
 connection state for Outside.
 
+The discovered-host list belongs to one wire protocol at a time. A host only
+answers the protocol its beacon announced, so choosing a protocol re-lists the
+endpoints that speak it and hides the rest rather than offering rows that
+cannot connect; a beacon predating the protocol field is an Operator host. Host
+labels carry an unbounded robot name and address, so the page widens its
+composition layer — viewport and quad together, keeping text the same physical
+size — to fit the longest row instead of clipping it.
+
 A configuration item's Test action is diagnostic preview only; it must not be
-the owner of runtime state. Confirming the complete settings page is the
-activation boundary: the selected target starts, required transports connect,
-and every enabled runtime visualization becomes active on the working page.
+the owner of runtime state. `Connect` is the activation boundary: the selected
+target starts, required transports connect, every enabled runtime
+visualization becomes active, and the page stays open reporting the outgoing
+frame rate in its title bar so the operator can see frames actually leaving the
+headset. `Disconnect` stops the target and clears that indicator.
 Descriptor-driven features may be pre-enabled from discovery metadata for
 immediate disconnected/connecting feedback, then must be reconciled against
-the authoritative descriptor returned by the live session. Opening settings
-suspends those features without destroying their configuration; closing or
-confirming resumes the configured runtime, while safety-sensitive controls
-return locked.
+the authoritative descriptor returned by the live session.
+
+Opening or closing the page does not move the link: its streams and any
+running Inside embodiment carry on, so the send rate the page reports describes
+a live session. Only `Connect` and `Disconnect` move the link, and the rate
+reads `Not sending` whenever the link is up but no frames are leaving. What
+the page guards is input. While the pointer rests on or presses the page,
+every controller key, the grip deadman included, is neutralised for all
+senders, so frames keep flowing but cannot steer the robot; touch-driven
+Blueprint widgets are suspended and the Revo2 palm unlock re-locks while the
+page is open. The bottom action closes the page and saves display
+preferences, never the endpoint: launch auto-connect only targets an endpoint
+that `Connect` saved.
+
+`Display` options are the live view rather than a staged form, so each applies
+and persists the moment it is flipped. `Show VR Pose` renders the canonical
+skeleton in every scope: an Inside session anchors it beside the in-headset
+robot, and every other scope gets a head-tracked skeleton owned by the Teleop
+controller. `Main menu placement` chooses whether the page follows the head or
+stays pinned to the spot it was opened at.
 
 For descriptor-driven dual-hand control, the left bare hand owns a palm menu.
 The menu appears only after the tracked palm faces the headset with all five
@@ -234,6 +260,9 @@ The Outside target creates the v2 network stack at runtime:
   back through `Session`. Outside Robot is currently the adapter that owns this
   runtime. A separate locally authored system Blueprint keeps the controller
   connection/recenter menu and status lamps available without a robot Blueprint.
+  The controller menu is a runtime menu: it is disabled while the settings page
+  is open, and while no robot is connected its connection row reads `Connect a
+  robot` and opens Settings on the robot group instead of connecting on its own.
   `menu_item` and legacy `palm_menu`/`controller_menu` contribute data to the
   single `SystemMenuHost`; hand/controller presenters share that system-owned
   panel. Remote declarations never allocate independent menus. Source tokens

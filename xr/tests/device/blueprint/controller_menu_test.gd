@@ -40,7 +40,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var remote_events: Array = []
 	host.connection_requested.connect(func(wanted: bool) -> void: local_events.append(wanted))
 	remote.event_emitted.connect(func(event: Dictionary) -> void: remote_events.append(event))
-	host.update_context(true, false, true, true)
+	host.update_context(true, false, true)
 	var spec := _definition()
 	t.is_true(remote.apply_blueprint(spec), "new and compatibility declarations coexist")
 	_state(remote, 1, true)
@@ -51,6 +51,13 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var groups: Dictionary = menu.get("_groups")
 	t.eq(groups["system"].size(), 2, "system controls are retained")
 	t.eq(groups["robot"].size(), 5, "robot rows are appended separately")
+	var menu_viewport: SubViewport = menu.get("_viewport")
+	t.eq(menu_viewport.size.y, 500, "robot rows grow the menu panel")
+	t.eq(
+		menu.layer_viewport,
+		menu_viewport,
+		"the grown menu is rebound so its layer is rebuilt at the new size"
+	)
 	var bad := spec.duplicate(true)
 	bad["components"][1]["bindings"]["value"] = "other_value"
 	t.is_false(remote.apply_blueprint(bad), "conflicting shared bindings fail before replacing current menu")
@@ -122,10 +129,15 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	router._update_controller_pointer()
 	t.eq(local_events.size(), 0, "tracking loss cannot activate disconnect")
 	remote.clear()
-	host.update_context(false, false, true, true)
+	host.update_context(false, false, true)
 	t.eq(host.menu, menu, "disconnect retains the same physical menu")
 	groups = menu.get("_groups")
 	t.eq(groups["robot"].size(), 0, "disconnect removes all robot contributions")
+	t.eq(
+		(menu.get("_viewport") as SubViewport).size.y,
+		280,
+		"dropping the robot rows shrinks the menu panel back"
+	)
 	t.eq(groups["system"].size(), 2, "connection controls remain after disconnect")
 	t.is_false(remote.dispatch_menu(prior, false), "old robot token cannot affect the system after disconnect")
 	await _ordinary_button_cancel(origin, tree, t)

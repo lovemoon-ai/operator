@@ -54,7 +54,7 @@ func set_error(message: String) -> void:
 	_last_error = message
 
 
-func update_context(connected: bool, connecting: bool, can_connect: bool, enabled: bool) -> void:
+func update_context(connected: bool, connecting: bool, enabled: bool) -> void:
 	if runtime == null:
 		return
 	_connected = connected
@@ -64,17 +64,17 @@ func update_context(connected: bool, connecting: bool, can_connect: bool, enable
 	var remote: Dictionary = robot_runtime.controller_status() if robot_runtime != null and connected else {}
 	_can_recenter = connected and robot_runtime != null and robot_runtime.can_recenter()
 	var state := indicator_state(connected, connecting, remote)
-	var detail := str(remote.get("message", "")) if connected else tr("UI_DISCONNECTED")
+	var detail := str(remote.get("message", "")) if connected else tr("UI_CONNECT_ROBOT_HINT")
 	if not _last_error.is_empty():
 		detail = _last_error
 	elif connecting:
 		detail = tr("UI_CONNECTION_PENDING")
-	elif not connected and not can_connect:
-		detail = tr("UI_SELECT_ROBOT_FIRST")
 	_detail = detail
 	var values := {
 		"local.connection_active": connected or connecting,
-		"local.connection_available": enabled and (can_connect or connected or connecting),
+		# Always actionable while the menu is live: it disconnects a session, or
+		# while disconnected asks to connect, which the owner routes to Settings.
+		"local.connection_available": enabled,
 		"local.can_recenter": enabled and _can_recenter,
 		"local.recenter_value": false, "local.state": state,
 		"local.left_tracked": enabled and _tracked(_left),
