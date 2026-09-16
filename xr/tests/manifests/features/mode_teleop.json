@@ -64,6 +64,34 @@
       "script": "res://tests/unit/blueprint/blueprint_runtime_test.gd"
     },
     {
+      "id": "contracts.dual_trigger_hold",
+      "level": "unit",
+      "suite": "contracts.controller_workflow",
+      "module": "core/teleop",
+      "script": "res://tests/unit/contracts/dual_trigger_hold_test.gd"
+    },
+    {
+      "id": "blueprint.controller_workflow",
+      "level": "device",
+      "suite": "contracts.controller_workflow",
+      "module": "core/blueprint",
+      "script": "res://tests/device/blueprint/controller_workflow_test.gd"
+    },
+    {
+      "id": "blueprint.controller_menu",
+      "level": "device",
+      "suite": "blueprint.controller",
+      "module": "core/blueprint",
+      "script": "res://tests/device/blueprint/controller_menu_test.gd"
+    },
+    {
+      "id": "blueprint.robot_model",
+      "level": "device",
+      "suite": "blueprint.robot",
+      "module": "core/blueprint",
+      "script": "res://tests/device/blueprint/robot_model_test.gd"
+    },
+    {
       "id": "teleop.sdk_mode_suspension",
       "level": "unit",
       "suite": "teleop.lifecycle",

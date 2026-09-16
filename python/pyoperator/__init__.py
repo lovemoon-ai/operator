@@ -15,6 +15,7 @@ from .models import (
     XrFrame,
 )
 from .session import BridgeConfig, XrSession
+from .robot_assets import RobotModelAsset, RobotAssetServer
 from .robot import EndEffectorTarget, JointTarget, Robot, RobotState
 from .retargeting import PoseDeltaRetargeter, Retargeter
 from .ik import CallableIK, DampedLeastSquaresIK, IKSolver
@@ -31,6 +32,8 @@ from .blueprint import (
 __all__ = [
     "xr_bridge",
     "XrSession",
+    "RobotModelAsset",
+    "RobotAssetServer",
     "BridgeConfig",
     "XrFrame",
     "Pose",

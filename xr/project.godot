@@ -25,6 +25,7 @@ XRToolsUserSettings="*res://addons/godot-xr-tools/user_settings/user_settings.gd
 XRToolsRumbleManager="*res://addons/godot-xr-tools/rumble/rumble_manager.gd"
 PicoOpenXRBridge="*res://scripts/xr/pico_openxr_bridge.gd"
 XRSessionPolicy="*res://scripts/xr/xr_session_policy.gd"
+SystemCompatibilityNotice="*res://scripts/app/system_compatibility_notice.gd"
 
 [editor_plugins]
 
@@ -37,6 +38,10 @@ import/blender/enabled=false
 [gui]
 
 common/drop_mouse_on_gui_input_disabled=true
+
+[layer_names]
+
+3d_render/layer_20="Blueprint robot lighting"
 
 [rendering]
 

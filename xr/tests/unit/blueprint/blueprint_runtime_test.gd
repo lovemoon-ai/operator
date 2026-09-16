@@ -87,6 +87,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			implementation_contract = RuntimeScript.NODE_IMPLEMENTATIONS.get(
 				implementation, {}
 			) as Dictionary
+		elif str(primitive.get("host", "")) == "system_menu":
+			implementation_contract = RuntimeScript.MENU_IMPLEMENTATIONS.get(implementation, {})
 		elif str(primitive.get("host", "")) == "external_view":
 			t.is_true(
 				implementation \
@@ -162,18 +164,22 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var right_controller := XRController3D.new()
 	var tracking_provider := Node.new()
 	var runtime := RuntimeScript.new()
+	var runtime_warnings: Array[String] = []
+	runtime.warning_raised.connect(func(message: String) -> void: runtime_warnings.append(message))
 	origin.add_child(camera)
 	origin.add_child(left_controller)
 	origin.add_child(right_controller)
 	origin.add_child(tracking_provider)
 	origin.add_child(runtime)
+	var external_views: Array[String] = []
+	external_views.assign(TeleopControllerScript.BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS)
 	runtime.configure(
 		origin,
 		camera,
 		left_controller,
 		right_controller,
 		tracking_provider,
-		TeleopControllerScript.BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS,
+		external_views,
 	)
 	var builtin_changes: Array[Dictionary] = []
 	runtime.external_view_changed.connect(
@@ -192,6 +198,10 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 
 	var blueprint_id := "unit.blueprint.%d" % Time.get_ticks_usec()
+	# Contract-only case: the separate device case loads an actual robot-hosted
+	# G1. This fixture must not depend on any Inside Robot bundle.
+	var robot_joint_names: Array = ["left_knee_joint"]
+	runtime.asset_host = "127.0.0.1"
 	var blueprint := {
 		"schema": BlueprintContract.BLUEPRINT_SCHEMA,
 		"blueprint_id": blueprint_id,
@@ -273,11 +283,31 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 				"bindings": {},
 				"user_overridable": true,
 			},
+			{
+				"id": "robot_model",
+				"type": "robot_model",
+				"properties": {"asset_sha256": "a".repeat(64), "asset_size": 100, "asset_port": 63904, "joint_names": robot_joint_names, "smoothing_ms": 0},
+				"bindings": {"joint_positions": "g1.joints", "base_pose": "g1.base", "sample": "g1.sample"},
+			},
+			{
+				"id": "controller_menu", "type": "controller_menu",
+				"properties": {"title": "Controller", "action": "toggle_unlock"},
+				"bindings": {"value": "hand.unlocked", "available": "hand.available"},
+			},
+			{
+				"id": "reset", "type": "input_binding", "properties": {"action": "reset"},
+				"bindings": {"available": "hand.available", "required": "reset.required", "acknowledged_request": "reset.ack", "success": "reset.ok"},
+			},
+			{"id": "ground", "type": "ground_grid", "properties": {"placement_target": "robot_model"}},
+			{"id": "lighting", "type": "model_lighting", "bindings": {"key_energy": "lighting.key"}},
+			{"id": "item", "type": "menu_item", "properties": {"title": "Item", "action": "toggle"}, "bindings": {"value": "hand.unlocked"}},
 		],
 	}
 	var wire_blueprint_v: Variant = JSON.parse_string(JSON.stringify(blueprint))
 	t.is_true(wire_blueprint_v is Dictionary, "wire Blueprint JSON decodes to an object")
 	var wire_blueprint := wire_blueprint_v as Dictionary
+	# Match the network boundary: Godot JSON decodes envelope integers as floats.
+	SessionScript._normalize_json_wire_integers(wire_blueprint, ["revision"])
 	var declared_types: Array[String] = []
 	for component_v in wire_blueprint.get("components", []) as Array:
 		declared_types.append(str((component_v as Dictionary).get("type", "")))
@@ -287,22 +317,25 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		spec_types.append(str(primitive_name_v))
 	spec_types.sort()
 	t.eq(declared_types, spec_types, "runtime fixture covers every generated primitive")
-	t.is_true(
+	if not t.is_true(
 		runtime.apply_blueprint(wire_blueprint),
 		"wire Blueprint accepts integral JSON numbers for integer properties",
-	)
+		{"warnings": runtime_warnings, "parsed": BlueprintContract.parse_blueprint(wire_blueprint)},
+	):
+		origin.free()
+		return
 	t.eq(
 		BlueprintContract.resolved_anchor(wire_blueprint["components"][2]),
 		"left_palm",
 		"palm menu anchor default comes from the generated spec",
 	)
-	t.eq(runtime.component_count(), 8, "blueprint registers rendered and XR-owned components")
+	t.eq(runtime.component_count(), 14, "blueprint registers rendered and XR-owned components")
 	t.is_true(runtime.has_blueprint(), "runtime records the active blueprint")
 	t.eq(builtin_changes.size(), 4, "XR-owned views emit one initial gate update each")
 	t.is_true(runtime.component_visible("fpv"), "declared video view is initially visible")
 	t.eq(runtime.component_node("fpv"), null, "XR-owned views reuse existing scene nodes")
 	var visibility_options := runtime.user_visibility_options()
-	t.eq(visibility_options.size(), 7, "all overridable components reach user settings")
+	t.eq(visibility_options.size(), 12, "all overridable components reach user settings")
 	t.eq(visibility_options[0].get("id"), "message", "visibility options preserve blueprint order")
 	t.eq(visibility_options[1].get("id"), "hand_control", "non-overridable UI is omitted")
 	t.eq(visibility_options[2].get("id"), "touch", "tactile visibility is user-overridable")
@@ -335,12 +368,35 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			"video.follow_camera": false,
 		},
 	)
+	var robot_q: Array = []
+	robot_q.resize(robot_joint_names.size())
+	robot_q.fill(0.0)
+	current["values"]["g1.joints"] = robot_q
+	current["values"]["g1.base"] = [0.2, 0.8, -2.0, 0.0, 0.0, 0.0, 1.0]
+	current["values"]["g1.sample"] = 1
+	current["values"]["lighting.key"] = 2.0
 	var wire_state_v: Variant = JSON.parse_string(JSON.stringify(current))
 	t.is_true(wire_state_v is Dictionary, "wire BlueprintState JSON decodes to an object")
+	SessionScript._normalize_json_wire_integers(
+		wire_state_v as Dictionary, ["blueprint_revision", "sequence", "timestamp_ns"]
+	)
 	t.is_true(
 		runtime.apply_state(wire_state_v as Dictionary),
 		"wire BlueprintState accepts integral JSON numbers in integer arrays",
 	)
+	var robot_node := runtime.component_node("robot_model")
+	var grid := runtime.component_node("ground") as MeshInstance3D
+	t.is_true(grid.mesh is PlaneMesh, "ground uses a bounded two-triangle plane")
+	t.is_true(grid.material_override is ShaderMaterial, "ground uses the client-owned antialiased grid shader")
+	var lights := runtime.component_node("lighting")
+	var key_light := lights.get_child(0) as DirectionalLight3D
+	t.almost_eq(key_light.light_energy, 2.0, 0.001, "key intensity follows Blueprint state")
+	t.eq(key_light.light_cull_mask, 1 << 19, "model lights cannot affect ordinary app geometry")
+	t.is_false(key_light.shadow_enabled, "model lighting has no mobile shadow-map cost")
+	if t.is_true(robot_node != null, "robot_model creates an asynchronous asset view"):
+		t.is_false(robot_node.is_asset_ready(), "no APK bundle is substituted for the robot-owned asset")
+		var base: Transform3D = robot_node.get("_target_base")
+		t.is_true(base.origin.is_equal_approx(Vector3(0.2, 0.8, -2.0)), "latest base state is retained while the asset loads")
 	t.eq(builtin_changes.size(), 5, "only the changed built-in view emits another gate update")
 	var video_change := builtin_changes.back() as Dictionary
 	t.eq(video_change.get("type"), "video_panel", "video gate identifies its built-in view")
@@ -405,7 +461,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		runtime.apply_state(_state(blueprint_id, 2, 3, {"robot.message": "stale"})),
 		"duplicate state sequence is rejected",
 	)
-	t.eq(label.text, "Ready", "rejected state cannot mutate component values")
+	t.eq(label.text, "Still ready", "rejected state cannot mutate component values")
 
 	runtime.set_user_visibility_override("message", false)
 	t.is_false(runtime.component_visible("message"), "user override hides an overridable component")
@@ -442,15 +498,17 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 
 	var events: Array = []
 	runtime.event_emitted.connect(func(event: Dictionary) -> void: events.append(event))
-	var palm_menu := runtime.component_node("hand_control")
-	palm_menu.call("_trigger_action", &"toggle_hand_lock")
+	t.eq(runtime.component_node("hand_control"), null, "remote palm declaration never creates a panel")
+	t.eq(runtime.component_node("controller_menu"), null, "remote controller declaration never creates a panel")
+	var menu_row: Dictionary = runtime.menu_entries()[0]
+	t.is_true(runtime.dispatch_menu(menu_row["token"], false), "system host dispatches the original menu declaration")
 	t.eq(events.size(), 1, "palm menu action emits one blueprint event")
 	var event := events[0] as Dictionary
 	t.eq(event.get("component_id"), "hand_control", "event identifies its component")
 	t.eq(event.get("action"), "toggle_unlock", "event uses the robot-authored action")
 	t.eq(event.get("value"), true, "toggle event proposes the inverse bound value")
 	t.is_false(
-		bool(palm_menu.get("_unlocked")),
+		bool(runtime.menu_entries()[0]["value"]),
 		"remote-driven palm menu waits for authoritative BlueprintState",
 	)
 	t.is_true(
@@ -462,7 +520,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	runtime._process(0.0)
 	t.is_true(
-		bool(palm_menu.get("_unlocked")),
+		bool(runtime.menu_entries()[0]["value"]),
 		"remote-driven palm menu updates after authoritative BlueprintState",
 	)
 
@@ -482,7 +540,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		runtime.apply_blueprint(duplicate_builtin),
 		"a Blueprint cannot ambiguously declare the same XR-owned view twice",
 	)
-	t.eq(runtime.component_count(), 8, "invalid replacement leaves the active Blueprint intact")
+	t.eq(runtime.component_count(), 14, "invalid replacement leaves the active Blueprint intact")
 
 	runtime.clear()
 	t.is_false(bool((builtin_changes.back() as Dictionary).get("visible", true)),

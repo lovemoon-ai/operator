@@ -32,6 +32,7 @@ public:
 	bool _on_event_polled(const void *event) override;
 
 	Dictionary get_status() const;
+	String get_os_version() const;
 	Dictionary get_external_camera_info();
 	Dictionary get_camera_image_capabilities();
 	Dictionary start_camera_image_capture(bool stereo = true, int width = 640, int height = 480, int fps = 30);
@@ -160,6 +161,7 @@ private:
 	bool ensure_hand_trackers();
 	void destroy_hand_trackers();
 	bool ensure_body_tracker(const Dictionary &bone_lengths);
+	void log_body_sample_status(const char *reason, const Dictionary &sample);
 	void destroy_body_tracker();
 	bool refresh_external_camera_info();
 	XrSession current_session() const;
@@ -185,6 +187,8 @@ private:
 	bool motion_tracking_ext = false;
 	bool pico_body_tracking2_ext = false;
 	bool bd_body_tracking_ext = false;
+	String last_body_diagnostic;
+	int64_t last_body_diagnostic_ms = -5000;
 	bool hand_tracking_ext = false;
 	bool virtual_boundary_ext = false;
 

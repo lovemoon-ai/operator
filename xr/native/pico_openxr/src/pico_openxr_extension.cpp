@@ -18,17 +18,59 @@
 
 #if defined(__ANDROID__)
 #include <android/log.h>
+#include <sys/system_properties.h>
 #define PROBE_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Operator-PROBE", __VA_ARGS__)
 #define PICO_BOUNDARY_LOG(...) __android_log_print(ANDROID_LOG_WARN, "Operator-PicoBoundary", __VA_ARGS__)
+#define PICO_BODY_LOG(...) __android_log_print(ANDROID_LOG_INFO, "Operator-PicoBody", __VA_ARGS__)
 #else
 #include <cstdio>
 #define PROBE_LOG(...) do { fprintf(stderr, "[Operator-PROBE] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
 #define PICO_BOUNDARY_LOG(...) do { fprintf(stderr, "[Operator-PicoBoundary] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#define PICO_BODY_LOG(...) do { fprintf(stderr, "[Operator-PicoBody] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
 #endif
 
 using namespace godot;
 
 namespace {
+
+// Core OpenXR enumeration ABI, kept local to this diagnostic (no poses).
+struct RuntimeExtensionProperty {
+	XrStructureType type = 2; // XR_TYPE_EXTENSION_PROPERTIES
+	void *next = nullptr;
+	char name[128] = {};
+	uint32_t version = 0;
+};
+
+void log_runtime_tracking_extensions(const Ref<OpenXRAPIExtension> &api) {
+	if (api.is_null()) {
+		return;
+	}
+	using EnumerateExtensions = XrResult (*)(const char *, uint32_t, uint32_t *, RuntimeExtensionProperty *);
+	const auto enumerate = reinterpret_cast<EnumerateExtensions>(api->get_instance_proc_addr("xrEnumerateInstanceExtensionProperties"));
+	if (!enumerate) {
+		return;
+	}
+	uint32_t count = 0;
+	XrResult result = enumerate(nullptr, 0, &count, nullptr);
+	if (XR_FAILED(result) || count == 0 || count > 4096) {
+		PICO_BODY_LOG("runtime_extension_enumeration result=%d count=%u", result, count);
+		return;
+	}
+	std::vector<RuntimeExtensionProperty> properties(count);
+	result = enumerate(nullptr, count, &count, properties.data());
+	if (XR_FAILED(result)) {
+		PICO_BODY_LOG("runtime_extension_enumeration result=%d", result);
+		return;
+	}
+	String names;
+	for (const auto &property : properties) {
+		const String name(property.name);
+		if (name.begins_with("XR_BD_") || name.begins_with("XR_PICO_") || name.contains("body_tracking")) {
+			names += name + String(" ");
+		}
+	}
+	PICO_BODY_LOG("runtime_advertised_extensions count=%u tracking_vendor=[%s]", count, names.utf8().get_data());
+}
 
 bool dict_bool(const Dictionary &dict, const String &key, bool fallback = false) {
 	return dict.has(key) ? bool(dict[key]) : fallback;
@@ -89,6 +131,7 @@ PicoOpenXRExtension::~PicoOpenXRExtension() {
 
 void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_status"), &PicoOpenXRExtension::get_status);
+	ClassDB::bind_method(D_METHOD("get_os_version"), &PicoOpenXRExtension::get_os_version);
 	ClassDB::bind_method(D_METHOD("get_external_camera_info"), &PicoOpenXRExtension::get_external_camera_info);
 	ClassDB::bind_method(D_METHOD("get_camera_image_capabilities"), &PicoOpenXRExtension::get_camera_image_capabilities);
 	ClassDB::bind_method(D_METHOD("start_camera_image_capture", "stereo", "width", "height", "fps"), &PicoOpenXRExtension::start_camera_image_capture, DEFVAL(true), DEFVAL(640), DEFVAL(480), DEFVAL(30));
@@ -136,6 +179,8 @@ void PicoOpenXRExtension::_on_instance_created(uint64_t p_instance) {
 	instance = reinterpret_cast<XrInstance>(p_instance);
 	function_resolution_attempted = false;
 	resolve_functions();
+	PICO_BODY_LOG("instance_created bd_extension=%d body2_extension=%d motion_extension=%d", bd_body_tracking_ext, pico_body_tracking2_ext, motion_tracking_ext);
+	log_runtime_tracking_extensions(get_openxr_api());
 	UtilityFunctions::print("PicoOpenXRExtension instance created; XR_EXT_future=", future_ext,
 				" XR_PICO_camera_image=", camera_image_ext,
 				" XR_PICO_motion_tracking=", motion_tracking_ext,
@@ -193,6 +238,7 @@ void PicoOpenXRExtension::_on_instance_destroyed() {
 
 void PicoOpenXRExtension::_on_session_created(uint64_t p_session) {
 	session = reinterpret_cast<XrSession>(p_session);
+	PICO_BODY_LOG("session_created body_supported=%d bd_extension=%d", system_body_tracking_properties.supportsBodyTracking == XR_TRUE, bd_body_tracking_ext);
 	UtilityFunctions::print("PicoOpenXRExtension session created");
 	if (!set_boundary_visible(false)) {
 		PICO_BOUNDARY_LOG("failed to suppress the PICO safety boundary; continuing without it");
@@ -252,6 +298,18 @@ bool PicoOpenXRExtension::_on_event_polled(const void *event) {
 		return true;
 	}
 	return false;
+}
+
+String PicoOpenXRExtension::get_os_version() const {
+#if defined(__ANDROID__)
+	// PICO OS version, not Android's release/API level. Available before XR
+	// initialization and without storage, shell, or privileged permissions.
+	char version[PROP_VALUE_MAX] = {};
+	if (__system_property_get("ro.build.display.id", version) > 0) {
+		return String::utf8(version);
+	}
+#endif
+	return String();
 }
 
 Dictionary PicoOpenXRExtension::get_status() const {
@@ -854,7 +912,9 @@ Array PicoOpenXRExtension::sample_motion_trackers(int max_count) {
 }
 
 bool PicoOpenXRExtension::start_body_tracking(Dictionary bone_lengths) {
-	return ensure_body_tracker(bone_lengths);
+	const bool started = ensure_body_tracker(bone_lengths);
+	PICO_BODY_LOG("start_body_tracking started=%d status=%s", started, String(UtilityFunctions::str(get_status())).utf8().get_data());
+	return started;
 }
 
 void PicoOpenXRExtension::stop_body_tracking() {
@@ -881,6 +941,7 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 	result["source_timestamp_ns"] = static_cast<int64_t>(display_time);
 
 	if (!ensure_body_tracker(Dictionary())) {
+		log_body_sample_status("tracker_unavailable", result);
 		return result;
 	}
 
@@ -930,6 +991,7 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 		display_time,
 	};
 	if (!locate_info.baseSpace || locate_info.time == 0) {
+		log_body_sample_status("space_or_time_unavailable", result);
 		return result;
 	}
 
@@ -943,6 +1005,7 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 	result["body_flags"] = int(tracking_state.status) | (int(tracking_state.message) << 8) | ((locations.allJointPosesTracked == XR_TRUE ? 1 : 0) << 16);
 
 	if (XR_FAILED(last_body_locate_result)) {
+		log_body_sample_status("locate_failed", result);
 		return result;
 	}
 
@@ -972,7 +1035,31 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 		joints.append(joint_record);
 	}
 	result["joints"] = joints;
+	log_body_sample_status("sampled", result);
 	return result;
+}
+
+void PicoOpenXRExtension::log_body_sample_status(const char *reason, const Dictionary &sample) {
+	const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+	const Array joints = sample.get("joints", Array());
+	const String diagnostic = UtilityFunctions::str(
+			reason, " session=", session != nullptr,
+			" bd_ext=", bd_body_tracking_ext, " body2_ext=", pico_body_tracking2_ext,
+			" supported=", system_body_tracking_properties.supportsBodyTracking == XR_TRUE,
+			" tracker=", body_tracker != XR_NULL_BODY_TRACKER_BD,
+			" create=", last_body_create_result, " state_result=", last_body_state_result,
+			" locate=", last_body_locate_result, " active=", sample.get("active", false),
+			" status=", sample.get("status", 0), " message=", sample.get("message", 0),
+			" joints=", joints.size());
+	// No per-joint pose logging. Repeat a stable state at most once per five
+	// seconds so release APK failures remain diagnosable through Android logcat.
+	if (diagnostic == last_body_diagnostic && now_ms - last_body_diagnostic_ms < 5000) {
+		return;
+	}
+	last_body_diagnostic = diagnostic;
+	last_body_diagnostic_ms = now_ms;
+	PICO_BODY_LOG("%s", diagnostic.utf8().get_data());
 }
 
 bool PicoOpenXRExtension::resolve_functions() {

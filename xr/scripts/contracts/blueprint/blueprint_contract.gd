@@ -38,6 +38,17 @@ static func parse_blueprint(value: Dictionary) -> Dictionary:
 			binding_contracts,
 			errors,
 		)
+	if errors.is_empty():
+		var shared := {}
+		for component_v in components:
+			var component: Dictionary = component_v
+			for item in preload("res://scripts/contracts/blueprint/menu_declarations.gd").entries(component, primitive(str(component["type"]))):
+				var key: String = item["item_key"]
+				if key.is_empty():
+					continue
+				if shared.has(key) and shared[key] != item["contract"]:
+					errors.append("conflicting shared menu item: %s" % key)
+				shared[key] = item["contract"]
 	return {"blueprint": value, "errors": errors}
 
 
@@ -174,6 +185,10 @@ static func value_matches_type(value: Variant, value_type: String) -> bool:
 		"number_array":
 			return value is Array and (value as Array).all(
 				func(item: Variant) -> bool: return _is_finite_number(item)
+			)
+		"string_array":
+			return value is Array and (value as Array).all(
+				func(item: Variant) -> bool: return item is String
 			)
 		"integer_array":
 			return value is Array and (value as Array).all(

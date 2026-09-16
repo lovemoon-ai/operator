@@ -7,6 +7,129 @@ use teleop_protocol::{
 };
 
 #[test]
+fn menu_items_merge_only_by_explicit_consistent_identity() {
+    let entry = serde_json::json!({"id": "primary", "type": "menu_item",
+        "properties": {"title": "Robot", "action": "connection.toggle", "item_key": "shared",
+            "locked_text": "Enable", "unlocked_text": "Disable", "unavailable_text": "Unavailable"},
+        "bindings": {"value": "enabled", "available": "ready"}});
+    let mut legacy = entry.clone();
+    legacy["id"] = serde_json::json!("legacy");
+    legacy["type"] = serde_json::json!("palm_menu");
+    let mut blueprint: Blueprint = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_SCHEMA, "blueprint_id": "menus", "revision": 1,
+        "components": [entry, legacy]
+    })).unwrap();
+    blueprint.validate().unwrap();
+    blueprint.components[1].bindings.insert("value".into(), "different".into());
+    assert!(blueprint.validate().unwrap_err().contains("conflicting shared menu"));
+    blueprint.components[1].properties.insert("item_key".into(), serde_json::json!("other"));
+    blueprint.validate().unwrap();
+}
+
+#[test]
+fn ground_grid_and_model_lighting_contract_round_trips() {
+    let blueprint: Blueprint = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_SCHEMA, "blueprint_id": "stage", "revision": 1,
+        "components": [
+            {"id": "ground", "type": "ground_grid", "properties": {"spacing": 0.5, "placement_target": "g1"}},
+            {"id": "lighting", "type": "model_lighting", "bindings": {"key_energy": "key", "fill_energy": "fill"}}
+        ]
+    })).unwrap();
+    blueprint.validate().unwrap();
+    let copy: Blueprint = serde_json::from_slice(&serde_json::to_vec(&blueprint).unwrap()).unwrap();
+    assert_eq!(copy, blueprint);
+    let mut state: BlueprintState = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_STATE_SCHEMA, "blueprint_id": "stage", "blueprint_revision": 1,
+        "sequence": 1, "timestamp_ns": 1, "values": {"key": 1.6, "fill": 0.6}
+    })).unwrap();
+    blueprint.validate_state(&state).unwrap();
+    state.values.insert("fill".into(), serde_json::json!(2.1));
+    assert!(blueprint.validate_state(&state).is_err());
+    let mut duplicate = blueprint.clone();
+    let mut second_light = duplicate.components[1].clone();
+    second_light.id = "other".into();
+    duplicate.components.push(second_light);
+    assert!(duplicate.validate().is_err());
+    let mut bad = blueprint;
+    bad.components[0].properties.insert("spacing".into(), serde_json::json!(0));
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn controller_chord_and_menu_actions_have_distinct_contracts() {
+    let blueprint: Blueprint = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_SCHEMA, "blueprint_id": "controls", "revision": 1,
+        "components": [
+            {"id":"reset","type":"input_binding","properties":{"action":"reset","hold_seconds":1},
+             "bindings":{"available":"available","required":"required","acknowledged_request":"ack","success":"success"}},
+            {"id":"menu","type":"controller_menu","properties":{"title":"Controls","action":"connection.toggle",
+             "secondary_action":"view.recenter","secondary_text":"Recenter"},"bindings":{"value":"connected"}}
+        ]
+    })).unwrap();
+    blueprint.validate().unwrap();
+    let mut event: BlueprintEvent = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_EVENT_SCHEMA, "blueprint_id": "controls", "blueprint_revision": 1,
+        "sequence": 1, "timestamp_ns": 1, "component_id": "reset", "action": "reset", "value": "request-id"
+    })).unwrap();
+    blueprint.validate_event(&event).unwrap();
+    event.value = serde_json::json!(true);
+    assert!(blueprint.validate_event(&event).is_err());
+    event.component_id = "menu".into();
+    event.action = "view.recenter".into();
+    blueprint.validate_event(&event).unwrap();
+    event.action = "arbitrary_local_action".into();
+    assert!(blueprint.validate_event(&event).is_err());
+}
+
+#[test]
+fn controller_menu_event_contract_round_trips() {
+    let blueprint: Blueprint = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_SCHEMA, "blueprint_id": "menu", "revision": 1,
+        "components": [{
+            "id": "calibrate", "type": "controller_menu",
+            "properties": {"title": "ScaleBFM", "action": "calibrate"},
+            "bindings": {"value": "calibrated", "available": "ready"}
+        }]
+    })).unwrap();
+    blueprint.validate().unwrap();
+    let event: BlueprintEvent = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_EVENT_SCHEMA, "blueprint_id": "menu", "blueprint_revision": 1,
+        "sequence": 1, "timestamp_ns": 1, "component_id": "calibrate",
+        "action": "calibrate", "value": true
+    })).unwrap();
+    blueprint.validate_event(&event).unwrap();
+    let mut bad_event = event;
+    bad_event.value = serde_json::json!("true");
+    assert!(blueprint.validate_event(&bad_event).is_err());
+    let mut duplicate = blueprint;
+    let mut second = duplicate.components[0].clone();
+    second.id = "second".into();
+    duplicate.components.push(second);
+    assert!(duplicate.validate().is_err());
+}
+
+#[test]
+fn robot_model_state_contract_round_trips() {
+    let blueprint: Blueprint = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_SCHEMA, "blueprint_id": "robot", "revision": 1,
+        "components": [{
+            "id": "g1", "type": "robot_model",
+            "properties": {"asset_sha256": "a".repeat(64), "asset_size": 100, "asset_port": 63904, "joint_names": ["left_knee_joint"]},
+            "bindings": {"joint_positions": "q", "base_pose": "base", "sample": "sample"}
+        }]
+    })).unwrap();
+    blueprint.validate().unwrap();
+    let mut state: BlueprintState = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_STATE_SCHEMA, "blueprint_id": "robot", "blueprint_revision": 1,
+        "sequence": 1, "timestamp_ns": 10,
+        "values": {"q": [0.2], "base": [0, 1, 0, 0, 0, 0, 1], "sample": 1}
+    })).unwrap();
+    blueprint.validate_state(&state).unwrap();
+    state.values.insert("base".into(), serde_json::json!(vec![0; 6]));
+    assert!(blueprint.validate_state(&state).is_err());
+}
+
+#[test]
 fn blueprint_round_trips_and_validates() {
     let blueprint = Blueprint {
         schema: BLUEPRINT_SCHEMA.to_string(),

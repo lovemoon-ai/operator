@@ -324,15 +324,16 @@ func _refresh(phase: String = "idle", active_action: StringName = ACTION_TOGGLE_
 		var glow := glow_v as Panel
 		var flash := flash_v as Panel
 		var rect := rect_v as Rect2
-		button.text = _blueprint_status_text()
-		button.disabled = not _available
+		var available := _action_available(action_id)
+		button.text = _action_status_text(action_id)
+		button.disabled = not available
 		var action_phase := phase if active_action == action_id else "idle"
-		var base_color := status_color(_unlocked, _available)
+		var base_color := status_color(_unlocked, available)
 		var approached := action_phase == "arm"
 		var pressed := action_phase == "press" or action_phase == "triggered"
-		if approached and _available:
+		if approached and available:
 			base_color = base_color.lightened(0.18)
-		elif pressed and _available:
+		elif pressed and available:
 			base_color = base_color.lightened(0.08)
 		button.add_theme_stylebox_override("normal", _button_style(base_color))
 		button.add_theme_stylebox_override("disabled", _button_style(UNAVAILABLE_COLOR))
@@ -340,7 +341,7 @@ func _refresh(phase: String = "idle", active_action: StringName = ACTION_TOGGLE_
 		button.scale = visual_scale_for_phase(action_phase)
 		if pressed:
 			button.position += BUTTON_PRESSED_OFFSET
-		glow.visible = (approached or pressed) and _available
+		glow.visible = (approached or pressed) and available
 		if glow.visible:
 			var glow_color := Color(1.0, 0.72, 0.24, 0.95) if pressed \
 				else Color(0.35, 1.0, 0.48, 0.88)
@@ -348,6 +349,14 @@ func _refresh(phase: String = "idle", active_action: StringName = ACTION_TOGGLE_
 		flash.visible = action_id == _flash_action and _flash_remaining > 0.0
 		if flash.visible:
 			flash.modulate.a = clampf(_flash_remaining / TRIGGER_FLASH_SEC, 0.0, 1.0)
+
+
+func _action_available(_action_id: StringName) -> bool:
+	return _available
+
+
+func _action_status_text(_action_id: StringName) -> String:
+	return _blueprint_status_text()
 
 
 func _blueprint_status_text() -> String:

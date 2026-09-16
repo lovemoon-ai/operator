@@ -18,8 +18,8 @@ extends Node3D
 
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
 const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
-const HandPalmMenuScript = preload("res://scripts/ui/hand_unlock_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
+const ControllerShellScript := preload("res://scripts/blueprint/system_menu_host.gd")
 const BlueprintRuntimeScript = preload(
 	"res://scripts/blueprint/blueprint_runtime.gd"
 )
@@ -163,7 +163,6 @@ var _active_target: Node
 
 var _settings_panel: Node3D
 var _settings_button: Node3D
-var _hand_palm_menu: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
 var _blueprint_external_view_visibility: Dictionary = {}
@@ -226,6 +225,7 @@ const SYNTH_CONNECT_TIMEOUT_SEC := 45.0
 var _synthetic := false
 ## Settings last applied, so the page can restore the robot it interrupted.
 var _applied_options: Dictionary = {}
+var _controller_shell: Node
 var _inside_resume_options: Dictionary = {}
 var _synth_source: Node = null
 var _synth_duration := SYNTH_DEFAULT_DURATION
@@ -326,11 +326,11 @@ func _ready() -> void:
 	# instead of waiting for discovery to finish.
 	_settings_panel.visible = false
 	_settings_button.visible = false
-	_hand_palm_menu.visible = false
 
 	# Apply persisted runtime options immediately. The settings page's Test
 	# actions are previews only; the confirmed options own the working page.
 	var persisted: Dictionary = SettingsUI.load_settings()
+	_applied_options = persisted.duplicate(true)
 	_apply_runtime_settings(persisted)
 
 	var xr_interface := XRServer.find_interface("OpenXR")
@@ -370,6 +370,7 @@ func _process(_delta: float) -> void:
 				_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
+	_update_controller_shell()
 	_tick_telemetry_reconnect(_delta)
 	# Position refreshes every frame so the gizmo tracks the controller smoothly;
 	# its orientation only changes when telemetry reports a new captured frame.
@@ -391,8 +392,6 @@ func _apply_settings_input_indicator(mode: String) -> void:
 	var controller := _right_controller if mode == "controllers" else null
 	if _settings_button and _settings_button.has_method("set_feedback_input_mode"):
 		_settings_button.call("set_feedback_input_mode", mode, controller)
-	if _hand_palm_menu and _hand_palm_menu.has_method("set_feedback_input_mode"):
-		_hand_palm_menu.call("set_feedback_input_mode", mode, controller)
 
 
 func _bind_operator_interaction() -> void:
@@ -613,10 +612,6 @@ func _create_settings_ui_nodes() -> void:
 	_settings_button.pressed.connect(_on_settings_button_pressed)
 	_origin.add_child(_settings_button)
 
-	_hand_palm_menu = HandPalmMenuScript.new()
-	_hand_palm_menu.name = "HandPalmMenu"
-	_hand_palm_menu.toggled.connect(_on_hand_unlock_toggled)
-	_origin.add_child(_hand_palm_menu)
 
 	_teleop_controller_panel = TeleopControllerPanelScript.new()
 	_teleop_controller_panel.name = "TeleopControllerPanel"
@@ -636,6 +631,33 @@ func _create_settings_ui_nodes() -> void:
 		_control_frame_gizmos[hand] = gizmo
 
 	_bind_operator_interaction()
+	_controller_shell = ControllerShellScript.new()
+	_controller_shell.name = "SystemMenuHost"
+	add_child(_controller_shell)
+	_controller_shell.call("configure", _origin, _camera, _left_controller, _right_controller, _tracking_provider, _blueprint_runtime)
+	_controller_shell.connect("connection_requested", _on_controller_connection_requested)
+
+
+func _update_controller_shell() -> void:
+	if _controller_shell == null:
+		return
+	var outside_operator := str(_applied_options.get("target_scope", "outside")) == "outside" \
+		and str(_applied_options.get("protocol", "operator")) == "operator"
+	var transport_connected: bool = _tcp_handler != null and bool(_tcp_handler.call("is_connected_to_robot"))
+	var connected: bool = transport_connected and _active_target == _outside_target and _outside_target.is_ready()
+	var connecting: bool = _tcp_handler != null and (int(_tcp_handler.call("get_state")) == TcpHandler.State.CONNECTING or (transport_connected and not connected))
+	var host := str(_applied_options.get("ip", "")).strip_edges()
+	var port := int(_applied_options.get("port", 0))
+	_controller_shell.call("update_context", connected, connecting, not host.is_empty() and port > 0 and port <= 65535,
+		outside_operator and _xr_started and not _teleop_suspended and not _app_paused and not _app_unfocused)
+
+
+func _on_controller_connection_requested(connect_requested: bool) -> void:
+	if connect_requested:
+		_on_settings_applied(_applied_options.duplicate(true))
+	else:
+		_on_settings_disconnect_requested()
+	_update_controller_shell()
 
 
 func _update_teleop_controller_panel() -> void:
@@ -887,10 +909,6 @@ func _on_settings_button_pressed() -> void:
 	_show_settings_panel()
 
 
-func _on_hand_unlock_toggled(unlocked: bool) -> void:
-	_set_revo2_hand_control_unlocked(unlocked)
-
-
 func _set_revo2_hand_control_unlocked(unlocked: bool) -> void:
 	var transport_connected: bool = (
 		_active_target == _outside_target
@@ -910,7 +928,6 @@ func _set_revo2_hand_control_unlocked(unlocked: bool) -> void:
 		and not _teleop_suspended
 	)
 	_sync_revo2_hand_command_gate()
-	_update_hand_palm_menu()
 	print("[Operator] Revo2 hand control unlocked=%s" % str(_revo2_hand_control_unlocked))
 
 
@@ -945,47 +962,6 @@ func _sync_revo2_hand_command_gate() -> void:
 			_command_sender.send_immediate_command()
 
 
-func _update_hand_palm_menu(delta: float = 0.0) -> void:
-	if _hand_palm_menu == null:
-		return
-	# Native Operator blueprint is robot-authored. The legacy Revo2 palm menu
-	# remains instantiated for compatibility tests, but never owns the work page.
-	var show_menu := false
-	var available: bool = (
-		show_menu
-		and not _teleop_suspended
-		and _tcp_handler != null
-		and _tcp_handler.is_connected_to_robot()
-		and _outside_target != null
-		and _outside_target.has_method("is_ready")
-		and _outside_target.is_ready()
-	)
-	var mode = _active_control_mode()
-	if not show_menu or mode == null or not mode.has_method("get_hand_control_state"):
-		_hand_palm_menu.call(
-			"update_palm_menu", {}, null, null, false, false, false, delta
-		)
-		return
-	if mode.has_method("refresh_hand_tracking") and _tracking_provider != null:
-		mode.call("refresh_hand_tracking", _tracking_provider)
-	var head_transform_v: Variant = _camera.transform if _camera != null else null
-	var head_position_v: Variant = (
-		(head_transform_v as Transform3D).origin if head_transform_v is Transform3D else null
-	)
-	var left_state: Dictionary = mode.get_hand_control_state(HAND_LEFT, head_position_v)
-	var right_state: Dictionary = mode.get_hand_control_state(HAND_RIGHT)
-	_hand_palm_menu.call(
-		"update_palm_menu",
-		left_state.get("palm_menu", {}),
-		head_transform_v,
-		right_state.get("index_tip", null),
-		_revo2_hand_control_unlocked,
-		available,
-		show_menu,
-		delta
-	)
-
-
 func _set_revo2_hand_runtime_enabled(enabled: bool) -> void:
 	_revo2_hand_runtime_enabled = enabled
 	if not enabled:
@@ -1000,7 +976,6 @@ func _set_revo2_hand_runtime_enabled(enabled: bool) -> void:
 			var indicator = indicator_v
 			if indicator != null:
 				indicator.update_state(null, false, false, false)
-	_update_hand_palm_menu()
 
 
 func _refresh_revo2_visualization_ownership() -> void:
@@ -1013,7 +988,6 @@ func _refresh_revo2_visualization_ownership() -> void:
 		if indicator != null:
 			indicator.update_state(null, false, false, false)
 	_sync_revo2_hand_command_gate()
-	_update_hand_palm_menu()
 
 
 static func _operator_discovery_key(ip: String, pose_port: int) -> String:
@@ -1191,6 +1165,9 @@ func _notification(what: int) -> void:
 
 
 func _sync_app_focus() -> void:
+	if _blueprint_runtime != null:
+		_blueprint_runtime.set_suspended(_teleop_suspended or _app_paused or _app_unfocused)
+	_update_controller_shell()
 	if _xrt_target != null and _xrt_target.has_method("set_app_focused"):
 		_xrt_target.call("set_app_focused", not _app_paused and not _app_unfocused)
 
@@ -1203,7 +1180,7 @@ func _set_teleop_suspended(suspended: bool) -> void:
 	if suspended:
 		_set_revo2_hand_control_unlocked(false)
 	if _blueprint_runtime:
-		_blueprint_runtime.set_suspended(suspended)
+		_blueprint_runtime.set_suspended(suspended or _app_paused or _app_unfocused)
 	if _teleop_suspended == suspended:
 		return
 	_teleop_suspended = suspended
@@ -1261,8 +1238,6 @@ func _show_settings_panel() -> void:
 		_settings_ui.set_discovering(false)
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
-	if _hand_palm_menu and _hand_palm_menu.has_method("reset_menu"):
-		_hand_palm_menu.call("reset_menu")
 	if _settings_panel and _settings_panel.has_method("set_feedback_input_mode"):
 		var mode := _current_interaction_mode()
 		_settings_panel.set_feedback_input_mode(
@@ -1273,7 +1248,6 @@ func _show_settings_panel() -> void:
 	else:
 		_settings_panel.visible = true
 	_settings_button.visible = false
-	_hand_palm_menu.visible = false
 
 
 func _hide_settings_panel() -> void:
@@ -1284,7 +1258,6 @@ func _hide_settings_panel() -> void:
 		_settings_panel.visible = false
 	_settings_button.visible = true
 	_set_teleop_suspended(false)
-	_update_hand_palm_menu()
 	_resume_inside_embodiment()
 
 
@@ -1593,6 +1566,8 @@ func _start_outside_with_options(options: Dictionary) -> bool:
 
 
 func _on_connected() -> void:
+	if _controller_shell != null:
+		_controller_shell.call("set_error", "")
 	_set_revo2_hand_control_unlocked(false)
 	_set_status(tr("UI_CONNECTED_HANDSHAKE"))
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
@@ -1633,6 +1608,8 @@ func _on_disconnected() -> void:
 
 
 func _on_connection_failed(reason: String) -> void:
+	if _controller_shell != null:
+		_controller_shell.call("set_error", reason)
 	_set_revo2_hand_control_unlocked(false)
 	_clear_blueprint_runtime()
 	_telemetry_tcp_handler.disconnect_from_robot()
@@ -1662,6 +1639,7 @@ func _on_blueprint_received(blueprint: Dictionary) -> void:
 			% [str(_active_target == _outside_target), str(_blueprint_runtime != null)]
 		)
 		return
+	_blueprint_runtime.asset_host = _tcp_handler.get_host()
 	if _blueprint_runtime.apply_blueprint(blueprint):
 		print(
 			"[Operator] Blueprint active components=%d suspended=%s"
@@ -1697,6 +1675,8 @@ func _on_blueprint_runtime_event(event: Dictionary) -> void:
 
 func _on_blueprint_runtime_warning(message: String) -> void:
 	push_warning("[Operator] %s" % message)
+	if _controller_shell != null:
+		_controller_shell.call("set_error", message)
 
 
 func _on_blueprint_external_view_changed(

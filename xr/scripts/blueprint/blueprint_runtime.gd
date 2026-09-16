@@ -3,6 +3,7 @@ extends Node3D
 
 signal event_emitted(event: Dictionary)
 signal warning_raised(message: String)
+signal menu_changed
 signal external_view_changed(
 	component_id: String,
 	component_type: String,
@@ -10,8 +11,11 @@ signal external_view_changed(
 	properties: Dictionary,
 )
 
-const HandGestureMapperScript := preload("res://scripts/input/hand_gesture_mapper.gd")
-const PalmMenuScript := preload("res://scripts/ui/hand_unlock_button.gd")
+const RobotModelScript := preload("res://scripts/blueprint/robot_model_view.gd")
+const GroundGridScript := preload("res://scripts/blueprint/ground_grid.gd")
+const ModelLightingScript := preload("res://scripts/blueprint/model_lighting.gd")
+const MenuDeclarations := preload("res://scripts/contracts/blueprint/menu_declarations.gd")
+const InputBindingScript := preload("res://scripts/blueprint/controller_input_binding.gd")
 const FingertipTactileScript := preload(
 	"res://scripts/ui/dexterous_hand_tactile_overlay.gd"
 )
@@ -28,6 +32,21 @@ const ANCHOR_IMPLEMENTATIONS := {
 	"right_palm": "hand",
 }
 const NODE_IMPLEMENTATIONS := {
+	"ground_grid": {
+		"properties": ["visible", "settings_label", "size", "spacing", "major_every", "line_width", "color", "major_color", "placement_target"],
+		"bindings": ["visible"],
+		"events": [],
+	},
+	"model_lighting": {
+		"properties": ["visible", "settings_label", "key_energy", "fill_energy", "key_color", "fill_color"],
+		"bindings": ["visible", "key_energy", "fill_energy"],
+		"events": [],
+	},
+	"robot_model": {
+		"properties": ["visible", "settings_label", "asset_sha256", "asset_size", "asset_port", "joint_names", "smoothing_ms", "stale_after_ms"],
+		"bindings": ["visible", "joint_positions", "base_pose", "sample"],
+		"events": [],
+	},
 	"label": {
 		"properties": [
 			"visible", "settings_label", "text", "font_size", "pixel_size",
@@ -38,17 +57,14 @@ const NODE_IMPLEMENTATIONS := {
 	},
 	"status_lamp": {
 		"properties": [
-			"visible", "settings_label", "text", "font_size", "pixel_size", "radius", "colors",
+			"visible", "settings_label", "text", "font_size", "pixel_size", "radius", "colors", "pulse_states", "pulse_hz",
 		],
 		"bindings": ["visible", "state", "text"],
 		"events": [],
 	},
-	"palm_menu": {
-		"properties": [
-			"visible", "settings_label", "title", "action", "locked_text",
-			"unlocked_text", "unavailable_text",
-		],
-		"bindings": ["visible", "value", "available"],
+	"input_binding": {
+		"properties": ["visible", "settings_label", "gesture", "action", "hold_seconds", "ack_timeout_seconds", "target_component"],
+		"bindings": ["visible", "available", "required", "acknowledged_request", "success", "message"],
 		"events": ["action"],
 	},
 	"fingertip_tactile": {
@@ -61,10 +77,25 @@ const NODE_IMPLEMENTATIONS := {
 		"events": [],
 	},
 }
-const EVENT_IMPLEMENTATIONS := ["action"]
+const EVENT_IMPLEMENTATIONS := ["action", "secondary_action"]
+const MENU_IMPLEMENTATIONS := {
+	"menu_item": {
+		"properties": ["visible", "settings_label", "title", "action", "item_key", "locked_text", "unlocked_text", "unavailable_text"],
+		"bindings": ["visible", "value", "available"], "events": ["action"],
+	},
+	"palm_menu": {
+		"properties": ["visible", "settings_label", "title", "action", "item_key", "locked_text", "unlocked_text", "unavailable_text"],
+		"bindings": ["visible", "value", "available"], "events": ["action"],
+	},
+	"controller_menu": {
+		"properties": ["visible", "settings_label", "title", "action", "item_key", "locked_text", "unlocked_text", "unavailable_text", "secondary_action", "secondary_text", "secondary_item_key"],
+		"bindings": ["visible", "value", "available", "secondary_available", "detail"], "events": ["action", "secondary_action"],
+	},
+}
 const RUNTIME_REVISION := 2
 
 var _origin: XROrigin3D
+var asset_host := "" # Supplied by the connected transport, never by Blueprint.
 var _camera: XRCamera3D
 var _left_controller: XRController3D
 var _right_controller: XRController3D
@@ -73,6 +104,8 @@ var _external_view_implementations: Array[String] = []
 var _blueprint_id := ""
 var _blueprint_revision := 0
 var _last_state_sequence := 0
+var _last_state_received_us := 0
+var _local_view_offsets: Dictionary = {}
 var _event_sequence := 0
 var _state_values: Dictionary = {}
 var _blueprint_components: Array = []
@@ -82,6 +115,7 @@ var _dynamic_components: Array = []
 var _frame_hand_joints: Dictionary = {}
 var _user_visibility_overrides: Dictionary = {}
 var _suspended := false
+var _menu_generation := 0
 
 
 func _init() -> void:
@@ -123,6 +157,9 @@ func apply_blueprint(blueprint: Dictionary) -> bool:
 			return false
 		var host := str(primitive_spec.get("host", ""))
 		var implementation := str(primitive_spec.get("implementation", ""))
+		if host == "system_menu" and not MENU_IMPLEMENTATIONS.has(implementation):
+			warning_raised.emit("Unsupported system menu declaration")
+			return false
 		if host == "node3d" and not NODE_IMPLEMENTATIONS.has(implementation):
 			warning_raised.emit(
 				"Unsupported Blueprint implementation: %s"
@@ -203,6 +240,7 @@ func apply_state(state: Dictionary) -> bool:
 			return false
 		_state_values = (values_v as Dictionary).duplicate(true)
 	_last_state_sequence = sequence
+	_last_state_received_us = Time.get_ticks_usec()
 	_refresh_components()
 	if sequence == 1:
 		print(
@@ -213,6 +251,7 @@ func apply_state(state: Dictionary) -> bool:
 
 
 func clear() -> void:
+	_menu_generation += 1
 	for entry_v in _components.values():
 		var entry := entry_v as Dictionary
 		if bool(entry.get("external_view", false)):
@@ -225,6 +264,8 @@ func clear() -> void:
 			)
 		var node := entry.get("node") as Node
 		if node != null:
+			if str(entry.get("implementation", "")) == "input_binding":
+				node.call("set_active", false)
 			if node is Node3D:
 				(node as Node3D).visible = false
 			node.queue_free()
@@ -238,11 +279,16 @@ func clear() -> void:
 	_blueprint_id = ""
 	_blueprint_revision = 0
 	_last_state_sequence = 0
+	_last_state_received_us = 0
+	_local_view_offsets.clear()
 	_event_sequence = 0
 	set_process(false)
+	menu_changed.emit()
 
 
 func set_suspended(value: bool) -> void:
+	if _suspended != value:
+		_menu_generation += 1
 	_suspended = value
 	_refresh_components()
 	_refresh_dynamic_processing()
@@ -261,6 +307,7 @@ func set_user_visibility_override(component_id: String, visible: Variant) -> voi
 		_user_visibility_overrides[component_id] = bool(visible)
 	_save_user_overrides()
 	_refresh_component(entry_v as Dictionary)
+	menu_changed.emit()
 
 
 func user_visibility_options() -> Array[Dictionary]:
@@ -309,6 +356,8 @@ func component_visible(component_id: String) -> bool:
 	if not entry_v is Dictionary:
 		return false
 	var entry := entry_v as Dictionary
+	if bool(entry.get("menu", false)):
+		return not _suspended and bool(entry.get("requested_visible", true))
 	if bool(entry.get("external_view", false)):
 		return bool(entry.get("effective_visible", false))
 	var node := entry.get("node") as Node3D
@@ -319,10 +368,9 @@ func _process(delta: float) -> void:
 	_frame_hand_joints.clear()
 	for entry_v in _dynamic_components:
 		var entry := entry_v as Dictionary
-		if str(entry.get("implementation", "")) == "palm_menu":
-			_update_palm_menu(entry, delta)
-		else:
-			_update_anchor(entry)
+		_update_anchor(entry)
+		if str(entry.get("implementation", "")) == "status_lamp":
+			_update_lamp(entry)
 	_frame_hand_joints.clear()
 
 
@@ -341,23 +389,40 @@ func _create_component(spec: Dictionary) -> Dictionary:
 		entry["effective_visible"] = null
 		entry["effective_properties"] = {}
 		return entry
+	if str(primitive_spec.get("host", "")) == "system_menu":
+		entry["menu"] = true
+		return entry # Declarations never allocate panels or input listeners.
 	match implementation:
+		"ground_grid":
+			node = GroundGridScript.new()
+			node.name = "BlueprintGroundGrid_%s" % str(spec.get("id", ""))
+			var properties := BlueprintContract.resolved_properties(spec)
+			node.call("configure", properties, _parse_color(properties["color"], Color.WHITE),
+				_parse_color(properties["major_color"], Color.WHITE))
+		"model_lighting":
+			node = ModelLightingScript.new()
+			node.name = "BlueprintModelLighting_%s" % str(spec.get("id", ""))
+		"input_binding":
+			node = InputBindingScript.new()
+			var configured: bool = node.call("configure", BlueprintContract.resolved_properties(spec), _left_controller, _right_controller)
+			if not configured:
+				warning_raised.emit("Unsupported Blueprint input gesture")
+				node.free()
+				return {}
+			node.set("target_ready", Callable(self, "_input_target_ready"))
+			node.connect("action_triggered", Callable(self, "_on_palm_menu_action").bind(str(spec.get("id", ""))))
+		"robot_model":
+			node = RobotModelScript.new()
+			node.name = "BlueprintRobot_%s" % str(spec.get("id", ""))
+			node.connect("warning_raised", func(message: String) -> void: warning_raised.emit(message))
+			var configured: bool = node.call("configure", BlueprintContract.resolved_properties(spec), asset_host)
+			if not configured:
+				node.free()
+				return {}
 		"label":
 			node = _create_label(spec)
 		"status_lamp":
 			node = _create_status_lamp(spec, entry)
-		"palm_menu":
-			node = PalmMenuScript.new()
-			node.name = "BlueprintPalmMenu_%s" % str(spec.get("id", ""))
-			node.call(
-			"configure_blueprint",
-			BlueprintContract.resolved_properties(spec),
-				_parse_transform(BlueprintContract.resolved_transform(spec)),
-			)
-			node.connect(
-				"action_triggered",
-				Callable(self, "_on_palm_menu_action").bind(str(spec.get("id", ""))),
-			)
 		"fingertip_tactile":
 			node = FingertipTactileScript.new()
 			node.name = "BlueprintFingertipTactile_%s" % str(spec.get("id", ""))
@@ -367,7 +432,7 @@ func _create_component(spec: Dictionary) -> Dictionary:
 	add_child(node)
 	entry["node"] = node
 	entry["local_transform"] = _parse_transform(BlueprintContract.resolved_transform(spec))
-	if implementation == "palm_menu" or BlueprintContract.resolved_anchor(spec) != "world":
+	if implementation == "status_lamp" or BlueprintContract.resolved_anchor(spec) != "world":
 		_dynamic_components.append(entry)
 	elif implementation != "fingertip_tactile":
 		_update_anchor(entry)
@@ -420,6 +485,7 @@ func _create_status_lamp(spec: Dictionary, entry: Dictionary) -> Node3D:
 func _refresh_components() -> void:
 	for entry_v in _components.values():
 		_refresh_component(entry_v as Dictionary)
+	menu_changed.emit()
 
 
 func _refresh_component(entry: Dictionary) -> void:
@@ -455,11 +521,11 @@ func _refresh_component(entry: Dictionary) -> void:
 	var node := entry.get("node") as Node3D
 	if node == null:
 		return
-	if implementation == "palm_menu":
-		if not visible or _suspended:
-			node.visible = false
-			if node.has_method("cancel_touch"):
-				node.call("cancel_touch")
+	if implementation == "input_binding":
+		node.call("set_active", visible and not _suspended)
+		node.call("set_bound_state", bool(_bound_value(spec, "available", false)),
+			bool(_bound_value(spec, "required", true)), str(_bound_value(spec, "acknowledged_request", "")),
+			bool(_bound_value(spec, "success", false)), str(_bound_value(spec, "message", "")), _last_state_received_us)
 	elif implementation == "fingertip_tactile":
 		node.call("set_suspended", _suspended)
 		node.call("set_enabled", visible)
@@ -475,6 +541,17 @@ func _refresh_component(entry: Dictionary) -> void:
 	else:
 		_update_anchor(entry)
 	match implementation:
+		"model_lighting":
+			node.call("update_lighting", float(_bound_value(spec, "key_energy", properties["key_energy"])),
+				float(_bound_value(spec, "fill_energy", properties["fill_energy"])),
+				_parse_color(properties["key_color"], Color.WHITE), _parse_color(properties["fill_color"], Color.WHITE))
+		"robot_model":
+			node.call(
+				"update_sample",
+				_bound_value(spec, "joint_positions", null),
+				_bound_value(spec, "base_pose", null),
+				_bound_value(spec, "sample", null),
+			)
 		"label":
 			var label := node as Label3D
 			label.text = str(_bound_value(spec, "text", properties["text"]))
@@ -510,55 +587,66 @@ func _update_anchor(entry: Dictionary) -> void:
 	var anchor_transform_v: Variant = _anchor_transform(BlueprintContract.resolved_anchor(spec))
 	if anchor_transform_v is Transform3D:
 		node.global_transform = (anchor_transform_v as Transform3D) * local_transform
+		var placement_id := str(spec.get("id", ""))
+		if str(entry.get("implementation", "")) == "ground_grid":
+			placement_id = str(BlueprintContract.resolved_properties(spec).get("placement_target", ""))
+		node.global_position += Vector3(_local_view_offsets.get(placement_id, Vector3.ZERO))
 		node.visible = true
 	else:
 		node.visible = false
-
-
-func _update_palm_menu(entry: Dictionary, delta: float) -> void:
-	var menu := entry.get("node") as Node3D
-	if menu == null:
-		return
-	var spec: Dictionary = entry.get("spec", {})
-	var requested_visible := bool(entry.get("requested_visible", true))
-	var enabled := requested_visible and not _suspended and _tracking_provider != null
-	var anchor_hand := (
-		HAND_RIGHT if BlueprintContract.resolved_anchor(spec) == "right_palm" else HAND_LEFT
-	)
-	var pointer_hand := HAND_LEFT if anchor_hand == HAND_RIGHT else HAND_RIGHT
-	var anchor_joints: Array = []
-	var pointer_joints: Array = []
-	if enabled and _tracking_provider.has_method("get_hand_joints"):
-		anchor_joints = _hand_joints(anchor_hand)
-		pointer_joints = _hand_joints(pointer_hand)
-	var head_transform_v: Variant = _camera.transform if _camera != null else null
-	var head_position_v: Variant = (
-		(head_transform_v as Transform3D).origin if head_transform_v is Transform3D else null
-	)
-	var menu_state := HandGestureMapperScript.palm_menu_state(
-		anchor_joints, head_position_v, anchor_hand
-	)
-	var fingertip: Variant = HandGestureMapperScript.index_tip_position(pointer_joints)
-	var value := bool(_bound_value(spec, "value", false))
-	var available := bool(_bound_value(spec, "available", true)) and enabled
-	menu.call(
-		"update_palm_menu",
-		menu_state,
-		head_transform_v,
-		fingertip,
-		value,
-		available,
-		enabled,
-		delta,
-	)
 
 
 func _refresh_dynamic_processing() -> void:
 	set_process(not _suspended and not _dynamic_components.is_empty())
 
 
+func menu_entries() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var shared := {}
+	for id in _component_order:
+		var entry: Dictionary = _components[id]
+		if not bool(entry.get("menu", false)):
+			continue
+		var spec: Dictionary = entry["spec"]
+		for declaration in MenuDeclarations.entries(spec, BlueprintContract.primitive(str(spec["type"]))):
+			var contract: Dictionary = declaration["contract"]
+			var value := bool(_state_values.get(contract["value_binding"], false))
+			var available := bool(_state_values.get(contract["available_binding"], contract["available_default"])) and not _suspended
+			var visible := bool(entry.get("requested_visible", true)) and not _suspended
+			var key: String = declaration["item_key"]
+			if not key.is_empty() and shared.has(key):
+				# First declaration is canonical; hiding either alias hides the row.
+				var row: Dictionary = result[int(shared[key])]
+				row["visible"] = bool(row["visible"]) and visible
+				row["available"] = bool(row["available"]) and available
+				continue
+			if not key.is_empty():
+				shared[key] = result.size()
+			result.append({
+				"token": {"runtime": get_instance_id(), "generation": _menu_generation,
+					"blueprint_id": _blueprint_id, "revision": _blueprint_revision,
+					"component_id": id, "event": declaration["event"]},
+				"title": contract["title"], "value": value, "available": available, "visible": visible,
+				"text": contract["on"] if value else contract["off"],
+				"unavailable_text": contract["unavailable"],
+				"detail": str(_state_values.get(contract["detail_binding"], "")),
+			})
+	return result
+
+
+func dispatch_menu(token: Dictionary, expected_value: bool) -> bool:
+	# Check the current source generation and resolved item, never a remote
+	# action name. A queued click cannot cross disconnect/replacement/suspension.
+	for row in menu_entries():
+		if row["token"] == token and bool(row["visible"]) and bool(row["available"]) \
+				and bool(row["value"]) == expected_value:
+			_on_palm_menu_action(StringName(token["event"]), not expected_value, str(token["component_id"]))
+			return true
+	return false
+
+
 func _on_palm_menu_action(
-	_internal_action: StringName,
+	internal_action: StringName,
 	proposed_value: Variant,
 	component_id: String,
 ) -> void:
@@ -571,7 +659,8 @@ func _on_palm_menu_action(
 	if not events_v is Dictionary:
 		warning_raised.emit("Blueprint primitive has no event contract")
 		return
-	var event_spec_v: Variant = (events_v as Dictionary).get("action", null)
+	var event_name := "secondary_action" if internal_action == &"secondary_action" else "action"
+	var event_spec_v: Variant = (events_v as Dictionary).get(event_name, null)
 	if not event_spec_v is Dictionary:
 		warning_raised.emit("Blueprint primitive does not support action events")
 		return
@@ -598,6 +687,102 @@ func _on_palm_menu_action(
 		"action": action,
 		"value": value,
 	})
+
+
+func _update_lamp(entry: Dictionary) -> void:
+	var material := entry.get("material") as StandardMaterial3D
+	if material == null:
+		return
+	var spec: Dictionary = entry.get("spec", {})
+	var properties := BlueprintContract.resolved_properties(spec)
+	var state := str(_bound_value(spec, "state", "inactive"))
+	var color := _status_color(state, properties)
+	if state in properties.get("pulse_states", []):
+		var phase := float(Time.get_ticks_usec()) / 1000000.0 * TAU * float(properties.get("pulse_hz", 2.0))
+		var brightness := 0.3 + 0.7 * (sin(phase) * 0.5 + 0.5)
+		color = Color(color.r * brightness, color.g * brightness, color.b * brightness, color.a)
+	material.albedo_color = color
+	material.emission = Color(color.r, color.g, color.b, 1.0)
+
+
+func _input_target_ready(component_id: String) -> bool:
+	if component_id.is_empty():
+		return true
+	var node := component_node(component_id)
+	return node != null and node.has_method("is_asset_ready") and bool(node.call("is_asset_ready"))
+
+
+func controller_status() -> Dictionary:
+	var status := {"present": false, "required": false, "pending": false, "available": false, "message": "", "target_component": ""}
+	for entry_v in _components.values():
+		var entry: Dictionary = entry_v
+		if str(entry.get("implementation", "")) == "input_binding":
+			var node := entry.get("node") as Node
+			if node != null:
+				status = node.call("ui_status")
+	var target := recenter_target()
+	if not target.is_empty():
+		var model := component_node(target)
+		if not bool(model.call("is_asset_ready")):
+			status["required"] = true
+			var error: String = model.call("asset_error")
+			status["pending"] = error.is_empty()
+			status["message"] = error if not error.is_empty() else tr("UI_ROBOT_MODEL_LOADING")
+		elif not bool(model.call("sample_is_fresh")):
+			status["required"] = true
+	return status
+
+
+func recenter_target() -> String:
+	var models: Array[String] = []
+	var target := ""
+	for id in _component_order:
+		var entry: Dictionary = _components[id]
+		if str(entry.get("implementation", "")) == "robot_model":
+			models.append(id)
+		elif str(entry.get("implementation", "")) == "input_binding":
+			target = str(BlueprintContract.resolved_properties(entry["spec"]).get("target_component", ""))
+	if not target.is_empty():
+		return target if target in models else ""
+	return models[0] if models.size() == 1 else ""
+
+
+func can_recenter() -> bool:
+	var target := recenter_target()
+	return not target.is_empty() and _input_target_ready(target)
+
+
+func recenter_robot(distance: float = 2.0) -> bool:
+	if _camera == null or not can_recenter() or not is_finite(distance) or distance <= 0:
+		return false
+	var target := recenter_target()
+	var model := component_node(target)
+	var current: Vector3 = model.call("base_world_position")
+	var shift_v: Variant = front_translation(_camera.global_transform, current, distance)
+	if not shift_v is Vector3:
+		return false
+	_local_view_offsets[target] = Vector3(_local_view_offsets.get(target, Vector3.ZERO)) + (shift_v as Vector3)
+	_update_anchor(_components[target])
+	for entry_v in _components.values():
+		var entry: Dictionary = entry_v
+		if str(entry.get("implementation", "")) == "ground_grid":
+			_update_anchor(entry)
+	return true
+
+
+static func front_translation(head: Transform3D, current: Vector3, distance: float) -> Variant:
+	if not head.is_finite() or not current.is_finite() or not is_finite(distance) or distance <= 0:
+		return null
+	var forward := -head.basis.z
+	forward.y = 0.0
+	if forward.length_squared() < 0.0001:
+		# Looking straight up/down still has a meaningful horizontal right axis.
+		forward = Vector3.UP.cross(head.basis.x)
+	if forward.length_squared() < 0.0001:
+		return null
+	var desired := head.origin + forward.normalized() * distance
+	desired.y = current.y # Keep ground height; do not move/rotate the simulation.
+	return desired - current
 
 
 func _bound_value(spec: Dictionary, property: String, fallback: Variant) -> Variant:

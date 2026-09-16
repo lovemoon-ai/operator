@@ -3,7 +3,8 @@
 Blueprint is Operator's mode-independent declarative XR UI contract. A source
 publishes a versioned component tree, latest-wins state snapshots, and receives
 ordered interaction events. The headset owns rendering and interaction; a
-source cannot send executable code, scenes, shaders, or arbitrary assets.
+source cannot send executable code, Godot scenes, shaders, or arbitrary resource
+paths. The `robot_model` primitive accepts a restricted data-only model asset.
 
 The current production adapter connects Blueprint to Outside Robot Teleop. The
 contract and XR runtime do not depend on Teleop, so VR operation, Realtime Feed,
@@ -66,6 +67,88 @@ registries for anchors, node primitives, interaction events, and mode-owned
 external views, including every property, binding, and event consumed by each
 implementation. A new primitive field or anchor cannot be added to the spec
 without a corresponding headset implementation and test update.
+
+## System and Robot Scopes
+
+Outside/Operator has two independent `BlueprintRuntime` instances. The local
+system Blueprint owns connection controls and controller status lamps; it lives
+for the Teleop scene and survives disconnect. The robot Blueprint owns models,
+application input bindings and their state; disconnect destroys that scope and
+cancels pending input/acknowledgements. Runtime ownership, not an ID/action-name
+prefix, determines authority. Only events from the locally created system runtime
+reach the allowlisted `connection.toggle` and `view.recenter` handlers. Robot
+events continue through the session to their source, even if they use those names.
+
+The system menu reconnects the selected/saved endpoint and disconnects through
+the existing connection manager. It cannot receive a new endpoint from remote
+Blueprint properties. Local connection truth overrides any stale robot-ready
+state. Controller lamps are grey when disconnected, flashing blue while
+connecting or resetting, orange when reset is required, and green when ready.
+Robot messages and errors appear in the controller menu, not a head-locked HUD.
+
+## Unified System Menu and Input Bindings
+
+`menu_item` contributes a row to the **system-owned** menu, not a scene node.
+`palm_menu` and `controller_menu` remain compatible declaration forms with host
+kind `system_menu`; neither allocates a panel or listens for input. Legacy
+anchors/transforms no longer position menus: placement is exclusively local.
+`controller_menu` can contribute its existing secondary action as a second row.
+Remote visibility overrides apply only to remote items, never the system menu.
+
+`SystemMenuHost` creates one `system_menu_view.gd` for the active Teleop scene.
+Its local Blueprint declares connection and recenter items plus status lamps.
+`MenuComposer` combines these fixed system rows with paginated robot rows.
+Both hand and controller input present the same content on that one panel:
+left-palm pose plus opposite index touch, or left Menu plus right-controller ray.
+Only one presenter is active, selected by the shared source arbitration (including
+Pico stale-profile recovery). Switching source closes/cancels the old interaction;
+held Menu or an already-touching finger cannot activate the new presenter.
+
+An optional `item_key` explicitly merges identical declarations **within one
+Blueprint**; empty keys keep rows distinct. No merging by text/action-name occurs.
+Python, Rust and XR reject shared-key conflicts in actions, labels, state bindings,
+defaults, and override policy. The first declaration is canonical and retains its
+original event identity; hiding either alias hides the merged row. Controller
+secondary rows have their own optional `secondary_item_key`. Local and remote
+items never share an identity namespace.
+
+Every composed row carries an internal source-runtime/generation/Blueprint/
+component/event token. Clicks are checked against the live item and expected
+bound value before the originating runtime emits its original `BlueprintEvent`.
+Only the locally created runtime reaches local connection/recenter callbacks;
+remote actions named `connection.toggle` or `view.recenter` still go to the robot.
+Disconnect/replacement/suspension invalidate old tokens. Changing pages, item
+state, source or visibility cancels active presses, and disconnect removes only
+remote contributions. Normal Button cancellation sends an outside mouse motion
+before release, clearing Godot's `pressing_inside` state instead of firing a click.
+
+`input_binding` declares a bounded `dual_trigger_hold` gesture and an action.
+ScaleBFM declares a one-second hold. XR requires both physical controllers,
+press/release hysteresis, continuous samples, and a fresh release baseline after
+activation, tracking loss, pause, or a frame gap. Both triggers must be released
+before another completed hold can trigger. While the chord owns input, pending
+ray clicks are canceled (not released over a button), and controller command
+inputs are neutralized. No hold timing is inferred from network packets.
+
+A completed hold emits a fresh opaque string request ID in `BlueprintEvent.value`.
+The host echoes it in the `acknowledged_request` binding and publishes `success`
+and `required` in the same state update. Only a current, matched, successful ack
+with `required=false` produces confirmation vibration on both controllers.
+Failures/timeouts use error feedback and retain an uncertain/reset-required
+state. Replayed, late or post-disconnect acknowledgements cannot confirm a new
+request. The headset supplies bounded haptic presets; robot state cannot request
+arbitrary vibration intensity or duration. `target_component` optionally names
+the associated model, gating input until its asset is ready and selecting the
+local recenter target.
+A recognized hold that is not currently available is rejected locally with error
+feedback and menu status; it does not send a request or give success vibration.
+
+Recenter is a translation-only local view offset computed from the model's
+actual current root and the head's horizontal forward direction (default 2 m).
+It preserves heading, joint pose and ground height. It neither sends robot
+commands nor mutates host `base_pose`, remains world-locked as the head moves,
+and is retained when subsequent robot states arrive. It is cleared with the
+robot Blueprint/session, not applied to the system menu or its lamps.
 
 ## SDK Ownership
 
@@ -151,8 +234,93 @@ limited to primitives attached to moving XR anchors and local hand interaction.
 
 ## Version 1 Primitives
 
-The canonical spec currently defines `label`, `status_lamp`, `palm_menu`,
+The canonical spec currently defines `robot_model`, `ground_grid`, `model_lighting`, `label`, `status_lamp`, `menu_item`, `palm_menu`, `controller_menu`, `input_binding`,
 `fingertip_tactile`, `video_panel`, `controller_help`, `control_frame`, and
 `operation_trajectory`. Consult `specs/blueprint/v1.json` for the authoritative
 property, binding, anchor, event, and constraint definitions; prose documents
 must not duplicate those tables as normative definitions.
+
+## Robot Presentation: Ground and Lighting
+
+The host can declare `ground_grid` and `model_lighting` alongside a model. These
+are ordinary world-anchored Blueprint components, not implicit Teleop scenery.
+Both support visible bindings and user visibility overrides, and are hidden on
+suspension and destroyed with their Blueprint on disconnect/replacement.
+
+`ground_grid` is a finite transparent XZ plane with metre-based size, spacing,
+and line width, independently colored minor/major lines, derivative antialiasing,
+and fading edges. It has no collider and does not change simulation contacts.
+Its shader is shipped client code; the host sends only validated parameters.
+The optional `placement_target` identifies a component whose **local recenter
+offset** is shared by the grid (an absent target has zero offset). It does not
+copy the model's animated base pose. The host sets ground height and initial
+offset through the grid's transform, so walking/jumping does not move the floor,
+while explicitly recentering the robot moves the grid with the display.
+
+`model_lighting` is a singleton key/fill directional-light rig with bounded
+energies, separate colors, and optional energy bindings. The component rotation
+rotates both default light directions; translation has no lighting effect.
+Two shadow-free lights reveal the robot's shape without shadow-map cost. Layer
+20 is reserved for Blueprint robot-model lighting: imported model geometry adds
+that bit to its existing camera-visible layers, and these lights cull everything
+else. They do not change materials, exposure, WorldEnvironment, passthrough,
+controller UI, or Inside Robot. The unshaded ground grid needs no lighting.
+
+## Render-only Robot Models
+
+`robot_model` displays a **robot/host-owned model**, never an APK-bundled robot.
+`scripts/make-robot/` is exclusively for Inside Robot. Outside applications do
+not run it, import it, or read `xr/assets/robots/` or bundled joint tables.
+Adding a new Outside robot requires no headset rebuild once its asset profile
+is supported. This renderer does not start Inside Robot, a retargeter, or physics.
+
+The source declares `asset_sha256`, `asset_size`, `asset_port`, and a complete
+ordered `joint_names` list. The connected transport supplies the peer hostname;
+Blueprint cannot supply a different host or an arbitrary URL/path. XR downloads
+`http://<connected-peer>:<asset_port>/blueprint-assets/<sha256>.glb` asynchronously,
+with redirects and compression disabled, a timeout, and a 64 MiB response cap.
+Exact length and SHA-256 are verified before import. A content-addressed cache
+under `user://blueprint_robot_assets/` is reverified on reuse, atomically written,
+and bounded to 256 MiB; oldest entries are evicted. Disconnect/replacement frees
+the consumer and cancels pending HTTP. Hashes provide integrity, not peer
+authentication: this HTTP service shares the robot protocol's trusted-LAN
+boundary. `RobotAssetServer` exposes only registered immutable bytes, never a
+filesystem directory. Static asset traffic is separate from high-rate state.
+
+The initial asset profile is self-contained GLB 2.0 with triangle meshes and
+solid PBR colors. It rejects external/data URIs, textures, animations, skins,
+cameras, glTF extensions, and unknown resource fields before runtime GLTF import.
+Budgets include 512 nodes, 256 movable joints, 3 million mesh vertices, 9 million
+indices (counted per primitive, even for shared accessors), and 2 MiB
+of JSON. Missing or invalid models report errors, not an implicit built-in G1.
+
+`extras.operator_robot` contains `schema: "operator.robot_asset.v1"`,
+`coordinate_space: "xr_y_up"`, the glTF root-node index, and a `joints` array.
+Node instances are charged again against the vertex/index render budgets, so
+reusing binary data cannot create unbounded import or draw work.
+Each joint specifies `name`, its glTF `node` index, `type` (`hinge` or `slide`),
+unit `axis`, local `pivot`, and `reference` position. glTF supplies the rest
+transforms and link hierarchy. Joint lists must match the Blueprint exactly;
+node indices avoid ambiguity from imported/sanitized node names. Positions are
+in radians (metres for sliders). Hinge motion is applied about the transmitted
+pivot relative to the rest transform; the root receives the floating base pose.
+
+`pyoperator.mujoco_asset.from_mujoco` exports this model directly from the host's
+compiled MuJoCo model, including its real visual meshes, transforms, scalar
+joint axes/pivots, and reference offsets. It has no Inside Robot dependency.
+Current exporter support is one scalar joint per non-root body, one externally
+driven root, and mesh geoms in explicitly selected visual groups (default 1).
+
+The base pose is `[x,y,z,qx,qy,qz,qw]`, relative to the component transform in
+the XR Y-up coordinate system. The host publishes joints, base pose and sample
+token together. A missing or stale sample hides the model; unrelated state
+updates with the same token do not refresh it. The renderer rejects invalid
+dimensions/non-finite transforms, normalizes nonzero quaternions, and smooths
+joint/base motion locally. This is presentation smoothing, not robot control.
+The latest state is retained while a model loads; asset arrival does not refresh
+its tracking timestamp. A late model with stale state remains hidden.
+
+Unlike low-rate status UI, robot state can update at policy frequency; latest-wins
+snapshots still prevent unbounded queues. Structural definitions are not resent
+per sample. `examples/scalebfm` demonstrates host ScaleBFM + MuJoCo with this
+component, returning actual simulated state rather than target joint commands.

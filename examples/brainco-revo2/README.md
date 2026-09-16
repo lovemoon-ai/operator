@@ -2,7 +2,7 @@
 
 This example runs the BrainCo Revo2 dual-hand service through Operator's
 mode-independent Blueprint protocol. The robot process publishes the
-head label, per-hand status lamps, left-palm control menu, and five-finger
+head label, per-hand status lamps, a system-menu control item, and five-finger
 tactile feedback; the headset owns rendering, hand interaction, tracked
 fingertip placement, and user visibility overrides.
 
@@ -13,7 +13,7 @@ commands, telemetry, and video connected but deliberately disables Blueprint
 UI. `xr-bridge` logs the expected and received digest when this happens.
 
 The service starts read-only by default. Physical hand commands require both
-the explicit `--allow-commands` flag and an unlock event from the palm menu. In
+the explicit `--allow-commands` flag and an unlock event from the system menu. In
 read-only mode the menu remains interactive as an input preview, but the hand
 runtime never calls a motion API. Tracking loss, stale telemetry, disconnect,
 or shutdown sends a hold command and relocks control.
@@ -83,7 +83,10 @@ python3 examples/brainco-revo2/revo2_thor_service.py \
 
 Only after clearing the workspace and confirming the serial identities, add
 `--allow-commands`. The headset then connects to the host's normal Outside
-Robot endpoint and the palm menu remains the authoritative motion gate.
+Robot endpoint and the robot-owned menu-item state remains the authoritative motion gate.
+The headset creates the menu once: use left-palm/right-index touch or left
+Menu/right-controller ray. The service contributes its control item without
+creating a separate panel or overriding the local connection controls.
 
 See `../../docs/tutorials/revo2-dual-hand-teleop.md` for hardware identities,
 Thor bundle deployment, port requirements, telemetry, and safety details.
