@@ -192,13 +192,15 @@ var _manual_video_protocol := ""
 var _manual_video_options: Dictionary = {}
 var _video_test_active := false
 var _video_test_generation := 0
-# True while the settings panel is open: teleop is suspended — DeviceCommand,
-# XrStateFrame, and XRoboToolkit Tracking are all disabled, and the controller
-# overlay is hidden — so the panel owns the controllers exclusively.
+# Teleop suspension gate: while set, DeviceCommand, XrStateFrame and
+# XRoboToolkit Tracking are all disabled and the controller overlay is hidden.
+# The settings page no longer sets it: the link and its streams stay live, and
+# the page neutralises controller input through pointer capture instead (see
+# TeleopSettingsPanel.captures_teleop_input), so only tests drive it today.
 var _teleop_suspended := false
-# Android lifecycle, tracked separately from _teleop_suspended: the panel being
-# open is a local UI state, while these two mean the headset itself is no longer
-# driving. Only the XRoboToolkit stream carries this on the wire (appState.focus).
+# Android lifecycle, tracked separately from _teleop_suspended: suspension is a
+# local gate, while these two mean the headset itself is no longer driving.
+# Only the XRoboToolkit stream carries this on the wire (appState.focus).
 var _app_paused := false
 var _app_unfocused := false
 # Persisted from the active descriptor. SDK mode and robot-control mode are
@@ -242,8 +244,7 @@ const SYNTH_MIN_JOINT_DELTA_DEG := 1.0
 const SYNTH_CONNECT_TIMEOUT_SEC := 45.0
 
 var _synthetic := false
-## Settings last applied. Live display changes read the scope from here
-## rather than from the form, which may already show a different one.
+## Settings last applied by Connect or a launch override.
 var _applied_options: Dictionary = {}
 var _synth_source: Node = null
 var _synth_duration := SYNTH_DEFAULT_DURATION
@@ -768,7 +769,7 @@ func _on_xr_started() -> void:
 		else:
 			_settings_panel.visible = false
 		_settings_button.visible = true
-		_set_teleop_suspended(false)
+		_set_menu_guards(false)
 		_apply_runtime_settings(launch_options)
 		print(
 			"[Operator] Direct-connect launch override %s:%d via %s"
@@ -1142,10 +1143,17 @@ func _on_display_options_changed(options: Dictionary) -> void:
 	_menu_world_locked = bool(options.get("menu_world_locked", false))
 	if _menu_world_locked:
 		_place_settings_panel()
-	var scope := str(
-		_applied_options.get("target_scope", options.get("target_scope", "outside"))
+	var show_vr_pose := bool(options.get("show_vr_pose", false))
+	# A running Inside embodiment owns its skeleton, anchored beside the robot;
+	# every other case, including no session at all, gets the head-tracked one.
+	var inside_running: bool = (
+		_inside_target != null
+		and _active_target == _inside_target
+		and not _inside_target.is_stopped()
 	)
-	_set_vr_pose_enabled(bool(options.get("show_vr_pose", false)) and scope != "inside")
+	if inside_running:
+		_inside_target.call("set_show_vr_pose", show_vr_pose)
+	_set_vr_pose_enabled(show_vr_pose and not inside_running)
 	if _ee_pose_trajectory and not _robot_authored_views_active:
 		_ee_pose_trajectory.set_enabled(
 			bool(options.get("show_operation_trajectory", false))
@@ -1211,9 +1219,16 @@ func _set_vr_pose_enabled(enabled: bool) -> void:
 		return
 	if _tracking_provider == null or _origin == null or _camera == null:
 		return
+	var bridge := _pico_body_bridge()
+	# PICO only reports body joints once body tracking has been started; without
+	# this the provider falls back to head + wrists with an inferred torso. It is
+	# not stopped when the skeleton is turned off: the bridge does not reference-
+	# count, and the XRoboToolkit sampler may be relying on the same session.
+	if bridge != null and bridge.has_method("start_body_tracking"):
+		bridge.call("start_body_tracking", {})
 	_vr_pose_provider = BodyPoseProviderScript.new()
 	_vr_pose_provider.name = "TeleopVrPoseProvider"
-	_vr_pose_provider.configure(_tracking_provider, _pico_body_bridge())
+	_vr_pose_provider.configure(_tracking_provider, bridge)
 	# Diagnostic overlay, not a control input: a headset without body
 	# tracking still gets the head/hand-derived fallback skeleton rather than
 	# a toggle that silently does nothing.
@@ -1389,9 +1404,12 @@ func _sync_stream_senders() -> void:
 ## Opening the page is a view change, nothing more: the link, the streams
 ## and any running Inside embodiment all carry on, so the send rate on the
 ## page reports a live session rather than one the page just paused.
-## Connect / Disconnect are the only things that start or stop a link.
+## Connect / Disconnect are the only things that start or stop a link. What
+## the page does guard is input: see `_set_menu_guards` and the page's pointer
+## capture.
 func _show_settings_panel() -> void:
 	_place_settings_panel()
+	_set_menu_guards(true)
 	_release_global_interaction_pointer()
 	# Re-push the latest discovery snapshot every time we open the panel —
 	# robots may have appeared / disappeared while it was closed.
@@ -1422,6 +1440,7 @@ func _hide_settings_panel() -> void:
 	else:
 		_settings_panel.visible = false
 	_settings_button.visible = true
+	_set_menu_guards(false)
 	_update_hand_palm_menu()
 
 
@@ -1431,6 +1450,17 @@ func _hide_settings_panel() -> void:
 func _place_settings_panel() -> void:
 	if _settings_panel != null and _camera != null:
 		_settings_panel.transform = _camera.transform * SETTINGS_PANEL_OFFSET
+
+
+## Inputs that must not stay live under an open page. Controller keys are
+## already neutralised while the pointer is on the page, but two inputs never
+## go through that pointer: touch-driven Blueprint widgets and the Revo2 palm
+## unlock. Suspend the first and re-lock the second while the page is open.
+func _set_menu_guards(open: bool) -> void:
+	if open:
+		_set_revo2_hand_control_unlocked(false)
+	if _blueprint_runtime:
+		_blueprint_runtime.set_suspended(open)
 
 
 # --- Launch decision (D: hybrid auto-discover) -------------------------------
@@ -1470,7 +1500,7 @@ func _begin_launch_window() -> void:
 			)
 			return
 		_settings_button.visible = true
-		_set_teleop_suspended(false)
+		_set_menu_guards(false)
 		print(
 			"[Operator] Auto-connecting XRoboToolkit compatibility target @ %s:%d"
 			% [saved_host, int(persisted.get("port", 63901))]
@@ -1571,7 +1601,7 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	else:
 		_settings_panel.visible = false
 	_settings_button.visible = true
-	_set_teleop_suspended(false)
+	_set_menu_guards(false)
 	print(
 		"[Operator] Auto-connecting to discovered %s endpoint @ %s:%d"
 		% [str(options.get("protocol", "operator")), ip, port]
@@ -1581,6 +1611,7 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 
 func _show_settings_panel_with_status(text: String) -> void:
 	_place_settings_panel()
+	_set_menu_guards(true)
 	_push_discovery_to_settings_ui()
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
@@ -1595,6 +1626,7 @@ func _show_settings_panel_with_status(text: String) -> void:
 
 func _show_settings_panel_discovering() -> void:
 	_place_settings_panel()
+	_set_menu_guards(true)
 	_push_discovery_to_settings_ui()
 	if _settings_button and _settings_button.has_method("clear_pointer"):
 		_settings_button.clear_pointer()
@@ -2222,7 +2254,7 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	if _ee_pose_trajectory:
 		_ee_pose_trajectory.configure_for_device(descriptor)
 	# SDK mode consumes raw state in Python; robot-control mode emits
-	# DeviceCommand. Suspension keeps both disabled.
+	# DeviceCommand. `_sync_stream_senders` keeps exactly one of them live.
 	_sync_stream_senders()
 	# Synthetic: the descriptor has landed and sending is on — start the canned
 	# operator trajectory now so the robot seeds its retarget reference cleanly.
@@ -2807,7 +2839,7 @@ func _start_inside_from_launch_args() -> void:
 	else:
 		_settings_panel.visible = false
 	_settings_button.visible = true
-	_set_teleop_suspended(false)
+	_set_menu_guards(false)
 	_on_settings_applied(options)
 
 

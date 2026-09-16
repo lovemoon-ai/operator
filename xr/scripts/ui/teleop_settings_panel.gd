@@ -47,9 +47,30 @@ const MANUAL_LABEL_KEY := "UI_MANUAL_ENTRY"
 ## otherwise fit — see `_fit_width_to_endpoints`.
 const PANEL_WIDTH_PX := 840
 const PANEL_MAX_WIDTH_PX := 1440
-## Width an endpoint row cannot spend on its own text: sidebar, split
-## separation, detail padding, panel margins and the button's own inset.
-const ENDPOINT_ROW_CHROME_PX := 400
+## Width the page spends outside an endpoint row: the base panel's 38 px side
+## margins and 2 px border, the sidebar, the split's 14 px separation and the
+## detail padding. The row's own inset and a possible scrollbar are measured at
+## runtime. Rows clip instead of pushing the layout, so if this ever falls short
+## the operator sees a trailing ellipsis rather than a cropped page.
+const ENDPOINT_ROW_CHROME_PX := 2 * 38 + 2 * 2 + SIDEBAR_WIDTH + 14 + 2 * DETAIL_PADDING
+const ENDPOINT_ROW_FONT_SIZE := 20
+## Below this the link is up but nothing is leaving the headset.
+const SEND_RATE_IDLE_HZ := 0.5
+## Keys naming *which* link Connect starts. Only Connect persists them: launch
+## auto-connects to the saved endpoint, so letting Close or a Display toggle
+## save an endpoint the operator never connected to would hand that endpoint
+## control on the next launch.
+const LINK_OPTION_KEYS := [
+	"target_scope",
+	"protocol",
+	"ip",
+	"port",
+	"inside_profile",
+	"retargeting_backend",
+	"retargeting_host",
+	"retargeting_port",
+	"retargeting_tls",
+]
 const BLUEPRINT_OVERRIDE_LABEL_KEYS := {
 	"follow": "UI_BLUEPRINT_FOLLOW",
 	"show": "UI_BLUEPRINT_SHOW",
@@ -720,11 +741,12 @@ func _add_scope_button(row: HBoxContainer, label: String, scope: String) -> Butt
 	return _add_choice_button(row, label, _on_scope_button_pressed.bind(scope))
 
 
-## Bottom action: leave the page. Closing is not a connection decision, so
-## it persists the form and gets out of the way — whatever link Connect
-## started keeps running, and a page that was never connected stays so.
+## Bottom action: leave the page. Closing is not a connection decision, so it
+## keeps the operator's preferences but not the endpoint (LINK_OPTION_KEYS) and
+## gets out of the way: whatever link Connect started keeps running, and a page
+## that was never connected stays so.
 func _on_confirm_requested() -> void:
-	_save_settings(get_options())
+	_save_preferences(get_options())
 	close_requested.emit()
 
 
@@ -769,13 +791,32 @@ func set_link_active(active: bool) -> void:
 	_link_active = active
 	if _send_rate_label != null:
 		_send_rate_label.visible = active
-		if not active:
-			_send_rate_label.text = ""
+		_send_rate_label.text = tr("UI_SEND_RATE_IDLE") if active else ""
 
 
+## A link can be up with nothing leaving the headset (still connecting, dropped
+## by the robot, or faulted), so a rate this low says so instead of reading as
+## "Sending 0.0 Hz".
 func set_send_rate(hz: float) -> void:
-	if _send_rate_label != null and _link_active:
+	if _send_rate_label == null or not _link_active:
+		return
+	if hz < SEND_RATE_IDLE_HZ:
+		_send_rate_label.text = tr("UI_SEND_RATE_IDLE")
+	else:
 		_send_rate_label.text = tr("UI_SEND_RATE") % hz
+
+
+## The pointer on this page is a UI gesture, never a robot one. While it rests
+## on or presses the page, TrackingProvider neutralises every controller key,
+## the grip deadman included, for every sender, so aiming at Connect with the
+## grip squeezed cannot steer the arm. Poses and frames keep flowing, which is
+## what keeps the send rate in the title bar honest while the page is open.
+func captures_teleop_input() -> bool:
+	return true
+
+
+func captures_teleop_hover() -> bool:
+	return true
 
 
 func _on_menu_lock_pressed(mode: String) -> void:
@@ -800,8 +841,19 @@ func _emit_display_options() -> void:
 	if _applying_options:
 		return
 	var options := get_options()
-	_save_settings(options)
+	_save_preferences(options)
 	display_options_changed.emit(options)
+
+
+## Persist everything the page shows except the link itself; the file keeps
+## whatever endpoint Connect last saved (or none, before the first Connect).
+func _save_preferences(options: Dictionary) -> Error:
+	var preference_defaults := _settings_defaults()
+	for key in LINK_OPTION_KEYS:
+		preference_defaults.erase(key)
+	return BaseSettingsPanel.save_settings_to_config(
+		_settings_path(), _settings_section(), preference_defaults, options, _settings_log_tag()
+	)
 
 
 func _on_disconnect_pressed() -> void:
@@ -893,19 +945,31 @@ func _discovery_ids_for_selected_protocol() -> Array[String]:
 func _fit_width_to_endpoints() -> void:
 	if _ip_dropdown == null:
 		return
-	var font := _ip_dropdown.get_theme_default_font()
+	# Measure with what the rows actually render: the Button theme's font and
+	# the widest inset among its state styleboxes.
+	var font := _ip_dropdown.get_theme_font("font", "Button")
 	if font == null:
 		return
+	var row_inset := 0.0
+	for state in ["normal", "hover", "pressed", "focus"]:
+		var style := _ip_dropdown.get_theme_stylebox(state, "Button")
+		if style != null:
+			row_inset = maxf(row_inset, style.get_minimum_size().x)
+	var scrollbar := 0.0
+	if _detail_scroll != null:
+		scrollbar = _detail_scroll.get_v_scroll_bar().get_combined_minimum_size().x
 	var widest := 0.0
 	for endpoint_id in _discovery_ids_for_selected_protocol():
 		var info: Dictionary = _discovered[endpoint_id]
 		var label := _format_robot_label(String(info.get("name", endpoint_id)), info)
 		widest = maxf(
-			widest, font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 20).x
+			widest,
+			font.get_string_size(
+				label, HORIZONTAL_ALIGNMENT_LEFT, -1, ENDPOINT_ROW_FONT_SIZE
+			).x
 		)
-	set_viewport_width(
-		clampi(int(ceilf(widest)) + ENDPOINT_ROW_CHROME_PX, PANEL_WIDTH_PX, PANEL_MAX_WIDTH_PX)
-	)
+	var needed := int(ceilf(widest + row_inset + scrollbar)) + ENDPOINT_ROW_CHROME_PX
+	set_viewport_width(clampi(needed, PANEL_WIDTH_PX, PANEL_MAX_WIDTH_PX))
 
 
 func add_discovered(endpoint_id: String, info: Dictionary) -> void:
@@ -1116,7 +1180,11 @@ func _show_ip_dropdown() -> void:
 		row.focus_mode = Control.FOCUS_NONE
 		row.custom_minimum_size.y = 48
 		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row.add_theme_font_size_override("font_size", 20)
+		row.add_theme_font_size_override("font_size", ENDPOINT_ROW_FONT_SIZE)
+		# Clip rather than widen: a row that outgrows the column must never push
+		# the whole page past its composition layer (see _fit_width_to_endpoints).
+		row.clip_text = true
+		row.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 		# Copy the endpoint_id into the callable so item indices don't
 		# matter across rebuilds — the dropdown owns its own listing but
 		# defers to the endpoint_id for state.
@@ -1242,7 +1310,24 @@ func _add_option_item(option: OptionButton, label: String, metadata: Variant, ic
 
 
 static func load_settings() -> Dictionary:
-	return BaseSettingsPanel.load_settings_from_config(SETTINGS_PATH, SECTION, _load_defaults(), "loaded")
+	var settings := BaseSettingsPanel.load_settings_from_config(
+		SETTINGS_PATH, SECTION, _load_defaults(), "loaded"
+	)
+	# `loaded` gates launch auto-connect, so it means "Connect saved a link",
+	# not merely "a settings file exists".
+	settings["loaded"] = bool(settings.get("loaded", false)) and _has_confirmed_link()
+	return settings
+
+
+func _load_settings() -> Dictionary:
+	return load_settings()
+
+
+## Close and the Display toggles can create the file with preferences alone
+## (see _save_preferences); only a file Connect wrote holds the endpoint.
+static func _has_confirmed_link() -> bool:
+	var cfg := ConfigFile.new()
+	return cfg.load(SETTINGS_PATH) == OK and cfg.has_section_key(SECTION, "ip")
 
 
 ## The first robot this build ships, so a fresh install lands on something
@@ -1252,16 +1337,16 @@ static func _default_inside_profile() -> String:
 	return str(offered[0]) if not offered.is_empty() else ""
 
 
-## Defaults used when merging a saved config on load. Fresh installs (no file
-## on disk) get `_default_options()` verbatim, so the panel opens on
+## Defaults used when merging a saved config on load. Fresh installs (no saved
+## link) get `_default_options()` verbatim, so the panel opens on
 ## XRoboToolkit Compatible per the current UI default. But a config written by
 ## an older build has no `protocol` field, and silently switching those users
 ## to XRoboToolkit on upgrade would break auto-connect for anyone whose robot
-## only speaks the Operator wire protocol — so when a file exists, missing
-## keys fall back to the pre-diff Operator behavior instead.
+## only speaks the Operator wire protocol — so once a link has been saved,
+## missing keys fall back to the pre-diff Operator behavior instead.
 static func _load_defaults() -> Dictionary:
 	var defaults := _default_options()
-	if FileAccess.file_exists(SETTINGS_PATH):
+	if _has_confirmed_link():
 		defaults["protocol"] = PROTOCOL_OPERATOR
 	return defaults
 

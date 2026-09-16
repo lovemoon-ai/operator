@@ -110,6 +110,36 @@ func set_control_enabled(enabled: bool) -> void:
 		_deadman_was_enabled = false
 
 
+## Toggle the VR-pose skeleton on a running embodiment, so the Display option
+## takes effect immediately instead of on the next start().
+func set_show_vr_pose(enabled: bool) -> void:
+	show_vr_pose = enabled
+	if state == State.IDLE or state == State.FAULTED:
+		return
+	var robot_visual: Node3D = _overlay if _overlay != null else _simulation_view
+	if enabled:
+		if _vr_pose_overlay != null or robot_visual == null:
+			return
+		if _body_provider == null:
+			_create_body_provider()
+		_create_vr_pose_overlay(robot_visual)
+		return
+	if _vr_pose_overlay != null:
+		_dispose_runtime_node(_vr_pose_overlay)
+		_vr_pose_overlay = null
+	# A profile that needs body tracking for control keeps its provider.
+	if _body_provider == null or bool(profile.get("requires_body_tracking", false)):
+		return
+	_body_provider.set_enabled(false)
+	_dispose_runtime_node(_body_provider)
+	_body_provider = null
+	if _started_pico_body:
+		var bridge := _pico_bridge()
+		if bridge != null and bridge.has_method("stop_body_tracking"):
+			bridge.call("stop_body_tracking")
+		_started_pico_body = false
+
+
 func reset() -> void:
 	_deadman_was_enabled = false
 	if _remote != null:

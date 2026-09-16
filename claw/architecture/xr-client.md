@@ -165,12 +165,17 @@ Descriptor-driven features may be pre-enabled from discovery metadata for
 immediate disconnected/connecting feedback, then must be reconciled against
 the authoritative descriptor returned by the live session.
 
-Opening or closing the page is a view change and nothing more: the link, its
-streams, and any running Inside embodiment all carry on, because the send rate
-the page reports must describe a live session rather than one the page just
-paused. Only `Connect` and `Disconnect` move the link. The bottom action
-persists the form and closes; safety-sensitive controls still return locked at
-disconnect, reconnect and Teleop-exit boundaries.
+Opening or closing the page does not move the link: its streams and any
+running Inside embodiment carry on, so the send rate the page reports describes
+a live session. Only `Connect` and `Disconnect` move the link, and the rate
+reads `Not sending` whenever the link is up but no frames are leaving. What
+the page guards is input. While the pointer rests on or presses the page,
+every controller key, the grip deadman included, is neutralised for all
+senders, so frames keep flowing but cannot steer the robot; touch-driven
+Blueprint widgets are suspended and the Revo2 palm unlock re-locks while the
+page is open. The bottom action closes the page and saves display
+preferences, never the endpoint: launch auto-connect only targets an endpoint
+that `Connect` saved.
 
 `Display` options are the live view rather than a staged form, so each applies
 and persists the moment it is flipped. `Show VR Pose` renders the canonical
@@ -250,8 +255,8 @@ The Blueprint runtime is deliberately mode-independent and separate from the
 tracking/control hot path. A blueprint rebuild happens only when its source
 publishes a new structural revision. State updates refresh bound properties;
 the per-frame loop contains only components attached to moving head,
-controller, or palm anchors. Opening Settings leaves them running; the owning
-mode is what suspends or clears the runtime. The current Teleop adapter clears it on
+controller, or palm anchors. Opening Settings suspends those components, while
+the owning mode suspends or clears it. The current Teleop adapter clears it on
 disconnect, target replacement, Python `clear()`, and Teleop exit so an old
 robot cannot leave stale UI in the next session. XR owns all palm
 tracking and touch interaction, so no hand-joint stream is echoed back merely

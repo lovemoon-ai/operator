@@ -12,7 +12,14 @@ const CASE_ID := "teleop.settings_scope"
 class TestPanel:
 	extends TeleopSettingsPanel
 
+	const PREFERENCES_PATH := "user://teleop_settings_scope_test.cfg"
+
 	var saved_options: Dictionary = {}
+
+	# Preference saves go through the real writer, into a scratch file, so the
+	# test can check what Close actually persists without touching user data.
+	func _settings_path() -> String:
+		return PREFERENCES_PATH
 
 	func _save_settings(options: Dictionary) -> Error:
 		saved_options = options.duplicate(true)
@@ -208,6 +215,18 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	panel.set_discovery_state(long_label_endpoints)
 	var wide_width := panel.quad_size.x
 	t.is_true(wide_width > narrow_width, "a long endpoint label widens the page")
+	t.eq(
+		panel.layer_viewport,
+		panel.get("_viewport"),
+		"a resized page is rebound to its viewport so the layer is rebuilt at the new size"
+	)
+	panel.call("_show_ip_dropdown")
+	var dropdown: VBoxContainer = panel.get("_ip_dropdown")
+	if t.is_true(dropdown.get_child_count() > 0, "the host list opens with the long endpoint"):
+		t.is_true(
+			(dropdown.get_child(0) as Button).clip_text,
+			"host rows clip instead of pushing the page past its layer"
+		)
 	panel.set_discovery_state(discovered)
 	t.is_true(panel.quad_size.x < wide_width, "the page narrows again without that host")
 	# The IP field is read-only until the operator double-clicks into edit
@@ -445,13 +464,53 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		t.is_false(send_rate_label.visible, "the send rate is hidden while disconnected")
 		panel.set_link_active(true)
 		t.is_true(send_rate_label.visible, "Connect reveals the send rate")
+		t.eq(
+			send_rate_label.text,
+			panel.tr("UI_SEND_RATE_IDLE"),
+			"a link with nothing flowing yet says it is not sending"
+		)
 		panel.set_send_rate(72.0)
 		t.is_true(
 			send_rate_label.text.contains("72"),
 			"the indicator reports the measured rate"
 		)
+		panel.set_send_rate(0.0)
+		t.eq(
+			send_rate_label.text,
+			panel.tr("UI_SEND_RATE_IDLE"),
+			"a link whose frames stopped says so instead of Sending 0.0 Hz"
+		)
 		panel.set_link_active(false)
 		t.is_false(send_rate_label.visible, "Disconnect hides the send rate again")
+
+	# Pointing at or clicking the page must never also drive the robot.
+	t.is_true(
+		panel.captures_teleop_input() and panel.captures_teleop_hover(),
+		"the page neutralises teleop controller input while the pointer is on it"
+	)
+
+	# Close and the Display toggles keep preferences but never the endpoint:
+	# launch auto-connects to a saved endpoint, so only Connect may save one.
+	var preferences_path: String = TestPanel.PREFERENCES_PATH
+	if FileAccess.file_exists(preferences_path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(preferences_path))
+	var unconfirmed := _options("outside")
+	unconfirmed["ip"] = "192.168.1.50"
+	unconfirmed["show_vr_pose"] = true
+	panel.set_options(unconfirmed)
+	panel.call("_on_confirm_requested")
+	var saved := ConfigFile.new()
+	if t.is_true(saved.load(preferences_path) == OK, "Close persists the operator's preferences"):
+		t.is_true(
+			bool(saved.get_value(TeleopSettingsPanel.SECTION, "show_vr_pose", false)),
+			"Close keeps a display preference"
+		)
+		for link_key in TeleopSettingsPanel.LINK_OPTION_KEYS:
+			t.is_false(
+				saved.has_section_key(TeleopSettingsPanel.SECTION, str(link_key)),
+				"Close does not save the unconfirmed %s" % link_key
+			)
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(preferences_path))
 
 	# Pressing the Type buttons is what the operator actually does.
 	var outside_button: Button = panel.get("_outside_scope_button")

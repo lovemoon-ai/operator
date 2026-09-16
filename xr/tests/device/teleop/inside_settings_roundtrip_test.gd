@@ -135,6 +135,17 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	target.stop()
 	target.start(config)
 	t.is_true(target.is_ready(), "%s restarts after the VR-pose check" % profile_id)
+	# The Display toggle applies to a running embodiment, not only at start().
+	target.call("set_show_vr_pose", true)
+	t.is_true(
+		target.get("_vr_pose_overlay") != null,
+		"%s Show VR Pose turns on without restarting" % profile_id
+	)
+	target.call("set_show_vr_pose", false)
+	t.is_true(
+		target.get("_vr_pose_overlay") == null,
+		"%s Show VR Pose turns off without restarting" % profile_id
+	)
 	overlay = target.get("_overlay")
 
 	# The shared ground grid is the operator's height reference: it must exist

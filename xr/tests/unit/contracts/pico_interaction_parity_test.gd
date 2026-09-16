@@ -16,6 +16,16 @@ class TeleopCapturingTarget:
 		return true
 
 
+class HoverCapturingTarget:
+	extends RefCounted
+
+	func captures_teleop_input() -> bool:
+		return true
+
+	func captures_teleop_hover() -> bool:
+		return true
+
+
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(
 		OperatorInteractionScript._mode_from_evidence(false, true, true, false, false, true),
@@ -149,6 +159,27 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		SettingsInteractionRouterScript._target_captures_teleop_input(RefCounted.new()),
 		"ordinary interaction targets must not suppress teleop input"
 	)
+	var hover_target := HoverCapturingTarget.new()
+	t.is_true(
+		SettingsInteractionRouterScript._target_captures_teleop_hover(hover_target),
+		"a page the operator works can capture teleop input on hover"
+	)
+	t.is_false(
+		SettingsInteractionRouterScript._target_captures_teleop_hover(capture_target),
+		"hover capture is opt-in; passive displays capture on press or scroll only"
+	)
+	var router: Node = SettingsInteractionRouterScript.new()
+	router.set("_hover_target", hover_target)
+	t.is_true(
+		bool(router.call("is_teleop_input_captured")),
+		"resting the pointer on a hover-capturing page neutralises teleop input"
+	)
+	router.set("_hover_target", capture_target)
+	t.is_false(
+		bool(router.call("is_teleop_input_captured")),
+		"pointing through a passive display leaves teleop input live"
+	)
+	router.free()
 	var neutral_input := TrackingProviderScript._neutral_controller_input({
 		"trigger": 0.8,
 		"grip": 0.9,
