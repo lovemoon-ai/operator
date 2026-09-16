@@ -201,16 +201,15 @@ define godot_export_release
 		status=$$?; \
 		trap - EXIT INT TERM; \
 		cp $$tmp_manifest $(release_manifest); \
-		rm -f $$tmp_manifest $$export_log; \
+		rm -f $$tmp_manifest $$export_log $$export_log.status; \
 		exit $$status; \
 	}; \
 	trap restore_release_manifest EXIT INT TERM; \
 	set +e; \
-	$(1) godot --headless --verbose --path . --export-release "$(2)" $(3) >$$export_log 2>&1; \
-	status=$$?; \
-	cat $$export_log; \
-	if grep -Eq 'SCRIPT ERROR:|Parse Error:|Could not resolve class' $$export_log; then \
-		echo "[export] GDScript parser errors detected; refusing APK $(3)" >&2; \
+	{ $(1) godot --headless --verbose --path . --export-release "$(2)" $(3) 2>&1; echo $$? >$$export_log.status; } | tee $$export_log; \
+	status=$$(cat $$export_log.status); \
+	if [ "$$OPERATOR_ALLOW_SCRIPT_ERRORS" != "1" ] && grep -Eq 'SCRIPT ERROR:|Parse Error:|Could not resolve class|Failed to load script' $$export_log; then \
+		echo "[export] GDScript parser errors detected; refusing APK $(3) (OPERATOR_ALLOW_SCRIPT_ERRORS=1 overrides)" >&2; \
 		status=1; \
 	fi; \
 	exit $$status
