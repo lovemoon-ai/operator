@@ -29,6 +29,13 @@
       "script": "res://tests/unit/capture/capture_state_machine_test.gd"
     },
     {
+      "id": "capture.volume_key_control",
+      "level": "unit",
+      "suite": "capture.pipeline",
+      "module": "app/modes",
+      "script": "res://tests/unit/capture/volume_key_control_test.gd"
+    },
+    {
       "id": "capture.pico_rgb_resolution_options",
       "level": "unit",
       "suite": "capture.pipeline",
