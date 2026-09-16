@@ -129,8 +129,8 @@ visibility choice stored on the headset under the blueprint id wins over the
 robot-provided `visible` property or binding. Teleop settings exposes Follow
 Robot, Show, and Hide choices; `properties.settings_label` may provide the
 human-readable row name. Non-overridable components ignore local visibility
-changes. Opening Teleop settings suspends Blueprint rendering
-interaction and rendering without discarding the blueprint; disconnecting,
+changes. Opening Teleop settings leaves Blueprint interaction and rendering
+running, since the page no longer pauses the session behind it; disconnecting,
 switching targets, clearing from Python, or leaving Teleop removes it.
 
 The data path is designed not to become a control-loop bottleneck. Blueprints

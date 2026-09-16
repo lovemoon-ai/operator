@@ -114,16 +114,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var ip_input: LineEdit = panel.get("_ip_input")
 	var port_input: LineEdit = panel.get("_port_input")
 	var endpoint_connect_button: Button = panel.get("_connect_button")
-	t.is_true(endpoint_connect_button != null, "Outside settings expose a Connect button")
+	t.is_true(endpoint_connect_button != null, "the page exposes a Connect button")
 	if endpoint_connect_button != null:
-		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "IP action is labeled Connect")
-		t.eq(
-			ip_input.get_parent().get_parent(),
-			endpoint_connect_button.get_parent(),
-			"Connect is placed beside the robot IP input",
-		)
+		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "the link action is labeled Connect")
 	var disconnect_button: Button = panel.get("_disconnect_button")
-	t.is_true(disconnect_button != null, "Outside settings expose a Disconnect button")
+	t.is_true(disconnect_button != null, "the page exposes a Disconnect button")
 	if disconnect_button != null:
 		t.eq(disconnect_button.text, panel.tr("UI_DISCONNECT"), "Disconnect uses the localized label")
 		if endpoint_connect_button != null:
@@ -132,11 +127,17 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 				disconnect_button.custom_minimum_size.x,
 				"Connect and Disconnect use the same width",
 			)
-		t.eq(
-			port_input.get_parent().get_parent(),
-			disconnect_button.get_parent(),
-			"Disconnect is placed beside the robot port input",
-		)
+			t.eq(
+				endpoint_connect_button.get_parent(),
+				disconnect_button.get_parent(),
+				"Connect and Disconnect share one row",
+			)
+			# An Inside embodiment starts and stops with the same pair, so the
+			# row must outlive the scope switch that hides the Outside fields.
+			t.is_false(
+				outside_box.is_ancestor_of(endpoint_connect_button),
+				"the link row is not hidden with the Outside endpoint fields",
+			)
 		var disconnect_requests: Array = []
 		panel.disconnect_requested.connect(func() -> void:
 			disconnect_requests.append(true)
@@ -145,9 +146,13 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		t.eq(disconnect_requests.size(), 1, "Disconnect emits one request")
 	var action_row: HBoxContainer = panel.get("_actions_row")
 	var confirm_button := _first_button(action_row)
-	t.is_true(confirm_button != null, "settings expose the primary Confirm action")
+	t.is_true(confirm_button != null, "settings expose the primary bottom action")
 	if confirm_button != null:
-		t.eq(confirm_button.text, panel.tr("UI_OK"), "bottom action remains Confirm")
+		t.eq(
+			confirm_button.text,
+			panel.tr("UI_CLOSE"),
+			"the bottom action closes the page rather than owning the link",
+		)
 	var shared_ip := "192.168.1.40"
 	var discovered := {
 		"operator|%s|63901" % shared_ip: {
@@ -174,10 +179,38 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			"protocol": "xrobot_toolkit_v1",
 		}
 	panel.set_discovery_state(discovered)
-	t.eq(discovery_option.item_count, 4 if xrt_available else 3,
-		"same-IP cross-protocol and same-name Operator services are all listed")
+	# One protocol at a time: a host only answers the protocol its beacon
+	# announced, so offering the others' hosts only ever produced rows that
+	# cannot connect.
+	t.eq(discovery_option.item_count, 2 if xrt_available else 3,
+		"only hosts speaking the selected protocol are offered")
 	t.eq(discovery_option.selected, 0,
 		"discovery without an explicitly saved endpoint leaves Manual selected")
+	if xrt_available:
+		(protocol_buttons["operator"] as Button).emit_signal("pressed")
+		t.eq(discovery_option.item_count, 3,
+			"switching to Operator re-lists that protocol's hosts")
+		(protocol_buttons["xrobot_toolkit_v1"] as Button).emit_signal("pressed")
+		t.eq(discovery_option.item_count, 2,
+			"switching back offers the XRoboToolkit host again")
+
+	# A discovered host's name and address are not length-bounded, so the page
+	# grows to fit the longest row rather than clipping it.
+	var narrow_width := panel.quad_size.x
+	var selected_protocol := str(panel.get_options().get("protocol", "operator"))
+	var long_label_endpoints := discovered.duplicate(true)
+	long_label_endpoints["%s|192.168.1.42|63901" % selected_protocol] = {
+		"name": "Robot with an exceptionally long descriptive name on one row",
+		"ip": "192.168.1.42",
+		"pose_port": 63901,
+		"device_type": "robot_arm",
+		"protocol": selected_protocol,
+	}
+	panel.set_discovery_state(long_label_endpoints)
+	var wide_width := panel.quad_size.x
+	t.is_true(wide_width > narrow_width, "a long endpoint label widens the page")
+	panel.set_discovery_state(discovered)
+	t.is_true(panel.quad_size.x < wide_width, "the page narrows again without that host")
 	# The IP field is read-only until the operator double-clicks into edit
 	# mode; the port field, which has no discovery UX, stays freely editable.
 	t.is_false(ip_input.editable, "IP field is read-only until the operator double-clicks it")
@@ -256,8 +289,16 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		panel.settings_applied.connect(func(options: Dictionary) -> void:
 			applied.append(options.duplicate(true))
 		)
+		var closes: Array = []
+		panel.close_requested.connect(func() -> void: closes.append(true))
+		# Connect starts the link and stays put so the operator can watch the
+		# send rate come up; the bottom action only closes the page.
+		(panel.get("_connect_button") as Button).emit_signal("pressed")
+		t.eq(applied.size(), 1, "Connect emits one options dictionary")
+		t.eq(closes.size(), 0, "Connect leaves the page open")
 		panel.call("_on_confirm_requested")
-		t.eq(applied.size(), 1, "applying Outside settings emits one options dictionary")
+		t.eq(applied.size(), 1, "closing the page does not restart the link")
+		t.eq(closes.size(), 1, "the bottom action closes the page")
 		if not applied.is_empty():
 			t.eq(
 				applied[0].get("protocol", ""),
@@ -389,6 +430,45 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		bool(panel.get_options().get("show_vr_pose", false)),
 		"Display's Show VR Pose toggle round-trips"
 	)
+
+	# Main menu placement: view-locked by default, world-locked on request.
+	var menu_lock_buttons: Dictionary = panel.get("_menu_lock_buttons")
+	t.eq(menu_lock_buttons.size(), 2, "Display offers view- and world-locked placement")
+	t.is_false(
+		bool(panel.get_options().get("menu_world_locked", true)),
+		"the main menu is view locked by default"
+	)
+	var display_changes: Array = []
+	panel.display_options_changed.connect(func(options: Dictionary) -> void:
+		display_changes.append(options.duplicate(true))
+	)
+	(menu_lock_buttons["world"] as Button).emit_signal("pressed")
+	t.is_true(
+		bool(panel.get_options().get("menu_world_locked", false)),
+		"World locked round-trips through the options dictionary"
+	)
+	t.eq(display_changes.size(), 1, "a display change applies immediately, without Connect")
+	(menu_lock_buttons["view"] as Button).emit_signal("pressed")
+	t.is_false(
+		bool(panel.get_options().get("menu_world_locked", true)),
+		"View locked is selectable again"
+	)
+
+	# The send rate is the page's proof that frames are going out; it belongs
+	# to Connect/Disconnect, not to opening or closing the page.
+	var send_rate_label: Label = panel.get("_send_rate_label")
+	t.is_true(send_rate_label != null, "the page exposes a send-rate indicator")
+	if send_rate_label != null:
+		t.is_false(send_rate_label.visible, "the send rate is hidden while disconnected")
+		panel.set_link_active(true)
+		t.is_true(send_rate_label.visible, "Connect reveals the send rate")
+		panel.set_send_rate(72.0)
+		t.is_true(
+			send_rate_label.text.contains("72"),
+			"the indicator reports the measured rate"
+		)
+		panel.set_link_active(false)
+		t.is_false(send_rate_label.visible, "Disconnect hides the send rate again")
 
 	# Pressing the Type buttons is what the operator actually does.
 	var outside_button: Button = panel.get("_outside_scope_button")

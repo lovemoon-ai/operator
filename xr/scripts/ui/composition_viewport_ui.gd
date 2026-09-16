@@ -41,6 +41,20 @@ func _setup_viewport_layer(
 	return _viewport
 
 
+## Widen (or narrow) the layer without resizing what it renders: the
+## viewport and the quad grow together, so a pixel keeps its metre scale and
+## text stays the same physical size. Used by panels whose content is not
+## length-bounded — a discovered robot's name and address, say — so a long
+## row gets more room instead of being clipped.
+func set_viewport_width(width_px: int) -> void:
+	if _viewport == null or width_px <= 0 or width_px == _viewport_size.x:
+		return
+	var metres_per_px := quad_size.x / float(_viewport_size.x)
+	_viewport_size.x = width_px
+	_viewport.size = _viewport_size
+	quad_size = Vector2(width_px * metres_per_px, quad_size.y)
+
+
 func update_pointer_from_ray(ray_origin: Vector3, ray_direction: Vector3) -> bool:
 	if _viewport == null:
 		return false

@@ -142,21 +142,42 @@ headsets with different camera shapes.
   sends canonical tracking frames to the pyoperator retargeting service; only
   the solve is remote and the embodiment remains in XR.
 
-The settings page has one `Robot` group. Its first row picks the type —
-`Inside` or `Outside` — and only that side's settings are shown: the robot
-picker and retargeting backend for Inside, or discovery, address, and
+The settings page has one `Robot Control` group. Its first row picks the
+type — `Inside` or `Outside` — and only that side's settings are shown: the
+robot picker and retargeting backend for Inside, or discovery, address, and
 connection state for Outside.
 
+The discovered-host list belongs to one wire protocol at a time. A host only
+answers the protocol its beacon announced, so choosing a protocol re-lists the
+endpoints that speak it and hides the rest rather than offering rows that
+cannot connect; a beacon predating the protocol field is an Operator host. Host
+labels carry an unbounded robot name and address, so the page widens its
+composition layer — viewport and quad together, keeping text the same physical
+size — to fit the longest row instead of clipping it.
+
 A configuration item's Test action is diagnostic preview only; it must not be
-the owner of runtime state. Confirming the complete settings page is the
-activation boundary: the selected target starts, required transports connect,
-and every enabled runtime visualization becomes active on the working page.
+the owner of runtime state. `Connect` is the activation boundary: the selected
+target starts, required transports connect, every enabled runtime
+visualization becomes active, and the page stays open reporting the outgoing
+frame rate in its title bar so the operator can see frames actually leaving the
+headset. `Disconnect` stops the target and clears that indicator.
 Descriptor-driven features may be pre-enabled from discovery metadata for
 immediate disconnected/connecting feedback, then must be reconciled against
-the authoritative descriptor returned by the live session. Opening settings
-suspends those features without destroying their configuration; closing or
-confirming resumes the configured runtime, while safety-sensitive controls
-return locked.
+the authoritative descriptor returned by the live session.
+
+Opening or closing the page is a view change and nothing more: the link, its
+streams, and any running Inside embodiment all carry on, because the send rate
+the page reports must describe a live session rather than one the page just
+paused. Only `Connect` and `Disconnect` move the link. The bottom action
+persists the form and closes; safety-sensitive controls still return locked at
+disconnect, reconnect and Teleop-exit boundaries.
+
+`Display` options are the live view rather than a staged form, so each applies
+and persists the moment it is flipped. `Show VR Pose` renders the canonical
+skeleton in every scope: an Inside session anchors it beside the in-headset
+robot, and every other scope gets a head-tracked skeleton owned by the Teleop
+controller. `Main menu placement` chooses whether the page follows the head or
+stays pinned to the spot it was opened at.
 
 For descriptor-driven dual-hand control, the left bare hand owns a palm menu.
 The menu appears only after the tracked palm faces the headset with all five
@@ -229,8 +250,8 @@ The Blueprint runtime is deliberately mode-independent and separate from the
 tracking/control hot path. A blueprint rebuild happens only when its source
 publishes a new structural revision. State updates refresh bound properties;
 the per-frame loop contains only components attached to moving head,
-controller, or palm anchors. Opening Settings suspends those components, while
-the owning mode suspends or clears it. The current Teleop adapter clears it on
+controller, or palm anchors. Opening Settings leaves them running; the owning
+mode is what suspends or clears the runtime. The current Teleop adapter clears it on
 disconnect, target replacement, Python `clear()`, and Teleop exit so an old
 robot cannot leave stale UI in the next session. XR owns all palm
 tracking and touch interaction, so no hand-joint stream is echoed back merely
