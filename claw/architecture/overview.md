@@ -167,12 +167,17 @@ mode can attach the same runtime and provide its own external-view mappings.
 
 Outside Robot Blueprint follows the same ownership direction as control:
 the robot-side Python application declares built-in XR UI through a versioned
-blueprint and publishes low-frequency bound state, while the headset performs
+blueprint and publishes bound state (including policy-rate robot poses), while the headset performs
 rendering, tracking, gesture recognition, and hit testing locally. Users may
 persistently override visibility only for components marked
-`user_overridable`. Arbitrary robot-provided code and assets are not part of
-the v1 contract. After a native Operator Teleop session enters its work page,
-the settings launcher is the only client-owned visualization. Video/FPV,
+`user_overridable`. `robot_model` obtains content-addressed, data-only GLB model
+assets and articulation from the connected robot; the headset validates and
+caches them separately from pose traffic. Arbitrary executable resources are
+not part of the contract. `make_robot` and APK robot bundles are Inside-only.
+The local system Blueprint retains the connection/recenter controller menu and
+status lamps across disconnect, alongside the settings launcher. The robot's
+Blueprint is a separate scope, cleared on disconnect; input bindings and their
+acknowledgements cannot outlive that scope. Video/FPV,
 controller help, control-frame gizmos, operation trajectories, hand menus, and
 robot status UI stay hidden unless the active Blueprint declares their built-in
 component. Inside Robot does not use this protocol because it has no external

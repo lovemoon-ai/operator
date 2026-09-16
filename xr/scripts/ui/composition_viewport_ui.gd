@@ -107,11 +107,23 @@ func set_feedback_input_mode(mode: String, controller: XRController3D = null) ->
 
 func clear_pointer() -> void:
 	if _pointer_pressed:
+		# BaseButton tracks pressing_inside from motion, not release coordinates.
+		# Send an outside motion while captured before releasing the button.
+		var motion := InputEventMouseMotion.new()
+		motion.position = NO_POINTER
+		motion.global_position = NO_POINTER
+		motion.button_mask = MOUSE_BUTTON_MASK_LEFT
+		_viewport.push_input(motion)
+		_pointer_position = NO_POINTER
 		set_pointer_pressed(false)
 	_pointer_position = NO_POINTER
 	if _cursor:
 		_cursor.visible = false
 	_on_pointer_cleared()
+
+
+func cancel_pointer() -> void:
+	clear_pointer()
 
 
 func get_interaction_priority() -> int:

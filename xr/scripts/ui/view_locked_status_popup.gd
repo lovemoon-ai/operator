@@ -2,6 +2,7 @@ extends "res://scripts/ui/composition_viewport_ui.gd"
 class_name ViewLockedStatusPopup
 
 signal cancel_requested
+signal dismissed
 
 const VIEWPORT_SIZE := Vector2i(720, 270)
 
@@ -11,6 +12,7 @@ var _panel_style: StyleBoxFlat
 var _progress_bar: ProgressBar
 var _cancel_button: Button
 var _hide_seconds := 0.0
+var _notice_mode := false
 
 
 func _init() -> void:
@@ -30,6 +32,7 @@ func _process(delta: float) -> void:
 
 
 func show_saved_path(path: String, duration_seconds: float = 2.0) -> void:
+	_notice_mode = false
 	_panel_style.bg_color = Color(0.055, 0.067, 0.08, 0.96)
 	_panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
 	_title_label.text = tr("UI_RECORDING_SAVED")
@@ -45,6 +48,7 @@ func show_saved_path(path: String, duration_seconds: float = 2.0) -> void:
 
 
 func show_error(message: String, duration_seconds: float = 4.0) -> void:
+	_notice_mode = false
 	_panel_style.bg_color = Color(0.15, 0.045, 0.04, 0.96)
 	_panel_style.border_color = Color(0.72, 0.16, 0.12, 0.92)
 	_title_label.text = tr("UI_RECORDING_SAVE_FAILED")
@@ -60,6 +64,7 @@ func show_error(message: String, duration_seconds: float = 4.0) -> void:
 
 
 func show_upload_progress(title: String, detail: String, progress: float, level: String = "normal", duration_seconds: float = 0.0, cancelable: bool = false) -> void:
+	_notice_mode = false
 	_panel_style.bg_color = Color(0.055, 0.067, 0.08, 0.96)
 	_panel_style.border_color = Color(0.28, 0.32, 0.36, 0.90)
 	_title_label.text = title
@@ -77,9 +82,24 @@ func show_upload_progress(title: String, detail: String, progress: float, level:
 		_progress_bar.visible = progress >= 0.0
 		_progress_bar.value = clampf(progress, 0.0, 1.0) * 100.0
 	if _cancel_button:
+		_cancel_button.text = tr("UI_CANCEL_UPLOAD")
 		_cancel_button.visible = cancelable
 	_hide_seconds = duration_seconds if duration_seconds > 0.0 else -1.0
 	visible = true
+
+
+func show_notice(title: String, detail: String) -> void:
+	show_upload_progress(title, detail, -1.0, "warning", 0.0, true)
+	_notice_mode = true
+	_cancel_button.text = tr("UI_ACKNOWLEDGE")
+
+
+func captures_teleop_input() -> bool:
+	return _notice_mode
+
+
+func captures_teleop_scroll() -> bool:
+	return false
 
 
 func accepts_pointer() -> bool:
@@ -147,4 +167,9 @@ func _build_viewport() -> void:
 
 func _on_cancel_pressed() -> void:
 	_play_feedback("click")
+	if _notice_mode:
+		visible = false
+		clear_pointer()
+		dismissed.emit()
+		return
 	cancel_requested.emit()

@@ -101,7 +101,7 @@ def build_revo2_blueprint() -> Blueprint:
                 state_binding="right.status",
                 properties={"settings_label": "Right Revo2 status"},
             ),
-            BlueprintComponent.palm_menu(
+            BlueprintComponent.menu_item(
                 REVO2_CONTROL_COMPONENT_ID,
                 title="BrainCo Revo2",
                 action=REVO2_CONTROL_ACTION,

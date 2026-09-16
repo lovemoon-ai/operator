@@ -128,6 +128,32 @@ exactly or capture is rejected. No product model, codename, or device serial is
 used to select a camera profile, so the same `Pico` export is shared by PICO
 headsets with different camera shapes.
 
+## UI Pointer Ownership
+
+`OperatorInteraction` selects the UI input source and supplies the same
+controller eligibility decision to `SettingsInteractionRouter`. A tracked
+bare-hand aim on the right must not displace a physical controller on the left.
+
+OpenXR profile names are useful but can lag a hand/controller switch on Pico.
+In the shipped action map, `trigger`, `grip`, joystick and physical button
+actions are controller-only; bare hands use `hand_pinch`/`hand_pinch_ready`.
+Fresh per-action press edges can therefore override a stale hand profile.
+Fallback ownership survives release/idle, but is reset on tracker/profile
+replacement or application pause/resume, and is relinquished by a new explicit
+bare-hand pinch. Merely receiving optical hand joints does not steal ownership.
+Existing held values are baselined on source changes, not replayed as new presses.
+
+Pose selection requires finite, non-degenerate transforms as well as tracking
+flags: Pico can mark an aim pose tracked while its orientation contains NaN.
+A usable default pose is the fallback. The router rejects non-finite node
+transforms, and the visual rebuilds a unit-scale basis for each accepted sample
+instead of preserving a previously contaminated scale through `look_at()`.
+
+Use `--es operator.interaction_debug 1` for opt-in on-device snapshots. They
+include the runtime profile, selected pose, fallback ownership, hit target and
+ray mesh visibility/transform. A running renderer or a valid pose alone is not
+proof that a ray was actually displayed.
+
 ## Teleop Runtime
 
 `teleop_controller.gd` presents one Teleop entry and creates exactly one
@@ -226,13 +252,26 @@ The Outside target creates the v2 network stack at runtime:
 
 - `Session` for Hello, descriptor, telemetry, and Blueprint messages.
 - `BlueprintRuntime` for mode-independent declarative XR UI. It
-  instantiates built-in `label`, `status_lamp`, `palm_menu`, and
+  instantiates built-in `robot_model`, `ground_grid`, `model_lighting`, `input_binding`, `label`, `status_lamp`, and
   `fingertip_tactile` components and gates the existing `video_panel`,
   `controller_help`, `control_frame`, and `operation_trajectory` views. It binds
   latest state values, persists permitted visibility overrides, exposes Follow
   Source / Show / Hide choices in Teleop settings, and sends interaction events
   back through `Session`. Outside Robot is currently the adapter that owns this
-  runtime. Without a Blueprint, only the settings launcher is visible there.
+  runtime. A separate locally authored system Blueprint keeps the controller
+  connection/recenter menu and status lamps available without a robot Blueprint.
+  The controller menu is a runtime menu: it is disabled while the settings page
+  is open, and while no robot is connected its connection row reads `Connect a
+  robot` and opens Settings on the robot group instead of connecting on its own.
+  `menu_item` and legacy `palm_menu`/`controller_menu` contribute data to the
+  single `SystemMenuHost`; hand/controller presenters share that system-owned
+  panel. Remote declarations never allocate independent menus. Source tokens
+  preserve remote event identities and cannot invoke local connection actions.
+  Disconnect clears only the robot scope; local transport actions never enter
+  the robot event stream. The `input_binding` primitive arbitrates dual-trigger
+  holds before pointer clicks and waits for matching host acknowledgements
+  before confirmation haptics. Recenter is a persistent local display offset,
+  not a reset of the host's simulation or root pose.
 - `CommandSender` for controller/tracking command frames.
 - `XrStateSender` for one atomic raw tracking snapshot when `xr_stream` is
   advertised by an embedded `pyoperator` session.
@@ -283,6 +322,32 @@ for normal robot descriptors, so `CommandSender` behavior and bandwidth are
 unchanged outside Python SDK mode.
 
 `XrTrackingSampler` owns that atomic sampling independently of serialization.
+On Pico, a request containing `body` takes priority over independent motion
+trackers: neither `request_motion_trackers` nor `sample_motion_trackers` is
+called in body mode, including during failed body startup. The latter can
+implicitly request object-tracking mode and disrupt the ankle trackers used by
+full-body tracking. `motion_trackers` stays empty in that mode. A motion-only
+request retains independent tracker sampling; other platforms are unchanged.
+Pico body availability requires the runtime to advertise `XR_BD_body_tracking`,
+not merely connected/calibrated pucks. The native `Operator-PicoBody` log reports
+the runtime's advertised vendor extensions, enabled flags, and rate-limited
+start/sample diagnostics without logging joint poses.
+
+`SystemCompatibilityNotice` checks Pico OS on app startup, including quick-entry
+modes. The platform adapter reads `ro.build.display.id` through the native bridge
+(not Android's release/API level). Versions below **5.13.0** trigger an upgrade
+notice, following PICO's [official Body Tracking requirements](https://developer.picoxr.com/document/native/body-tracking/)
+for both `XR_BD_body_tracking` and `XR_PICO_body_tracking2`. The notice displays
+the current version and this minimum from the same version policy. Meeting the
+version floor alone does not establish compatibility. Once an XR session exists,
+the check also detects a missing `XR_BD_body_tracking` extension. Unknown version
+strings and not-yet-initialized sessions are not treated as old systems. The
+localized, head-locked notice shows the installed version and asks the user to
+update PICO to the latest system release, then restart Operator. It waits for XR
+initialization and remains until acknowledged; acknowledgement lasts across scene changes
+and headset re-don for the process. No updates are installed automatically, no
+mode is disabled, and other headset platforms do not receive this prompt.
+
 The normal `XrStateSender` filters its output back to the unchanged v1 schema;
 the optional `XrtSender` converts the same snapshot to XRoboToolkit Tracking
 JSON and frames it with the legacy byte-command envelope. Selecting

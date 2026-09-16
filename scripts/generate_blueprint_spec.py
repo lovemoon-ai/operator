@@ -24,8 +24,9 @@ FIELD_TYPES = {
     "color_map",
     "number_array",
     "integer_array",
+    "string_array",
 }
-HOST_TYPES = {"node3d", "external_view"}
+HOST_TYPES = {"node3d", "external_view", "system_menu"}
 TRACKING_TYPES = {"origin", "head", "controller", "hand"}
 TOP_LEVEL_KEYS = {
     "schema",
@@ -116,8 +117,8 @@ def _matches_type(value: object, value_type: str) -> bool:
             isinstance(key, str) and _matches_type(color, "color")
             for key, color in value.items()
         )
-    if value_type in ("number_array", "integer_array"):
-        item_type = "number" if value_type == "number_array" else "integer"
+    if value_type in ("number_array", "integer_array", "string_array"):
+        item_type = value_type.removesuffix("_array")
         return isinstance(value, list) and all(
             _matches_type(item, item_type) for item in value
         )
@@ -152,7 +153,7 @@ def _validate_field_spec(context: str, field_spec: object) -> None:
             raise ValueError(f"{context} minimum exceeds maximum")
     length = field_spec.get("length")
     if length is not None:
-        if value_type not in ("number_array", "integer_array"):
+        if value_type not in ("number_array", "integer_array", "string_array"):
             raise ValueError(f"{context} length requires an array type")
         if not isinstance(length, int) or isinstance(length, bool) or length < 0:
             raise ValueError(f"{context} length must be a non-negative integer")

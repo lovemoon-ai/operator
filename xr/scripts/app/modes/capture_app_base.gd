@@ -26,6 +26,7 @@ const LIVE_FEED_MAX_RGB_BITRATE := DEFAULT_RGB_BITRATE
 const LIVE_FEED_MIN_RGB_FPS := 1
 const LIVE_FEED_MAX_RGB_FPS := 60
 const OPENXR_HAND_CAPTURE_SINGLETON := &"NativeOpenXRHandCapture"
+const OPERATOR_INPUT_PLUGIN_SINGLETON := &"OperatorInputPlugin"
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -0.86))
@@ -180,6 +181,7 @@ var _audio_permission_degraded_logged := false
 var _audio_permission_wait_started_ticks_us := 0
 var _active_capture_options := {}
 var _export_space_start_pending := false
+var _capture_start_cancel_requested := false
 var _pico_camera_image_started := false
 var _pico_native_pipeline_started := false
 var _pico_native_metrics_accum: Dictionary = {}
@@ -266,6 +268,7 @@ var _stage_us_emit_metrics := 0
 
 
 func _ready() -> void:
+	_set_volume_buttons_captured(not _is_live_feed_mode())
 	_setup_xr_scene()
 	_setup_pico_openxr_bridge()
 	_bind_operator_interaction()
@@ -936,6 +939,8 @@ func _compact_dict(d: Dictionary) -> String:
 
 
 func _exit_tree() -> void:
+	_capture_start_cancel_requested = true
+	_set_volume_buttons_captured(false)
 	stop_capture()
 	_stop_live_pull()
 	var interaction := _operator_interaction()
@@ -1036,11 +1041,17 @@ func start_capture() -> void:
 		return
 	if _export_space_start_pending:
 		return
+	_capture_start_cancel_requested = false
 	_export_space_start_pending = true
 	var export_space := OpenXRExportSpace.normalize(
 		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
 	var export_space_ready := await _ensure_export_coordinate_space_ready(export_space)
 	_export_space_start_pending = false
+	var start_cancelled := _capture_start_cancel_requested
+	_capture_start_cancel_requested = false
+	if start_cancelled:
+		print("Capture start cancelled before the session opened")
+		return
 	if not export_space_ready:
 		push_error("Capture start blocked: OpenXR export coordinate space %s is unavailable" % export_space.to_upper())
 		return
@@ -1779,27 +1790,71 @@ func _on_live_feed_disconnected(endpoint: String) -> void:
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
-	if not (event is InputEventKey):
-		return
-	var key_event := event as InputEventKey
-	if not key_event.pressed or key_event.echo:
+	var action := capture_action_for_key_event(
+		event, _recording, _is_live_feed_mode(), _export_space_start_pending)
+	if action.is_empty():
 		return
 
+	# Volume keys are an ego-capture hardware shortcut regardless of whether
+	# the active XR interaction source is controllers or hands. Restricting
+	# them to the legacy "head" override made the shortcut unreachable during
+	# normal auto-detected interaction.
+	print("Volume key requested ego capture %s" % action)
+	var viewport := get_viewport()
+	if viewport != null:
+		viewport.set_input_as_handled()
+	if action == &"start":
+		print("Volume-up requested capture start")
+		start_capture()
+	elif action == &"cancel_start":
+		print("Volume-down cancelled pending capture start")
+		_capture_start_cancel_requested = true
+	elif action == &"stop":
+		print("Volume-down requested capture stop")
+		stop_capture()
+
+
+static func capture_action_for_key_event(
+		event: InputEvent,
+		recording: bool,
+		live_feed_mode: bool,
+		start_pending: bool = false) -> StringName:
+	if not (event is InputEventKey):
+		return &""
+	var key_event := event as InputEventKey
+	if not key_event.pressed or key_event.echo:
+		return &""
 	var code := key_event.keycode
 	if code == KEY_NONE:
 		code = key_event.physical_keycode
-	if code == KEY_VOLUMEUP or code == KEY_VOLUMEDOWN:
-		print("Volume key received: %s mode=%s" % [code, capture_options.get("interaction_mode", "")])
-	if str(capture_options.get("interaction_mode", "")) != "head":
+	return capture_action_for_volume_key(code, recording, live_feed_mode, start_pending)
+
+
+static func capture_action_for_volume_key(
+		code: Key,
+		recording: bool,
+		live_feed_mode: bool,
+		start_pending: bool = false) -> StringName:
+	if live_feed_mode:
+		return &""
+	if code == KEY_VOLUMEDOWN and start_pending:
+		return &"cancel_start"
+	if code == KEY_VOLUMEUP and not recording and not start_pending:
+		return &"start"
+	if code == KEY_VOLUMEDOWN and recording:
+		return &"stop"
+	return &""
+
+
+func _set_volume_buttons_captured(captured: bool) -> void:
+	if not OS.has_feature("android"):
 		return
-	if code == KEY_VOLUMEUP and not _recording:
-		print("Volume-up requested capture start")
-		start_capture()
-		get_viewport().set_input_as_handled()
-	elif code == KEY_VOLUMEDOWN and _recording:
-		print("Volume-down requested capture stop")
-		stop_capture()
-		get_viewport().set_input_as_handled()
+	if not Engine.has_singleton(OPERATOR_INPUT_PLUGIN_SINGLETON):
+		if captured:
+			push_warning("OperatorInputPlugin unavailable; volume keys will also change system volume")
+		return
+	var input_plugin := Engine.get_singleton(OPERATOR_INPUT_PLUGIN_SINGLETON)
+	input_plugin.call("set_volume_buttons_captured", captured)
 
 
 func _on_capture_settings_saved(options: Dictionary) -> void:

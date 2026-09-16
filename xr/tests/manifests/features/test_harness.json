@@ -34,6 +34,14 @@
       "script": "res://tests/device/quest/capability_snapshot_smoke_test.gd"
     },
     {
+      "id": "device.pico.system_compatibility",
+      "level": "device",
+      "suite": "device.pico.compatibility",
+      "module": "platform",
+      "required_device": "pico",
+      "script": "res://tests/device/pico/system_compatibility_test.gd"
+    },
+    {
       "id": "device.pico.capability_snapshot",
       "level": "device",
       "suite": "device.smoke",

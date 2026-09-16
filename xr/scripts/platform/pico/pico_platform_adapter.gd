@@ -14,6 +14,10 @@ const CAMERA_SINGLETON := "PicoCapturePlugin"
 const MUXER_SINGLETON := "SpatialMp4MuxerPlugin"
 const OPENXR_BRIDGE_NATIVE_SINGLETON := "PicoOpenXRBridgeNative"
 const OPENXR_BRIDGE_CLASS := "PicoOpenXRExtension"
+# Official minimum for XR_BD_body_tracking and XR_PICO_body_tracking2:
+# https://developer.picoxr.com/document/native/body-tracking/
+# Meeting the version floor does not replace runtime capability checks.
+const MIN_BODY_TRACKING_OS_VERSION := [5, 13, 0]
 
 
 # WP6 sweep: PICO build/device probes used by app-level scripts live here so
@@ -73,6 +77,59 @@ func instantiate_openxr_bridge() -> Object:
 	if not ClassDB.class_exists(OPENXR_BRIDGE_CLASS):
 		return null
 	return ClassDB.instantiate(OPENXR_BRIDGE_CLASS)
+
+
+func system_compatibility() -> Dictionary:
+	if not is_pico_build():
+		return evaluate_system_compatibility(false, "", {})
+	var bridge := openxr_bridge_native()
+	var version := ""
+	var status: Dictionary = {}
+	if bridge != null:
+		if bridge.has_method("get_os_version"):
+			version = str(bridge.call("get_os_version")).strip_edges()
+		if bridge.has_method("get_status"):
+			var raw: Variant = bridge.call("get_status")
+			if raw is Dictionary:
+				status = raw as Dictionary
+	return evaluate_system_compatibility(true, version, status)
+
+
+static func parse_os_version(version: String) -> Array[int]:
+	var pattern := RegEx.new()
+	pattern.compile("(?i)^(?:PICO[ _-]*(?:OS[ _-]*)?)?(\\d+)\\.(\\d+)\\.(\\d+)(?:[^0-9].*)?$")
+	var found := pattern.search(version.strip_edges())
+	if found == null:
+		return []
+	return [int(found.get_string(1)), int(found.get_string(2)), int(found.get_string(3))]
+
+
+static func evaluate_system_compatibility(is_pico: bool, version: String, status: Dictionary) -> Dictionary:
+	var report := {
+		"version": version,
+		"minimum_version": "%d.%d.%d" % MIN_BODY_TRACKING_OS_VERSION,
+		"needs_upgrade": false,
+		"reason": "",
+	}
+	if not is_pico:
+		return report
+	var parsed := parse_os_version(version)
+	var below_minimum := false
+	for index in range(parsed.size()):
+		if parsed[index] != MIN_BODY_TRACKING_OS_VERSION[index]:
+			below_minimum = parsed[index] < MIN_BODY_TRACKING_OS_VERSION[index]
+			break
+	if below_minimum:
+		report["needs_upgrade"] = true
+		report["reason"] = "old_os"
+	elif bool(status.get("session_created", false)) \
+			and status.has("bd_body_tracking_extension") \
+			and not bool(status["bd_body_tracking_extension"]):
+		# New/unrecognised version but a known missing API: do not claim the
+		# version is old, or mistake an uninitialized XR session for one.
+		report["needs_upgrade"] = true
+		report["reason"] = "body_extension_unavailable"
+	return report
 
 
 func set_boundary_visible(visible: bool) -> bool:

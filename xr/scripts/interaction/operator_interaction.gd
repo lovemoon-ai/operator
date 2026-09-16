@@ -30,6 +30,10 @@ const HAND_INTERACTION_PROFILE_HINT := "hand_interaction"
 # controller, so it must be excluded explicitly -- an is_empty() test never
 # matches it and silently classifies it as a physical controller.
 const INTERACTION_PROFILE_NONE := "/interaction_profiles/none"
+const CONTROLLER_ONLY_ACTIONS: Array[StringName] = [
+	&"trigger", &"grip", &"primary", &"trigger_click", &"primary_click",
+	&"select_button", &"ax_button", &"by_button", &"grip_click", &"menu_button",
+]
 
 # On-device interaction debug log. OPT-IN ONLY — it records a snapshot every
 # second, so it must not run (or write to shared storage) on a normal release
@@ -57,6 +61,7 @@ var _preferred_pose_cache := {}
 # Instance id of the XRPositionalTracker each cache entry was derived from, so
 # the cache can be dropped when the runtime rebuilds the tracker.
 var _pose_cache_tracker_ids := {}
+var _controller_evidence: Dictionary = {}
 var _router: Node
 var _pointer_visual: Node3D
 var _origin: XROrigin3D
@@ -79,8 +84,15 @@ func _ready() -> void:
 	_router = SettingsInteractionRouterScript.new()
 	_router.name = "OperatorInteractionRouter"
 	_router.debug_enabled = _debug_log_enabled
+	_router.set("controller_source_filter", Callable(self, "_controller_tracking"))
+	_router.set("pointer_blocker", Callable(self, "_blueprint_input_reserved"))
 	add_child(_router)
 	set_process(true)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_RESUMED:
+		_controller_evidence.clear()
 
 
 func _interaction_debug_requested() -> bool:
@@ -105,12 +117,10 @@ func _interaction_debug_requested() -> bool:
 func _process(delta: float) -> void:
 	_sync_rig()
 	_update_mode()
+	for binding in get_tree().get_nodes_in_group("operator_blueprint_input_binding"):
+		if binding.has_method("sample_input"):
+			binding.call("sample_input")
 	_update_targets()
-	if _debug_log_enabled:
-		_debug_log_accum_s += delta
-		if _debug_log_accum_s >= DEBUG_LOG_SNAPSHOT_INTERVAL_S:
-			_debug_log_accum_s = 0.0
-			_write_debug_snapshot()
 	_pico_head_probe_accum_s += delta
 	if _pico_head_probe_accum_s >= 1.0:
 		_pico_head_probe_accum_s = 0.0
@@ -120,6 +130,21 @@ func _process(delta: float) -> void:
 	_router.interaction_mode = current_mode
 	_router.busy = busy
 	_router.update_pointer()
+	if _debug_log_enabled:
+		_debug_log_accum_s += delta
+		if _debug_log_accum_s >= DEBUG_LOG_SNAPSHOT_INTERVAL_S:
+			_debug_log_accum_s = 0.0
+			_write_debug_snapshot()
+			for binding in get_tree().get_nodes_in_group("operator_blueprint_input_binding"):
+				if binding.has_method("get_debug_state"):
+					_append_debug_line("[BlueprintInput] %s" % str(binding.call("get_debug_state")))
+
+
+func _blueprint_input_reserved() -> bool:
+	for binding in get_tree().get_nodes_in_group("operator_blueprint_input_binding"):
+		if binding.has_method("reserves_pointer") and bool(binding.call("reserves_pointer")):
+			return true
+	return false
 
 
 func _emit_pico_head_probe() -> void:
@@ -163,6 +188,11 @@ func is_teleop_input_captured() -> bool:
 		and _router.has_method("is_teleop_input_captured")
 		and bool(_router.call("is_teleop_input_captured"))
 	)
+
+
+func is_controller_source_active(controller: XRController3D) -> bool:
+	# Share the same Pico stale-profile arbitration with controller-mounted UI.
+	return _controller_tracking(controller)
 
 
 func set_busy(next_busy: bool) -> void:
@@ -209,6 +239,8 @@ func _sync_rig() -> void:
 	left_pointer.pose = left_pose
 	right_pointer.tracker = &"right_hand"
 	right_pointer.pose = right_pose
+	_repair_pointer_transform(left_pointer)
+	_repair_pointer_transform(right_pointer)
 
 	if origin == _origin \
 			and camera == _camera \
@@ -301,7 +333,29 @@ func _reset_pose_cache_if_tracker_replaced(
 
 func _pose_is_tracked(positional: XRPositionalTracker, pose_name: StringName) -> bool:
 	var pose := positional.get_pose(pose_name)
-	return pose != null and pose.has_tracking_data
+	return pose != null and pose.has_tracking_data \
+		and usable_pose_transform(pose.transform) \
+		and usable_pose_transform(pose.get_adjusted_transform())
+
+
+static func usable_pose_transform(value: Transform3D) -> bool:
+	return value.is_finite() and absf(value.basis.determinant()) > 0.000001
+
+
+func _repair_pointer_transform(pointer: XRController3D) -> void:
+	# XRNode3D can preserve a poisoned scale even after a subsequent pose is
+	# healthy. Repair only from a real, usable tracked pose, never an identity
+	# placeholder. Invalid samples remain hidden by the router.
+	if usable_pose_transform(pointer.transform):
+		return
+	var tracker: XRTracker = XRServer.get_tracker(pointer.tracker)
+	if not tracker is XRPositionalTracker:
+		return
+	var positional := tracker as XRPositionalTracker
+	if not _pose_is_tracked(positional, pointer.pose):
+		return
+	var pose := positional.get_pose(pointer.pose)
+	pointer.transform = pose.get_adjusted_transform()
 
 
 func _ensure_pointer_visual() -> void:
@@ -355,6 +409,7 @@ func _update_mode() -> void:
 
 func _detect_mode() -> String:
 	var now := Time.get_ticks_msec()
+	_update_controller_evidence()
 	var controller_input := _controller_input_detected()
 	if controller_input:
 		_last_controller_input_msec = now
@@ -436,16 +491,96 @@ func _controller_input_detected() -> bool:
 func _pointer_input_detected(pointer: XRController3D) -> bool:
 	if pointer == null:
 		return false
-	# Pinch via XR_EXT_hand_interaction also drives these action values —
-	# only count input coming from a real controller profile.
-	if _tracker_profile_is_hand(pointer):
+	# These actions are controller-only in openxr_action_map.tres. Bare-hand
+	# selection is bound to hand_pinch/hand_pinch_ready, NOT trigger/primary.
+	# A stale hand profile must not veto fresh physical-controller evidence.
+	if _tracker_profile_is_hand(pointer) or _profile_is_none(_tracker_profile(pointer)):
 		return false
+	return _physical_controls_mask(pointer) != 0
+
+
+func _physical_controls_mask(pointer: XRController3D) -> int:
+	var mask := 0
 	if pointer.get_float(&"trigger") >= 0.35:
-		return true
-	for action in ["trigger_click", "primary_click", "select_button"]:
-		if pointer.is_button_pressed(action):
-			return true
-	return pointer.get_vector2(&"primary").length() >= 0.4
+		mask |= 1
+	if pointer.get_float(&"grip") >= 0.35:
+		mask |= 2
+	if pointer.get_vector2(&"primary").length() >= 0.4:
+		mask |= 4
+	for index in range(3, CONTROLLER_ONLY_ACTIONS.size()):
+		if pointer.is_button_pressed(CONTROLLER_ONLY_ACTIONS[index]):
+			mask |= 1 << index
+	return mask
+
+
+func _update_controller_evidence() -> void:
+	var controller_edge := false
+	var hand_edge := false
+	for pointer in [_left_pointer, _right_pointer]:
+		if pointer == null:
+			continue
+		var tracker: XRTracker = XRServer.get_tracker(pointer.tracker)
+		if tracker == null:
+			_controller_evidence.erase(pointer.tracker)
+			continue
+		var hand_path: StringName = LEFT_HAND_TRACKER if pointer == _left_pointer else RIGHT_HAND_TRACKER
+		var hand_select: bool = (
+			_hand_tracker_active(hand_path)
+			and pointer.is_button_pressed(&"hand_pinch_ready")
+			and pointer.get_float(&"hand_pinch") >= 0.55
+		)
+		var previous: Dictionary = _controller_evidence.get(pointer.tracker, {})
+		var evidence := advance_controller_evidence(
+			previous, _tracker_profile(pointer), tracker.get_instance_id(),
+			_physical_controls_mask(pointer), hand_select,
+		)
+		_controller_evidence[pointer.tracker] = evidence
+		controller_edge = controller_edge or bool(evidence["controller_edge"])
+		hand_edge = hand_edge or bool(evidence["hand_edge"])
+	# A deliberate new bare-hand selection releases fallback ownership on both
+	# sides. Passive UNKNOWN-source hand joints cannot steal controller input.
+	if hand_edge and not controller_edge:
+		for evidence_v in _controller_evidence.values():
+			var evidence: Dictionary = evidence_v
+			evidence["override"] = false
+
+
+static func advance_controller_evidence(
+	previous: Dictionary, profile: String, tracker_id: int,
+	physical_mask: int, hand_select: bool,
+) -> Dictionary:
+	var same_source: bool = (
+		previous.get("tracker_id", -1) == tracker_id
+		and previous.get("profile", "") == profile
+	)
+	# Rebaseline on profile/tracker changes. Cached pressed actions from an old
+	# controller must not classify a newly bound bare hand as a controller.
+	# Per-action edges: a held grip must not mask a new trigger/joystick press.
+	var controller_edge: bool = same_source and (physical_mask & ~int(previous.get("physical_mask", 0))) != 0
+	var hand_edge: bool = same_source and hand_select and not bool(previous.get("hand_select", false))
+	var override: bool = same_source and bool(previous.get("override", false))
+	if profile.find(HAND_INTERACTION_PROFILE_HINT) == -1:
+		override = false
+	elif controller_edge:
+		override = true
+	elif hand_edge:
+		override = false
+	return {
+		"tracker_id": tracker_id, "profile": profile,
+		"physical_mask": physical_mask, "hand_select": hand_select,
+		"controller_edge": controller_edge, "hand_edge": hand_edge,
+		"override": override,
+	}
+
+
+func _has_controller_override(pointer: XRController3D) -> bool:
+	if pointer == null:
+		return false
+	var evidence: Dictionary = _controller_evidence.get(pointer.tracker, {})
+	var tracker: XRTracker = XRServer.get_tracker(pointer.tracker)
+	return tracker != null and bool(evidence.get("override", false)) \
+		and evidence.get("tracker_id", -1) == tracker.get_instance_id() \
+		and evidence.get("profile", "") == _tracker_profile(pointer)
 
 
 func _hands_data_present() -> bool:
@@ -492,10 +627,13 @@ func _tracker_profile(pointer: XRController3D) -> String:
 
 
 func _tracker_profile_is_hand(pointer: XRController3D) -> bool:
-	return _tracker_profile(pointer).find(HAND_INTERACTION_PROFILE_HINT) != -1
+	return not _has_controller_override(pointer) \
+		and _tracker_profile(pointer).find(HAND_INTERACTION_PROFILE_HINT) != -1
 
 
 func _tracker_profile_is_controller(pointer: XRController3D) -> bool:
+	if _has_controller_override(pointer):
+		return true
 	var profile := _tracker_profile(pointer)
 	if profile.is_empty() or _profile_is_none(profile):
 		return false
@@ -539,12 +677,13 @@ func _pointer_debug(pointer: XRController3D) -> String:
 	if pointer == null:
 		return "null"
 	var profile := _tracker_profile(pointer)
-	return "act=%d trk=%d prof=%s sel=%s trig=%.2f poses=%s" % [
+	return "act=%d trk=%d prof=%s sel=%s trig=%.2f override=%d poses=%s" % [
 		int(pointer.get_is_active()),
 		int(pointer.get_has_tracking_data()),
 		profile.get_file() if not profile.is_empty() else "-",
 		String(pointer.pose),
 		pointer.get_float(&"trigger"),
+		int(_has_controller_override(pointer)),
 		_tracker_pose_debug(pointer),
 	]
 
@@ -561,10 +700,13 @@ func _tracker_pose_debug(pointer: XRController3D) -> String:
 		if pose == null:
 			states.append("%s:-" % label)
 		else:
-			states.append("%s:%d/%d" % [
+			states.append("%s:%d/%d ok=%d p=%s z=%s" % [
 				label,
 				int(pose.get_has_tracking_data()),
 				int(pose.get_tracking_confidence()),
+				int(_pose_is_tracked(positional, pose_name)),
+				str(pose.transform.origin),
+				str(pose.transform.basis.z),
 			])
 	return ",".join(states)
 
@@ -695,7 +837,8 @@ func _controller_tracking(controller: XRController3D) -> bool:
 		return false
 	if not controller.get_is_active() or not controller.get_has_tracking_data():
 		return false
-	return not _tracker_profile_is_hand(controller)
+	return not _tracker_profile_is_hand(controller) \
+		and not _profile_is_none(_tracker_profile(controller))
 
 
 func _normalize_mode(mode: String) -> String:

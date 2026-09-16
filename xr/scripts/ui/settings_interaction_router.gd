@@ -41,6 +41,10 @@ var hmd_camera: XRCamera3D
 var left_pointer: XRController3D
 var right_pointer: XRController3D
 var ui_pointer_visual: Node
+# The owner arbitrates actual source evidence, including Pico's stale profile
+# recovery. Do not pick a tracked bare-hand aim merely because it is on the right.
+var controller_source_filter: Callable = Callable()
+var pointer_blocker: Callable = Callable()
 
 var _targets: Array[Object] = []
 var _pressed_target: Object
@@ -87,6 +91,17 @@ func set_targets(targets: Array) -> void:
 
 
 func update_pointer() -> void:
+	if _controller_pointer_down != null and not _eligible_controller_pointer(_controller_pointer_down):
+		cancel_pointer()
+	if _pointer_blocked():
+		cancel_pointer()
+		# Keep analog edges synchronized while the chord owns input.
+		for pointer in [left_pointer, right_pointer]:
+			if pointer != null:
+				var key: int = pointer.get_instance_id()
+				var value: float = pointer.get_float(analog_trigger_action)
+				_trigger_down[key] = value > trigger_release_threshold if bool(_trigger_down.get(key, false)) else value >= trigger_press_threshold
+		return
 	_update_analog_trigger(left_pointer)
 	_update_analog_trigger(right_pointer)
 
@@ -114,28 +129,56 @@ func update_pointer() -> void:
 
 
 func release_pointer() -> void:
-	_release_pressed_target()
-	_controller_pointer_down = null
-	_hand_pointer_down = false
+	# Public/lifecycle release means cancellation; only a real input-up edge
+	# is allowed to use _release_pressed_target() and activate a control.
+	cancel_pointer()
 	for target in _targets:
-		if target and target.has_method("clear_pointer"):
+		if is_instance_valid(target) and target.has_method("clear_pointer"):
 			target.clear_pointer()
 	_hover_target = null
 	_hide_ui_pointer_visual()
 	_reset_hand_state()
 
 
+func _pointer_blocked() -> bool:
+	return pointer_blocker.is_valid() and bool(pointer_blocker.call())
+
+
+func cancel_pointer() -> void:
+	for target in [_pressed_target, _hover_target]:
+		if is_instance_valid(target):
+			if target.has_method("cancel_pointer"):
+				target.call("cancel_pointer")
+			elif target.has_method("clear_pointer"):
+				target.call("clear_pointer")
+	_pressed_target = null
+	_hover_target = null
+	_controller_pointer_down = null
+	_hand_pointer_down = false
+	_hide_ui_pointer_visual()
+
+
 func reset_input_state() -> void:
 	_trigger_down.clear()
 	_last_scroll_ticks_usec = 0
-	release_pointer()
+	cancel_pointer()
 
 
 func get_debug_state() -> String:
-	return _debug_pointer_state if debug_enabled else "disabled"
+	if not debug_enabled:
+		return "disabled"
+	var visual_state := "missing"
+	if is_instance_valid(ui_pointer_visual):
+		if ui_pointer_visual.has_method("get_debug_state"):
+			visual_state = str(ui_pointer_visual.call("get_debug_state"))
+		else:
+			visual_state = "no_diagnostics"
+	return "%s visual[%s]" % [_debug_pointer_state, visual_state]
 
 
 func is_teleop_input_captured() -> bool:
+	if _pointer_blocked():
+		return true
 	var target := _pressed_target if _pressed_target != null else _hover_target
 	if not _target_captures_teleop_input(target):
 		return false
@@ -293,11 +336,14 @@ func _should_use_controller_pointer() -> bool:
 
 func _update_controller_pointer() -> void:
 	if _hand_pointer_down:
-		_release_pressed_target()
-		_hand_pointer_down = false
+		cancel_pointer()
+	if _controller_pointer_down != null and not _eligible_controller_pointer(_controller_pointer_down):
+		cancel_pointer()
 
 	var pointer := _active_controller_pointer()
 	if pointer == null:
+		if debug_enabled:
+			_debug_pointer_state = "controller:no_tracked_pointer"
 		_set_hover_target(null)
 		_hide_ui_pointer_visual()
 		return
@@ -320,22 +366,32 @@ func _update_controller_pointer() -> void:
 		_show_ui_pointer_visual(ray_origin, ray_direction, target, _controller_pointer_down != null)
 	else:
 		_show_idle_ui_pointer_visual(ray_origin, ray_direction)
+	if debug_enabled:
+		var target_name: String = str(target.get("name")) if target != null else "none"
+		_debug_pointer_state = "controller:hit=%s p=%s d=%s" % [
+			target_name, str(ray_origin), str(ray_direction),
+		]
 
 
 func _active_controller_pointer() -> XRController3D:
-	if _controller_pointer_down != null:
+	if _eligible_controller_pointer(_controller_pointer_down):
 		return _controller_pointer_down
-	if _has_tracking(right_pointer):
+	if _eligible_controller_pointer(right_pointer):
 		return right_pointer
-	if _has_tracking(left_pointer):
+	if _eligible_controller_pointer(left_pointer):
 		return left_pointer
 	return null
 
 
+func _eligible_controller_pointer(pointer: XRController3D) -> bool:
+	if not _has_tracking(pointer):
+		return false
+	return not controller_source_filter.is_valid() or bool(controller_source_filter.call(pointer))
+
+
 func _update_hand_pointer() -> void:
 	if _controller_pointer_down:
-		_release_pressed_target()
-		_controller_pointer_down = null
+		cancel_pointer()
 
 	var tracker := _tracked_hand(RIGHT_HAND_TRACKER)
 	if tracker == null:
@@ -344,8 +400,7 @@ func _update_hand_pointer() -> void:
 		if debug_enabled:
 			_debug_pointer_state = "hand:no_tracker origin=%d" % int(origin != null)
 		if _hand_pointer_down:
-			_release_pressed_target()
-			_hand_pointer_down = false
+			cancel_pointer()
 		_set_hover_target(null)
 		_hide_ui_pointer_visual()
 		_reset_hand_state()
@@ -356,8 +411,7 @@ func _update_hand_pointer() -> void:
 		if debug_enabled:
 			_debug_pointer_state = "hand:no_ray"
 		if _hand_pointer_down:
-			_release_pressed_target()
-			_hand_pointer_down = false
+			cancel_pointer()
 		_set_hover_target(null)
 		_hide_ui_pointer_visual()
 		_reset_hand_state()
@@ -365,6 +419,10 @@ func _update_hand_pointer() -> void:
 
 	var ray_origin: Vector3 = hand_ray.get("origin", Vector3.ZERO)
 	var ray_direction: Vector3 = hand_ray.get("direction", Vector3.ZERO)
+	if _hand_pointer_down and not bool(hand_ray.get("pinch_value_valid", false)) \
+			and not bool(hand_ray.get("pinch_valid", false)):
+		cancel_pointer() # A grace-period cached ray has no real pinch-up edge.
+		return
 	var has_intersection := false
 	var target: Object
 	if ray_direction.length_squared() > 0.000001:
@@ -439,6 +497,9 @@ func _on_controller_button_pressed(action: StringName, pointer: XRController3D) 
 
 
 func _on_controller_button_released(action: StringName, pointer: XRController3D) -> void:
+	if _pointer_blocked() or not _eligible_controller_pointer(pointer):
+		cancel_pointer()
+		return
 	if interaction_mode == "hands":
 		return
 	var action_name := String(action)
@@ -463,12 +524,18 @@ func _update_analog_trigger(pointer: XRController3D) -> void:
 	if is_down:
 		_press_from_controller(pointer)
 	elif pointer == _controller_pointer_down:
-		_release_pressed_target()
+		if _eligible_controller_pointer(pointer):
+			_release_pressed_target()
+		else:
+			cancel_pointer()
 		_controller_pointer_down = null
 
 
 func _press_from_controller(pointer: XRController3D) -> void:
-	if pointer == null:
+	if _pointer_blocked():
+		cancel_pointer()
+		return
+	if not _should_use_controller_pointer() or not _eligible_controller_pointer(pointer):
 		return
 	var feedback_mode := _feedback_mode_for_pointer(pointer)
 	var target := _target_from_ray(
@@ -486,7 +553,7 @@ func _press_from_controller(pointer: XRController3D) -> void:
 
 func _press_target(target: Object) -> void:
 	if _pressed_target != null and _pressed_target != target:
-		_pressed_target.set_pointer_pressed(false)
+		_pressed_target.clear_pointer()
 	_pressed_target = target
 	target.set_pointer_pressed(true)
 
@@ -966,6 +1033,9 @@ func _reset_hand_state() -> void:
 
 
 func _feedback_mode_for_pointer(pointer: XRController3D) -> String:
+	if pointer != null and controller_source_filter.is_valid() \
+			and bool(controller_source_filter.call(pointer)):
+		return "controllers"
 	var haptics := _get_haptics_bus()
 	if haptics != null and haptics.has_method("should_use_controller_feedback"):
 		if not bool(haptics.call("should_use_controller_feedback", pointer)):
@@ -1001,4 +1071,6 @@ func _tracked_hand(tracker_name: StringName) -> XRHandTracker:
 
 
 func _has_tracking(pointer: XRController3D) -> bool:
-	return pointer != null and pointer.get_has_tracking_data()
+	return pointer != null and pointer.get_has_tracking_data() \
+		and pointer.global_transform.is_finite() \
+		and absf(pointer.global_basis.determinant()) > 0.000001

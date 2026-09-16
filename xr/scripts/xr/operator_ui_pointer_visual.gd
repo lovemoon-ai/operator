@@ -38,6 +38,7 @@ var _pulse_material: StandardMaterial3D
 var _pressed := false
 var _pulse_phase := 0.0
 var _alpha_scale := 1.0
+var _draw_kind := "none"
 
 
 func _ready() -> void:
@@ -78,6 +79,10 @@ func show_ray(
 	# CompositionViewportUI._build_cursor), so we just hide our sphere and
 	# leave the laser as the directional cue.
 	_build_visuals()
+	_draw_kind = "hit"
+	if not usable_ray(ray_origin, ray_direction) or not hit_point.is_finite():
+		clear()
+		return
 
 	var direction := ray_direction.normalized()
 	if direction.length_squared() < 0.000001:
@@ -111,6 +116,10 @@ func show_ray(
 
 func show_idle_ray(ray_origin: Vector3, ray_direction: Vector3) -> void:
 	_build_visuals()
+	_draw_kind = "idle"
+	if not usable_ray(ray_origin, ray_direction):
+		clear()
+		return
 
 	var direction := ray_direction.normalized()
 	if direction.length_squared() < 0.000001:
@@ -129,6 +138,7 @@ func show_idle_ray(ray_origin: Vector3, ray_direction: Vector3) -> void:
 
 
 func clear() -> void:
+	_draw_kind = "clear"
 	visible = false
 	_pressed = false
 	if _laser:
@@ -137,6 +147,16 @@ func clear() -> void:
 		_target.visible = false
 	if _pulse:
 		_pulse.visible = false
+
+
+func get_debug_state() -> String:
+	if _laser == null:
+		return "v1 unbuilt"
+	return "v1 kind=%s visible=%d tree=%d laser=%d surfaces=%d size=%s origin=%s scale=%s alpha=%.2f" % [
+		_draw_kind, int(visible), int(is_visible_in_tree()), int(_laser.visible),
+		_ray_mesh.get_surface_count(), str(_ray_mesh.size), str(global_position),
+		str(global_basis.get_scale()), _alpha_scale,
+	]
 
 
 func _build_visuals() -> void:
@@ -203,11 +223,18 @@ func _build_visuals() -> void:
 
 
 func _place_ray(ray_origin: Vector3, direction: Vector3, length_m: float, thickness_m: float) -> void:
-	global_position = ray_origin
-	look_at(ray_origin + direction, _safe_up(direction))
+	# look_at() preserves the previous scale, including a NaN from an earlier
+	# invalid XR sample. Construct a clean unit-scale basis each time instead.
+	global_transform = Transform3D(Basis.looking_at(direction, _safe_up(direction)), ray_origin)
 	_ray_mesh.size = Vector3(thickness_m, thickness_m, maxf(length_m, MIN_LASER_LENGTH_M))
 	_laser.position = Vector3(0.0, 0.0, -_ray_mesh.size.z * 0.5)
 	_ray_material.set_shader_parameter("laser_length_m", _ray_mesh.size.z)
+
+
+static func usable_ray(ray_origin: Vector3, ray_direction: Vector3) -> bool:
+	return ray_origin.is_finite() and ray_direction.is_finite() \
+		and is_finite(ray_direction.length_squared()) \
+		and ray_direction.length_squared() > 0.000001
 
 
 func _apply_ray_style(core_color: Color, tip_color: Color, fade_start: float, alpha_multiplier: float) -> void:

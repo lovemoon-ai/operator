@@ -29,7 +29,7 @@ func _run_and_quit() -> void:
 	var runner := OperatorTestRunner.new()
 	for error in runner.registry().load_errors():
 		print("[OperatorTestRunner] manifest error: %s" % error)
-	runner.run(suite, case_id)
+	await runner.run(suite, case_id)
 
 	var reporter := runner.reporter()
 	for path in reporter.write_results():
