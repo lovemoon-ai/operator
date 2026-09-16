@@ -273,7 +273,8 @@ For automated PICO launches, Android intent extras map directly to the target:
 `operator.teleop.show_video_panel=true` to override the persisted panel toggle
 for that launch without rewriting the saved settings. The device-SN extra
 should be the legacy PICO `EQUIPMENT_SN` when the deployed RoboticsService
-identifies clients by SN.
+identifies clients by SN. The settings page has no SN field; without the
+extra the sender identifies the headset by its own unique id.
 `operator.teleop.pico_body_calibrate=true` opens PICO's body-tracking
 calibration flow after XR startup. The same action is available from the
 XRoboToolkit-compatible Teleop settings panel.

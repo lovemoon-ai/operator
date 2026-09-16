@@ -23,7 +23,6 @@ const DEFAULT_TARGET_SCOPE := "outside"
 const PROTOCOL_OPERATOR := "operator"
 const PROTOCOL_XROBOT_TOOLKIT_V1 := "xrobot_toolkit_v1"
 const DEFAULT_PROTOCOL := PROTOCOL_XROBOT_TOOLKIT_V1
-const DEFAULT_XROBOT_TOOLKIT_DEVICE_SN := ""
 const DEFAULT_RETARGETING_BACKEND := "native"
 const DEFAULT_RETARGETING_HOST := "127.0.0.1"
 const DEFAULT_RETARGETING_PORT := 8000
@@ -134,7 +133,6 @@ var _ip_click_timer: Timer
 var _ip_dropdown_endpoint_ids: PackedStringArray = PackedStringArray()
 var _port_input: LineEdit
 var _disconnect_button: Button
-var _xrobot_toolkit_device_sn_input: LineEdit
 var _pico_body_calibration_button: Button
 var _video_protocol_row: HBoxContainer
 var _video_protocol_buttons: Dictionary = {}
@@ -366,13 +364,6 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_port_input.add_theme_font_size_override("font_size", 21)
 	_port_input.text_changed.connect(_on_manual_endpoint_changed)
 	add_interactive(port_row, _port_input)
-
-	_xrobot_toolkit_device_sn_input = LineEdit.new()
-	_xrobot_toolkit_device_sn_input.placeholder_text = tr("UI_XROBOT_TOOLKIT_DEVICE_SN")
-	_xrobot_toolkit_device_sn_input.custom_minimum_size.y = 55
-	_xrobot_toolkit_device_sn_input.add_theme_font_size_override("font_size", 21)
-	_xrobot_toolkit_device_sn_input.tooltip_text = tr("UI_XROBOT_TOOLKIT_DEVICE_SN_TOOLTIP")
-	add_interactive(connection, _xrobot_toolkit_device_sn_input)
 
 	_pico_body_calibration_button = Button.new()
 	_pico_body_calibration_button.text = tr("UI_PICO_BODY_CALIBRATION")
@@ -948,7 +939,6 @@ func get_options() -> Dictionary:
 		"protocol": _selected_protocol,
 		"ip": _ip_input.text.strip_edges(),
 		"port": _port_input.text.strip_edges().to_int(),
-		"xrobot_toolkit_device_sn": _xrobot_toolkit_device_sn_input.text.strip_edges(),
 		"inside_profile": _selected_profile,
 		"retargeting_backend": _selected_backend,
 		"retargeting_host": _retargeting_host_input.text.strip_edges(),
@@ -975,9 +965,6 @@ func set_options(options: Dictionary) -> void:
 	_selected_protocol = _normalized_protocol(str(options.get("protocol", DEFAULT_PROTOCOL)))
 	_ip_input.text = str(options.get("ip", DEFAULT_IP))
 	_port_input.text = str(int(options.get("port", DEFAULT_PORT)))
-	_xrobot_toolkit_device_sn_input.text = str(
-		options.get("xrobot_toolkit_device_sn", DEFAULT_XROBOT_TOOLKIT_DEVICE_SN)
-	).strip_edges()
 	_selected_profile = str(options.get("inside_profile", _default_inside_profile()))
 	_refresh_backend_options(str(options.get("retargeting_backend", DEFAULT_RETARGETING_BACKEND)))
 	_retargeting_host_input.text = str(options.get("retargeting_host", DEFAULT_RETARGETING_HOST))
@@ -1289,7 +1276,6 @@ static func _default_options() -> Dictionary:
 		"protocol": _normalized_protocol(DEFAULT_PROTOCOL),
 		"ip": DEFAULT_IP,
 		"port": DEFAULT_PORT,
-		"xrobot_toolkit_device_sn": DEFAULT_XROBOT_TOOLKIT_DEVICE_SN,
 		"inside_profile": _default_inside_profile(),
 		"retargeting_backend": DEFAULT_RETARGETING_BACKEND,
 		"retargeting_host": DEFAULT_RETARGETING_HOST,
@@ -1422,8 +1408,6 @@ func _refresh_xrobot_toolkit_controls() -> void:
 		var slot := legacy_toggle.get_parent() as Control
 		if slot != null:
 			slot.visible = not robot_authored_blueprint
-	if _xrobot_toolkit_device_sn_input != null:
-		_xrobot_toolkit_device_sn_input.visible = show_xrobot_controls
 	if _pico_body_calibration_button != null:
 		_pico_body_calibration_button.visible = show_xrobot_controls
 		var slot := _pico_body_calibration_button.get_parent() as Control

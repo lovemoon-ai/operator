@@ -40,7 +40,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var inside_box: Control = panel.get("_inside_box")
 	var protocol_row: HBoxContainer = panel.get("_protocol_row")
 	var protocol_buttons: Dictionary = panel.get("_protocol_buttons")
-	var xrobot_device_sn_input: LineEdit = panel.get("_xrobot_toolkit_device_sn_input")
 	var pico_body_calibration_button: Button = panel.get("_pico_body_calibration_button")
 	var picker: Dictionary = panel.get("_profile_buttons")
 	if not t.is_true(
@@ -48,7 +47,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		and inside_box != null
 		and protocol_row != null
 		and protocol_buttons != null
-		and xrobot_device_sn_input != null
 		and pico_body_calibration_button != null
 		and picker != null,
 		"the page exposes both configuration sides"
@@ -99,10 +97,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	t.is_true(outside_box.visible, "outside shows the robot-service settings")
 	t.is_true(protocol_row.visible, "outside shows protocol selection")
-	t.eq(
-		xrobot_device_sn_input.visible,
-		xrt_available,
-		"PICO device SN visibility follows the default protocol"
+	# The XRoboToolkit sender identifies the headset by its own unique id; the
+	# page no longer offers (or persists) a hand-typed device SN.
+	t.is_false(
+		panel.get_options().has("xrobot_toolkit_device_sn"),
+		"the settings page carries no PICO device SN"
 	)
 	t.eq(
 		pico_body_calibration_button.visible,
@@ -234,7 +233,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	if xrt_available:
 		var xrobot_options := _options("outside")
 		xrobot_options["protocol"] = "xrobot_toolkit_v1"
-		xrobot_options["xrobot_toolkit_device_sn"] = "PICO-SN-123"
 		panel.set_options(xrobot_options)
 		t.eq(
 			panel.get_options().get("protocol", ""),
@@ -245,15 +243,9 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		var xrobot_button: Button = protocol_buttons["xrobot_toolkit_v1"]
 		t.is_true(xrobot_button.button_pressed, "XRoboToolkit-compatible choice stays selected")
 		t.is_false(operator_button.button_pressed, "Operator choice is released")
-		t.is_true(xrobot_device_sn_input.visible, "XRoboToolkit protocol shows the PICO device SN")
 		t.is_true(
 			pico_body_calibration_button.visible,
 			"XRoboToolkit-compatible Outside settings show PICO Body Calibration"
-		)
-		t.eq(
-			panel.get_options().get("xrobot_toolkit_device_sn", ""),
-			"PICO-SN-123",
-			"PICO device SN round-trips through settings"
 		)
 		var calibration_requests: Array = []
 		panel.pico_body_calibration_requested.connect(func() -> void:
@@ -305,11 +297,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 				"xrobot_toolkit_v1",
 				"settings_applied includes the selected protocol"
 			)
-			t.eq(
-				applied[0].get("xrobot_toolkit_device_sn", ""),
-				"PICO-SN-123",
-				"settings_applied includes the configured PICO device SN"
-			)
 		t.eq(
 			panel.saved_options.get("protocol", ""),
 			"xrobot_toolkit_v1",
@@ -323,10 +310,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			panel.get_options().get("protocol", ""),
 			"operator",
 			"XRoboToolkit-compatible protocol normalizes to Operator off Pico"
-		)
-		t.is_false(
-			xrobot_device_sn_input.visible,
-			"non-Pico builds never show the PICO device SN"
 		)
 		t.is_false(
 			pico_body_calibration_button.visible,
@@ -702,7 +685,6 @@ func _options(scope: String) -> Dictionary:
 		"target_scope": scope,
 		"ip": "127.0.0.1",
 		"port": 63901,
-		"xrobot_toolkit_device_sn": "",
 		"inside_profile": str(offered[0]) if not offered.is_empty() else "",
 		"retargeting_backend": "native",
 		"retargeting_host": "127.0.0.1",
