@@ -50,14 +50,21 @@ func set_viewport_width(width_px: int) -> void:
 	if _viewport == null or width_px <= 0 or width_px == _viewport_size.x:
 		return
 	var metres_per_px := quad_size.x / float(_viewport_size.x)
-	_viewport_size.x = width_px
-	_viewport.size = _viewport_size
 	quad_size = Vector2(width_px * metres_per_px, quad_size.y)
-	# Godot 4.5's OpenXR layer provider records the viewport size only when a
-	# viewport is bound, and its swapchain keeps that size. A visible layer
-	# resized in place goes on rendering into the old swapchain under the new
-	# quad, so the whole page — sidebar included — is stretched and cropped.
-	# Unbinding frees that swapchain; rebinding allocates one at the new size.
+	set_viewport_size(Vector2i(width_px, _viewport_size.y))
+
+
+## Resize what the layer renders. Godot 4.5's OpenXR layer provider records
+## the viewport size only when a viewport is bound, and its swapchain keeps
+## that size: a visible layer resized in place goes on rendering into the old
+## swapchain, so the whole panel is stretched and cropped. Unbinding frees
+## that swapchain and rebinding allocates one at the new size, so every
+## runtime resize of a composition-layer panel must go through here.
+func set_viewport_size(size_px: Vector2i) -> void:
+	if _viewport == null or size_px.x <= 0 or size_px.y <= 0 or size_px == _viewport_size:
+		return
+	_viewport_size = size_px
+	_viewport.size = size_px
 	layer_viewport = null
 	layer_viewport = _viewport
 
