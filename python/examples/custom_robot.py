@@ -46,7 +46,7 @@ def build_blueprint() -> Blueprint:
                 properties={"settings_label": "Robot status"},
                 user_overridable=False,
             ),
-            BlueprintComponent.palm_menu(
+            BlueprintComponent.menu_item(
                 "control_gate",
                 title="Robot control",
                 action="toggle_control",

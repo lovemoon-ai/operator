@@ -37,7 +37,7 @@ session.blueprint.set_blueprint(
                 anchor="right_controller",
                 state_binding="robot.state",
             ),
-            BlueprintComponent.palm_menu(
+            BlueprintComponent.menu_item(
                 "hand_control",
                 title="Hand control",
                 action="toggle_unlock",
@@ -71,15 +71,16 @@ session.blueprint.clear()
 xr_bridge.stop()
 ```
 
-Available components are `label`, `status_lamp`, `palm_menu`,
-`fingertip_tactile`, `video_panel`, `controller_help`, `control_frame`, and
+Available components include `robot_model`, `ground_grid`, `model_lighting`,
+`input_binding`, `menu_item`, `label`, `status_lamp`, legacy `palm_menu` and
+`controller_menu`, `fingertip_tactile`, `video_panel`, `controller_help`, `control_frame`, and
 `operation_trajectory`; anchors are world, head, either controller, or either palm.
 `fingertip_tactile` binds five-element normal, tangential, direction, proximity,
 and status arrays for either or both hands; XR places the markers on tracked
 fingertips. The final four component types gate XR-owned views. A
 `DeviceDescriptor.video_feeds` entry describes video transport, while
 `video_panel` alone decides whether that feed is presented. Without a Blueprint,
-native Operator Teleop shows only its settings button. `user_overridable=True`
+native Operator Teleop retains its local settings and system connection menu. `user_overridable=True`
 lets a headset-side Follow Robot / Show /
 Hide preference win over robot state; set a static `settings_label` property
 when the component id is not user-friendly.
@@ -89,6 +90,15 @@ local value map, then publishes a complete latest-wins snapshot, so a slow
 network does not build an unbounded UI backlog or lose unchanged bindings.
 This path does not delay the independent XR tracking stream. `clear()` removes
 the active UI from connected and future headsets.
+
+`menu_item` contributes to the system-created menu: the same item works through
+the left-palm gesture/right-index touch or left Menu/right-controller ray.
+The fixed connection/recenter section remains local; robot actions retain the
+declaring Blueprint/component identity and return only to the robot. Legacy
+`palm_menu`/`controller_menu` declarations contribute items too, never separate
+panels. Optional `item_key` merges identical declarations within one Blueprint;
+conflicting shared keys are rejected. Disconnect removes the robot's items but
+does not remove the system menu. Menu placement is controlled by the headset.
 
 Runnable examples:
 

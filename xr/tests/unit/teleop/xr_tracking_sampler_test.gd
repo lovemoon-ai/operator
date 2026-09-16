@@ -147,6 +147,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_configurable_body_rate_and_reset(t)
 	_test_body_shutdown_ownership(t)
 	_test_requested_streams(t)
+	_test_motion_only_mode(t)
 	_test_pico_body_validation_is_opt_in(t)
 	_test_pico_body_status_gate(t)
 	_test_pico_body_collapsed_gate(t)
@@ -171,9 +172,9 @@ func _test_snapshot_shape_and_default_rate(t: OperatorTestAssertions) -> void:
 		"default Operator sampling does not query native predicted display time")
 	t.eq(first.get("coordinate_space"), "godot_world", "snapshot keeps coordinate space")
 	t.eq(bridge.body_starts, 1, "body tracking starts when requested")
-	t.eq(bridge.motion_requests, 1, "motion trackers are requested when selected")
+	t.eq(bridge.motion_requests, 0, "full-body mode must not request Pico object trackers")
 	t.eq(bridge.body_samples, 1, "first frame samples Pico body")
-	t.eq(bridge.motion_samples, 1, "first frame samples Pico motion trackers")
+	t.eq(bridge.motion_samples, 0, "full-body mode must not sample Pico object trackers")
 
 	var left_controller: Dictionary = first.get("controllers", {}).get("left", {})
 	t.eq(
@@ -212,20 +213,49 @@ func _test_snapshot_shape_and_default_rate(t: OperatorTestAssertions) -> void:
 		"Pico acceleration is normalized in the internal snapshot")
 	t.contains(joint.get("pose", {}), "linear_velocity",
 		"existing v1 pose velocity remains available")
-	var motion: Dictionary = first.get("motion_trackers", [])[0]
-	t.eq(motion.get("linear_acceleration"), [1.7, 1.8, 1.9],
-		"internal snapshot keeps Pico motion-tracker acceleration")
+	t.eq(first.get("motion_trackers"), [], "independent tracker stream stays empty during Pico body tracking")
 
 	sampler.now_us = 33_332
 	var cached := sampler.sample_frame()
 	t.eq(cached.get("frame_id"), 2, "high-rate frames continue while body is cached")
 	t.eq(bridge.body_samples, 1, "default body cadence remains 30 Hz")
-	t.eq(bridge.motion_samples, 1, "motion tracker cache shares the slow cadence")
+	t.eq(bridge.motion_samples, 0, "cached frames cannot switch Pico into object mode")
 	sampler.now_us = 33_333
 	sampler.sample_frame()
 	t.eq(bridge.body_samples, 2, "default body cache refreshes at 33333 us")
-	t.eq(bridge.motion_samples, 2, "motion tracker cache refreshes with body")
+	t.eq(bridge.motion_samples, 0, "later body samples cannot switch Pico into object mode")
 
+	provider.free()
+
+
+func _test_motion_only_mode(t: OperatorTestAssertions) -> void:
+	var provider := FakeProvider.new()
+	var bridge := FakePicoBridge.new()
+	var sampler := DeterministicSampler.new()
+	sampler.tracking_provider = provider
+	sampler.fake_bridge = bridge
+	sampler.configure({"streams": ["motion_trackers"]})
+	var frame := sampler.sample_frame()
+	t.eq(bridge.body_starts, 0, "motion-only capture does not start full-body mode")
+	t.eq(bridge.motion_requests, 1, "explicit motion-only capture still requests trackers")
+	t.eq(bridge.motion_samples, 1, "explicit motion-only capture still samples trackers")
+	var motion: Dictionary = frame.get("motion_trackers", [])[0]
+	t.eq(motion.get("linear_acceleration"), [1.7, 1.8, 1.9], "motion-only snapshot retains vendor acceleration")
+	sampler.now_us = 33332
+	sampler.sample_frame()
+	t.eq(bridge.motion_samples, 1, "motion-only capture retains the slow cadence")
+	sampler.now_us = 33333
+	sampler.sample_frame()
+	t.eq(bridge.motion_samples, 2, "motion-only capture refreshes at 30 Hz")
+	var failed_bridge := FakePicoBridge.new()
+	failed_bridge.body_start_succeeds = false
+	var failed_sampler := DeterministicSampler.new()
+	failed_sampler.tracking_provider = provider
+	failed_sampler.fake_bridge = failed_bridge
+	failed_sampler.configure({"streams": ["body", "motion_trackers"]})
+	failed_sampler.sample_frame()
+	t.eq(failed_bridge.motion_requests, 0, "failed body startup must not fall back to object mode")
+	t.eq(failed_bridge.motion_samples, 0, "failed body startup must not implicitly request object mode")
 	provider.free()
 
 
@@ -457,8 +487,8 @@ func _test_sender_filters_v1_body_extensions(t: OperatorTestAssertions) -> void:
 	var body: Dictionary = frame.get("body", {})
 	t.is_false(body.has("source_timestamp_ns"),
 		"v1 body omits the sampler-only source timestamp")
-	t.eq(body.get("joints", []).size(), 23,
-		"v1 body preserves the previous behavior of omitting untracked joints")
+	t.eq(body.get("joints", []).size(), 24,
+		"v1 projection preserves the sampler's fixed joint slots, including untracked entries")
 	var joint: Dictionary = body.get("joints", [])[0]
 	t.eq(joint.keys(), ["joint", "flags", "tracked", "radius_m", "pose"],
 		"v1 body joint keeps the existing wire fields and ordering")
@@ -471,10 +501,16 @@ func _test_sender_filters_v1_body_extensions(t: OperatorTestAssertions) -> void:
 		"acceleration_flags", "linear_acceleration", "angular_acceleration",
 	]:
 		t.is_false(joint.has(field), "v1 wire body joint filters internal %s" % field)
-	var motion: Dictionary = frame.get("motion_trackers", [])[0]
+	t.eq(frame.get("motion_trackers"), [], "v1 body mode does not request independent trackers")
+	var motion_sampler := DeterministicSampler.new()
+	motion_sampler.tracking_provider = provider
+	motion_sampler.fake_bridge = FakePicoBridge.new()
+	motion_sampler.configure({"streams": ["motion_trackers"]})
+	var motion_frame: Dictionary = sender.call("_frame_v1", motion_sampler.sample_frame())
+	var motion: Dictionary = motion_frame.get("motion_trackers", [])[0]
 	t.eq(motion.keys(), ["id", "tracker_index", "pose", "battery_level"],
 		"v1 motion tracker keeps the existing wire fields and ordering")
-	var payload := JSON.stringify(frame)
+	var payload := JSON.stringify(frame) + JSON.stringify(motion_frame)
 	t.is_false(payload.contains("linear_acceleration"),
 		"v1 wire JSON does not expose new acceleration fields")
 	t.is_false(payload.contains("acceleration_flags"),

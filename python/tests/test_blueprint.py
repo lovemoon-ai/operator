@@ -37,6 +37,114 @@ class FakeNative:
 
 
 class BlueprintTests(unittest.TestCase):
+    def test_system_menu_shared_identity_requires_identical_contracts(self) -> None:
+        item = BlueprintComponent.menu_item("item", title="Robot", action="connection.toggle",
+            value_binding="enabled", available_binding="ready", item_key="control",
+            locked_text="Enable", unlocked_text="Disable", unavailable_text="Unavailable")
+        palm = BlueprintComponent.palm_menu("legacy", title="Robot", action="connection.toggle",
+            value_binding="enabled", available_binding="ready", properties={"item_key": "control"},
+            locked_text="Enable", unlocked_text="Disable", unavailable_text="Unavailable")
+        bp = Blueprint(blueprint_id="menu", components=(item, palm))
+        self.assertEqual(SPEC["primitives"]["menu_item"]["host"], "system_menu")
+        self.assertEqual(SPEC["primitives"]["palm_menu"]["host"], "system_menu")
+        self.assertEqual(SPEC["primitives"]["controller_menu"]["host"], "system_menu")
+        bp.validate_event(BlueprintEvent(blueprint_id="menu", blueprint_revision=1,
+            sequence=1, timestamp_ns=1, component_id="item", action="connection.toggle", value=True))
+        for patch in ({"value": "other"}, {"available": "other"}, {"visible": "other"}):
+            with self.subTest(patch=patch), self.assertRaisesRegex(ValueError, "conflicting shared menu"):
+                changed = BlueprintComponent(id="changed", type="palm_menu", properties=palm.properties,
+                    bindings={**palm.bindings, **patch})
+                Blueprint(blueprint_id="menu", components=(item, changed))
+        different = BlueprintComponent.menu_item("different", title="Different", action="connection.toggle",
+            value_binding="other", item_key="other.control")
+        Blueprint(blueprint_id="menu", components=(item, different))
+
+    def test_ground_grid_and_model_lighting_contract(self) -> None:
+        grid = BlueprintComponent.ground_grid(placement_target="g1", visible_binding="visible",
+            properties={"size": 8, "spacing": 0.5, "major_every": 5, "color": "#8094aa66"})
+        lighting = BlueprintComponent.model_lighting(visible_binding="visible",
+            key_energy_binding="key", fill_energy_binding="fill")
+        blueprint = Blueprint(blueprint_id="stage", components=(grid, lighting))
+        self.assertEqual(grid.anchor, "world")
+        self.assertEqual(grid.properties["placement_target"], "g1")
+        blueprint.validate_state_values({"visible": True, "key": 1.6, "fill": 0.6})
+        for values in ({"key": -1}, {"key": 4.1}, {"fill": 2.1}, {"fill": float("nan")}, {"visible": 1}):
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                blueprint.validate_state_values(values)
+        for properties in ({"size": 41}, {"spacing": 0}, {"line_width": 0}, {"major_every": 1.5}):
+            with self.subTest(properties=properties), self.assertRaises(ValueError):
+                BlueprintComponent.ground_grid(properties=properties)
+        with self.assertRaises(ValueError):
+            Blueprint(blueprint_id="duplicate_lights", components=(lighting, BlueprintComponent.model_lighting("other")))
+        with self.assertRaises(ValueError):
+            BlueprintComponent(id="grid", type="ground_grid", anchor="head")
+
+    def test_input_binding_ack_contract_and_secondary_menu_action(self) -> None:
+        binding = BlueprintComponent.input_binding("reset", action="reset", available_binding="available",
+            required_binding="required", acknowledged_request_binding="ack", success_binding="ok")
+        menu = BlueprintComponent.controller_menu("menu", title="Local", action="connection.toggle",
+            value_binding="connected", secondary_action="view.recenter", secondary_text="Recenter",
+            secondary_available_binding="can_recenter", detail_binding="detail")
+        bp = Blueprint(blueprint_id="controls", components=(binding, menu))
+        for component, action, value in (("reset", "reset", "nonce"), ("menu", "connection.toggle", True),
+                                         ("menu", "view.recenter", True)):
+            bp.validate_event(BlueprintEvent(blueprint_id=bp.blueprint_id, blueprint_revision=bp.revision,
+                sequence=1, timestamp_ns=1, component_id=component, action=action, value=value))
+        with self.assertRaises(ValueError):
+            bp.validate_event(BlueprintEvent(blueprint_id=bp.blueprint_id, blueprint_revision=bp.revision,
+                sequence=1, timestamp_ns=1, component_id="reset", action="reset", value=True))
+        with self.assertRaises(ValueError):
+            bp.validate_state_values({"ack": True})
+        with self.assertRaises(ValueError):
+            BlueprintComponent.input_binding("bad", action="reset", available_binding="a", required_binding="r",
+                acknowledged_request_binding="ack", success_binding="ok", hold_seconds=0.1)
+
+    def test_controller_menu_contract(self) -> None:
+        menu = BlueprintComponent.controller_menu(
+            "controller_calibrate", title="ScaleBFM", action="calibrate",
+            value_binding="calibrated", available_binding="ready",
+            locked_text="Calibrate / reset", unlocked_text="Calibrate / reset",
+        )
+        palm = BlueprintComponent.palm_menu(
+            "palm_calibrate", title="ScaleBFM", action="calibrate", value_binding="calibrated",
+        )
+        blueprint = Blueprint(blueprint_id="menus", components=(menu, palm))
+        self.assertEqual(menu.anchor, "left_controller")
+        blueprint.validate_state_values({"calibrated": False, "ready": True})
+        for component in (menu, palm):
+            blueprint.validate_event(BlueprintEvent(
+                blueprint_id="menus", blueprint_revision=blueprint.revision,
+                sequence=1, timestamp_ns=1, component_id=component.id,
+                action="calibrate", value=True,
+            ))
+        with self.assertRaises(ValueError):
+            blueprint.validate_state_values({"ready": "yes"})
+        with self.assertRaises(ValueError):
+            BlueprintComponent(id="bad", type="controller_menu", anchor="head",
+                               properties=menu.properties, bindings=menu.bindings)
+        with self.assertRaises(ValueError):
+            Blueprint(blueprint_id="duplicate", components=(menu, BlueprintComponent.controller_menu(
+                "second", title="Second", action="reset", value_binding="calibrated",
+            )))
+
+    def test_robot_model_contract(self) -> None:
+        component = BlueprintComponent.robot_model(
+            "robot", asset_sha256="a" * 64, asset_size=100, asset_port=63904, joint_names=["left_knee_joint"],
+            joint_positions_binding="q", base_pose_binding="base", sample_binding="sample",
+        )
+        blueprint = Blueprint(blueprint_id="robot", components=(component,))
+        self.assertEqual(component.properties["joint_names"], ["left_knee_joint"])
+        valid = {"q": [0.2], "base": [0, 1, 0, 0, 0, 0, 1], "sample": 1}
+        blueprint.validate_state_values(valid)
+        for patch in ({"base": [0] * 6}, {"q": [float("nan")]}, {"sample": -1}):
+            with self.assertRaises(ValueError):
+                blueprint.validate_state_values({**valid, **patch})
+        with self.assertRaises(ValueError):
+            BlueprintComponent.robot_model(
+                "bad", asset_sha256="a" * 64, asset_size=100, asset_port=63904, joint_names=[True],
+                joint_positions_binding="q", base_pose_binding="base", sample_binding="sample",
+            )
+
     def test_generated_spec_matches_canonical_source(self) -> None:
         from pathlib import Path
 

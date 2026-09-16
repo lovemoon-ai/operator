@@ -59,7 +59,10 @@ func configure(stream_config: Dictionary) -> void:
 		if _wants("body") and _pico_bridge.has_method("start_body_tracking"):
 			var started: Variant = _pico_bridge.call("start_body_tracking", {})
 			_started_pico_body = typeof(started) != TYPE_BOOL or bool(started)
-		if _wants("motion_trackers") and _pico_bridge.has_method("request_motion_trackers"):
+		# On Pico this API selects independent/object tracking, not the ankle
+		# trackers that feed full-body tracking. The two modes are exclusive.
+		if _wants("motion_trackers") and not _wants("body") \
+				and _pico_bridge.has_method("request_motion_trackers"):
 			_pico_bridge.call("request_motion_trackers", DEFAULT_MAX_MOTION_TRACKERS)
 
 
@@ -265,6 +268,10 @@ func _body_from_records(raw: Dictionary, joint_set: String, timestamp_ns: int) -
 
 
 func _sample_motion_trackers(timestamp_ns: int) -> Array:
+	if _pico_bridge != null and _wants("body"):
+		# sample_motion_trackers can itself request devices. Suppress that path
+		# even while body startup fails; never steal the trackers from body mode.
+		return []
 	if _pico_bridge != null and _pico_bridge.has_method("sample_motion_trackers"):
 		var pico_records: Variant = _pico_bridge.call(
 			"sample_motion_trackers", DEFAULT_MAX_MOTION_TRACKERS)

@@ -80,6 +80,21 @@ cargo test
 
 ## Architecture
 
+### Inside Robot / Outside Robot asset boundary
+
+- `scripts/make-robot/` (`make_robot`) is **Inside Robot only**. It generates
+  headset-local robot bundles for the in-headset simulator and robot picker.
+- Outside Robot, including `pyoperator` examples and Blueprint `robot_model`,
+  must obtain robot assets from the connected robot/host. Do not require
+  `make_robot`, `xr/assets/robots/`, APK-bundled joint tables, hardcoded model
+  allowlists, or rebuilding the APK to add/change an Outside robot.
+- The robot/host owns mesh and articulation descriptions and publishes a
+  content-addressed model asset. Blueprint describes the asset and state
+  bindings; the headset downloads, validates, caches, and renders it. Static
+  assets are separate from high-rate joint/base-pose updates. Remote assets
+  must be data-only, never executable Godot scenes, scripts, or shaders.
+- `CLAUDE.md` links to this file; keep this boundary shared by both entry points.
+
 See `claw/architecture/overview.md`. Historical RFC, issue, lesson, and v2
 planning documents have been removed from the repo; keep architecture docs
 current instead of adding new history logs.

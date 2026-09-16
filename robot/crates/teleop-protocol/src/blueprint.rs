@@ -74,6 +74,9 @@ pub fn blueprint_value_matches_type(value: &Value, value_type: &str) -> bool {
                 .iter()
                 .all(|item| blueprint_value_matches_type(item, "integer"))
         }),
+        "string_array" => value
+            .as_array()
+            .is_some_and(|items| items.iter().all(Value::is_string)),
         _ => false,
     }
 }
@@ -191,6 +194,16 @@ impl Blueprint {
             }
         }
         self.binding_specs()?;
+        let mut shared: HashMap<String, Value> = HashMap::new();
+        for component in &self.components {
+            for (key, contract) in component.menu_contracts() {
+                if key.is_empty() { continue; }
+                if shared.get(&key).is_some_and(|previous| previous != &contract) {
+                    return Err(format!("conflicting shared menu item: {key}"));
+                }
+                shared.insert(key, contract);
+            }
+        }
         Ok(())
     }
 
@@ -378,6 +391,34 @@ impl<'de> Deserialize<'de> for BlueprintComponent {
 }
 
 impl BlueprintComponent {
+    fn menu_contracts(&self) -> Vec<(String, Value)> {
+        let Some(primitive) = primitive_spec(&self.component_type) else { return vec![]; };
+        if primitive["host"] != "system_menu" { return vec![]; }
+        let property = |name: &str| -> Value {
+            self.properties.get(name).cloned()
+                .unwrap_or_else(|| primitive["properties"][name]["default"].clone())
+        };
+        let binding = |name: &str| self.bindings.get(name).cloned().unwrap_or_default();
+        let mut rows = vec![];
+        for event in primitive["events"].as_object().unwrap().keys() {
+            let secondary = event == "secondary_action";
+            let action = property(if secondary { "secondary_action" } else { "action" });
+            if action.as_str().unwrap_or_default().is_empty() { continue; }
+            rows.push((property(if secondary { "secondary_item_key" } else { "item_key" }).as_str().unwrap_or_default().into(), serde_json::json!({
+                "action": action, "title": property("title"),
+                "off": property(if secondary { "secondary_text" } else { "locked_text" }),
+                "on": property(if secondary { "secondary_text" } else { "unlocked_text" }),
+                "unavailable": property(if secondary { "secondary_text" } else { "unavailable_text" }),
+                "value_binding": if secondary { String::new() } else { binding("value") },
+                "available_binding": binding(if secondary { "secondary_available" } else { "available" }),
+                "available_default": !secondary,
+                "visible_binding": binding("visible"), "visible_default": property("visible"),
+                "detail_binding": binding("detail"), "user_overridable": self.user_overridable,
+            })));
+        }
+        rows
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.id.trim().is_empty() {
             return Err("Blueprint component id must not be empty".to_string());

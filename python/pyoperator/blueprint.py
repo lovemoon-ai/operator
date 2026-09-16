@@ -127,8 +127,8 @@ def _matches_type(value: Any, value_type: str) -> bool:
             isinstance(key, str) and _matches_type(color, "color")
             for key, color in value.items()
         )
-    if value_type in ("number_array", "integer_array"):
-        item_type = "number" if value_type == "number_array" else "integer"
+    if value_type in ("number_array", "integer_array", "string_array"):
+        item_type = value_type.removesuffix("_array")
         return isinstance(value, (list, tuple)) and all(
             _matches_type(item, item_type) for item in value
         )
@@ -157,6 +157,31 @@ def _binding_value_contract(field_spec: Mapping[str, Any]) -> dict[str, Any]:
         for key, value in field_spec.items()
         if key not in ("required", "semantics")
     }
+
+
+def _menu_contracts(component):
+    primitive = PRIMITIVES[component.type]
+    if primitive["host"] != "system_menu":
+        return
+    properties = {name: field["default"] for name, field in primitive["properties"].items() if "default" in field}
+    properties.update(component.properties)
+    bindings = component.bindings
+    for event in primitive["events"]:
+        secondary = event == "secondary_action"
+        action = properties.get("secondary_action" if secondary else "action", "")
+        if not action:
+            continue
+        yield properties.get("secondary_item_key" if secondary else "item_key", ""), dict(
+            action=action, title=properties["title"],
+            off=properties["secondary_text"] if secondary else properties["locked_text"],
+            on=properties["secondary_text"] if secondary else properties["unlocked_text"],
+            unavailable=properties["secondary_text"] if secondary else properties["unavailable_text"],
+            value_binding="" if secondary else bindings.get("value", ""),
+            available_binding=bindings.get("secondary_available" if secondary else "available", ""),
+            available_default=not secondary, visible_binding=bindings.get("visible", ""),
+            visible_default=properties["visible"], detail_binding=bindings.get("detail", ""),
+            user_overridable=component.user_overridable,
+        )
 
 
 def _required_wire_integer(name: str, value: Any, *, positive: bool) -> int:
@@ -289,6 +314,93 @@ class BlueprintComponent:
         }
 
     @classmethod
+    def ground_grid(
+        cls, id: str = "ground", *, placement_target: str = "",
+        visible_binding: str | None = None,
+        transform: BlueprintTransform | None = None,
+        properties: Mapping[str, Any] | None = None,
+        user_overridable: bool | None = None,
+    ) -> "BlueprintComponent":
+        """Transparent XZ floor grid; dimensions/spacing/line width are metres.
+
+        ``placement_target`` shares a robot component's local recenter offset,
+        not its animated base pose. Set the grid's transform to the desired
+        ground origin; it stays stationary as the robot walks or jumps.
+        """
+        component_properties = dict(properties or {})
+        component_properties.setdefault("placement_target", placement_target)
+        return cls(id=id, type="ground_grid", transform=transform or BlueprintTransform(),
+                   properties=component_properties,
+                   bindings={"visible": visible_binding} if visible_binding else {},
+                   user_overridable=user_overridable)
+
+    @classmethod
+    def model_lighting(
+        cls, id: str = "lighting", *, visible_binding: str | None = None,
+        key_energy_binding: str | None = None, fill_energy_binding: str | None = None,
+        transform: BlueprintTransform | None = None,
+        properties: Mapping[str, Any] | None = None,
+        user_overridable: bool | None = None,
+    ) -> "BlueprintComponent":
+        """One shadow-free key/fill rig per Blueprint, lighting robot_model only.
+
+        Configure key/fill energy and colors in properties. The transform's
+        rotation rotates both light directions; position has no effect.
+        """
+        bindings = {key: value for key, value in dict(visible=visible_binding,
+                    key_energy=key_energy_binding, fill_energy=fill_energy_binding).items() if value}
+        return cls(id=id, type="model_lighting", transform=transform or BlueprintTransform(),
+                   properties=dict(properties or {}), bindings=bindings,
+                   user_overridable=user_overridable)
+
+    @classmethod
+    def robot_model(
+        cls,
+        id: str,
+        *,
+        asset_sha256: str,
+        asset_size: int,
+        asset_port: int,
+        joint_names: tuple[str, ...] | list[str],
+        joint_positions_binding: str,
+        base_pose_binding: str,
+        sample_binding: str,
+        visible_binding: str | None = None,
+        transform: BlueprintTransform | None = None,
+        properties: Mapping[str, Any] | None = None,
+        user_overridable: bool | None = None,
+    ) -> "BlueprintComponent":
+        """Display a robot-hosted GLB; angles are radians in ``joint_names`` order.
+
+        Assets are fetched from the connected robot at ``asset_port`` using
+        ``/blueprint-assets/<asset_sha256>.glb``. No APK robot bundle is used.
+
+        ``base_pose`` is [x, y, z, qx, qy, qz, qw] in the component's local
+        XR frame (metres, Y up). Publish all three bindings together; change
+        ``sample`` only for a new robot sample, not for unrelated UI updates.
+        """
+        component_properties = dict(properties or {})
+        if not isinstance(asset_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", asset_sha256):
+            raise ValueError("asset_sha256 must be a lowercase SHA-256 digest")
+        component_properties.update(asset_sha256=asset_sha256, asset_size=asset_size,
+                                    asset_port=asset_port, joint_names=list(joint_names))
+        bindings = {
+            "joint_positions": joint_positions_binding,
+            "base_pose": base_pose_binding,
+            "sample": sample_binding,
+        }
+        if visible_binding:
+            bindings["visible"] = visible_binding
+        return cls(
+            id=id,
+            type="robot_model",
+            transform=transform or BlueprintTransform(),
+            properties=component_properties,
+            bindings=bindings,
+            user_overridable=user_overridable,
+        )
+
+    @classmethod
     def label(
         cls,
         id: str,
@@ -350,6 +462,31 @@ class BlueprintComponent:
         )
 
     @classmethod
+    def menu_item(
+        cls, id: str, *, title: str, action: str, value_binding: str,
+        available_binding: str | None = None, visible_binding: str | None = None,
+        item_key: str = "", locked_text: str = "Enable", unlocked_text: str = "Disable",
+        unavailable_text: str = "Unavailable", user_overridable: bool | None = None,
+        properties: Mapping[str, Any] | None = None,
+    ) -> "BlueprintComponent":
+        """Contribute one item to the system-owned hand/controller menu.
+
+        Optional item_key explicitly merges identical declarations in this
+        Blueprint. The first declaration owns the emitted event identity.
+        """
+        bindings = {"value": value_binding}
+        if available_binding:
+            bindings["available"] = available_binding
+        if visible_binding:
+            bindings["visible"] = visible_binding
+        component_properties = dict(properties or {})
+        component_properties.update(title=title, action=action,
+            item_key=item_key, locked_text=locked_text, unlocked_text=unlocked_text,
+            unavailable_text=unavailable_text)
+        return cls(id=id, type="menu_item", properties=component_properties,
+                   bindings=bindings, user_overridable=user_overridable)
+
+    @classmethod
     def palm_menu(
         cls,
         id: str,
@@ -385,6 +522,64 @@ class BlueprintComponent:
             bindings=bindings,
             user_overridable=user_overridable,
         )
+
+    @classmethod
+    def controller_menu(
+        cls,
+        id: str,
+        *,
+        title: str,
+        action: str,
+        value_binding: str,
+        available_binding: str | None = None,
+        visible_binding: str | None = None,
+        locked_text: str = _PALM_MENU_LOCKED_TEXT,
+        unlocked_text: str = _PALM_MENU_UNLOCKED_TEXT,
+        unavailable_text: str = _PALM_MENU_UNAVAILABLE_TEXT,
+        secondary_action: str = "",
+        secondary_text: str = "",
+        secondary_available_binding: str | None = None,
+        detail_binding: str | None = None,
+        properties: Mapping[str, Any] | None = None,
+        user_overridable: bool | None = None,
+    ) -> "BlueprintComponent":
+        """Compatibility declaration; contributes rows to the system menu."""
+        component_properties = dict(properties or {})
+        for key, value in dict(title=title, action=action, locked_text=locked_text,
+                               unlocked_text=unlocked_text, unavailable_text=unavailable_text,
+                               secondary_action=secondary_action, secondary_text=secondary_text).items():
+            component_properties.setdefault(key, value)
+        bindings = {"value": value_binding}
+        for key, binding in dict(available=available_binding, visible=visible_binding,
+                                 secondary_available=secondary_available_binding, detail=detail_binding).items():
+            if binding:
+                bindings[key] = binding
+        return cls(
+            id=id, type="controller_menu", properties=component_properties,
+            bindings=bindings, user_overridable=user_overridable,
+        )
+
+    @classmethod
+    def input_binding(
+        cls, id: str, *, action: str, available_binding: str, required_binding: str,
+        acknowledged_request_binding: str, success_binding: str,
+        message_binding: str | None = None, target_component: str = "",
+        hold_seconds: float = 1.0, ack_timeout_seconds: float = 3.0,
+    ) -> "BlueprintComponent":
+        """Both physical triggers held continuously -> action with a request ID.
+
+        Echo the string event.value in acknowledged_request_binding and publish
+        success atomically. Only a matching successful acknowledgement causes
+        confirmation haptics. The headset owns timing and input arbitration.
+        """
+        bindings = dict(available=available_binding, required=required_binding,
+                        acknowledged_request=acknowledged_request_binding, success=success_binding)
+        if message_binding:
+            bindings["message"] = message_binding
+        return cls(id=id, type="input_binding", properties=dict(action=action,
+            gesture="dual_trigger_hold", hold_seconds=hold_seconds,
+            ack_timeout_seconds=ack_timeout_seconds, target_component=target_component),
+            bindings=bindings, user_overridable=False)
 
     @classmethod
     def fingertip_tactile(
@@ -557,6 +752,13 @@ class Blueprint:
         if len(singleton_types) != len(set(singleton_types)):
             raise ValueError("singleton Blueprint primitive types must be unique")
         self.binding_specs()
+        shared = {}
+        for component in self.components:
+            for key, contract in _menu_contracts(component):
+                if key:
+                    if key in shared and shared[key] != contract:
+                        raise ValueError(f"conflicting shared menu item: {key}")
+                    shared[key] = contract
 
     def to_dict(self) -> dict[str, Any]:
         return {

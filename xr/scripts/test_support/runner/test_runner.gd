@@ -32,7 +32,7 @@ func reporter() -> OperatorTestReporter:
 func run(suite_filter := "", case_filter := "") -> Array:
 	var out: Array = []
 	for case_v in _registry.cases(suite_filter, case_filter):
-		out.append(run_case(case_v as OperatorTestCase))
+		out.append(await run_case(case_v as OperatorTestCase))
 	return out
 
 
@@ -74,7 +74,9 @@ func run_case(test_case: OperatorTestCase) -> OperatorTestResult:
 				"clock": OperatorTestClock.new(),
 				"storage": storage,
 			}
-			instance.run(ctx, t)
+			# Synchronous cases return immediately; device network/render cases
+			# may await frames. Keep their assertions alive until completion.
+			await instance.run(ctx, t)
 
 	# Teardown must always run to clean storage even when the case failed.
 	storage.cleanup()

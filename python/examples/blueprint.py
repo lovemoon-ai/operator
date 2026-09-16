@@ -11,7 +11,7 @@ from pyoperator import (
     XrSession,
 )
 
-INSTRUCTION = "Open your left palm and touch the menu with the other hand."
+INSTRUCTION = "Open your left palm and touch, or press left Menu and use the right ray."
 
 
 def build_blueprint() -> Blueprint:
@@ -32,7 +32,7 @@ def build_blueprint() -> Blueprint:
                 state_binding="demo.status",
                 properties={"settings_label": "Demo status"},
             ),
-            BlueprintComponent.palm_menu(
+            BlueprintComponent.menu_item(
                 "hand_toggle",
                 title="Blueprint demo",
                 action="toggle_demo",
