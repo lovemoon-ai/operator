@@ -95,6 +95,19 @@ bambu-cli --printer lab --json status
 bambu-cli --printer lab --json ams status
 ```
 
+同时查看所有已配置打印机：
+
+```bash
+bambu-cli status --all
+bambu-cli --json status --all
+bambu-cli --json status --all --active
+```
+
+`status --all` 对同时具有 IP 和 Access Code 文件的 profile 优先使用 LAN；只有序列号的 profile
+使用 Cloud。LAN 查询失败且存在序列号时会回退 Cloud，并在结果中保留 `warning`。
+`--active` 仅保留活动任务，但不会隐藏状态查询错误。该命令展示每台打印机的当前任务，不是
+历史任务或云端队列列表。
+
 `doctor`、`status` 和 `ams status` 是 LAN 路径，需要 IP 可达和 Access Code。LAN 默认检查
 MQTT 8883、FTPS 990、Camera 6000。
 
