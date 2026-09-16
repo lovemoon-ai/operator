@@ -35,6 +35,7 @@ import org.godotengine.godot.GodotActivity;
 import org.godotengine.godot.plugin.GodotPlugin;
 
 import com.godot.game.camera.KotlinCameraPlugin;
+import com.godot.game.input.OperatorInputPlugin;
 import com.godot.game.video.KotlinVideoDecoderPlugin;
 
 import android.os.Bundle;
@@ -122,6 +123,7 @@ public class GodotApp extends GodotActivity {
 			plugins.addAll(basePlugins);
 		}
 		plugins.add(new KotlinCameraPlugin(godot));
+		plugins.add(new OperatorInputPlugin(godot));
 		plugins.add(new KotlinVideoDecoderPlugin(godot));
 		return plugins;
 	}
