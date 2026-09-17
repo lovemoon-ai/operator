@@ -1,2 +1,6 @@
 -r requirements.txt
+# CUDA build from the PyTorch index (validated: 2.7.0+cu128); PyPI stays primary
+# for everything else. The plain PyPI wheel is CUDA-bundled too, but the
+# explicit index makes the CUDA requirement visible and versioned.
+--extra-index-url https://download.pytorch.org/whl/cu128
 torch>=2.7

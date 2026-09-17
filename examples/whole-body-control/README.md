@@ -24,7 +24,11 @@ but have no effect on that model.
 Linux, Python 3.10/3.11, MuJoCo 3.3.6, a compatible real headset, and host/headset
 LAN connectivity are required. SONIC additionally needs a C++20 compiler: it
 builds a small adapter around the actual upstream planner/timeline methods.
-Install in your chosen environment:
+For a one-shot setup, `examples/whole-body-control/setup.sh` creates the shared
+venv at `python/.venv`, installs pyoperator editable plus both controllers'
+dependencies, and picks the GPU or CPU ONNX Runtime requirements automatically
+(`FORCE_CPU=1` overrides detection). To install manually in your own chosen
+environment instead:
 
 ```bash
 pip install -e ./python -r examples/whole-body-control/requirements.txt
