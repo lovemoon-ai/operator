@@ -85,6 +85,28 @@
       "script": "res://tests/unit/contracts/sensor_frame_test.gd"
     },
     {
+      "id": "contracts.tracking_interlocks",
+      "level": "unit",
+      "suite": "tracking.sessions",
+      "module": "teleop",
+      "script": "res://tests/unit/teleop/tracking_consumer_interlock_test.gd"
+    },
+    {
+      "id": "contracts.tracking_sessions",
+      "level": "unit",
+      "suite": "tracking.sessions",
+      "module": "xr",
+      "script": "res://tests/unit/teleop/tracking_session_service_test.gd"
+    },
+    {
+      "id": "device.pico.capture_body_status",
+      "level": "device",
+      "suite": "device.pico.capture",
+      "module": "app/modes",
+      "required_device": "pico",
+      "script": "res://tests/device/pico/capture_body_status_test.gd"
+    },
+    {
       "id": "mode_ego_capture.device_smoke",
       "level": "device",
       "required_device": "quest_or_pico"

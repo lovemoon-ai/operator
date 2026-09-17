@@ -13,6 +13,7 @@ const V1_BODY_JOINT_FIELDS := ["joint", "flags", "tracked", "radius_m", "pose"]
 const V1_MOTION_TRACKER_FIELDS := ["id", "tracker_index", "pose", "battery_level"]
 
 signal frame_sent(frame_id: int, timestamp_ns: int)
+signal tracking_blocked(report: Dictionary)
 
 var tracking_provider: TrackingProvider
 var tcp_handler: TcpHandler
@@ -20,6 +21,8 @@ var _sending := false
 var _min_send_interval := 1.0 / float(DEFAULT_RATE_HZ)
 var _time_since_last_send := 0.0
 var _tracking_sampler: XrTrackingSampler
+var _tracking_interlocked := false
+var _has_published_tracking := false
 
 
 func configure(stream_config: Dictionary) -> void:
@@ -27,6 +30,10 @@ func configure(stream_config: Dictionary) -> void:
 	_min_send_interval = 1.0 / float(rate_hz)
 	var sampler := _ensure_sampler()
 	sampler.configure(stream_config)
+	if not sampler.has_tracker_demand():
+		# A new head/controller/hand-only request is not governed by an old
+		# body-session latch. Changing to another body request does NOT re-arm.
+		rearm_tracking()
 	var requested_streams: Dictionary = {}
 	for stream in stream_config.get("streams", []):
 		requested_streams[str(stream)] = true
@@ -38,10 +45,35 @@ func configure(stream_config: Dictionary) -> void:
 
 
 func set_sending(enabled: bool) -> void:
+	if _sending == enabled:
+		return
 	_sending = enabled
 	_time_since_last_send = 0.0
-	if not enabled and _tracking_sampler != null:
+	if enabled:
+		_ensure_sampler().activate()
+	elif _tracking_sampler != null:
 		_tracking_sampler.reset()
+		if not _tracking_interlocked:
+			_tracking_sampler.shutdown()
+
+
+func rearm_tracking() -> void:
+	_tracking_interlocked = false
+	_has_published_tracking = false
+
+
+func is_tracking_interlocked() -> bool:
+	return _tracking_interlocked
+
+
+func shutdown() -> void:
+	_sending = false
+	if _tracking_sampler != null:
+		_tracking_sampler.shutdown()
+
+
+func _exit_tree() -> void:
+	shutdown()
 
 
 func is_sending() -> bool:
@@ -60,20 +92,51 @@ func _process(delta: float) -> void:
 
 	var sampler := _ensure_sampler()
 	sampler.tracking_provider = tracking_provider
+	if not sampler.is_tracking_ready():
+		_on_tracking_invalidated(sampler.tracking_status())
+		return
+	if _tracking_interlocked:
+		return
 	var snapshot := sampler.sample_frame()
 	if snapshot.is_empty():
+		return
+	if not sampler.snapshot_tracking_ready(snapshot):
+		_on_tracking_invalidated({"phase": "waiting_body"})
 		return
 	var frame := _frame_v1(snapshot)
 	var payload := JSON.stringify(frame).to_utf8_buffer()
 	if tcp_handler.send_command("XrStateFrame", payload) == OK:
+		_has_published_tracking = true
 		frame_sent.emit(int(frame.get("frame_id", 0)), int(frame.get("timestamp_ns", 0)))
 
 
 func _ensure_sampler() -> XrTrackingSampler:
 	if _tracking_sampler == null:
 		_tracking_sampler = XrTrackingSamplerScript.new()
+		_tracking_sampler.tracking_invalidated.connect(_on_tracking_invalidated)
 	_tracking_sampler.tracking_provider = tracking_provider
 	return _tracking_sampler
+
+
+func _on_tracking_invalidated(report: Dictionary) -> void:
+	if not _sending or _tracking_interlocked:
+		return
+	if not _has_published_tracking and report.get("phase") in ["waiting_body", "motion_setup"]:
+		return # Already-calibrated startup may still be waiting for its first frame.
+	_tracking_interlocked = true
+	if _tracking_sampler != null:
+		_tracking_sampler.reset()
+	# No robot-independent neutral command exists in XrStateFrame v1. Closing
+	# transport gives the host an explicit loss instead of stale valid poses.
+	call_deferred("_disconnect_for_tracking", report)
+
+
+func _disconnect_for_tracking(report: Dictionary) -> void:
+	if not _tracking_interlocked:
+		return
+	if tcp_handler != null:
+		tcp_handler.disconnect_from_robot()
+	tracking_blocked.emit(report)
 
 
 func _frame_v1(snapshot: Dictionary) -> Dictionary:

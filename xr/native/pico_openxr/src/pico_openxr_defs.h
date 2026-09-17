@@ -51,6 +51,7 @@ using PFN_xrVoidFunction = void(XRAPI_PTR)();
 
 static constexpr XrResult XR_SUCCESS = 0;
 static constexpr XrResult XR_ERROR_VALIDATION_FAILURE = -1;
+static constexpr XrResult XR_ERROR_FEATURE_UNSUPPORTED = -8;
 static constexpr XrResult XR_ERROR_HANDLE_INVALID = -12;
 static constexpr XrResult XR_ERROR_CAMERA_UNAVAILABLE_PICO = -1010033000;
 static constexpr XrResult XR_ERROR_CAMERA_OCCUPIED_PICO = -1010033001;

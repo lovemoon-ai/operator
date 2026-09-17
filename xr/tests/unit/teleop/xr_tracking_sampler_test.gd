@@ -128,6 +128,32 @@ class FakeBridgeWithoutPredictedTime:
 	extends RefCounted
 
 
+class SamplerSessions:
+	extends RefCounted
+	var bridge: Object
+	var acquired := false
+	var started_body := false
+	func acquire(_owner: Object, capabilities: Array, count: int) -> void:
+		if acquired:
+			return
+		acquired = true
+		if capabilities.has("body"):
+			started_body = bool(bridge.call("start_body_tracking", {}))
+		elif capabilities.has("motion"):
+			bridge.call("request_motion_trackers", count)
+	func release(_owner: Object) -> void:
+		if started_body:
+			bridge.call("stop_body_tracking")
+		started_body = false
+		acquired = false
+	func status(_owner: Object) -> Dictionary:
+		return {"allowed": true, "generation": 0}
+	func sample_body(_owner: Object) -> Dictionary:
+		return bridge.call("sample_body_joints")
+	func sample_motion(_owner: Object) -> Array:
+		return bridge.call("sample_motion_trackers", 3)
+
+
 class DeterministicSampler:
 	extends XrTrackingSampler
 	var now_us := 0
@@ -138,6 +164,10 @@ class DeterministicSampler:
 
 	func _resolve_pico_bridge() -> void:
 		_pico_bridge = fake_bridge
+		if tracking_sessions == null:
+			var sessions := SamplerSessions.new()
+			sessions.bridge = fake_bridge
+			tracking_sessions = sessions
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
@@ -354,7 +384,9 @@ func _test_body_shutdown_ownership(t: OperatorTestAssertions) -> void:
 	body_sampler.tracking_provider = provider
 	body_sampler.fake_bridge = body_bridge
 	body_sampler.configure({"streams": ["body"]})
-	t.eq(body_bridge.body_starts, 1, "body configuration starts PICO body tracking once")
+	t.eq(body_bridge.body_starts, 0, "configuration alone does not start body tracking")
+	body_sampler.activate()
+	t.eq(body_bridge.body_starts, 1, "activation acquires tracking once")
 	body_sampler.reset()
 	t.eq(body_bridge.body_stops, 0, "reset clears caches without stopping PICO body tracking")
 	body_sampler.call("shutdown")

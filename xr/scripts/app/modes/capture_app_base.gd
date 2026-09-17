@@ -35,16 +35,8 @@ const CUE_SAMPLE_RATE := 32000
 const UPLOAD_ACK_TIMEOUT_SECONDS := 8.0
 const AUDIO_PERMISSION_GRACE_US := 3000000
 const TRACKER_STATUS_REFRESH_SECONDS := 0.5
-const TRACKER_REQUEST_RETRY_SECONDS := 3.0
 const TRACKER_SETUP_OPENING_SECONDS := 4.0
 const DEFAULT_PICO_BODY_TRACKERS := 2
-const PICO_BODY_MESSAGE_TRACKER_NOT_CALIBRATED := 1
-const PICO_BODY_MESSAGE_TRACKER_NUM_NOT_ENOUGH := 2
-const PICO_BODY_MESSAGE_TRACKER_STATE_NOT_SATISFIED := 3
-const PICO_BODY_MESSAGE_TRACKER_PERSISTENT_INVISIBILITY := 4
-const PICO_BODY_MESSAGE_TRACKING_POSE_ERROR := 7
-const PICO_BODY_STATUS_VALID := 1
-const PICO_BODY_STATUS_LIMITED := 2
 const XR_TRACKING_STABLE_SECONDS := 0.75
 const XR_TRACKING_WAIT_TIMEOUT_SECONDS := 15.0
 const XR_TRACKING_POLL_SECONDS := 0.1
@@ -115,6 +107,8 @@ var _platform: PlatformRegistry
 var camera_plugin: Object
 var muxer_plugin: Object
 var pico_openxr_bridge: Object
+var _tracking_sessions: TrackingSessionService
+var _pico_calibration_report: Dictionary = {}
 var live_server_plugin: Object
 var live_pull_view: Node3D
 ## Streams the Live Feed server last asked for (OLCP stream names). Empty
@@ -236,7 +230,6 @@ var _pico_view_pose_log_count := 0
 var _metrics_pose_loop_iters := 0
 var _metrics_started_ticks_us := 0
 var _tracker_status_refresh_accum := TRACKER_STATUS_REFRESH_SECONDS
-var _tracker_last_request_ticks_us := 0
 var _tracker_setup_opened_ticks_us := 0
 var _last_capture_interaction_mode := ""
 var _motion_tracker_supported_pushed := false
@@ -942,6 +935,8 @@ func _exit_tree() -> void:
 	_capture_start_cancel_requested = true
 	_set_volume_buttons_captured(false)
 	stop_capture()
+	if _tracking_sessions != null:
+		_tracking_sessions.release(self)
 	_stop_live_pull()
 	var interaction := _operator_interaction()
 	if interaction != null:
@@ -1022,7 +1017,7 @@ func _setup_capture_controller(io: Dictionary) -> void:
 		"pose_sampler": pose_sampler,
 		"depth_sampler": depth_sampler,
 		"body_motion_sampler": body_motion_sampler,
-		"permission_check": Callable(self, "_ensure_output_storage_ready"),
+		"permission_check": Callable(self, "_ensure_capture_start_ready"),
 	}
 	if _is_live_feed_mode():
 		_capture_controller = LiveFeedComposition.build_controller(io, deps)
@@ -1040,6 +1035,8 @@ func start_capture() -> void:
 	if _capture_controller == null:
 		return
 	if _export_space_start_pending:
+		return
+	if not _ensure_pico_capture_calibrated(capture_options):
 		return
 	_capture_start_cancel_requested = false
 	_export_space_start_pending = true
@@ -1307,6 +1304,7 @@ func _setup_xr_scene() -> void:
 		)
 	settings_panel.saved.connect(_on_capture_settings_saved)
 	settings_panel.tracker_connect_requested.connect(_on_tracker_connect_requested)
+	settings_panel.tracker_calibration_confirm_requested.connect(_on_tracker_calibration_confirm_requested)
 	settings_panel.exit_requested.connect(_on_exit_requested)
 	# Camera button on the Upload URL row → open the QR scanner overlay.
 	if settings_panel.has_signal("scan_upload_url_requested"):
@@ -2695,39 +2693,96 @@ func _has_body_motion_streams_enabled() -> bool:
 
 
 func _update_pico_tracker_setup_status(delta: float) -> void:
-	if settings_panel == null or not bool(settings_panel.get("visible")):
-		return
-	if not settings_panel.has_method("set_pico_tracker_status"):
+	if _is_live_feed_mode():
 		return
 	_tracker_status_refresh_accum += delta
 	if _tracker_status_refresh_accum < TRACKER_STATUS_REFRESH_SECONDS:
 		return
 	_tracker_status_refresh_accum = 0.0
-	var options: Dictionary = settings_panel.get_options() if settings_panel.has_method("get_options") else capture_options
+	var options := _pico_selected_capture_options()
 	if not _pico_tracker_setup_required(options):
-		settings_panel.call("set_pico_tracker_status", false, false, 0, false, false, false)
+		if _tracking_sessions != null:
+			_tracking_sessions.release(self)
+		if settings_panel != null:
+			settings_panel.call("set_pico_tracker_status", false, false, 0, false, false, false)
 		return
-	var status := _pico_openxr_status()
-	var tracker_count := int(status.get("motion_tracker_count", 0))
-	var connected := tracker_count > 0
-	var request_sent := bool(status.get("motion_request_sent", false))
+	var report := _refresh_pico_capture_calibration(options)
+	# This runs with the settings CLOSED too, using the immutable session
+	# options while recording. A loss finalizes the current file normally.
+	if _recording and not bool(report.get("allowed", false)):
+		stop_capture()
+		_show_pico_calibration_required()
+	if settings_panel == null or not bool(settings_panel.get("visible")):
+		return
 	var opening_setup := _tracker_setup_opened_ticks_us > 0 and Time.get_ticks_usec() - _tracker_setup_opened_ticks_us < int(TRACKER_SETUP_OPENING_SECONDS * 1000000.0)
-	var can_open_setup := pico_openxr_bridge != null and (
-			pico_openxr_bridge.has_method("request_motion_trackers")
-			or pico_openxr_bridge.has_method("start_body_tracking_calibration_app")
-	)
-	settings_panel.call("set_pico_tracker_status", true, connected, tracker_count, request_sent, can_open_setup, opening_setup)
+	settings_panel.call("set_pico_calibration_status", report, bool(report.get("can_calibrate", false)), opening_setup)
+
+
+func _pico_selected_capture_options() -> Dictionary:
+	if _recording:
+		return _active_capture_options
+	if settings_panel != null and bool(settings_panel.get("visible")):
+		return settings_panel.get_options()
+	return capture_options
+
+
+func _refresh_pico_capture_calibration(options: Dictionary) -> Dictionary:
+	_tracking_sessions = TrackingSessionService.shared()
+	if _tracking_sessions == null:
+		return {"phase": "unavailable", "allowed": false}
+	var capabilities: Array = ["body"] if bool(options.get("record_body_tracking", false)) else (["motion"] if bool(options.get("record_motion_trackers", false)) else [])
+	_tracking_sessions.acquire(self, capabilities, int(options.get("max_motion_trackers", 2)))
+	var report := _tracking_sessions.status(self)
+	if report.get("phase") != _pico_calibration_report.get("phase") or report.get("mode") != _pico_calibration_report.get("mode"):
+		print("[CaptureCalibration] %s" % str(report))
+	_pico_calibration_report = report
+	return report
+
+
+func _ensure_capture_start_ready() -> bool:
+	# Recheck AFTER the asynchronous export-space wait and before the writer
+	# allocates any tracks. All start inputs share this gate.
+	return _ensure_pico_capture_calibrated(_active_capture_options) and _ensure_output_storage_ready()
+
+
+func _ensure_pico_capture_calibrated(options: Dictionary) -> bool:
+	if _is_live_feed_mode() or not _pico_tracker_setup_required(options):
+		return true
+	var report := _refresh_pico_capture_calibration(options)
+	if _tracking_sessions != null:
+		report = _tracking_sessions.status(self, true)
+		_pico_calibration_report = report
+	if bool(report.get("allowed", false)):
+		return true
+	_show_pico_calibration_required()
+	return false
+
+
+func _show_pico_calibration_required() -> void:
+	push_warning("[CaptureApp] tracker capture blocked: %s" % str(_pico_calibration_report))
+	if settings_panel != null:
+		if record_control != null:
+			record_control.hide_control()
+		settings_panel.open()
+		settings_panel.select_group("streams")
+		settings_panel.call("set_pico_calibration_status", _pico_calibration_report, bool(_pico_calibration_report.get("can_calibrate", false)), false)
 
 
 func _on_tracker_connect_requested() -> void:
+	if _recording:
+		return
 	var options: Dictionary = settings_panel.get_options() if settings_panel != null and settings_panel.has_method("get_options") else capture_options
 	if not _pico_tracker_setup_required(options):
 		return
 	var opened := false
-	if bool(options.get("record_body_tracking", false)):
-		opened = _open_pico_body_tracking_setup("tracker setup", {})
-	elif bool(options.get("record_motion_trackers", false)):
-		opened = _request_pico_motion_trackers(options, true)
+	var report := _refresh_pico_capture_calibration(options)
+	if _tracking_sessions == null:
+		return
+	if report.get("phase") == "motion_setup":
+		_tracking_sessions.retry_setup()
+		opened = true
+	else:
+		opened = _tracking_sessions.begin_calibration()
 	if opened:
 		_tracker_setup_opened_ticks_us = Time.get_ticks_usec()
 		print("PICO tracker setup requested")
@@ -2737,85 +2792,21 @@ func _on_tracker_connect_requested() -> void:
 	_update_pico_tracker_setup_status(0.0)
 
 
+func _on_tracker_calibration_confirm_requested() -> void:
+	if _recording:
+		return
+	var options := _pico_selected_capture_options()
+	if not _pico_tracker_setup_required(options):
+		return
+	_refresh_pico_capture_calibration(options)
+	if _tracking_sessions == null or not _tracking_sessions.confirm_calibration():
+		push_warning(tr("UI_TRACKING_CONFIRM_REJECTED"))
+	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
+	_update_pico_tracker_setup_status(0.0)
+
+
 func _pico_tracker_setup_required(options: Dictionary) -> bool:
-	if camera_plugin == null:
-		_bind_android_plugin()
-	if camera_plugin == null or not CaptureProviderRegistryScript.provider_uses_pico_bridge(CaptureProviderRegistryScript.provider_name(camera_plugin)):
-		return false
-	return bool(options.get("record_body_tracking", false)) or bool(options.get("record_motion_trackers", false))
-
-
-func _request_pico_motion_trackers(options: Dictionary, force: bool = false) -> bool:
-	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("request_motion_trackers"):
-		return false
-	var max_trackers := clampi(int(options.get("max_motion_trackers", DEFAULT_PICO_BODY_TRACKERS)), 0, 6)
-	if max_trackers <= 0:
-		return false
-	var now_us := Time.get_ticks_usec()
-	var retry_window_us := int(TRACKER_REQUEST_RETRY_SECONDS * 1000000.0)
-	if not force \
-			and _tracker_last_request_ticks_us > 0 \
-			and now_us - _tracker_last_request_ticks_us < retry_window_us:
-		return false
-	_tracker_last_request_ticks_us = now_us
-	return bool(pico_openxr_bridge.call("request_motion_trackers", max_trackers))
-
-
-func _pico_body_debug_needs_setup(body: Dictionary) -> bool:
-	var status := _pico_openxr_status()
-	if not bool(status.get("pico_body_tracking2_extension", false)):
-		return false
-	var body_status := int(body.get("status", 0))
-	if body_status != PICO_BODY_STATUS_VALID and body_status != PICO_BODY_STATUS_LIMITED:
-		return true
-	var joints_v: Variant = body.get("joints", [])
-	if typeof(joints_v) == TYPE_ARRAY and not (joints_v as Array).is_empty():
-		return false
-	var message := int(body.get("message", 0))
-	if [
-			PICO_BODY_MESSAGE_TRACKER_NOT_CALIBRATED,
-			PICO_BODY_MESSAGE_TRACKER_NUM_NOT_ENOUGH,
-			PICO_BODY_MESSAGE_TRACKER_STATE_NOT_SATISFIED,
-			PICO_BODY_MESSAGE_TRACKER_PERSISTENT_INVISIBILITY,
-			PICO_BODY_MESSAGE_TRACKING_POSE_ERROR,
-	].has(message):
-		return true
-	return int(status.get("motion_tracker_count", 0)) <= 0
-
-
-func _open_pico_body_tracking_setup(reason: String, body: Dictionary) -> bool:
-	if pico_openxr_bridge == null \
-			or not pico_openxr_bridge.has_method("start_body_tracking_calibration_app"):
-		return false
-	var opened := bool(pico_openxr_bridge.call("start_body_tracking_calibration_app"))
-	if opened:
-		_tracker_setup_opened_ticks_us = Time.get_ticks_usec()
-		print(
-			"[CaptureApp] Pico body tracking setup opened for %s: body=%s status=%s"
-			% [reason, _pico_body_setup_summary(body), JSON.stringify(_pico_openxr_status())]
-		)
-	else:
-		push_warning(
-			"[CaptureApp] Pico body tracking setup failed for %s: body=%s status=%s"
-			% [reason, _pico_body_setup_summary(body), JSON.stringify(_pico_openxr_status())]
-		)
-	return opened
-
-
-func _pico_body_setup_summary(body: Dictionary) -> String:
-	if body == null or body.is_empty():
-		return "{}"
-	var joints_v: Variant = body.get("joints", [])
-	var joint_count := (joints_v as Array).size() if typeof(joints_v) == TYPE_ARRAY else 0
-	return "status=%s message=%s joints=%d locate_result=%s state_result=%s active=%s supported=%s" % [
-		str(body.get("status", "")),
-		str(body.get("message", "")),
-		joint_count,
-		str(body.get("locate_result", "")),
-		str(body.get("state_result", "")),
-		str(body.get("active", false)),
-		str(body.get("supported", false)),
-	]
+	return PicoPlatformAdapter.is_pico_build() and (bool(options.get("record_body_tracking", false)) or bool(options.get("record_motion_trackers", false)))
 
 
 ## Push the "external motion-tracker capture is available on this device?"

@@ -17,6 +17,7 @@ const BODY_TRACKER_NAME := &"/user/body_tracker"
 
 signal canonical_frame_ready(frame: Dictionary)
 signal tracking_unavailable(source: String, reason: String)
+signal frame_invalidated
 ## Emitted with the *raw* vendor frame (one of the per-vendor schemas:
 ## ``operator.raw_vendor_pose.v1``, source = ``pico_bd_body_tracking`` or
 ## ``meta_fb_body_tracking``). Lets ``SessionSpoolWriter`` archive the
@@ -53,6 +54,8 @@ var _fallback_adapter: FallbackBodyAdapter = FallbackBodyAdapter.new()
 var _last_frame: Dictionary = {}
 var _time_since_last_sample: float = 0.0
 var _enabled: bool = false
+var _output_enabled := true
+var _tracking_sessions: TrackingSessionService
 var _last_pico_diag_key := ""
 var _last_pico_diag_usec := 0
 var _pico_unavailable_since_usec := 0
@@ -72,8 +75,49 @@ func configure(p_tracking_provider: Object, p_pico_bridge: Object = null) -> voi
 func set_enabled(value: bool) -> void:
 	_enabled = value
 	_time_since_last_sample = 0.0
+	if _tracking_sessions == null:
+		_tracking_sessions = TrackingSessionService.shared()
+	if _tracking_sessions != null:
+		if not _tracking_sessions.changed.is_connected(_on_tracking_changed):
+			_tracking_sessions.changed.connect(_on_tracking_changed)
+		if value and source_mode in [SourceMode.AUTO, SourceMode.PICO_ONLY, SourceMode.GODOT_ONLY]:
+			_tracking_sessions.acquire(self, ["body"])
+		else:
+			_tracking_sessions.release(self)
 	if not value:
+		_last_frame = {}
+		frame_invalidated.emit()
 		_reset_pico_availability()
+
+
+func set_output_enabled(value: bool) -> void:
+	_output_enabled = value
+	if not value:
+		_last_frame = {}
+
+
+func tracking_status() -> Dictionary:
+	return _tracking_sessions.status(self) if _tracking_sessions != null else {"allowed": pico_openxr_bridge == null, "phase": "unavailable"}
+
+
+func is_tracking_ready() -> bool:
+	return bool(tracking_status().get("allowed", false))
+
+
+func _exit_tree() -> void:
+	set_enabled(false)
+
+
+func _on_tracking_changed() -> void:
+	if not _enabled:
+		return
+	if is_tracking_ready():
+		_reset_pico_availability()
+	elif not _pico_unavailable_emitted:
+		_last_frame = {}
+		frame_invalidated.emit()
+		_pico_unavailable_emitted = true
+		tracking_unavailable.emit("pico", "tracking_not_ready")
 
 
 func is_enabled() -> bool:
@@ -86,6 +130,12 @@ func get_latest_frame() -> Dictionary:
 
 func _physics_process(delta: float) -> void:
 	if not _enabled:
+		return
+	if not is_tracking_ready():
+		_last_frame = {}
+		_note_pico_unavailable("tracking_not_ready")
+		return
+	if not _output_enabled:
 		return
 	if sample_rate_hz <= 0.0:
 		return
@@ -110,6 +160,9 @@ func _physics_process(delta: float) -> void:
 			# always fall back to HMD+controllers so the resolver has at
 			# least head+wrist+inferred-torso when the body tracker drops.
 			var pico_frame := _sample_pico(ts_ns)
+			if pico_openxr_bridge != null and pico_frame.is_empty():
+				_last_frame = {}
+				return
 			if not pico_frame.is_empty():
 				partial_frames.append(pico_frame)
 			var godot_frame := _sample_godot(ts_ns)
@@ -126,6 +179,7 @@ func _physics_process(delta: float) -> void:
 		if typeof(f) == TYPE_DICTIONARY and not f.is_empty():
 			non_empty.append(f)
 	if non_empty.is_empty():
+		_last_frame = {}
 		return
 	var merged := CanonicalResolverCls.resolve(non_empty, ts_ns)
 	_last_frame = merged
@@ -161,7 +215,7 @@ func _sample_pico(timestamp_ns: int) -> Dictionary:
 				_log_pico_diag_once("unsupported", "Pico body source unsupported: %s" % JSON.stringify(status))
 				_note_pico_unavailable("unsupported")
 				return {}
-	var body: Variant = pico_openxr_bridge.call("sample_body_joints")
+	var body: Variant = _tracking_sessions.sample_body(self) if _tracking_sessions != null else {}
 	if typeof(body) != TYPE_DICTIONARY:
 		_log_pico_diag_once(
 			"sample_not_dict",

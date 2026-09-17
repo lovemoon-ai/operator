@@ -22,6 +22,7 @@ signal frame_sent(timestamp_ns: int)
 signal handshake_sent
 signal protocol_ready
 signal send_failed(reason: String)
+signal tracking_blocked(report: Dictionary)
 
 var client: Node
 var sampler: RefCounted
@@ -38,6 +39,8 @@ var _live_neutral_required := true
 var _last_top_timestamp_ns := 0
 var _sampler_configured := false
 var _app_focused := true
+var _tracking_interlocked := false
+var _has_published_tracking := false
 
 
 func configure(
@@ -47,9 +50,15 @@ func configure(
 	options: Dictionary = {}
 ) -> void:
 	_unbind_client()
+	if sampler != null and sampler.has_signal("tracking_invalidated") and sampler.is_connected("tracking_invalidated", _on_tracking_invalidated):
+		sampler.disconnect("tracking_invalidated", _on_tracking_invalidated)
+	if sampler != null and sampler.has_method("shutdown"):
+		sampler.call("shutdown")
 	client = xrt_client
 	sampler = sampler_override if sampler_override != null else XrTrackingSamplerScript.new()
 	sampler.set("tracking_provider", tracking_provider)
+	if sampler.has_signal("tracking_invalidated") and not sampler.is_connected("tracking_invalidated", _on_tracking_invalidated):
+		sampler.connect("tracking_invalidated", _on_tracking_invalidated)
 	_sampler_configured = false
 	set_identity(options)
 	_bind_client()
@@ -73,6 +82,10 @@ func set_sending(enabled: bool) -> void:
 	if sampler != null:
 		if enabled:
 			_configure_sampler()
+			if sampler.has_method("activate"):
+				sampler.call("activate")
+		elif not _tracking_interlocked and sampler.has_method("shutdown"):
+			sampler.call("shutdown")
 		sampler.call("reset")
 	if enabled:
 		if _protocol_ready and _client_connected() and _live_neutral_required:
@@ -84,6 +97,16 @@ func set_sending(enabled: bool) -> void:
 
 func is_sending() -> bool:
 	return _sending
+
+
+func rearm_tracking() -> void:
+	_tracking_interlocked = false
+	_has_published_tracking = false
+	_live_neutral_required = true
+
+
+func is_tracking_interlocked() -> bool:
+	return _tracking_interlocked
 
 
 ## Mirrors the Android APPLICATION_PAUSED/APPLICATION_RESUMED lifecycle onto the
@@ -140,6 +163,11 @@ func _process(delta: float) -> void:
 	# tracking below does not resume until the operator is back.
 	if not _app_focused:
 		return
+	if sampler.has_method("is_tracking_ready") and not bool(sampler.call("is_tracking_ready")):
+		_on_tracking_invalidated(sampler.call("tracking_status"))
+		return
+	if _tracking_interlocked:
+		return # Calibration completing does not automatically move a robot.
 	if _live_neutral_required:
 		if _send_neutral() == OK:
 			_live_neutral_required = false
@@ -152,7 +180,24 @@ func _process(delta: float) -> void:
 	var snapshot: Variant = sampler.call("sample_frame")
 	if not (snapshot is Dictionary) or snapshot.is_empty():
 		return
-	_send_tracking(_encode_snapshot(snapshot as Dictionary))
+	if sampler.has_method("snapshot_tracking_ready") and not bool(sampler.call("snapshot_tracking_ready", snapshot)):
+		_on_tracking_invalidated({"phase": "waiting_body"})
+		return
+	if _send_tracking(_encode_snapshot(snapshot as Dictionary)) == OK:
+		_has_published_tracking = true
+
+
+func _on_tracking_invalidated(report: Dictionary) -> void:
+	if not _sending or _tracking_interlocked:
+		return
+	if not _has_published_tracking and report.get("phase") in ["waiting_body", "motion_setup"]:
+		return
+	_tracking_interlocked = true
+	if _protocol_ready and _client_connected():
+		_send_neutral()
+	if sampler != null:
+		sampler.call("reset")
+	tracking_blocked.emit(report)
 
 
 func _on_client_connected() -> void:
@@ -296,6 +341,10 @@ func shutdown() -> void:
 		sampler.call("shutdown")
 	_sampler_configured = false
 	reset()
+
+
+func _exit_tree() -> void:
+	shutdown()
 
 
 func _unbind_client() -> void:

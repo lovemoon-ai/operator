@@ -50,6 +50,8 @@ class FakeClient:
 
 class FakeSampler:
 	extends RefCounted
+	signal tracking_invalidated(report: Dictionary)
+	var ready := true
 
 	var tracking_provider: Node
 	var configured: Dictionary = {}
@@ -64,6 +66,10 @@ class FakeSampler:
 
 	func reset() -> void:
 		reset_calls += 1
+	func is_tracking_ready() -> bool:
+		return ready
+	func tracking_status() -> Dictionary:
+		return {"allowed": ready, "phase": "ready" if ready else "required"}
 
 	func sample_frame() -> Dictionary:
 		var index := sample_calls
@@ -108,6 +114,37 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_backward_clock_step_rebaselines(t)
 	_test_focus_loss_sends_one_neutral(t)
 	_test_v1_body_schema_keeps_a_fixed_joint_array(t)
+	_test_calibration_loss_interlock(t)
+
+
+func _test_calibration_loss_interlock(t: OperatorTestAssertions) -> void:
+	var provider := Node.new()
+	var client := FakeClient.new()
+	var sampler := FakeSampler.new()
+	sampler.frames = [_snapshot(0.5, true), _snapshot(0.5, true)]
+	var sender := XrtSenderScript.new()
+	sender.configure(provider, client, sampler)
+	sender.set_sending(true)
+	client.emit_connected()
+	sender._process(0.02)
+	var before := client.packets.size()
+	sampler.ready = false
+	sampler.tracking_invalidated.emit(sampler.tracking_status())
+	t.eq(client.packets.size(), before + 1, "tracking loss immediately sends one protocol neutral frame")
+	_assert_neutral(t, _tracking(client.packets.back()), "tracking loss")
+	var reads := sampler.sample_calls
+	sender._process(0.02)
+	t.eq(sampler.sample_calls, reads, "unready body is not sampled")
+	sampler.ready = true
+	sender.set_app_focused(false)
+	sender.set_app_focused(true)
+	sender._process(0.02)
+	t.eq(sampler.sample_calls, reads, "calibration/focus recovery cannot automatically re-arm teleop")
+	sender.rearm_tracking()
+	sender._process(0.02) # neutral before the next live frame
+	sender._process(0.02)
+	t.eq(sampler.sample_calls, reads + 1, "explicit re-arm permits a new live sample")
+	_free_fixture(sender, provider, client)
 
 
 func _test_identity_fields_are_protocol_safe(t: OperatorTestAssertions) -> void:

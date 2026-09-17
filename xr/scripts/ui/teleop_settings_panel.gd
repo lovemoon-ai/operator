@@ -5,6 +5,7 @@ signal settings_applied(options: Dictionary)
 signal disconnect_requested
 signal close_requested
 signal pico_body_calibration_requested
+signal tracker_calibration_confirm_requested
 signal video_connect_requested(options: Dictionary)
 signal blueprint_visibility_override_requested(component_id: String, visible: Variant)
 ## Display preferences are the live view, not a staged form: they are saved
@@ -155,6 +156,10 @@ var _ip_dropdown_endpoint_ids: PackedStringArray = PackedStringArray()
 var _port_input: LineEdit
 var _disconnect_button: Button
 var _pico_body_calibration_button: Button
+var _tracking_status_label: Label
+var _tracking_confirm_button: Button
+var _tracking_confirm_slot: PanelContainer
+var _tracking_report: Dictionary = {}
 var _video_protocol_row: HBoxContainer
 var _video_protocol_buttons: Dictionary = {}
 var _selected_video_protocol := DEFAULT_VIDEO_PROTOCOL
@@ -386,6 +391,13 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_port_input.text_changed.connect(_on_manual_endpoint_changed)
 	add_interactive(port_row, _port_input)
 
+	# Shared tracking status is outside the Inside/Outside containers. Its
+	# visibility follows live demand, not the selected robot wire protocol.
+	_tracking_status_label = Label.new()
+	_tracking_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_tracking_status_label.add_theme_font_size_override("font_size", 18)
+	_tracking_status_label.visible = false
+	robot.add_child(_tracking_status_label)
 	_pico_body_calibration_button = Button.new()
 	_pico_body_calibration_button.text = tr("UI_PICO_BODY_CALIBRATION")
 	_pico_body_calibration_button.focus_mode = Control.FOCUS_NONE
@@ -393,7 +405,16 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_pico_body_calibration_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_pico_body_calibration_button.add_theme_font_size_override("font_size", 21)
 	_pico_body_calibration_button.pressed.connect(_on_pico_body_calibration_pressed)
-	add_interactive(connection, _pico_body_calibration_button)
+	_pico_body_calibration_button.visible = false
+	add_interactive(robot, _pico_body_calibration_button)
+	_tracking_confirm_button = Button.new()
+	_tracking_confirm_button.text = tr("UI_TRACKING_CONFIRM_CALIBRATION")
+	_tracking_confirm_button.focus_mode = Control.FOCUS_NONE
+	_tracking_confirm_button.custom_minimum_size.y = 55
+	_tracking_confirm_button.add_theme_font_size_override("font_size", 21)
+	_tracking_confirm_button.pressed.connect(func() -> void: tracker_calibration_confirm_requested.emit())
+	_tracking_confirm_slot = add_interactive(robot, _tracking_confirm_button)
+	_tracking_confirm_slot.visible = false
 
 	var status_row := HBoxContainer.new()
 	status_row.add_theme_constant_override("separation", 10)
@@ -1475,10 +1496,6 @@ func _refresh_protocol_buttons() -> void:
 
 
 func _refresh_xrobot_toolkit_controls() -> void:
-	var show_xrobot_controls := (
-		_target_scope == DEFAULT_TARGET_SCOPE
-		and _selected_protocol == PROTOCOL_XROBOT_TOOLKIT_V1
-	)
 	var robot_authored_blueprint := (
 		_target_scope == DEFAULT_TARGET_SCOPE
 		and _selected_protocol == PROTOCOL_OPERATOR
@@ -1493,11 +1510,28 @@ func _refresh_xrobot_toolkit_controls() -> void:
 		var slot := legacy_toggle.get_parent() as Control
 		if slot != null:
 			slot.visible = not robot_authored_blueprint
-	if _pico_body_calibration_button != null:
-		_pico_body_calibration_button.visible = show_xrobot_controls
-		var slot := _pico_body_calibration_button.get_parent() as Control
-		if slot != null:
-			slot.visible = show_xrobot_controls
+	set_tracking_status(_tracking_report)
+
+
+func set_tracking_status(report: Dictionary) -> void:
+	_tracking_report = report.duplicate()
+	if _pico_body_calibration_button == null or _tracking_status_label == null:
+		return
+	var needed := PicoPlatformAdapter.is_pico_build() and bool(report.get("needed", false))
+	var phase := str(report.get("phase", "required"))
+	_tracking_status_label.visible = needed
+	_tracking_status_label.text = tr(TrackingStatusText.key(phase))
+	if bool(report.get("rearm_required", false)) and phase in ["ready", "limited"]:
+		_tracking_status_label.text = tr("UI_TRACKING_CALIBRATION_CONFIRMED")
+	_pico_body_calibration_button.visible = needed
+	var slot := _pico_body_calibration_button.get_parent() as Control
+	if slot != null:
+		slot.visible = needed
+	_pico_body_calibration_button.text = tr("UI_PICO_RECALIBRATE")
+	_pico_body_calibration_button.disabled = not bool(report.get("can_calibrate", false)) or phase == "mode_conflict"
+	if _tracking_confirm_slot != null:
+		_tracking_confirm_slot.visible = needed and bool(report.get("needs_confirmation", false))
+		_tracking_confirm_button.disabled = not bool(report.get("can_confirm", false))
 
 
 ## XRoboToolkit compatibility rides Pico vendor APIs, so only Pico builds may

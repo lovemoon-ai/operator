@@ -1,5 +1,6 @@
 class_name XrTrackingSampler
 extends RefCounted
+signal tracking_invalidated(report: Dictionary)
 ## Captures one complete XR tracking snapshot from a single render sample.
 ##
 ## High-rate OpenXR fields are read together. Body and motion-tracker data are
@@ -38,10 +39,13 @@ var _cached_motion_trackers: Array = []
 var _pico_bridge: Object = null
 var _strict_pico_body_validation := false
 var _include_predicted_display_time := false
-var _started_pico_body := false
+var tracking_sessions: Object
+var _activated := false
+var _tracking_generation := -1
 
 
 func configure(stream_config: Dictionary) -> void:
+	reset()
 	var body_rate_hz := clampi(
 		int(stream_config.get("body_rate_hz", DEFAULT_BODY_RATE_HZ)), 1, 144)
 	_body_sample_interval_us = maxi(1, int(1_000_000.0 / float(body_rate_hz)))
@@ -55,15 +59,54 @@ func configure(stream_config: Dictionary) -> void:
 	for stream in stream_config.get("streams", []):
 		_requested_streams[str(stream)] = true
 	_resolve_pico_bridge()
-	if _pico_bridge != null:
-		if _wants("body") and _pico_bridge.has_method("start_body_tracking"):
-			var started: Variant = _pico_bridge.call("start_body_tracking", {})
-			_started_pico_body = typeof(started) != TYPE_BOOL or bool(started)
-		# On Pico this API selects independent/object tracking, not the ankle
-		# trackers that feed full-body tracking. The two modes are exclusive.
-		if _wants("motion_trackers") and not _wants("body") \
-				and _pico_bridge.has_method("request_motion_trackers"):
-			_pico_bridge.call("request_motion_trackers", DEFAULT_MAX_MOTION_TRACKERS)
+	if _activated:
+		activate()
+
+
+func activate() -> void:
+	_activated = true
+	if tracking_sessions == null:
+		tracking_sessions = TrackingSessionService.shared()
+	if tracking_sessions != null:
+		if tracking_sessions.has_signal("changed") and not tracking_sessions.is_connected("changed", _on_tracking_changed):
+			tracking_sessions.connect("changed", _on_tracking_changed)
+		# Preserve the protocol's existing body-priority semantics. Never ask
+		# for independent tracker mode as a side effect of requesting "all".
+		var capabilities: Array = ["body"] if _wants("body") else (["motion"] if _wants("motion_trackers") else [])
+		tracking_sessions.acquire(self, capabilities, DEFAULT_MAX_MOTION_TRACKERS)
+
+
+func tracking_status() -> Dictionary:
+	activate()
+	return tracking_sessions.status(self) if tracking_sessions != null else {"allowed": _pico_bridge == null, "phase": "unavailable"}
+
+
+func is_tracking_ready() -> bool:
+	return bool(tracking_status().get("allowed", false))
+
+
+func has_tracker_demand() -> bool:
+	return _wants("body") or _wants("motion_trackers")
+
+
+func snapshot_tracking_ready(snapshot: Dictionary) -> bool:
+	if _pico_bridge == null:
+		return true
+	if _wants("body"):
+		var body: Variant = snapshot.get("body")
+		return body is Dictionary and not body.get("joints", []).is_empty()
+	if _wants("motion_trackers"):
+		return not snapshot.get("motion_trackers", []).is_empty()
+	return true
+
+
+func _on_tracking_changed() -> void:
+	if not _activated or tracking_sessions == null:
+		return
+	var report: Dictionary = tracking_sessions.status(self)
+	if not bool(report.get("allowed", false)):
+		reset()
+		tracking_invalidated.emit(report)
 
 
 func reset() -> void:
@@ -73,16 +116,20 @@ func reset() -> void:
 
 
 func shutdown() -> void:
-	if _started_pico_body and _pico_bridge != null \
-			and _pico_bridge.has_method("stop_body_tracking"):
-		_pico_bridge.call("stop_body_tracking")
-	_started_pico_body = false
+	if tracking_sessions != null:
+		tracking_sessions.release(self)
+	_activated = false
 	reset()
 
 
 func sample_frame() -> Dictionary:
 	if tracking_provider == null:
 		return {}
+	var readiness := tracking_status()
+	var generation := int(readiness.get("generation", 0))
+	if generation != _tracking_generation or not bool(readiness.get("allowed", false)):
+		reset()
+		_tracking_generation = generation
 	# Captured once. All high-rate fields below are read without yielding.
 	var timestamp_ns := _ticks_usec() * 1000
 	var predicted_display_time_ns := timestamp_ns
@@ -90,7 +137,8 @@ func sample_frame() -> Dictionary:
 		predicted_display_time_ns = _predicted_display_time_ns(timestamp_ns)
 	_frame_id += 1
 	var raw := tracking_provider.get_all_tracking_data()
-	_refresh_slow_tracking(timestamp_ns)
+	if bool(readiness.get("allowed", false)):
+		_refresh_slow_tracking(timestamp_ns)
 	return {
 		"schema_version": SCHEMA_VERSION,
 		"frame_id": _frame_id,
@@ -189,8 +237,8 @@ func _refresh_slow_tracking(timestamp_ns: int) -> void:
 
 
 func _sample_body(timestamp_ns: int) -> Variant:
-	if _pico_bridge != null and _pico_bridge.has_method("sample_body_joints"):
-		var pico_raw: Variant = _pico_bridge.call("sample_body_joints")
+	if _pico_bridge != null:
+		var pico_raw: Variant = tracking_sessions.sample_body(self) if tracking_sessions != null else {}
 		if pico_raw is Dictionary and bool(pico_raw.get("active", false)):
 			var pico_body := pico_raw as Dictionary
 			var status_ready := not _strict_pico_body_validation \
@@ -200,6 +248,7 @@ func _sample_body(timestamp_ns: int) -> Variant:
 				or _pico_body_position_span(pico_body) >= PICO_MIN_BODY_SPAN_M
 			if status_ready and span_ready:
 				return _body_from_records(pico_body, "pico_bd_24", timestamp_ns)
+		return null # No synthetic/other-runtime fallback around the Pico gate.
 
 	var tracker := XRServer.get_tracker(BODY_TRACKER_NAME)
 	if not (tracker is XRBodyTracker):
@@ -272,9 +321,8 @@ func _sample_motion_trackers(timestamp_ns: int) -> Array:
 		# sample_motion_trackers can itself request devices. Suppress that path
 		# even while body startup fails; never steal the trackers from body mode.
 		return []
-	if _pico_bridge != null and _pico_bridge.has_method("sample_motion_trackers"):
-		var pico_records: Variant = _pico_bridge.call(
-			"sample_motion_trackers", DEFAULT_MAX_MOTION_TRACKERS)
+	if _pico_bridge != null:
+		var pico_records: Variant = tracking_sessions.sample_motion(self) if tracking_sessions != null else []
 		if pico_records is Array and not pico_records.is_empty():
 			var pico_result: Array = []
 			for record_v in pico_records:
@@ -295,6 +343,7 @@ func _sample_motion_trackers(timestamp_ns: int) -> Array:
 						tracker[key] = _vec3(record.get(key))
 				pico_result.append(tracker)
 			return pico_result
+		return []
 
 	var result: Array = []
 	var trackers := XRServer.get_trackers(XRServer.TRACKER_ANY)

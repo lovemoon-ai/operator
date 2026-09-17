@@ -45,6 +45,7 @@ const MOTION_TRACKER_CANDIDATES := [
 
 var pose_sampler: Object
 var pico_openxr_bridge: Object
+var _tracking_sessions: TrackingSessionService
 # NativeBodyMotionWriter instance — the only body/motion write path. Null
 # when the hand_capture extension is absent (body/motion not recorded).
 var _native_writer: Object = null
@@ -159,18 +160,17 @@ func set_capture_options(options: Dictionary) -> void:
 		_record_motion_trackers = false
 	_max_motion_trackers = clampi(int(options.get("max_motion_trackers", DEFAULT_MOTION_TRACKERS)), 0, MAX_MOTION_TRACKERS)
 	_last_capture_options = options.duplicate(true)
-	if pico_openxr_bridge != null:
-		if _record_body_tracking and pico_openxr_bridge.has_method("start_body_tracking"):
-			pico_openxr_bridge.call("start_body_tracking", {})
-		if _record_motion_trackers and pico_openxr_bridge.has_method("request_motion_trackers"):
-			pico_openxr_bridge.call("request_motion_trackers", _max_motion_trackers)
+	_tracking_sessions = TrackingSessionService.shared()
+	if _tracking_sessions != null:
+		var capabilities: Array = ["body"] if _record_body_tracking else (["motion"] if _record_motion_trackers else [])
+		_tracking_sessions.acquire(self, capabilities, _max_motion_trackers)
 	if _record_motion_trackers:
 		_refresh_motion_trackers()
 
 
 func stop() -> void:
-	if pico_openxr_bridge != null and pico_openxr_bridge.has_method("stop_body_tracking"):
-		pico_openxr_bridge.call("stop_body_tracking")
+	if _tracking_sessions != null:
+		_tracking_sessions.release(self)
 	_record_body_tracking = false
 	_record_motion_trackers = false
 	_last_power_key_event_hash = 0
@@ -200,6 +200,8 @@ func sample(timestamp_ns: int) -> void:
 	if _native_writer == null:
 		return
 	if not _record_body_tracking and not _record_motion_trackers:
+		return
+	if _tracking_sessions != null and not bool(_tracking_sessions.status(self).get("allowed", false)):
 		return
 	_sample_count += 1
 	var resolved_ts := _resolve_timestamp(timestamp_ns)
@@ -360,7 +362,7 @@ func _sample_pico_body(timestamp_ns: int) -> bool:
 		return false
 	if not _pico_body_supported():
 		return false
-	var body_v: Variant = pico_openxr_bridge.call("sample_body_joints")
+	var body_v: Variant = _tracking_sessions.sample_body(self) if _tracking_sessions != null else {}
 	if typeof(body_v) != TYPE_DICTIONARY:
 		_log_body_diag_once("pico_body_sample_not_dict",
 			"Pico body sample returned %s, expected Dictionary" % type_string(typeof(body_v)))
@@ -471,7 +473,7 @@ func _sample_pico_motion_trackers(timestamp_ns: int) -> bool:
 		return false
 	if not _pico_motion_supported():
 		return false
-	var trackers: Array = pico_openxr_bridge.call("sample_motion_trackers", _max_motion_trackers)
+	var trackers: Array = _tracking_sessions.sample_motion(self) if _tracking_sessions != null else []
 	for record in trackers:
 		if typeof(record) != TYPE_DICTIONARY:
 			continue

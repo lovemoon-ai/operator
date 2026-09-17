@@ -32,8 +32,22 @@ class InvalidPicoBridge:
 		}
 
 
+class InvalidSampleSessions:
+	extends TrackingSessionService
+	func acquire(_owner: Object, _capabilities: Array, _count: int = 2) -> void:
+		pass
+	func release(_owner: Object) -> void:
+		pass
+	func status(_owner: Object, _refresh: bool = false) -> Dictionary:
+		return {"allowed": true}
+	func sample_body(_owner: Object) -> Dictionary:
+		return InvalidPicoBridge.new().sample_body_joints()
+
+
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var provider := BodyPoseProviderScript.new()
+	var sessions := InvalidSampleSessions.new()
+	provider.set("_tracking_sessions", sessions)
 	provider.pico_unavailable_grace_s = 0.0
 	provider.configure(null, InvalidPicoBridge.new())
 	var unavailable: Array = []
@@ -58,3 +72,5 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	provider.set_enabled(true)
 	provider.call("_sample_pico", 3_000)
 	t.eq(unavailable.size(), 2, "a new tracking session can report unavailability again")
+	provider.free()
+	sessions.free()
