@@ -17,6 +17,8 @@ PYTHON_VERSION="${RERUN_PYTHON_VERSION:-${PYTHON_VERSION:-3.13}}"
 BUILD_TYPE="${BUILD_TYPE:-Release}"
 BUILD_JOBS="${BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 BUILD_FFMPEG="${BUILD_FFMPEG:-auto}"
+FFMPEG_MINIMAL="${FFMPEG_MINIMAL:-1}"
+SKIP_DEPS="${SKIP_DEPS:-1}"
 CLEAN="${CLEAN:-0}"
 
 usage() {
@@ -29,6 +31,8 @@ Environment:
   RERUN_PYTHON_VERSION      Python ABI for web rerun worker (default: 3.13)
   PYTHON_VERSION            Fallback Python ABI if RERUN_PYTHON_VERSION is unset
   BUILD_FFMPEG              auto|1|0 (default: auto; run SpatialMP4's ffmpeg build if needed)
+  FFMPEG_MINIMAL            1|0 (default: 1; omit optional codec/font libraries)
+  SKIP_DEPS                 1|0 (default: 1; never invoke sudo package installation)
   BUILD_JOBS                Parallel build jobs (default: CPU count)
 
 Outputs:
@@ -79,6 +83,9 @@ log "sync source checkout"
 
 [ -d "$SPATIALMP4_HOME" ] || die "SpatialMP4 checkout missing: $SPATIALMP4_HOME"
 [ -f "$SPATIALMP4_HOME/CMakeLists.txt" ] || die "not a SpatialMP4 checkout: $SPATIALMP4_HOME"
+if [ "$FFMPEG_MINIMAL" = "1" ]; then
+    git -C "$SPATIALMP4_HOME" apply "$SCRIPT_DIR/spatialmp4_minimal_ffmpeg.patch"
+fi
 SOURCE_REVISION="$(git -C "$SPATIALMP4_HOME" rev-parse HEAD)"
 
 PYTHON_BIN="$(python_bin)"
@@ -101,7 +108,10 @@ mkdir -p "$BUILD_DIR"
 mkdir -p "$HOST_DEPS_DIR"
 
 if [ "$BUILD_FFMPEG" = "auto" ]; then
-    if [ -d "$HOST_DEPS_DIR/ffmpeg_install" ]; then
+    if [ -f "$HOST_DEPS_DIR/ffmpeg_install/lib/pkgconfig/libavformat.pc" ] && \
+       [ -f "$HOST_DEPS_DIR/ffmpeg_install/lib/cmake/opencv4/OpenCVConfig.cmake" ] && \
+       [ -f "$HOST_DEPS_DIR/ffmpeg_install/lib/libopencv_core.a" ] && \
+       [ -f "$HOST_DEPS_DIR/ffmpeg_install/lib/libopencv_imgproc.a" ]; then
         BUILD_FFMPEG=0
     else
         BUILD_FFMPEG=1
@@ -115,8 +125,15 @@ rm -f "$HOST_DEPS_LINK"
 ln -s "$HOST_DEPS_DIR" "$HOST_DEPS_LINK"
 
 if [ "$BUILD_FFMPEG" = "1" ]; then
+    log "sync ffmpeg source"
+    "$SCRIPT_DIR/sync_deps.sh" ffmpeg
+    if [ ! -e "$HOST_DEPS_DIR/ffmpeg" ]; then
+        ln -s "$DEPS_SRC_DIR/ffmpeg" "$HOST_DEPS_DIR/ffmpeg"
+    fi
     log "build SpatialMP4 ffmpeg"
-    (cd "$SPATIALMP4_HOME" && bash scripts/build_ffmpeg.sh)
+    (cd "$SPATIALMP4_HOME" && \
+        FFMPEG_MINIMAL="$FFMPEG_MINIMAL" SKIP_DEPS="$SKIP_DEPS" \
+        bash scripts/build_ffmpeg.sh)
 else
     log "skip ffmpeg build"
 fi
@@ -131,6 +148,7 @@ cmake -S "$SPATIALMP4_HOME" -B "$BUILD_DIR" \
     -DBUILD_PYTHON=ON \
     -DBUILD_TESTING=OFF \
     -DBUILD_READER_SMOKE=OFF \
+    -DOpenCV_DIR="$HOST_DEPS_DIR/ffmpeg_install/lib/cmake/opencv4" \
     -DPython3_EXECUTABLE="$PYTHON_BIN" \
     -DPython_EXECUTABLE="$PYTHON_BIN"
 

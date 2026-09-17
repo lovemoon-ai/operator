@@ -3,6 +3,8 @@ SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 UV ?= uv
+NODE ?= node
+NPM ?= npm
 RERUN_PYTHON_VERSION ?= 3.13
 RERUN_SDK_VERSION ?= 0.33.*
 RERUN_WEB_PORT ?= 9090
@@ -19,6 +21,9 @@ SPATIALMP4_REVISION_STAMP ?= $(OPERATOR_DEPS_CACHE_ROOT)/build/spatialmp4/.sourc
 # The old spatialmp4_to_rrd_pico.py wrapper hard-forced --device-type pico,
 # which mis-projected quest captures (skipped the Quest-only Camera2 overlay).
 RERUN_SCRIPT ?= app/scripts/spatialmp4_to_rrd.py
+WEB_ENV_STAMP := node_modules/.operator-env
+WEB_PACKAGE_FILES := package.json package-lock.json app/package.json modules/ego-ingest/package.json
+SPATIALMP4_SETUP_FILES := ../scripts/setup_spatialmp4.sh ../scripts/sync_deps.sh ../scripts/spatialmp4_minimal_ffmpeg.patch
 
 RRD ?= $(basename $(MP4)).rrd
 
@@ -27,15 +32,57 @@ export RERUN_PYTHON_VERSION
 export SPATIALMP4_HOME
 export RERUN_SCRIPT
 
-.PHONY: run-dev vis-rerun spatialmp4-deps
+.PHONY: run-dev env web-env rerun-env check-node check-rerun-tools prepare-rerun-python vis-rerun spatialmp4-deps
 
-run-dev:
-	PORT=3001 npm run dev
+run-dev: env
+	PORT=3001 $(NPM) run dev
 
-spatialmp4-deps:
+env: web-env rerun-env
+
+web-env: check-node $(WEB_ENV_STAMP)
+	@if [ ! -x node_modules/.bin/tsc ] || [ ! -x node_modules/.bin/tsx ]; then \
+		echo "Web dependencies are incomplete; reinstalling from package-lock.json"; \
+		$(NPM) ci; \
+		touch "$(WEB_ENV_STAMP)"; \
+	fi
+
+check-node:
+	@command -v "$(NODE)" >/dev/null 2>&1 || { echo "Node.js 20 or newer is required" >&2; exit 1; }
+	@command -v "$(NPM)" >/dev/null 2>&1 || { echo "npm is required" >&2; exit 1; }
+	@$(NODE) -e 'const major = Number(process.versions.node.split(".")[0]); if (major < 20) { console.error(`Node.js 20 or newer is required (found $${process.version})`); process.exit(1); }'
+
+$(WEB_ENV_STAMP): $(WEB_PACKAGE_FILES) | check-node
+	$(NPM) ci
+	@touch "$@"
+
+check-rerun-tools:
+	@command -v "$(UV)" >/dev/null 2>&1 || { echo "uv is required (https://docs.astral.sh/uv/getting-started/installation/)" >&2; exit 1; }
+	@command -v cmake >/dev/null 2>&1 || { echo "cmake is required to build SpatialMP4" >&2; exit 1; }
+	@command -v git >/dev/null 2>&1 || { echo "git is required to fetch SpatialMP4" >&2; exit 1; }
+	@command -v make >/dev/null 2>&1 || { echo "make is required to build SpatialMP4" >&2; exit 1; }
+	@command -v c++ >/dev/null 2>&1 || { echo "a C++ compiler is required to build SpatialMP4" >&2; exit 1; }
+	@command -v pkg-config >/dev/null 2>&1 || { echo "pkg-config is required to build SpatialMP4" >&2; exit 1; }
+
+prepare-rerun-python: check-rerun-tools
+	$(UV) python install "$(RERUN_PYTHON_VERSION)"
+
+$(SPATIALMP4_REVISION_STAMP): $(SPATIALMP4_SETUP_FILES) | prepare-rerun-python
 	../scripts/setup_spatialmp4.sh
 
-vis-rerun:
+rerun-env: $(SPATIALMP4_REVISION_STAMP)
+	@python_bin="$$($(UV) python find "$(RERUN_PYTHON_VERSION)")"; \
+	ext_suffix="$$($$python_bin -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"; \
+	spatialmp4_so="$$(find "$(SPATIALMP4_HOME)" "$(OPERATOR_DEPS_CACHE_ROOT)/build/spatialmp4" -name "spatialmp4*$$ext_suffix" -type f -print -quit 2>/dev/null || true)"; \
+	if [ -z "$$spatialmp4_so" ]; then \
+		echo "SpatialMP4 extension for Python $(RERUN_PYTHON_VERSION) is missing; rebuilding"; \
+		../scripts/setup_spatialmp4.sh; \
+	fi
+	@echo "Preparing Rerun Python dependencies"
+	@$(UV) run --script --no-project --python "$(RERUN_PYTHON_VERSION)" "$(RERUN_SCRIPT)" --help >/dev/null
+
+spatialmp4-deps: rerun-env
+
+vis-rerun: rerun-env
 ifndef MP4
 	$(error Usage: make vis-rerun MP4=../tmp_data/20260608_123420.mp4 [RRD=out.rrd] [FORCE=1])
 endif
