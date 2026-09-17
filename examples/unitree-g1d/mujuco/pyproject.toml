@@ -5,6 +5,7 @@ description = "Unitree G1-D dual-arm MuJoCo teleoperation sandbox"
 requires-python = ">=3.11"
 dependencies = [
   "mujoco>=3.2.0,<3.8.1",
+  "mink>=1.1.0",
   "numpy>=1.26",
   "pyoperator",
 ]

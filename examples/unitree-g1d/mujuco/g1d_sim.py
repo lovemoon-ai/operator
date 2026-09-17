@@ -21,6 +21,12 @@ from typing import Mapping
 import mujoco
 import numpy as np
 
+try:
+    import mink
+    from mink.lie import SE3, SO3
+except ImportError:  # pragma: no cover - mink is optional, DLS is the fallback
+    mink = None
+
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[2]
 sys.path.insert(0, str(REPO_ROOT / "python"))
@@ -262,6 +268,22 @@ class G1DMujocoRobot:
                 raise RuntimeError(f"model is missing {side}_ee site")
             self.site_ids[side] = site_id
         self.arm_dofs = np.concatenate(tuple(self.dof_indices.values()))
+        self._mink_config = None
+        self._mink_tasks = None
+        self._mink_limits = None
+        if mink is not None:
+            self._mink_config = mink.Configuration(self.model)
+            self._mink_limits = [mink.ConfigurationLimit(model=self.model)]
+            self._mink_tasks = {}
+            for side in SIDES:
+                arm = set(int(d) for d in self.dof_indices[side])
+                freeze = mink.DofFreezingTask(
+                    self.model, [d for d in range(self.model.nv) if d not in arm]
+                )
+                task = mink.FrameTask(
+                    f"{side}_ee", "site", position_cost=1.0, orientation_cost=0.02
+                )
+                self._mink_tasks[side] = (task, freeze)
         self.reset("ready")
 
     def connect(self) -> None:
@@ -305,62 +327,63 @@ class G1DMujocoRobot:
             ),
         )
 
-    def _solve_arm(self, side: str, target: Pose) -> tuple[np.ndarray, float, float]:
+    def _ik_dls(
+        self,
+        side: str,
+        target_position: np.ndarray,
+        target_rotation: np.ndarray,
+        *,
+        position_only: bool,
+    ) -> tuple[np.ndarray, float, float]:
+        """Hand-rolled damped least squares, mirrors the C++ robot IK."""
         qpos_indices = self.qpos_indices[side]
         dof_indices = self.dof_indices[side]
         joint_ids = self.joint_ids[side]
         site_id = self.site_ids[side]
-        target_position = np.asarray(target.position, dtype=float)
-        target_rotation = _quat_xyzw_to_matrix(target.rotation)
-        initial_qpos = self.data.qpos.copy()
-        initial_position = self.data.site_xpos[site_id].copy()
+        limits = self.model.jnt_range[joint_ids]
         jacobian_position = np.zeros((3, self.model.nv))
         jacobian_rotation = np.zeros((3, self.model.nv))
-        limits = self.model.jnt_range[joint_ids]
 
-        def iterate(iterations: int, step_limit: float, use_rotation: bool) -> None:
-            for _ in range(iterations):
-                mujoco.mj_forward(self.model, self._scratch)
-                current_position = self._scratch.site_xpos[site_id]
-                current_rotation = self._scratch.site_xmat[site_id].reshape(3, 3)
-                position_error = target_position - current_position
-                rotation_error = _rotation_vector(target_rotation @ current_rotation.T)
-                position_error_norm = float(np.linalg.norm(position_error))
-                rotation_error_norm = float(np.linalg.norm(rotation_error))
-                if position_error_norm <= 0.002 and (
-                    not use_rotation or rotation_error_norm <= 0.10
-                ):
-                    break
-                mujoco.mj_jacSite(
-                    self.model,
-                    self._scratch,
-                    jacobian_position,
-                    jacobian_rotation,
-                    site_id,
-                )
-                if use_rotation:
-                    jacobian = np.vstack(
-                        (
-                            jacobian_position[:, dof_indices],
-                            0.25 * jacobian_rotation[:, dof_indices],
-                        )
-                    )
-                    error = np.concatenate((position_error, 0.25 * rotation_error))
-                else:
-                    jacobian = jacobian_position[:, dof_indices]
-                    error = position_error
-                normal = jacobian @ jacobian.T + (0.045**2) * np.eye(jacobian.shape[0])
-                step = jacobian.T @ np.linalg.solve(normal, error)
-                next_q = self._scratch.qpos[qpos_indices] + np.clip(
-                    step, -step_limit, step_limit
-                )
-                self._scratch.qpos[qpos_indices] = np.clip(
-                    next_q, limits[:, 0], limits[:, 1]
-                )
-
-        self._scratch.qpos[:] = initial_qpos
+        self._scratch.qpos[:] = self.data.qpos
         self._scratch.qvel[:] = 0.0
-        iterate(80, 0.16, use_rotation=True)
+        step_limit = 0.12 if position_only else 0.16
+        for _ in range(80):
+            mujoco.mj_forward(self.model, self._scratch)
+            current_position = self._scratch.site_xpos[site_id]
+            current_rotation = self._scratch.site_xmat[site_id].reshape(3, 3)
+            position_error = target_position - current_position
+            rotation_error = _rotation_vector(target_rotation @ current_rotation.T)
+            position_error_norm = float(np.linalg.norm(position_error))
+            rotation_error_norm = float(np.linalg.norm(rotation_error))
+            if position_error_norm <= 0.002 and (
+                position_only or rotation_error_norm <= 0.10
+            ):
+                break
+            mujoco.mj_jacSite(
+                self.model,
+                self._scratch,
+                jacobian_position,
+                jacobian_rotation,
+                site_id,
+            )
+            if position_only:
+                jacobian = jacobian_position[:, dof_indices]
+                error = position_error
+            else:
+                jacobian = np.vstack(
+                    (
+                        jacobian_position[:, dof_indices],
+                        0.25 * jacobian_rotation[:, dof_indices],
+                    )
+                )
+                error = np.concatenate((position_error, 0.25 * rotation_error))
+            normal = jacobian @ jacobian.T + (0.045**2) * np.eye(jacobian.shape[0])
+            step = jacobian.T @ np.linalg.solve(normal, error)
+            next_q = self._scratch.qpos[qpos_indices] + np.clip(
+                step, -step_limit, step_limit
+            )
+            self._scratch.qpos[qpos_indices] = np.clip(next_q, limits[:, 0], limits[:, 1])
+
         mujoco.mj_forward(self.model, self._scratch)
         position_error_norm = float(
             np.linalg.norm(target_position - self._scratch.site_xpos[site_id])
@@ -372,58 +395,99 @@ class G1DMujocoRobot:
                 )
             )
         )
-        if position_error_norm <= 0.005 and rotation_error_norm <= 0.10:
-            return (
-                self._scratch.qpos[qpos_indices].copy(),
-                position_error_norm,
-                rotation_error_norm,
+        return (
+            self._scratch.qpos[qpos_indices].copy(),
+            position_error_norm,
+            rotation_error_norm,
+        )
+
+    def _ik_mink(
+        self,
+        side: str,
+        target_position: np.ndarray,
+        target_rotation: np.ndarray,
+        *,
+        position_only: bool,
+    ) -> tuple[np.ndarray, float, float]:
+        """MuJoCo mink QP IK (daqp), joint limits enforced as constraints."""
+        task, freeze = self._mink_tasks[side]
+        task.orientation_cost = 0.0 if position_only else 0.02
+        task.set_target(
+            SE3.from_rotation_and_translation(
+                SO3.from_matrix(target_rotation), target_position
             )
+        )
+        self._mink_config.update(self.data.qpos)
+        position_error_norm = rotation_error_norm = math.inf
+        for _ in range(20):
+            error = task.compute_error(self._mink_config)
+            position_error_norm = float(np.linalg.norm(error[:3]))
+            rotation_error_norm = float(np.linalg.norm(error[3:]))
+            if position_error_norm <= 0.002 and (
+                position_only or rotation_error_norm <= 0.10
+            ):
+                break
+            velocity = mink.solve_ik(
+                self._mink_config,
+                [task, freeze],
+                0.05,
+                solver="daqp",
+                damping=1e-3,
+                limits=self._mink_limits,
+            )
+            self._mink_config.integrate_inplace(velocity, 0.05)
+        return (
+            self._mink_config.q[self.qpos_indices[side]].copy(),
+            position_error_norm,
+            rotation_error_norm,
+        )
+
+    def _ik_solve(
+        self,
+        side: str,
+        target_position: np.ndarray,
+        target_rotation: np.ndarray,
+        *,
+        position_only: bool,
+    ) -> tuple[np.ndarray, float, float]:
+        if mink is not None:
+            return self._ik_mink(
+                side, target_position, target_rotation, position_only=position_only
+            )
+        return self._ik_dls(
+            side, target_position, target_rotation, position_only=position_only
+        )
+
+    def _solve_arm(self, side: str, target: Pose) -> tuple[np.ndarray, float, float]:
+        site_id = self.site_ids[side]
+        target_position = np.asarray(target.position, dtype=float)
+        target_rotation = _quat_xyzw_to_matrix(target.rotation)
+        initial_position = self.data.site_xpos[site_id].copy()
+
+        solved, position_error_norm, rotation_error_norm = self._ik_solve(
+            side, target_position, target_rotation, position_only=False
+        )
+        if position_error_norm <= 0.005 and rotation_error_norm <= 0.10:
+            return solved, position_error_norm, rotation_error_norm
         # One frame rarely closes the last centimetre.  Accept a nearby
         # full-pose solution so teleoperation keeps converging over the next
         # frames instead of dropping the command; the joint rate limit in
         # write() keeps each step small.
         if position_error_norm <= 0.015 and rotation_error_norm <= 0.15:
-            return (
-                self._scratch.qpos[qpos_indices].copy(),
-                position_error_norm,
-                rotation_error_norm,
-            )
+            return solved, position_error_norm, rotation_error_norm
 
         # Controller orientation can briefly disagree with the local arm
         # branch.  For a small translation, retry position-only instead of
         # turning a valid hand displacement into a large posture flip.
         translation_norm = float(np.linalg.norm(target_position - initial_position))
         if translation_norm <= 0.12:
-            self._scratch.qpos[:] = initial_qpos
-            self._scratch.qvel[:] = 0.0
-            iterate(80, 0.12, use_rotation=False)
-            mujoco.mj_forward(self.model, self._scratch)
-            position_error_norm = float(
-                np.linalg.norm(target_position - self._scratch.site_xpos[site_id])
-            )
-            rotation_error_norm = float(
-                np.linalg.norm(
-                    _rotation_vector(
-                        target_rotation @ self._scratch.site_xmat[site_id].reshape(3, 3).T
-                    )
-                )
+            solved, position_error_norm, rotation_error_norm = self._ik_solve(
+                side, target_position, target_rotation, position_only=True
             )
             if position_error_norm <= 0.005:
-                return (
-                    self._scratch.qpos[qpos_indices].copy(),
-                    position_error_norm,
-                    rotation_error_norm,
-                )
-            # One frame rarely closes the last centimetre.  Accept a nearby
-            # solution so teleoperation keeps converging over the next frames
-            # instead of dropping the command; the joint rate limit below
-            # keeps each step small.
+                return solved, position_error_norm, rotation_error_norm
             if position_error_norm <= 0.015:
-                return (
-                    self._scratch.qpos[qpos_indices].copy(),
-                    position_error_norm,
-                    rotation_error_norm,
-                )
+                return solved, position_error_norm, rotation_error_norm
 
         raise RuntimeError(
             f"{side} IK did not converge: position={position_error_norm:.6f}m "
