@@ -114,6 +114,12 @@ func is_tracking_interlocked() -> bool:
 	return sender != null and sender.has_method("is_tracking_interlocked") and bool(sender.call("is_tracking_interlocked"))
 
 
+func tracking_report() -> Dictionary:
+	if sender == null or not sender.has_method("tracking_report"):
+		return {"needed": false, "allowed": true, "phase": "off"}
+	return sender.call("tracking_report")
+
+
 func _bind_client_signals() -> void:
 	if client.has_signal("connected"):
 		client.connect("connected", Callable(self, "_on_connected"))

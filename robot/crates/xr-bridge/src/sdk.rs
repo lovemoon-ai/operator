@@ -143,6 +143,12 @@ async fn run_sdk_mode_inner(
     startup: Option<oneshot::Sender<std::result::Result<(), String>>>,
     blueprint: Option<BlueprintStreams>,
 ) -> Result<()> {
+    if let Err(error) = crate::config::validate_xr_streams(&config.xr_streams) {
+        if let Some(startup) = startup {
+            let _ = startup.send(Err(error.to_string()));
+        }
+        return Err(error);
+    }
     let mut descriptor = DeviceDescriptor {
         device: DeviceInfo {
             device_type: "pyoperator".to_string(),
@@ -158,13 +164,7 @@ async fn run_sdk_mode_inner(
         xr_stream: Some(XrStreamConfig {
             schema_version: XR_STATE_SCHEMA_VERSION,
             rate_hz: 72,
-            streams: vec![
-                "head".into(),
-                "controllers".into(),
-                "hands".into(),
-                "body".into(),
-                "motion_trackers".into(),
-            ],
+            streams: config.xr_streams.clone(),
         }),
         ..DeviceDescriptor::default()
     };
@@ -274,6 +274,20 @@ async fn run_sdk_mode_inner(
 mod tests {
     use super::*;
     use std::net::TcpListener as StdTcpListener;
+
+    #[tokio::test]
+    async fn startup_rejects_ambiguous_streams_before_opening_network() {
+        let config = BridgeConfig {
+            xr_streams: vec![],
+            ..BridgeConfig::default()
+        };
+        let (sink, _frames) = state_channel();
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let (startup_tx, startup_rx) = oneshot::channel();
+        let service = run_sdk_mode_with_startup(config, sink, shutdown, startup_tx).await;
+        assert!(service.unwrap_err().to_string().contains("non-empty"));
+        assert!(startup_rx.await.unwrap().unwrap_err().contains("non-empty"));
+    }
 
     #[tokio::test]
     async fn startup_reports_pose_bind_failure() {

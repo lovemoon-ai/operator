@@ -166,6 +166,15 @@ func is_tracking_interlocked() -> bool:
 	return _tracking_interlocked
 
 
+func tracking_report(optional: bool = false) -> Dictionary:
+	var required := bool(profile.get("requires_body_tracking", false))
+	if _body_provider == null or required == optional:
+		return {"needed": false, "allowed": true, "phase": "off"}
+	var report: Dictionary = _body_provider.call("tracking_status")
+	report["rearm_required"] = _tracking_interlocked if required else false
+	return report
+
+
 func stop() -> void:
 	control_enabled = false
 	set_process(false)

@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use operator::BlueprintPublisher;
 use teleop_protocol::{Blueprint, BlueprintEvent, BlueprintState, XrStateFrame};
-use xr_bridge::config::BridgeConfig;
+use xr_bridge::config::{default_xr_streams, validate_xr_streams, BridgeConfig};
 use xr_bridge::sdk::{
     run_sdk_mode_with_startup_and_blueprint, state_channel, BlueprintStreams, XrStateStats,
 };
@@ -162,7 +162,8 @@ impl NativeSession {
         discovery_port = 63900,
         pose_udp_port = 63902,
         telemetry_port = 63903,
-        discovery_unicast_targets = Vec::new()
+        discovery_unicast_targets = Vec::new(),
+        streams = None
     ))]
     fn new(
         name: String,
@@ -171,7 +172,10 @@ impl NativeSession {
         pose_udp_port: u16,
         telemetry_port: u16,
         discovery_unicast_targets: Vec<String>,
+        streams: Option<Vec<String>>,
     ) -> PyResult<Self> {
+        let streams = streams.unwrap_or_else(default_xr_streams);
+        validate_xr_streams(&streams).map_err(|error| PyValueError::new_err(error.to_string()))?;
         let targets = discovery_unicast_targets
             .iter()
             .map(|value| {
@@ -187,6 +191,7 @@ impl NativeSession {
             pose_udp_port,
             telemetry_port,
             discovery_unicast_targets: targets,
+            xr_streams: streams,
             ..BridgeConfig::default()
         };
         Ok(Self {

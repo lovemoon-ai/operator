@@ -148,6 +148,24 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 @unittest.skipUnless(HAS_NATIVE, "requires the built pyoperator native extension")
 class NativeLifecycleTests(unittest.TestCase):
+    @pytest.mark.fake_headset
+    def test_descriptor_carries_exact_requested_tracking_streams(self):
+        for streams in (("controllers",), ("head", "controllers", "body"), ("motion_trackers",)):
+            with self.subTest(streams=streams):
+                config = replace(_config(), streams=streams)
+                with XrSession(config):
+                    peer, descriptor = _connect_fake_headset(config.pose_port)
+                    try:
+                        self.assertEqual(descriptor["xr_stream"]["streams"], list(streams))
+                        self.assertEqual(descriptor["xr_stream"]["schema_version"], 1)
+                    finally:
+                        peer.close()
+
+    def test_native_rejects_empty_unknown_and_duplicate_streams(self):
+        for streams in ([], ["all"], ["body", "body"]):
+            with self.subTest(streams=streams), self.assertRaises(ValueError):
+                _native.NativeSession(streams=streams)
+
     def test_standalone_blueprint_publisher_uses_rust_core(self) -> None:
         publisher = _native.NativeBlueprintPublisher()
         self.assertEqual(publisher.blueprint_spec_version(), 1)
@@ -289,7 +307,7 @@ class NativeLifecycleTests(unittest.TestCase):
         try:
             self.assertEqual(descriptor["xr_stream"]["schema_version"], 1)
             self.assertEqual(descriptor["xr_stream"]["rate_hz"], 72)
-            self.assertIn("controllers", descriptor["xr_stream"]["streams"])
+            self.assertEqual(descriptor["xr_stream"]["streams"], ["head", "controllers", "hands"])
             _send_frame(first_headset, "XrStateFrame", _frame(900))
             self.assertEqual(session.wait_next(timeout=1.0).frame_id, 900)
             self.assertEqual(session.latest().frame_id, 900)

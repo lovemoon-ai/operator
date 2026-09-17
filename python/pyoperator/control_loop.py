@@ -10,7 +10,7 @@ import time
 from .ik import IKSolver
 from .retargeting import Retargeter
 from .robot import EndEffectorTarget, Robot
-from .session import XrSession
+from .session import BridgeConfig, DEFAULT_XR_STREAMS, XrSession
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,11 @@ def run(
     """Run until ``stop_event``/Ctrl-C; always stop and disconnect the robot."""
     owns_session = session is None
     if session is None:
-        session = XrSession()
+        session = XrSession(BridgeConfig(streams=getattr(retargeter, "required_streams", DEFAULT_XR_STREAMS)))
+    elif isinstance(getattr(session, "config", None), BridgeConfig):
+        missing = set(getattr(retargeter, "required_streams", ())) - set(session.config.streams)
+        if missing:
+            raise ValueError(f"session is missing retargeter streams: {sorted(missing)}")
     stop_event = stop_event or threading.Event()
     frames = commands = watchdog_stops = 0
     frame_id = 0

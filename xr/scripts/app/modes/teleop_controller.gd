@@ -1284,23 +1284,44 @@ func _on_tracking_calibration_confirm_requested() -> void:
 
 
 func _on_tracking_sessions_changed() -> void:
-	var sessions := TrackingSessionService.shared()
-	if sessions != null and _settings_panel != null:
-		var report := sessions.summary()
-		var rearm := _sdk_mode and _xr_state_sender != null and _xr_state_sender.is_tracking_interlocked()
-		if _active_target != null and _active_target.has_method("is_tracking_interlocked"):
-			rearm = rearm or bool(_active_target.call("is_tracking_interlocked"))
-		report["rearm_required"] = rearm
-		_settings_panel.set_tracking_status(report)
+	if _settings_panel != null:
+		_settings_panel.set_tracking_status(_robot_tracking_report(), _optional_tracking_report())
 	# Lease release can happen inside target.stop(). Do not re-enable a target
 	# reentrantly while its teardown is still running.
-	call_deferred("_sync_stream_senders")
+	# Detached controllers cannot own live senders. In particular, don't queue
+	# work during scene destruction or for an unattached contract-test instance.
+	if is_inside_tree():
+		call_deferred("_sync_stream_senders")
 
 
-func _on_tracking_blocked(_report: Dictionary) -> void:
+func _robot_tracking_report() -> Dictionary:
+	# Use the active consumer's lease, not the global summary: a local body
+	# overlay must never make a controller-only robot require calibration.
+	if _active_target == _outside_target and _active_target != null and _xr_state_sender != null:
+		# Keep the interlocked lease visible after an SDK safety disconnect so
+		# calibration can be completed before an explicit Connect/re-arm.
+		return _xr_state_sender.tracking_report()
+	if _active_target != null and _active_target.has_method("tracking_report"):
+		return _active_target.call("tracking_report")
+	return {"needed": false, "allowed": true, "phase": "off"}
+
+
+func _optional_tracking_report() -> Dictionary:
+	if _active_target == _inside_target and _inside_target != null and _inside_target.has_method("tracking_report"):
+		return _inside_target.tracking_report(true)
+	if is_instance_valid(_vr_pose_provider):
+		var report: Dictionary = _vr_pose_provider.call("tracking_status")
+		return report
+	return {"needed": false, "allowed": true, "phase": "off"}
+
+
+func _on_tracking_blocked(report: Dictionary) -> void:
 	_set_link_active(false)
 	_on_tracking_sessions_changed()
 	_show_settings_panel_with_status(tr("UI_TRACKING_REARM_REQUIRED"))
+	if _settings_ui and _settings_ui.has_method("select_group"):
+		_settings_ui.call("select_group", "robot")
+	print("[TeleopTracking] required-tracking-blocked phase=%s settings=robot" % str(report.get("phase", "unavailable")))
 
 
 ## Exit on the panel returns to the mode-select / launcher scene so the
@@ -2291,6 +2312,7 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	# SDK mode consumes raw state in Python; robot-control mode emits
 	# DeviceCommand. `_sync_stream_senders` keeps exactly one of them live.
 	_sync_stream_senders()
+	_on_tracking_sessions_changed()
 	# Synthetic: the descriptor has landed and sending is on — start the canned
 	# operator trajectory now so the robot seeds its retarget reference cleanly.
 	if _synthetic and _synth_source and not _synth_engaged:
@@ -2785,6 +2807,7 @@ func _on_target_ready(descriptor: Dictionary, target: Node) -> void:
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_teleop_controller_panel.call("set_bridge_connected", true)
 	_sync_stream_senders()
+	_on_tracking_sessions_changed()
 
 
 func _on_target_state_changed(_state: int, detail: String, target: Node) -> void:

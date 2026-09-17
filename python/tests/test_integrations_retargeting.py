@@ -31,6 +31,16 @@ requires_retargeting = unittest.skipIf(
     retargeting is None, "the retargeting solver library is not installed"
 )
 
+
+class TrackingRequirementTests(unittest.TestCase):
+    def test_source_declares_streams_without_a_solver_or_profile_name_heuristic(self):
+        # This tests only the input contract, not a solver or a robot runtime.
+        retargeter = PyOperatorRetargeter.__new__(PyOperatorRetargeter)
+        retargeter.source = "body"
+        self.assertEqual(retargeter.required_streams, ("body",))
+        retargeter.source = "controller"
+        self.assertEqual(retargeter.required_streams, ("controllers",))
+
 EEPOSE_PAYLOAD = {
     "position": [0.31, -0.12, 0.24],
     "orientation_wxyz": [1.0, 0.0, 0.0, 0.0],

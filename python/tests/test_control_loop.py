@@ -111,6 +111,25 @@ class RecordingIK:
 
 
 class ControlLoopTests(unittest.TestCase):
+    def test_owned_session_uses_retargeter_tracking_requirements(self):
+        retargeter = ResettingRetargeter()
+        retargeter.required_streams = ("body",)
+        owned = SequenceSession([])
+        with patch("pyoperator.control_loop.XrSession", return_value=owned) as factory:
+            run(FakeRobot(), retargeter)
+        self.assertEqual(factory.call_args.args[0].streams, ("body",))
+
+    def test_supplied_session_cannot_silently_omit_required_tracking(self):
+        from pyoperator.session import BridgeConfig
+        retargeter = ResettingRetargeter()
+        retargeter.required_streams = ("body",)
+        session = SequenceSession([])
+        session.config = BridgeConfig()
+        robot = FakeRobot()
+        with self.assertRaisesRegex(ValueError, "missing retargeter streams"):
+            run(robot, retargeter, session=session)
+        self.assertFalse(robot.connected)
+
     def test_managed_loop_commands_and_safes_robot(self) -> None:
         stop = threading.Event()
         robot = FakeRobot()

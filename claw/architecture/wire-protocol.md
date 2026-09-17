@@ -56,6 +56,15 @@ tick. The bridge publishes it through a Rust `watch` channel: backpressure
 drops complete old frames (latest-wins), never individual fields. Existing
 robot descriptors omit `xr_stream`, so their command protocol is unchanged.
 
+Embedded SDK consumers now configure these names through Python
+`BridgeConfig.streams` / Rust `BridgeConfig.xr_streams`. The default is
+`["head", "controllers", "hands"]`; body and independent trackers are opt-in.
+SDK requests reject empty, duplicate or unknown names. The legacy wire semantics
+of omitted/empty `streams` remain "all", so new SDKs never emit an empty request.
+Requested body/motion data establishes a tracking lease in XR. System settings
+own calibration and user confirmation; this is independent of Blueprint and
+does not add a new wire schema or a remote "calibration completed" command.
+
 SDK mode requires the headset `Hello.capabilities` list to contain
 `xr_state_v1`; otherwise the connection is closed and the compatibility error
 is exposed through Python bridge stats. Exactly one headset owns an embedded

@@ -10,11 +10,54 @@ from pyoperator import xr_bridge
 xr_bridge.start()
 frame = xr_bridge.wait_next(timeout=5.0)
 if frame:
-    # One immutable, atomic frame: head/controllers/input/hands/body/trackers.
+    # One immutable, atomic frame containing the requested streams.
     right = frame.controllers.right
     print(frame.frame_id, frame.timestamp_ns, right.pose if right else None)
 xr_bridge.stop()
 ```
+
+## Tracking requirements
+
+SDK sessions request `head`, `controllers`, and `hands` by default. Body tracking
+and independent motion trackers are **opt-in**, so a controller-only robot does
+not require Pico tracker calibration. Configure the actual inputs your consumer
+needs; these are sent in the existing `DeviceDescriptor.xr_stream.streams`:
+
+```python
+from pyoperator import BridgeConfig, XrSession
+
+with XrSession(BridgeConfig(streams=("head", "controllers", "body"))) as session:
+    frame = session.wait_next(timeout=5.0)
+
+# Compatibility API accepts the same configuration:
+# xr_bridge.start(streams=("head", "controllers", "body"))
+```
+
+Allowed names: `head`, `controllers`, `hands`, `body`, `motion_trackers`.
+Requests must be non-empty and have no duplicates. Empty is rejected because
+legacy XR treats an empty stream list as **all streams**, not "no tracking".
+On Pico, body and independent motion tracking are mutually exclusive; existing
+body-priority semantics apply if both are requested. Prefer only the mode needed.
+
+The headset's system settings own tracker setup/confirmation, not Blueprint.
+Unready required tracking blocks publication; after setup, explicitly confirm
+and press Connect/re-arm. Runtime tracking loss does not automatically resume
+control. Optional local body display has separate status and cannot turn a
+controller-only robot into a body-tracking consumer. Robot-policy calibration
+(for example ABXY in whole-body-control) is separate from tracker calibration.
+
+Migration: consumers that previously relied on the SDK requesting everything
+must explicitly include `body` or `motion_trackers`. `control_loop.run` honors a
+retargeter's optional `required_streams` when it creates its own session;
+`PyOperatorRetargeter` declares this from its body/controller source. Supplied
+live sessions missing declared requirements are rejected before robot connection.
+
+Pico acceptance (wear the headset with room tracking active): build/install the
+current Pico test APK, then run `tests/test_real_headset.py` with `--run-device
+--require-device --xr-device pico --adb-serial SERIAL`. It checks default
+controller-only streaming and a fresh body request's settings prompt/blocked
+publication. Complete the actual tracker setup/confirmation/Connect round trip
+manually; the tests never attest calibration on the user's behalf.
 
 ## Blueprint UI
 
@@ -330,7 +373,8 @@ from pyoperator.integrations.retargeting import PyOperatorRetargeter
 
 retargeter = PyOperatorRetargeter("unitree_g1", source="body")
 # or source="controller" for end-effector profiles such as SO-101
-pyoperator.control_loop.run(session, robot, retargeter)
+pyoperator.control_loop.run(robot, retargeter)
+# Its automatically owned session requests the retargeter's required streams.
 ```
 
 ## Debugging

@@ -66,6 +66,14 @@ func is_tracking_interlocked() -> bool:
 	return _tracking_interlocked
 
 
+func tracking_report() -> Dictionary:
+	if _tracking_sampler == null:
+		return {"needed": false, "allowed": true, "phase": "off"}
+	var report := _tracking_sampler.tracking_report()
+	report["rearm_required"] = _tracking_interlocked
+	return report
+
+
 func shutdown() -> void:
 	_sending = false
 	if _tracking_sampler != null:

@@ -1,0 +1,2 @@
+-r requirements-sonic-base.txt
+onnxruntime-gpu[cuda,cudnn]==1.23.2

@@ -67,6 +67,18 @@ class FakeNative:
 
 
 class SessionReplayTests(unittest.TestCase):
+    def test_explicit_streams_default_without_trackers_and_reject_ambiguous_requests(self):
+        self.assertEqual(BridgeConfig().streams, ("head", "controllers", "hands"))
+        for streams in ((), [], None, "body", ("all",), ("body", "body"), (None,)):
+            with self.subTest(streams=streams), self.assertRaises(ValueError):
+                BridgeConfig(streams=streams)
+        supplied = ["controllers", "body"]
+        config = BridgeConfig(streams=supplied)
+        supplied.clear()
+        session = XrSession(config, _native_factory=FakeNative)
+        self.assertEqual(config.streams, ("controllers", "body"))
+        self.assertEqual(session._native.kwargs["streams"], ["controllers", "body"])
+
     def test_session_makes_one_native_call_per_frame(self) -> None:
         config = BridgeConfig(name="test", pose_port=1001, discovery_unicast_targets=("127.0.0.1",))
         session = XrSession(config, _native_factory=FakeNative).start()
@@ -75,6 +87,7 @@ class SessionReplayTests(unittest.TestCase):
         self.assertEqual(session._native.kwargs["name"], "test")
         self.assertEqual(session._native.kwargs["pose_port"], 1001)
         self.assertEqual(session._native.kwargs["discovery_unicast_targets"], ["127.0.0.1"])
+        self.assertEqual(session._native.kwargs["streams"], ["head", "controllers", "hands"])
         self.assertEqual(session.latest().frame_id, 3)
         stats = session.stats()
         self.assertTrue(stats.connected)
