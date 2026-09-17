@@ -171,6 +171,7 @@ class DeterministicSampler:
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
+	_test_passive_consumer_demand(t)
 	_test_snapshot_shape_and_default_rate(t)
 	_test_predicted_display_time_is_opt_in(t)
 	_test_predicted_display_time_fallback(t)
@@ -182,6 +183,27 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_pico_body_status_gate(t)
 	_test_pico_body_collapsed_gate(t)
 	_test_sender_filters_v1_body_extensions(t)
+
+
+func _test_passive_consumer_demand(t: OperatorTestAssertions) -> void:
+	var sessions := TrackingSessionService.new()
+	var sampler := XrTrackingSampler.new()
+	sampler.tracking_sessions = sessions
+	sampler.configure({"streams": ["head", "controllers"]})
+	t.is_false(sampler.tracking_report().get("needed", true), "UI inspection does not activate the sender")
+	t.is_false(sessions.summary()["needed"], "UI inspection never acquires a tracker lease")
+	sampler.activate()
+	var display := RefCounted.new()
+	sessions.acquire(display, ["body"])
+	t.is_true(sessions.summary()["needed"], "optional display owns its own tracking demand")
+	t.is_false(sampler.tracking_report().get("needed", true), "optional body demand is not a controller-only robot requirement")
+	sampler.configure({"streams": ["controllers", "body"]})
+	t.is_true(sampler.tracking_report().get("needed", false), "explicit body stream owns robot demand")
+	sampler.shutdown()
+	t.is_false(sampler.tracking_report().get("needed", true), "disconnect removes this robot's demand")
+	t.is_true(sessions.status(display)["needed"], "disconnect does not remove optional display's lease")
+	sessions.release(display)
+	sessions.free()
 
 
 func _test_snapshot_shape_and_default_rate(t: OperatorTestAssertions) -> void:

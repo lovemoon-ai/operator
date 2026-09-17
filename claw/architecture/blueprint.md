@@ -123,7 +123,7 @@ remote contributions. Normal Button cancellation sends an outside mouse motion
 before release, clearing Godot's `pressing_inside` state instead of firing a click.
 
 `input_binding` declares a bounded `dual_trigger_hold` gesture and an action.
-ScaleBFM declares a one-second hold. XR requires both physical controllers,
+XR requires both physical controllers,
 press/release hysteresis, continuous samples, and a fresh release baseline after
 activation, tracking loss, pause, or a frame gap. Both triggers must be released
 before another completed hold can trigger. While the chord owns input, pending
@@ -142,6 +142,15 @@ the associated model, gating input until its asset is ready and selecting the
 local recenter target.
 A recognized hold that is not currently available is rejected locally with error
 feedback and menu status; it does not send a request or give success vibration.
+
+The `whole-body-control` examples do not declare this trigger binding: ScaleBFM
+and SONIC share a host-side, UI-filtered `XrFrame` gamepad mapping. ABXY resets,
+left-stick click cycles LOCOMOTION/VR/BODY, sticks send velocity commands in the
+first two modes, and triggers/grips control articulated hands when present
+(no-op on ScaleBFM's default 29-DoF model). Status is a
+controller-attached Blueprint label. Buttons require a fresh release baseline
+after tracking loss; reset does not re-arm a held chord. This changes example
+interaction only, not the generic `input_binding` protocol or its ack behavior.
 
 Recenter is a translation-only local view offset computed from the model's
 actual current root and the head's horizontal forward direction (default 2 m).
@@ -322,5 +331,9 @@ its tracking timestamp. A late model with stale state remains hidden.
 
 Unlike low-rate status UI, robot state can update at policy frequency; latest-wins
 snapshots still prevent unbounded queues. Structural definitions are not resent
-per sample. `examples/scalebfm` demonstrates host ScaleBFM + MuJoCo with this
-component, returning actual simulated state rather than target joint commands.
+per sample. `examples/whole-body-control` demonstrates host ScaleBFM or SONIC +
+MuJoCo with this component, returning actual simulated state rather than target
+joint commands. The example shares session lifecycle, tracking validation and
+presentation; each controller owns its point selection, calibration, policy
+observations, model parameters and physics. The former standalone ScaleBFM
+example has been consolidated into this implementation.

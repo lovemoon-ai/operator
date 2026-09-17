@@ -277,6 +277,11 @@ class PyOperatorRetargeter:
     def session(self):
         return self._session
 
+    @property
+    def required_streams(self) -> tuple[str, ...]:
+        """Tracking demand for an automatically created Outside XR session."""
+        return ("body",) if self.source == "body" else ("controllers",)
+
     def reset(self) -> None:
         self._session.reset()
         self._last_target = None

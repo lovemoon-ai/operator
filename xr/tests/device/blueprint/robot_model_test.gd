@@ -21,8 +21,12 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	if FileAccess.file_exists(path):
 		DirAccess.remove_absolute(path)
 	var names: Array = properties["joint_names"]
+	var expected_v: Variant = config.get("expected_joint_names")
+	if not t.is_true(expected_v is Array, "host reports its compiled model joint table"):
+		return
+	var expected_names: Array = expected_v
+	t.eq(names, expected_names, "asset articulation matches the actual host model, including optional hands")
 	names.reverse()
-	t.eq(names.size(), 29, "host model describes the real 29-DoF G1")
 	properties["smoothing_ms"] = 0
 	var tree := Engine.get_main_loop() as SceneTree
 	var view := View.new()
@@ -30,10 +34,16 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		view.free()
 		return
 	var q: Array = []
-	q.resize(29)
+	q.resize(names.size())
 	q.fill(0.0)
 	var knee := names.find("left_knee_joint")
+	if not t.is_true(knee >= 0, "host G1 includes its named left knee"):
+		view.free()
+		return
 	q[knee] = 0.6
+	var finger := names.find("left_hand_index_0_joint")
+	if finger >= 0:
+		q[finger] = 0.35
 	var base := [0.3, 0.8, -2.0, 0.0, sin(0.25), 0.0, cos(0.25)]
 	t.is_true(view.update_sample(q, base, 1), "state is buffered before asset arrival")
 	tree.root.add_child(view)
@@ -51,6 +61,16 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var rest: Transform3D = spec["rest"]
 	var axis: Vector3 = spec["axis"]
 	t.is_true(node.transform.is_equal_approx(rest * Transform3D(Basis(axis, 0.6), Vector3.ZERO)), "joint names map to transmitted node indices/axes")
+	if finger >= 0:
+		var finger_spec: Dictionary = joints[finger]
+		var finger_node: Node3D = finger_spec["node"]
+		var finger_rest: Transform3D = finger_spec["rest"]
+		var finger_axis: Vector3 = finger_spec["axis"]
+		var finger_pivot: Vector3 = finger_spec["pivot"]
+		var finger_basis := Basis(finger_axis, 0.35 - float(finger_spec["reference"]))
+		t.is_true(finger_node.transform.is_equal_approx(finger_rest * Transform3D(
+			finger_basis, finger_pivot - finger_basis * finger_pivot)),
+			"official G1 hand articulation applies its transmitted joint target")
 	view.update_sample(q, base, 2)
 	view._process(0.02)
 	var instance: Node3D = view.get("_instance")

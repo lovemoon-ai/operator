@@ -1,0 +1,7 @@
+# Common host simulation/tracking/testing dependencies. Install pyoperator
+# from ../../python, then the requirements for your selected controller.
+# pyoperator -> rerun-sdk requires NumPy 2; both controller runtimes support it.
+numpy>=2,<3
+scipy>=1.13
+mujoco>=3.3.6,<4
+glfw>=2.9

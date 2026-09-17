@@ -81,6 +81,15 @@ func tracking_status() -> Dictionary:
 	return tracking_sessions.status(self) if tracking_sessions != null else {"allowed": _pico_bridge == null, "phase": "unavailable"}
 
 
+func tracking_report() -> Dictionary:
+	# UI inspection must never activate a sampler or acquire a tracking lease.
+	if not _activated:
+		return {"needed": false, "allowed": true, "phase": "off"}
+	if tracking_sessions == null:
+		return {"needed": has_tracker_demand(), "allowed": _pico_bridge == null, "phase": "unavailable"}
+	return tracking_sessions.status(self)
+
+
 func is_tracking_ready() -> bool:
 	return bool(tracking_status().get("allowed", false))
 

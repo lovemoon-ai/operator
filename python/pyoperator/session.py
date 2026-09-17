@@ -19,14 +19,32 @@ else:
     _native_import_error = None
 
 
+DEFAULT_XR_STREAMS = ("head", "controllers", "hands")
+XR_STREAMS = frozenset((*DEFAULT_XR_STREAMS, "body", "motion_trackers"))
+
+
 @dataclass(frozen=True)
 class BridgeConfig:
+    """Requested XR data; body/motion tracking (and its calibration) is opt-in.
+
+    Empty requests are rejected because legacy XR interprets them as all streams.
+    """
     name: str = "pyoperator"
     pose_port: int = 63901
     discovery_port: int = 63900
     pose_udp_port: int = 63902
     telemetry_port: int = 63903
     discovery_unicast_targets: tuple[str, ...] = ()
+    streams: tuple[str, ...] = DEFAULT_XR_STREAMS
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.streams, (tuple, list)) or not self.streams:
+            raise ValueError("streams must be a non-empty sequence of explicit XR stream names")
+        if any(not isinstance(s, str) or s not in XR_STREAMS for s in self.streams):
+            raise ValueError(f"streams must contain only {sorted(XR_STREAMS)}")
+        if len(set(self.streams)) != len(self.streams):
+            raise ValueError("streams must not contain duplicates")
+        object.__setattr__(self, "streams", tuple(self.streams))
 
 
 class XrSession:
@@ -50,6 +68,7 @@ class XrSession:
             pose_udp_port=self.config.pose_udp_port,
             telemetry_port=self.config.telemetry_port,
             discovery_unicast_targets=list(self.config.discovery_unicast_targets),
+            streams=list(self.config.streams),
         )
         self.blueprint = BlueprintClient(self._native, lambda: self.is_running)
 

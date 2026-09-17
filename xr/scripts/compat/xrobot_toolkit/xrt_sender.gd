@@ -109,6 +109,14 @@ func is_tracking_interlocked() -> bool:
 	return _tracking_interlocked
 
 
+func tracking_report() -> Dictionary:
+	if sampler == null or not sampler.has_method("tracking_report"):
+		return {"needed": false, "allowed": true, "phase": "off"}
+	var report: Dictionary = sampler.call("tracking_report")
+	report["rearm_required"] = _tracking_interlocked
+	return report
+
+
 ## Mirrors the Android APPLICATION_PAUSED/APPLICATION_RESUMED lifecycle onto the
 ## wire. Losing focus emits one neutral frame and then holds the stream: a
 ## receiver that stops hearing from us falls back to a held, zero-velocity

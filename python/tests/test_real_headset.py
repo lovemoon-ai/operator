@@ -70,6 +70,12 @@ def _logcat_tail(device: XrDevice) -> str:
 def _prepare_headset(device: XrDevice) -> None:
     """Mirror the proven Quest launch preparation in cicd/02_ego_record.sh."""
     device.run("shell", "am", "force-stop", PACKAGE, check=False)
+    if device.kind == "pico":
+        # Pico room/tracker setup must be completed by the wearer, not dismissed
+        # with Quest-specific guardian or synthetic proximity commands.
+        device.run("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
+        device.run("logcat", "-c", check=False)
+        return
     device.run("shell", "am", "force-stop", "com.oculus.guardian", check=False)
     device.run(
         "shell",
@@ -118,6 +124,12 @@ def _launch_teleop(device: XrDevice, pose_port: int) -> None:
         "--es",
         "operator.teleop.port",
         str(pose_port),
+        "--es",
+        "operator.teleop.protocol",
+        "operator",
+        "--es",
+        "operator.teleop.scope",
+        "outside",
     )
     assert "Error" not in launch.stdout, launch.stdout + launch.stderr
 
@@ -165,7 +177,7 @@ def test_pyoperator_receives_real_headset_frames(
         apk_path = Path(apk).expanduser().resolve()
         if not apk_path.is_file():
             pytest.fail(f"--xr-apk does not exist: {apk_path}")
-        xr_device.run("install", "-r", "-d", str(apk_path), timeout=180.0)
+        xr_device.run("install", "--no-incremental", "-r", "-d", str(apk_path), timeout=180.0)
     else:
         installed = xr_device.run("shell", "pm", "path", PACKAGE, check=False)
         if installed.returncode != 0 or "package:" not in installed.stdout:
@@ -207,6 +219,9 @@ def test_pyoperator_receives_real_headset_frames(
         )
         assert stats.connected
         assert stats.frames_received >= minimum
+        assert all(frame.body is None and not frame.motion_trackers for frame in frames), (
+            "default SDK request must not publish body or independent tracker data"
+        )
         assert all(frame.timestamp_ns > 0 for frame in frames)
         assert all(
             current.timestamp_ns >= previous.timestamp_ns
@@ -220,3 +235,52 @@ def test_pyoperator_receives_real_headset_frames(
         session.close()
         _best_effort(xr_device, "shell", "am", "force-stop", PACKAGE)
         _best_effort(xr_device, "reverse", "--remove", reverse)
+
+
+def test_pico_body_request_prompts_and_blocks_until_calibration(
+    request: pytest.FixtureRequest, xr_device: XrDevice,
+) -> None:
+    """Real SDK descriptor -> Pico settings prompt and zero published poses.
+
+    Does not fake tracking or confirm calibration on the user's behalf. The
+    manual setup/confirmation/re-arm round trip still needs worn-tracker testing.
+    """
+    if xr_device.kind != "pico":
+        pytest.skip("Pico system calibration is not available on this device")
+    apk = str(request.config.getoption("--xr-apk"))
+    if apk:
+        path = Path(apk).expanduser().resolve()
+        assert path.is_file(), path
+        xr_device.run("install", "--no-incremental", "-r", "-d", str(path), timeout=180.)
+    config = BridgeConfig(name="pyoperator_body_requirement_test", pose_port=_tcp_port(),
+        discovery_port=_udp_port(), pose_udp_port=_udp_port(), telemetry_port=_tcp_port(),
+        streams=("head", "controllers", "body"))
+    reverse = f"tcp:{config.pose_port}"
+    reverse_created = False
+    with XrSession(config) as session:
+        try:
+            xr_device.run("reverse", "--no-rebind", reverse, reverse)
+            reverse_created = True
+            # Fresh process has no user calibration attestation. Never clear app
+            # data, dismiss calibration, or synthesize a controller action.
+            xr_device.run("shell", "am", "force-stop", PACKAGE)
+            xr_device.run("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+            xr_device.run("logcat", "-c")
+            _launch_teleop(xr_device, config.pose_port)
+            deadline = time.monotonic() + float(request.config.getoption("--xr-frame-timeout"))
+            logs = ""
+            while time.monotonic() < deadline:
+                assert session.wait_next(timeout=.5) is None, "unconfirmed Pico body data escaped"
+                logs = _logcat_tail(xr_device)
+                assert _script_startup_error(logs) is None, logs
+                if "[TeleopTracking] required-tracking-blocked" in logs:
+                    break
+            assert "[XrStateSender] configured" in logs and '"body"' in logs, logs
+            assert "[TeleopTracking] required-tracking-blocked" in logs and "settings=robot" in logs, logs
+            assert session.wait_next(timeout=1.) is None
+            assert session.stats().frames_received == 0
+            assert not session.stats().connected, "required tracking loss must retain SDK disconnect interlock"
+        finally:
+            _best_effort(xr_device, "shell", "am", "force-stop", PACKAGE)
+            if reverse_created:
+                _best_effort(xr_device, "reverse", "--remove", reverse)

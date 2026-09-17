@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 import shutil
 import subprocess
 from typing import Sequence
@@ -119,25 +120,39 @@ def _device_identity(adb: str, serial: str) -> str:
         text=True,
         timeout=10.0,
     )
-    return result.stdout.lower()
+    return _product_identity(result.stdout)
+
+
+def _product_identity(properties: str) -> str:
+    """Use hardware identity, not arbitrary Android properties such as vbmeta."""
+    keys = {
+        "ro.product.manufacturer", "ro.product.brand", "ro.product.model",
+        "ro.product.device", "ro.product.name",
+    }
+    values = []
+    for line in properties.splitlines():
+        match = re.fullmatch(r"\[([^]]+)\]: \[(.*)\]", line.strip())
+        if match and match[1] in keys:
+            values.append(match[2].strip().lower())
+    return "\n".join(values)
 
 
 def _device_kind(identity: str) -> str | None:
+    values = identity.lower().splitlines()
+    if any(value in {"pico", "picovr"} or value.startswith("pico ") for value in values):
+        return "pico"
     if any(
-        token in identity
-        for token in (
+        value in {
             "oculus",
             "meta",
-            "quest",
             "hollywood",
             "eureka",
             "panther",
             "seacliff",
-        )
+        } or value.startswith("quest")
+        for value in values
     ):
         return "quest"
-    if "pico" in identity or "picovr" in identity:
-        return "pico"
     return None
 
 

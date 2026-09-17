@@ -413,6 +413,13 @@ profile's `requires_body_tracking` and optional body display; Outside derives
 it from negotiated streams or the XRoboToolkit protocol, never bundled robot
 model lists. Configuration alone does not activate an Outside sampler.
 
+The SDK's `BridgeConfig.streams` defaults to head/controllers/hands; body and
+motion trackers must be explicitly requested by consumers (whole-body-control
+requests body). Python, the native binding and Rust SDK validate the request;
+the existing `DeviceDescriptor.xr_stream.streams` carries it with no Blueprint
+or wire-schema change. Empty SDK lists are rejected, since the legacy wire's
+empty-list meaning remains "all streams".
+
 `PicoTrackingCalibration` owns process-local **user confirmation**, independently
 of pages and recording options. Its compatibility workflow is: successfully open
 PICO system calibration, leave and return to Operator, then explicitly press
@@ -460,7 +467,16 @@ Optional body visualization does not suspend a controller-only robot target.
 Capture and Teleop display the same status vocabulary, recalibration action and
 separate confirmation button; the confirmation button appears only after return.
 The Teleop row is outside the Inside/Outside UI containers and follows demand,
-not the selected protocol. `cicd/validate_tracking_ownership.py` rejects direct
+not the selected protocol. Its required row reads the active robot consumer's
+lease via passive `tracking_report()`; a separate optional row reads only the
+local body display's lease. It never derives robot requirements from global
+`summary()` or activates a sampler just to display settings. Lease membership
+changes notify the UI even when the underlying tracking mode is unchanged.
+When required tracking blocks a target, settings focus the Robot group; an
+interlocked SDK lease remains visible after safety disconnect until explicit
+disconnect/replacement or re-arm. Calibration actions still go to the single
+service, and no robot message can assert user confirmation.
+`cicd/validate_tracking_ownership.py` rejects direct
 tracker lifecycle/data calls outside the service; device tests are still required.
 
 ## Capture Runtime

@@ -22,7 +22,7 @@ TEST_DIR="$(mktemp -d -t operator-robot-assets.XXXXXX)"
 ASSET_PORT=""
 REVERSE_CREATED=0
 PYTHON="${PYTHON:-python3}"
-PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" "$ROOT/examples/scalebfm/serve_asset_test.py" \
+PYTHONPATH="$ROOT/python${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" "$ROOT/examples/whole-body-control/serve_asset_test.py" \
     --model "$MODEL" --config "$TEST_DIR/config.json" > "$TEST_DIR/server.log" 2>&1 &
 ASSET_PID=$!
 cleanup() {

@@ -27,6 +27,8 @@ var _dirty := true
 var _updating := false
 var _state_key := ""
 var _generation := 0
+var _lease_revision := 0
+var _notified_lease_revision := 0
 
 
 static func shared() -> TrackingSessionService:
@@ -97,12 +99,14 @@ func acquire(owner: Object, capabilities: Array, motion_count: int = 2) -> void:
 	if previous.get("capabilities") == wanted and previous.get("motion_count") == count:
 		return
 	_leases[id] = {"owner": weakref(owner), "capabilities": wanted, "motion_count": count}
+	_lease_revision += 1
 	_dirty = true
 	_refresh()
 
 
 func release(owner: Object) -> void:
 	if owner != null and _leases.erase(owner.get_instance_id()):
+		_lease_revision += 1
 		_dirty = true
 		_refresh()
 
@@ -204,10 +208,13 @@ func _status_for(lease: Dictionary) -> Dictionary:
 		phase = "ready" if not _pico else str(_policy_report.get("phase", "required"))
 		if phase == "confirming" and not _confirmation_ready:
 			phase = "confirmation_waiting_tracking"
-		if _pico and bool(_policy_report.get("confirmed", false)):
-			if (wanted.has("motion") and _mode != "motion") or (wanted.has("body") and _mode != "body"):
-				phase = "mode_conflict"
-			elif mode == "body":
+		if _pico and _mode != "off" and mode != _mode:
+			# Conflicting leases are actionable before calibration. Waiting until
+			# confirmation deadlocks the UI: only the owner of _mode can confirm.
+			phase = "mode_conflict"
+			allowed = false
+		elif _pico and bool(_policy_report.get("confirmed", false)):
+			if mode == "body":
 				var state := int(_body.get("status", 0))
 				allowed = _body_started and bool(_runtime.get("session_created", false)) \
 						and bool(_runtime.get("body_tracker_created", false)) and bool(_body.get("available", false)) and state in [1, 2]
@@ -216,7 +223,7 @@ func _status_for(lease: Dictionary) -> Dictionary:
 				allowed = _motion_count > 0 and int(_runtime.get("motion_tracker_count", 0)) >= int(lease.get("motion_count", 2)) \
 						and bool(_runtime.get("motion_request_sent", false)) and int(_runtime.get("last_motion_request_result", -1)) >= 0
 				phase = "ready" if allowed else "motion_setup"
-	return {"mode": mode, "phase": phase, "allowed": allowed, "generation": _generation,
+	return {"needed": not wanted.is_empty(), "mode": mode, "phase": phase, "allowed": allowed, "generation": _generation,
 		"confirmation_source": _policy_report.get("confirmation_source", ""),
 		"needs_confirmation": not wanted.is_empty() and bool(_policy_report.get("needs_confirmation", false)),
 		"can_confirm": mode == _mode and bool(_policy_report.get("can_confirm", false)) and _confirmation_ready,
@@ -231,6 +238,7 @@ func _refresh(force_refresh: bool = false) -> void:
 		var ref: WeakRef = _leases[id]["owner"]
 		if ref.get_ref() == null:
 			_leases.erase(id)
+			_lease_revision += 1
 			_dirty = true
 	var now := Time.get_ticks_usec()
 	# Publication checks see native invalidation epochs immediately, without
@@ -312,11 +320,13 @@ func _refresh(force_refresh: bool = false) -> void:
 	_mode = mode
 	var key := str([_mode, _policy_report, _confirmation_ready, _body.get("status"), _runtime.get("motion_tracker_count"), _runtime.get("session_created")])
 	var notify := key != _state_key
+	var demand_changed := _lease_revision != _notified_lease_revision
+	_notified_lease_revision = _lease_revision
 	if notify:
 		_state_key = key
 		_generation += 1
 	_updating = false
-	if notify:
+	if notify or demand_changed:
 		changed.emit()
 
 

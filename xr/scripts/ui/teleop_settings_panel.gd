@@ -159,6 +159,8 @@ var _ip_dropdown_endpoint_ids: PackedStringArray = PackedStringArray()
 var _port_input: LineEdit
 var _pico_body_calibration_button: Button
 var _tracking_status_label: Label
+var _optional_tracking_status_label: Label
+var _optional_tracking_report: Dictionary = {}
 var _tracking_confirm_button: Button
 var _tracking_confirm_slot: PanelContainer
 var _tracking_report: Dictionary = {}
@@ -421,6 +423,11 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_tracking_status_label.add_theme_font_size_override("font_size", 18)
 	_tracking_status_label.visible = false
 	robot.add_child(_tracking_status_label)
+	_optional_tracking_status_label = Label.new()
+	_optional_tracking_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_optional_tracking_status_label.add_theme_font_size_override("font_size", 18)
+	_optional_tracking_status_label.visible = false
+	robot.add_child(_optional_tracking_status_label)
 	_pico_body_calibration_button = Button.new()
 	_pico_body_calibration_button.text = tr("UI_PICO_BODY_CALIBRATION")
 	_pico_body_calibration_button.focus_mode = Control.FOCUS_NONE
@@ -1573,28 +1580,38 @@ func _refresh_xrobot_toolkit_controls() -> void:
 		var slot := legacy_toggle.get_parent() as Control
 		if slot != null:
 			slot.visible = not robot_authored_blueprint
-	set_tracking_status(_tracking_report)
+	set_tracking_status(_tracking_report, _optional_tracking_report)
 
 
-func set_tracking_status(report: Dictionary) -> void:
+func set_tracking_status(report: Dictionary, optional_report: Dictionary = {}) -> void:
 	_tracking_report = report.duplicate()
+	_optional_tracking_report = optional_report.duplicate()
 	if _pico_body_calibration_button == null or _tracking_status_label == null:
 		return
-	var needed := PicoPlatformAdapter.is_pico_build() and bool(report.get("needed", false))
-	var phase := str(report.get("phase", "required"))
-	_tracking_status_label.visible = needed
-	_tracking_status_label.text = tr(TrackingStatusText.key(phase))
-	if bool(report.get("rearm_required", false)) and phase in ["ready", "limited"]:
-		_tracking_status_label.text = tr("UI_TRACKING_CALIBRATION_CONFIRMED")
+	var pico := PicoPlatformAdapter.is_pico_build()
+	var robot_needed := pico and bool(report.get("needed", false))
+	var optional_needed := pico and bool(optional_report.get("needed", false))
+	var needed := robot_needed or optional_needed
+	var action_report: Dictionary = report if robot_needed else optional_report
+	var phase := str(action_report.get("phase", "required"))
+	_tracking_status_label.visible = robot_needed
+	var robot_text := tr(TrackingStatusText.key(str(report.get("phase", "required"))))
+	if bool(report.get("rearm_required", false)) and str(report.get("phase", "")) in ["ready", "limited"]:
+		robot_text = tr("UI_TRACKING_CALIBRATION_CONFIRMED")
+	var requirement_key := "UI_TRACKING_ROBOT_BODY" if report.get("mode") == "body" else "UI_TRACKING_ROBOT_MOTION"
+	_tracking_status_label.text = tr(requirement_key) + "\n" + robot_text
+	if _optional_tracking_status_label != null:
+		_optional_tracking_status_label.visible = optional_needed
+		_optional_tracking_status_label.text = tr("UI_TRACKING_LOCAL_DISPLAY") + "\n" + tr(TrackingStatusText.key(str(optional_report.get("phase", "required"))))
 	_pico_body_calibration_button.visible = needed
 	var slot := _pico_body_calibration_button.get_parent() as Control
 	if slot != null:
 		slot.visible = needed
 	_pico_body_calibration_button.text = tr("UI_PICO_RECALIBRATE")
-	_pico_body_calibration_button.disabled = not bool(report.get("can_calibrate", false)) or phase == "mode_conflict"
+	_pico_body_calibration_button.disabled = not bool(action_report.get("can_calibrate", false)) or phase == "mode_conflict"
 	if _tracking_confirm_slot != null:
-		_tracking_confirm_slot.visible = needed and bool(report.get("needs_confirmation", false))
-		_tracking_confirm_button.disabled = not bool(report.get("can_confirm", false))
+		_tracking_confirm_slot.visible = needed and bool(action_report.get("needs_confirmation", false))
+		_tracking_confirm_button.disabled = not bool(action_report.get("can_confirm", false))
 
 
 ## XRoboToolkit compatibility rides Pico vendor APIs, so only Pico builds may

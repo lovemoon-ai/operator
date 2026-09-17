@@ -52,8 +52,48 @@ class NativeCalls:
 		return true
 
 
+func _test_demand_notifications(t: OperatorTestAssertions) -> void:
+	var sessions := TrackingSessionService.new()
+	var first := RefCounted.new()
+	var second := RefCounted.new()
+	var notifications: Array = []
+	sessions.changed.connect(func() -> void: notifications.append(true))
+	sessions.acquire(first, ["body"])
+	var before := notifications.size()
+	sessions.acquire(second, ["body"])
+	t.eq(notifications.size(), before + 1, "same-mode lease changes notify consumer-scoped UI")
+	t.is_true(sessions.status(second)["needed"], "status is scoped to the owner")
+	sessions.acquire(second, ["body"])
+	t.eq(notifications.size(), before + 1, "unchanged acquire does not cause a refresh loop")
+	sessions.release(second)
+	t.eq(notifications.size(), before + 2, "release notifies even while another body lease remains")
+	t.is_false(sessions.status(second)["needed"], "released consumer no longer needs tracking")
+	t.is_true(sessions.status(first)["needed"], "other consumer retains demand")
+	sessions.release(first)
+	sessions.free()
+
+
+func _test_unconfirmed_mode_conflict(t: OperatorTestAssertions) -> void:
+	var sessions := TrackingSessionService.new()
+	var native := NativeCalls.new()
+	sessions.set("_pico", true)
+	sessions.set("_native", native)
+	var body := RefCounted.new()
+	var motion := RefCounted.new()
+	sessions.acquire(body, ["body"])
+	sessions.acquire(motion, ["motion"], 2)
+	t.eq(sessions.status(body)["phase"], "required", "current body owner can enter setup")
+	t.eq(sessions.status(motion)["phase"], "mode_conflict", "conflicting motion demand is explicit before confirmation")
+	t.is_false(sessions.status(motion)["can_confirm"], "conflicting owner cannot confirm another mode")
+	sessions.release(motion)
+	sessions.release(body)
+	sessions.free()
+
+
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_freshness(t)
+	_test_demand_notifications(t)
+	_test_unconfirmed_mode_conflict(t)
 	var sessions := TrackingSessionService.new()
 	var native := NativeCalls.new()
 	sessions.set("_pico", true)

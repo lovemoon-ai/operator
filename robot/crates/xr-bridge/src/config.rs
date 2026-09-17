@@ -27,6 +27,31 @@ pub const DEFAULT_POSE_UDP_PORT: u16 = 63902;
 /// Default TCP port for the dedicated telemetry stream.
 pub const DEFAULT_TELEMETRY_PORT: u16 = 63903;
 
+/// SDK consumers opt into calibrated body/independent-tracker data explicitly.
+pub fn default_xr_streams() -> Vec<String> {
+    ["head", "controllers", "hands"].map(String::from).to_vec()
+}
+
+pub fn validate_xr_streams(streams: &[String]) -> Result<()> {
+    // Empty means "all" to legacy XR clients, never "no tracker demand".
+    anyhow::ensure!(
+        !streams.is_empty(),
+        "xr_streams must be non-empty; request streams explicitly"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for stream in streams {
+        anyhow::ensure!(
+            matches!(
+                stream.as_str(),
+                "head" | "controllers" | "hands" | "body" | "motion_trackers"
+            ),
+            "unsupported XR stream: {stream:?}"
+        );
+        anyhow::ensure!(seen.insert(stream), "duplicate XR stream: {stream:?}");
+    }
+    Ok(())
+}
+
 /// Top-level bridge configuration.
 ///
 /// `Default` resolves the adapter endpoint to [`Endpoint::default`] (UDS) and
@@ -52,6 +77,8 @@ pub struct BridgeConfig {
     pub pose_udp_port: u16,
     /// TCP port for the dedicated telemetry stream.
     pub telemetry_port: u16,
+    /// Raw streams advertised by SDK mode; adapter descriptors remain authoritative.
+    pub xr_streams: Vec<String>,
     /// Video relay configuration (Annex-B source → XR wire protocol).
     pub video: VideoConfig,
 }
@@ -128,6 +155,7 @@ impl Default for BridgeConfig {
             discovery_unicast_targets: Vec::new(),
             pose_udp_port: DEFAULT_POSE_UDP_PORT,
             telemetry_port: DEFAULT_TELEMETRY_PORT,
+            xr_streams: default_xr_streams(),
             video: VideoConfig::default(),
         }
     }
@@ -185,6 +213,8 @@ struct BridgeConfigFile {
     pose_udp_port: Option<u16>,
     #[serde(default)]
     telemetry_port: Option<u16>,
+    #[serde(default)]
+    xr_streams: Option<Vec<String>>,
     #[serde(default)]
     video: Option<VideoConfig>,
 }
@@ -275,6 +305,10 @@ fn apply_bridge_config_file(cfg: &mut BridgeConfig, file: BridgeConfigFile) -> R
     if let Some(p) = file.telemetry_port {
         cfg.telemetry_port = p;
     }
+    if let Some(streams) = file.xr_streams {
+        validate_xr_streams(&streams)?;
+        cfg.xr_streams = streams;
+    }
     if let Some(v) = file.video {
         cfg.video = v;
     }
@@ -285,6 +319,25 @@ fn apply_bridge_config_file(cfg: &mut BridgeConfig, file: BridgeConfigFile) -> R
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+
+    #[test]
+    fn sdk_streams_are_explicit_and_default_without_trackers() {
+        assert_eq!(
+            BridgeConfig::default().xr_streams,
+            ["head", "controllers", "hands"]
+        );
+        let config =
+            BridgeConfig::from_yaml_str("bridge:\n  xr_streams: [head, controllers, body]\n")
+                .unwrap();
+        assert_eq!(config.xr_streams, ["head", "controllers", "body"]);
+        for yaml in [
+            "xr_streams: []",
+            "xr_streams: [all]",
+            "xr_streams: [body, body]",
+        ] {
+            assert!(BridgeConfig::from_yaml_str(yaml).is_err(), "{yaml}");
+        }
+    }
 
     #[test]
     fn defaults_to_uds() {

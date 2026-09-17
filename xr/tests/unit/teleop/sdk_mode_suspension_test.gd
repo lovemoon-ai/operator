@@ -8,6 +8,8 @@ const TeleopControllerScript = preload("res://scripts/app/modes/teleop_controlle
 
 class FakeRobotSink:
 	extends RobotControlSink
+	# SensorSink is RefCounted, not a scene Node. Never manually free this
+	# instance while the controller or the local variable still references it.
 	var sending := false
 	var configurations := 0
 
@@ -90,7 +92,7 @@ class FakeXrtTarget:
 
 
 class FakeBlueprint:
-	extends Node
+	extends BlueprintRuntime
 	var clear_calls := 0
 
 	func clear() -> void:
@@ -227,7 +229,6 @@ func _test_protocol_aware_outside_start(t: OperatorTestAssertions) -> void:
 	t.is_false(controller._link_active, "a stopped target changes the link action back to Connect")
 
 	controller.free()
-	robot_sink.free()
 	xr_sender.free()
 	tcp.free()
 	command_sender.free()

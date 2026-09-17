@@ -1,5 +1,0 @@
-numpy>=1.26,<3
-scipy>=1.11
-mujoco>=3.3,<4
-# Install pyoperator from ../../python and PyTorch >=2.7 separately (CPU or CUDA
-# wheel as appropriate). Torch-TensorRT is optional for --backend tensorrt.
