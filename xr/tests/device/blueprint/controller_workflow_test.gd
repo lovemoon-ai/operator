@@ -141,7 +141,12 @@ func _test_system_scope(origin: XROrigin3D, camera: XRCamera3D, controllers: Arr
 	var menu: Node3D = shell.menu
 	t.is_true(menu != null, "system menu exists before a remote Blueprint")
 	var buttons: Dictionary = menu.get("_buttons")
-	t.eq(buttons.size(), 2, "system menu has connect/disconnect and recenter, not reset")
+	t.eq(buttons.size(), 1, "system menu only creates a slot for the available connection action")
+	var groups: Dictionary = menu.get("_groups")
+	t.eq((groups.get("system", []) as Array).size(), 1, "unavailable recenter is omitted from the menu")
+	t.is_false(buttons.has(&"system_1"), "the unavailable recenter button leaves no empty slot")
+	var menu_viewport_size := Vector2i(menu.get("_viewport_size"))
+	t.eq(menu_viewport_size.y, 206, "the menu shrinks after omitting recenter")
 	var connection_row: Dictionary = shell.runtime.menu_entries()[0]
 	t.eq(
 		str(connection_row["text"]),

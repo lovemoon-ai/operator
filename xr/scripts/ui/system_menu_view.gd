@@ -40,7 +40,12 @@ func configure_controller(left: XRController3D, right_tracker: StringName, head:
 func set_content(groups: Dictionary, detail: String) -> void:
 	if groups != _groups:
 		cancel_interaction()
-		var needs_layout: bool = (_groups["robot"].is_empty() != groups["robot"].is_empty())
+		var old_system_rows := mini(2, _groups["system"].size())
+		var new_system_rows := mini(2, groups["system"].size())
+		var needs_layout: bool = (
+			old_system_rows != new_system_rows
+			or _groups["robot"].is_empty() != groups["robot"].is_empty()
+		)
 		_groups = groups.duplicate(true)
 		_page = mini(_page, maxi(0, ceili(float(_groups["robot"].size()) / PAGE_SIZE) - 1))
 		if needs_layout and is_inside_tree():
@@ -59,21 +64,27 @@ func _build_slots() -> void:
 	_flashes.clear()
 	_action_rects.clear()
 	var expanded: bool = not _groups["robot"].is_empty()
+	var system_rows := mini(2, _groups["system"].size())
+	var hidden_system_height := (2 - system_rows) * 74
 	# Robot rows can arrive while the menu is open; resizing through the
 	# rebinding path keeps the panel from being drawn into its old swapchain.
-	set_viewport_size(Vector2i(360, 500 if expanded else 280))
+	set_viewport_size(Vector2i(360, (500 if expanded else 280) - hidden_system_height))
 	var root := Control.new()
 	_viewport.add_child(root)
 	_title = _label(root, tr("UI_CONTROLLER_SESSION_MENU"), Rect2(18, 8, 324, 34), 25)
-	_add_action_button(root, &"system_0", Rect2(18, 48, 324, 64))
-	_add_action_button(root, &"system_1", Rect2(18, 122, 324, 64))
+	for index in range(system_rows):
+		_add_action_button(
+			root, StringName("system_%d" % index), Rect2(18, 48 + index * 74, 324, 64)
+		)
 	if expanded:
-		_label(root, tr("UI_MENU_ROBOT_ACTIONS"), Rect2(18, 190, 324, 26), 18)
-		_add_action_button(root, &"robot_0", Rect2(18, 220, 324, 70))
-		_add_action_button(root, &"robot_1", Rect2(18, 300, 324, 70))
-		_add_action_button(root, &"previous", Rect2(18, 380, 156, 44))
-		_add_action_button(root, &"next", Rect2(186, 380, 156, 44))
-	_detail_label = _label(root, "", Rect2(18, 430 if expanded else 196, 324, 74), 17)
+		var robot_heading_y := 190 - hidden_system_height
+		_label(root, tr("UI_MENU_ROBOT_ACTIONS"), Rect2(18, robot_heading_y, 324, 26), 18)
+		_add_action_button(root, &"robot_0", Rect2(18, robot_heading_y + 30, 324, 70))
+		_add_action_button(root, &"robot_1", Rect2(18, robot_heading_y + 110, 324, 70))
+		_add_action_button(root, &"previous", Rect2(18, robot_heading_y + 190, 156, 44))
+		_add_action_button(root, &"next", Rect2(186, robot_heading_y + 190, 156, 44))
+	var detail_y := (430 if expanded else 196) - hidden_system_height
+	_detail_label = _label(root, "", Rect2(18, detail_y, 324, 74), 17)
 	_detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	for button_v in _buttons.values():
 		var button: Button = button_v
@@ -200,6 +211,21 @@ func _action_status_text(action: StringName) -> String:
 	var title := str(row.get("title", ""))
 	var text_value := str(row.get("text", "")) if bool(row.get("available", false)) else str(row.get("unavailable_text", ""))
 	return (title + "\n" if not title.is_empty() else "") + text_value
+
+
+func _refresh(phase: String = "idle", active_action: StringName = ACTION_TOGGLE_LOCK) -> void:
+	super(phase, active_action)
+	# Slots are preallocated so the composition viewport does not churn as
+	# robot state changes. Do not render an empty disabled slot when a menu row
+	# is hidden by its Blueprint (for example, recenter before a model exists).
+	for action_v: Variant in _buttons:
+		var action := StringName(action_v)
+		if not (str(action).begins_with("system_") or str(action).begins_with("robot_")):
+			continue
+		var row_visible := _rows.has(action)
+		(_buttons[action] as Button).visible = row_visible
+		(_glows[action] as Panel).visible = row_visible and (_glows[action] as Panel).visible
+		(_flashes[action] as Panel).visible = row_visible and (_flashes[action] as Panel).visible
 
 
 func _trigger_action(action: StringName) -> void:

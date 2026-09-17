@@ -17,7 +17,7 @@ class TestPanel:
 	var saved_options: Dictionary = {}
 
 	# Preference saves go through the real writer, into a scratch file, so the
-	# test can check what Close actually persists without touching user data.
+	# test can check what Confirm actually persists without touching user data.
 	func _settings_path() -> String:
 		return PREFERENCES_PATH
 
@@ -121,45 +121,59 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var ip_input: LineEdit = panel.get("_ip_input")
 	var port_input: LineEdit = panel.get("_port_input")
 	var endpoint_connect_button: Button = panel.get("_connect_button")
-	t.is_true(endpoint_connect_button != null, "the page exposes a Connect button")
+	t.is_true(endpoint_connect_button != null, "the page exposes one link action button")
 	if endpoint_connect_button != null:
-		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "the link action is labeled Connect")
-	var disconnect_button: Button = panel.get("_disconnect_button")
-	t.is_true(disconnect_button != null, "the page exposes a Disconnect button")
-	if disconnect_button != null:
-		t.eq(disconnect_button.text, panel.tr("UI_DISCONNECT"), "Disconnect uses the localized label")
-		if endpoint_connect_button != null:
-			t.eq(
-				endpoint_connect_button.custom_minimum_size.x,
-				disconnect_button.custom_minimum_size.x,
-				"Connect and Disconnect use the same width",
-			)
-			t.eq(
-				endpoint_connect_button.get_parent(),
-				disconnect_button.get_parent(),
-				"Connect and Disconnect share one row",
-			)
-			# An Inside embodiment starts and stops with the same pair, so the
-			# row must outlive the scope switch that hides the Outside fields.
-			t.is_false(
-				outside_box.is_ancestor_of(endpoint_connect_button),
-				"the link row is not hidden with the Outside endpoint fields",
-			)
+		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "the link action starts as Connect")
+		t.eq(endpoint_connect_button.get_parent().get_child_count(), 1, "only one link action is displayed")
+		# An Inside embodiment starts and stops with the same action, so the
+		# row must outlive the scope switch that hides the Outside fields.
+		t.is_false(
+			outside_box.is_ancestor_of(endpoint_connect_button),
+			"the link action is not hidden with the Outside endpoint fields",
+		)
 		var disconnect_requests: Array = []
 		panel.disconnect_requested.connect(func() -> void:
 			disconnect_requests.append(true)
 		)
-		disconnect_button.emit_signal("pressed")
-		t.eq(disconnect_requests.size(), 1, "Disconnect emits one request")
+		panel.set_link_active(true)
+		t.eq(endpoint_connect_button.text, panel.tr("UI_DISCONNECT"), "an active link changes the action to Disconnect")
+		endpoint_connect_button.emit_signal("pressed")
+		t.eq(disconnect_requests.size(), 1, "the active link action emits one disconnect request")
+		panel.set_link_active(false)
+		t.eq(endpoint_connect_button.text, panel.tr("UI_CONNECT"), "a stopped link changes the action back to Connect")
 	var action_row: HBoxContainer = panel.get("_actions_row")
 	var confirm_button := _first_button(action_row)
 	t.is_true(confirm_button != null, "settings expose the primary bottom action")
 	if confirm_button != null:
 		t.eq(
 			confirm_button.text,
-			panel.tr("UI_CLOSE"),
-			"the bottom action closes the page rather than owning the link",
+			panel.tr("UI_OK"),
+			"the bottom action uses the Confirm label",
 		)
+	var wifi_status_indicator: TextureRect = panel.get("_wifi_status_indicator")
+	t.is_true(wifi_status_indicator != null, "the title bar exposes a Wi-Fi status icon")
+	if wifi_status_indicator != null:
+		t.is_true(wifi_status_indicator.texture != null, "the Wi-Fi status icon is loaded")
+		t.eq(
+			wifi_status_indicator.get_index(),
+			(panel.get("_input_mode_indicator") as TextureRect).get_index() - 1,
+			"the Wi-Fi icon sits immediately beside the hand/controller icon",
+		)
+	var title_send_rate_label: Label = panel.get("_send_rate_label")
+	if title_send_rate_label != null and wifi_status_indicator != null:
+		t.eq(
+			title_send_rate_label.get_index(),
+			wifi_status_indicator.get_index() - 1,
+			"send FPS is third from the right, before Wi-Fi and input mode",
+		)
+	t.eq(
+		TeleopSettingsPanel._wifi_connection_address([
+			{"name": "lo", "friendly": "Loopback", "addresses": ["127.0.0.1"]},
+			{"name": "wlan0", "friendly": "Wi-Fi", "addresses": ["192.168.1.25"]},
+		]),
+		"192.168.1.25",
+		"Wi-Fi detection reports the active wireless interface address",
+	)
 	var shared_ip := "192.168.1.40"
 	var discovered := {
 		"operator|%s|63901" % shared_ip: {
@@ -509,7 +523,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"the page neutralises teleop controller input while the pointer is on it"
 	)
 
-	# Close and the Display toggles keep preferences but never the endpoint:
+	# Confirm and the Display toggles keep preferences but never the endpoint:
 	# launch auto-connects to a saved endpoint, so only Connect may save one.
 	var preferences_path: String = TestPanel.PREFERENCES_PATH
 	if FileAccess.file_exists(preferences_path):
@@ -520,15 +534,15 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	panel.set_options(unconfirmed)
 	panel.call("_on_confirm_requested")
 	var saved := ConfigFile.new()
-	if t.is_true(saved.load(preferences_path) == OK, "Close persists the operator's preferences"):
+	if t.is_true(saved.load(preferences_path) == OK, "Confirm persists the operator's preferences"):
 		t.is_true(
 			bool(saved.get_value(TeleopSettingsPanel.SECTION, "show_vr_pose", false)),
-			"Close keeps a display preference"
+			"Confirm keeps a display preference"
 		)
 		for link_key in TeleopSettingsPanel.LINK_OPTION_KEYS:
 			t.is_false(
 				saved.has_section_key(TeleopSettingsPanel.SECTION, str(link_key)),
-				"Close does not save the unconfirmed %s" % link_key
+				"Confirm does not save the unconfirmed %s" % link_key
 			)
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(preferences_path))
 

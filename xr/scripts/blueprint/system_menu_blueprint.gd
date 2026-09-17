@@ -23,7 +23,11 @@ static func definition() -> Dictionary:
 			"locked_text": str(TranslationServer.translate("UI_RECENTER_ROBOT")),
 			"unlocked_text": str(TranslationServer.translate("UI_RECENTER_ROBOT")),
 			"unavailable_text": str(TranslationServer.translate("UI_RECENTER_ROBOT"))},
-		"bindings": {"value": "local.recenter_value", "available": "local.can_recenter"},
+		"bindings": {
+			"value": "local.recenter_value",
+			"available": "local.can_recenter",
+			"visible": "local.can_recenter",
+		},
 	}]
 	for hand in ["left", "right"]:
 		components.append({

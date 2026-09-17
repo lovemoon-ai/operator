@@ -64,9 +64,13 @@ class FakeCommandSender:
 class FakeOutsideTarget:
 	extends Node
 	var starts: Array = []
+	var ready := false
 
 	func start(options: Dictionary) -> void:
 		starts.append(options.duplicate(true))
+
+	func is_ready() -> bool:
+		return ready
 
 
 class FakeXrtTarget:
@@ -214,6 +218,13 @@ func _test_protocol_aware_outside_start(t: OperatorTestAssertions) -> void:
 	t.eq(outside_target.starts.size(), 1, "Operator target receives one start request")
 	t.eq((outside_target.starts[0] as Dictionary).get("host"), "192.168.1.30",
 		"Operator target receives the configured host")
+	t.is_false(controller._link_active, "starting a target does not report a connected link")
+	outside_target.ready = true
+	controller._on_target_state_changed(2, "ready", outside_target)
+	t.is_true(controller._link_active, "a ready target changes the link action to Disconnect")
+	outside_target.ready = false
+	controller._on_target_state_changed(0, "disconnected", outside_target)
+	t.is_false(controller._link_active, "a stopped target changes the link action back to Connect")
 
 	controller.free()
 	robot_sink.free()

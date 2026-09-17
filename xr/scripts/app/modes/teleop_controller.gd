@@ -814,7 +814,8 @@ func _on_xr_started() -> void:
 			"[Operator] Direct-connect launch override %s:%d via %s"
 			% [launch_host, launch_port, str(launch_options.get("protocol", "operator"))]
 		)
-		_set_link_active(_start_outside_with_options(launch_options))
+		_set_link_active(false)
+		_start_outside_with_options(launch_options)
 		if _teleop_flag_set(TELEOP_KEY_PICO_BODY_CALIBRATE):
 			call_deferred("_on_pico_body_calibration_requested")
 	elif not _synthetic:
@@ -860,6 +861,7 @@ func _on_settings_applied(options: Dictionary) -> void:
 	)
 	_cancel_launch_window()
 	_applied_options = options.duplicate(true)
+	_set_link_active(false)
 
 	# A manual video override is only meaningful for the endpoint it was
 	# configured against. `_connect_video_stream()` short-circuits to it
@@ -898,9 +900,8 @@ func _on_settings_applied(options: Dictionary) -> void:
 		if not _start_outside_with_options(options):
 			_set_link_active(false)
 			return
-	# The page stays open: Connect owns the link, not the operator's place in
-	# the UI. Leaving for the work page is the bottom Close action's job.
-	_set_link_active(true)
+	# The page stays open while the target starts. `_on_target_state_changed`
+	# switches the action to Disconnect only after the target is actually ready.
 
 
 func _apply_runtime_settings(options: Dictionary) -> void:
@@ -1120,7 +1121,7 @@ static func _descriptor_supports_revo2_hand_runtime(descriptor: Dictionary) -> b
 	)
 
 
-## Close signal: hide the page and re-show the floating settings button so
+## Confirm signal: hide the page and re-show the floating settings button so
 ## the user can reopen later. The link is untouched.
 func _on_settings_close_requested() -> void:
 	_hide_settings_panel()
@@ -1151,7 +1152,7 @@ func _on_display_options_changed(options: Dictionary) -> void:
 		)
 
 
-## Connect / Disconnect own this flag; opening or closing the page does not.
+## Target readiness owns this flag; opening or closing the page does not.
 func _set_link_active(active: bool) -> void:
 	_link_active = active
 	if not active:
@@ -1529,7 +1530,8 @@ func _begin_launch_window() -> void:
 			"[Operator] Auto-connecting XRoboToolkit compatibility target @ %s:%d"
 			% [saved_host, int(persisted.get("port", 63901))]
 		)
-		_set_link_active(_start_outside_with_options(persisted))
+		_set_link_active(false)
+		_start_outside_with_options(persisted)
 		return
 	_launch_window_token += 1
 	_launch_window_active = true
@@ -1630,7 +1632,8 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 		"[Operator] Auto-connecting to discovered %s endpoint @ %s:%d"
 		% [str(options.get("protocol", "operator")), ip, port]
 	)
-	_set_link_active(_start_outside_with_options(options))
+	_set_link_active(false)
+	_start_outside_with_options(options)
 
 
 func _show_settings_panel_with_status(text: String) -> void:
@@ -2769,6 +2772,7 @@ func _bind_target_signals(target: Node) -> void:
 func _on_target_ready(descriptor: Dictionary, target: Node) -> void:
 	if target != _active_target:
 		return
+	_set_link_active(true)
 	var execution: Dictionary = descriptor.get("execution", {})
 	var kind := str(execution.get("kind", target.get("target_kind")))
 	var environment := str(execution.get("environment", ""))
@@ -2788,7 +2792,10 @@ func _on_target_ready(descriptor: Dictionary, target: Node) -> void:
 
 
 func _on_target_state_changed(_state: int, detail: String, target: Node) -> void:
-	if target == _active_target and not detail.is_empty():
+	if target != _active_target:
+		return
+	_set_link_active(target.has_method("is_ready") and bool(target.call("is_ready")))
+	if not detail.is_empty():
 		_set_status(detail)
 
 

@@ -57,8 +57,11 @@ const ENDPOINT_ROW_CHROME_PX := 2 * 38 + 2 * 2 + SIDEBAR_WIDTH + 14 + 2 * DETAIL
 const ENDPOINT_ROW_FONT_SIZE := 20
 ## Below this the link is up but nothing is leaving the headset.
 const SEND_RATE_IDLE_HZ := 0.5
+const WIFI_STATUS_REFRESH_SEC := 2.0
+const WIFI_CONNECTED_COLOR := Color(0.20, 0.82, 0.42, 1.0)
+const WIFI_DISCONNECTED_COLOR := Color(0.45, 0.48, 0.52, 1.0)
 ## Keys naming *which* link Connect starts. Only Connect persists them: launch
-## auto-connects to the saved endpoint, so letting Close or a Display toggle
+## auto-connects to the saved endpoint, so letting Confirm or a Display toggle
 ## save an endpoint the operator never connected to would hand that endpoint
 ## control on the next launch.
 const LINK_OPTION_KEYS := [
@@ -154,7 +157,6 @@ var _ip_click_timer: Timer
 ## handler can resolve an item id back to a `_discovered` endpoint id.
 var _ip_dropdown_endpoint_ids: PackedStringArray = PackedStringArray()
 var _port_input: LineEdit
-var _disconnect_button: Button
 var _pico_body_calibration_button: Button
 var _tracking_status_label: Label
 var _tracking_confirm_button: Button
@@ -181,6 +183,8 @@ var _blueprint_rows: VBoxContainer
 var _blueprint_override_buttons: Dictionary = {}
 var _blueprint_override_modes: Dictionary = {}
 var _status_label: Label
+var _wifi_status_indicator: TextureRect
+var _wifi_status_timer: Timer
 var _send_rate_label: Label
 var _link_active := false
 ## Last `prefer_*` hints handed to `set_discovery_state`, replayed whenever
@@ -202,8 +206,26 @@ func _init() -> void:
 	# for a long host label. 720 tall replaces the legacy 884 — there's no
 	# longer a single tall scroll list, each group fits comfortably.
 	_setup_two_column_panel(
-		Vector2i(PANEL_WIDTH_PX, 720), Vector2(0.63, 0.54), "UI_SETTINGS_TITLE", "UI_CLOSE", 2, false
+		Vector2i(PANEL_WIDTH_PX, 720), Vector2(0.63, 0.54), "UI_SETTINGS_TITLE", "UI_OK", 2, false
 	)
+	# The headset's network state is independent of the robot link. Keep it in
+	# the title bar so it remains visible on every settings group.
+	_wifi_status_indicator = TextureRect.new()
+	_wifi_status_indicator.custom_minimum_size = Vector2(40, 40)
+	_wifi_status_indicator.expand_mode = TextureRect.EXPAND_FIT_WIDTH_PROPORTIONAL
+	_wifi_status_indicator.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_wifi_status_indicator.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_wifi_status_indicator.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_wifi_status_indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_wifi_status_indicator.texture = _load_icon("wifi")
+	_title_row.add_child(_wifi_status_indicator)
+	_title_row.move_child(_wifi_status_indicator, 1)
+	_wifi_status_timer = Timer.new()
+	_wifi_status_timer.wait_time = WIFI_STATUS_REFRESH_SEC
+	_wifi_status_timer.autostart = true
+	_wifi_status_timer.timeout.connect(_refresh_wifi_status)
+	add_child(_wifi_status_timer)
+	_refresh_wifi_status()
 	# Connection state belongs in the title bar rather than inside the Robot
 	# group: the link is global to the page, so the operator must see frames
 	# going out from whichever group they happen to be looking at.
@@ -213,6 +235,7 @@ func _init() -> void:
 	_send_rate_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_send_rate_label.visible = false
 	_title_row.add_child(_send_rate_label)
+	# Right-to-left: input mode, WiFi, send rate.
 	_title_row.move_child(_send_rate_label, 1)
 	var settings := _load_settings()
 	set_options(settings)
@@ -501,10 +524,10 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_retargeting_status_label.add_theme_color_override("font_color", COL_STATUS)
 	inside.add_child(_retargeting_status_label)
 
-	# Connect / Disconnect belong to the Robot Control group as a whole rather
+	# The stateful Connect / Disconnect action belongs to Robot Control as a whole rather
 	# than to the Outside endpoint fields: an Inside embodiment is started and
-	# stopped by exactly the same pair, and living inside the Outside box would
-	# hide them — and with them the only way to start — for that scope.
+	# stopped by exactly the same button, and living inside the Outside box would
+	# hide it — and with it the only way to start — for that scope.
 	var link_row := HBoxContainer.new()
 	link_row.add_theme_constant_override("separation", 10)
 	link_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -516,17 +539,8 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_connect_button.custom_minimum_size = Vector2(112, 58)
 	_connect_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_connect_button.add_theme_font_size_override("font_size", 22)
-	_connect_button.pressed.connect(_on_connect_pressed)
+	_connect_button.pressed.connect(_on_link_button_pressed)
 	link_row.add_child(_connect_button)
-
-	_disconnect_button = Button.new()
-	_disconnect_button.text = tr("UI_DISCONNECT")
-	_disconnect_button.focus_mode = Control.FOCUS_NONE
-	_disconnect_button.custom_minimum_size = Vector2(112, 58)
-	_disconnect_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_disconnect_button.add_theme_font_size_override("font_size", 22)
-	_disconnect_button.pressed.connect(_on_disconnect_pressed)
-	link_row.add_child(_disconnect_button)
 
 	# --- Video group -------------------------------------------------------
 	var video := register_group("video", "UI_GROUP_VIDEO", "camera")
@@ -771,6 +785,13 @@ func _on_confirm_requested() -> void:
 	close_requested.emit()
 
 
+func _on_link_button_pressed() -> void:
+	if _link_active:
+		_on_disconnect_pressed()
+	else:
+		_on_connect_pressed()
+
+
 ## Connect: validate, persist, and start the link while staying on the page,
 ## so the send rate in the title bar can show the operator that frames are
 ## actually going out.
@@ -806,13 +827,55 @@ func _on_connect_pressed() -> void:
 	settings_applied.emit(options)
 
 
-## Connect/Disconnect own the link; opening or closing the page does not.
-## The controller drives these two so the indicator tracks the real stream.
+## Target readiness owns the link state; opening or closing the page does not.
+## The controller drives it so the action and indicator track the real stream.
 func set_link_active(active: bool) -> void:
 	_link_active = active
+	if _connect_button != null:
+		_connect_button.text = tr("UI_DISCONNECT" if active else "UI_CONNECT")
 	if _send_rate_label != null:
 		_send_rate_label.visible = active
 		_send_rate_label.text = tr("UI_SEND_RATE_IDLE") if active else ""
+
+
+func _refresh_wifi_status() -> void:
+	if _wifi_status_indicator == null:
+		return
+	var address := _wifi_connection_address(IP.get_local_interfaces())
+	var connected := not address.is_empty()
+	_wifi_status_indicator.self_modulate = (
+		WIFI_CONNECTED_COLOR if connected else WIFI_DISCONNECTED_COLOR
+	)
+
+
+static func _wifi_connection_address(interfaces: Array) -> String:
+	var ipv6_fallback := ""
+	for interface_v: Variant in interfaces:
+		if not interface_v is Dictionary:
+			continue
+		var interface := interface_v as Dictionary
+		var interface_name := str(interface.get("name", "")).to_lower()
+		var friendly_name := str(interface.get("friendly", "")).to_lower()
+		if not (
+			interface_name.begins_with("wlan")
+			or interface_name.contains("wifi")
+			or interface_name.contains("wi-fi")
+			or friendly_name.contains("wifi")
+			or friendly_name.contains("wi-fi")
+		):
+			continue
+		var addresses: Variant = interface.get("addresses", [])
+		if not addresses is Array and not addresses is PackedStringArray:
+			continue
+		for address_v: Variant in addresses:
+			var address := str(address_v).strip_edges()
+			if address.is_empty() or address == "::1" or address.begins_with("127."):
+				continue
+			if not address.contains(":"):
+				return address
+			if ipv6_fallback.is_empty() and not address.begins_with("fe80:"):
+				ipv6_fallback = address
+	return ipv6_fallback
 
 
 ## A link can be up with nothing leaving the headset (still connecting, dropped
@@ -1344,7 +1407,7 @@ func _load_settings() -> Dictionary:
 	return load_settings()
 
 
-## Close and the Display toggles can create the file with preferences alone
+## Confirm and the Display toggles can create the file with preferences alone
 ## (see _save_preferences); only a file Connect wrote holds the endpoint.
 static func _has_confirmed_link() -> bool:
 	var cfg := ConfigFile.new()
