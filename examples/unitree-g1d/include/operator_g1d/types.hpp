@@ -61,17 +61,31 @@ struct BackendSnapshot {
   double height_m = 0.0;
   std::vector<double> joint_positions_rad;
   std::vector<double> joint_velocities_rad_s;
+  // Last position targets actually retained by the backend.  These may
+  // intentionally differ from measured q: with tau_ff unavailable that
+  // position error supplies the torque which holds an arm against gravity.
+  std::vector<double> arm_command_targets_rad;
   std::int64_t motor_fault_count = 0;
   std::int64_t mode_machine = 0;
   std::int64_t last_base_result = 0;
   std::int64_t last_height_result = 0;
+  bool left_hand_fresh = false;
+  bool right_hand_fresh = false;
+  double left_hand_age_ms = -1.0;
+  double right_hand_age_ms = -1.0;
+  std::vector<double> left_hand_positions;
+  std::vector<double> right_hand_positions;
+  std::vector<double> left_hand_velocities;
+  std::vector<double> right_hand_velocities;
+  std::vector<double> left_hand_currents;
+  std::vector<double> right_hand_currents;
 };
 
 enum class MotionMode {
   Idle,
   Base,
   Lift,
-  ArmsUnavailable,
+  Arms,
   Conflict,
   Stopped,
 };
@@ -80,9 +94,15 @@ struct ActuatorCommand {
   MotionMode mode = MotionMode::Idle;
   bool base_active = false;
   bool lift_active = false;
+  bool arms_active = false;
   double base_vx_mps = 0.0;
   double base_wz_rad_s = 0.0;
   double lift_normalized = 0.0;
+  std::vector<double> joint_targets_rad;
+  bool left_hand_active = false;
+  bool right_hand_active = false;
+  std::array<double, 6> left_hand_targets{};
+  std::array<double, 6> right_hand_targets{};
 };
 
 struct ControllerStatus {

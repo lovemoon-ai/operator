@@ -20,6 +20,8 @@ bridge:
           - left
           - --fps
           - "30"
+          - --tone-correction
+          - "on"
         tcp_port: 12345
         udp_port: 12345
         width: 640

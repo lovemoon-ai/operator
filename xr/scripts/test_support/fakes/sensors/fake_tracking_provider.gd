@@ -20,6 +20,7 @@ var _hand_joints_right: Array[Dictionary] = []
 ## to the left hand. Tests that care about a dead/powered-off controller call
 ## `set_controller_mode_active(hand, false)`.
 var _mode_active: Array = [true, true]
+var _optical_active: Array = [false, false]
 
 
 func set_controller_mode_active(hand: int, active: bool) -> void:
@@ -30,6 +31,17 @@ func set_controller_mode_active(hand: int, active: bool) -> void:
 func is_controller_mode_active(hand: int) -> bool:
 	if hand >= 0 and hand < 2:
 		return bool(_mode_active[hand])
+	return false
+
+
+func set_optical_hand_tracking_active(hand: int, active: bool) -> void:
+	if hand >= 0 and hand < 2:
+		_optical_active[hand] = active
+
+
+func is_optical_hand_tracking_active(hand: int) -> bool:
+	if hand >= 0 and hand < 2:
+		return bool(_optical_active[hand])
 	return false
 
 

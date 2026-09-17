@@ -20,6 +20,7 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../cpp/liboperator
   ${CMAKE_CURRENT_BINARY_DIR}/liboperator)
 
 set(OPERATOR_G1D_CORE_SOURCES
+  src/arm_ik.cpp
   src/backend.cpp
   src/controller.cpp
   src/protocol.cpp
@@ -87,6 +88,13 @@ target_compile_options(operator_g1d_core PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(operator-g1d-client src/main.cpp)
 target_link_libraries(operator-g1d-client PRIVATE operator_g1d_core operator::operator)
+
+if(OPERATOR_G1D_WITH_UNITREE)
+  add_executable(g1d-motion-switcher tools/motion_switcher.cpp)
+  target_link_libraries(g1d-motion-switcher PRIVATE ${OPERATOR_UNITREE_TARGET} Threads::Threads)
+  add_executable(g1d-lowcmd-probe tools/lowcmd_probe.cpp)
+  target_link_libraries(g1d-lowcmd-probe PRIVATE ${OPERATOR_UNITREE_TARGET} Threads::Threads)
+endif()
 
 if(OPERATOR_G1D_BUILD_TESTS)
   enable_testing()

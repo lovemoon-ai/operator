@@ -149,12 +149,16 @@ commands.
 
 `examples/unitree-g1d/` is the first such client. It is a C++17 process
 using Unitree SDK2/DDS and serves the standard `[4-byte little-endian
-length][JSON]` protocol over UDS or TCP. The initial hardware scope is the
-mobile base and lift. G1-D upper-body state is telemetry-only until its
-robot-specific URDF, IK, and low-command takeover sequence are validated. It
-also publishes a read-only robot-authored Blueprint for connection and safety
-status. Motion authorization remains local to the adapter and is never granted
-by Blueprint UI state.
+length][JSON]` protocol over UDS or TCP. It controls the mobile base and lift,
+and runs a self-contained G1-D 7-DoF IK solver for both arms. Each arm accepts a
+physical-controller pose/grip or optical wrist pose/fist deadman, captures a
+relative reference on engagement, then rate-limits joint targets before the
+Unitree `rt/lowcmd` boundary. BrainCo Revo-1 hands remain owned by the robot's
+serial service; the adapter uses its `rt/brainco/{left,right}/{cmd,state}` DDS
+boundary and maps controller trigger/grip to the five supported finger motors.
+It also publishes a read-only robot-authored
+Blueprint for connection and safety status. Motion authorization remains local
+to the adapter and is never granted by Blueprint UI state.
 
 Key paths:
 

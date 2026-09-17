@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 
 import argparse
 import ctypes
@@ -7,7 +9,18 @@ import subprocess
 import sys
 
 
-def build_ffmpeg_command(ffmpeg: str, fps: int, eye: str) -> list[str]:
+TONE_CORRECTION_FILTER = (
+    "curves=master='0/0 0.2/0.12 0.5/0.35 0.8/0.58 1/0.75',"
+    "colorbalance=gm=-0.01:bm=0.015"
+)
+
+
+def build_ffmpeg_command(
+    ffmpeg: str,
+    fps: int,
+    eye: str,
+    tone_correction: bool = True,
+) -> list[str]:
     command = [
         ffmpeg,
         "-hide_banner",
@@ -25,10 +38,15 @@ def build_ffmpeg_command(ffmpeg: str, fps: int, eye: str) -> list[str]:
         "-i",
         "pipe:0",
     ]
+    filters: list[str] = []
     if eye == "left":
-        command.extend(["-vf", "crop=iw/2:ih:0:0"])
+        filters.append("crop=iw/2:ih:0:0")
     elif eye == "right":
-        command.extend(["-vf", "crop=iw/2:ih:iw/2:0"])
+        filters.append("crop=iw/2:ih:iw/2:0")
+    if tone_correction and eye != "stereo":
+        filters.append(TONE_CORRECTION_FILTER)
+    if filters:
+        command.extend(["-vf", ",".join(filters)])
     command.extend(
         [
             "-an",
@@ -69,7 +87,13 @@ def set_parent_death_signal() -> None:
     libc.prctl(1, signal.SIGTERM)
 
 
-def relay(endpoint: str, ffmpeg: str, fps: int, eye: str) -> int:
+def relay(
+    endpoint: str,
+    ffmpeg: str,
+    fps: int,
+    eye: str,
+    tone_correction: bool,
+) -> int:
     import zmq
 
     running = True
@@ -82,7 +106,7 @@ def relay(endpoint: str, ffmpeg: str, fps: int, eye: str) -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     process = subprocess.Popen(
-        build_ffmpeg_command(ffmpeg, fps, eye),
+        build_ffmpeg_command(ffmpeg, fps, eye, tone_correction),
         stdin=subprocess.PIPE,
         stdout=sys.stdout.buffer,
         stderr=sys.stderr.buffer,
@@ -136,6 +160,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ffmpeg", default="/usr/bin/ffmpeg")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--eye", choices=("left", "right", "stereo"), default="left")
+    parser.add_argument(
+        "--tone-correction",
+        choices=("on", "off"),
+        default="on",
+        help="compress clipped highlights and reduce the green cast",
+    )
     args = parser.parse_args()
     if args.fps < 1 or args.fps > 120:
         parser.error("--fps must be between 1 and 120")
@@ -144,7 +174,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    return relay(args.endpoint, args.ffmpeg, args.fps, args.eye)
+    return relay(
+        args.endpoint,
+        args.ffmpeg,
+        args.fps,
+        args.eye,
+        args.tone_correction == "on",
+    )
 
 
 if __name__ == "__main__":

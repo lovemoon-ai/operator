@@ -104,14 +104,35 @@ def main() -> int:
                 assert {
                     ("left_joystick_y", "base_linear"),
                     ("right_joystick_x", "base_yaw"),
-                    ("button_x", "lift_down"),
-                    ("button_y", "lift_up"),
+                    ("button_x", "arm_ready"),
+                    ("button_y", "arm_init"),
+                    ("head_pose", "operator_frame"),
+                    ("left_arm_pose", "left_end_effector"),
+                    ("right_arm_pose", "right_end_effector"),
+                    ("left_arm_grip", "left_enable"),
+                    ("right_arm_grip", "right_enable"),
+                    ("left_trigger", "revo1_left_grasp"),
+                    ("left_controller_active", "left_hand_enable"),
+                    ("right_trigger", "revo1_right_grasp"),
+                    ("right_controller_active", "right_hand_enable"),
                 }.issubset(mappings)
                 assert mappings_by_target["base_yaw"]["invert"] is True
                 assert {
                     button["name"]
                     for button in descriptor_message["control_schema"]["buttons"]
-                } == {"emergency_stop", "reset", "lift_down", "lift_up"}
+                } == {
+                    "emergency_stop",
+                    "reset",
+                    "arm_ready",
+                    "arm_init",
+                    "left_enable",
+                    "right_enable",
+                    "left_hand_enable",
+                    "right_hand_enable",
+                }
+                assert descriptor_message["capabilities"]["dual_arm"] is True
+                assert descriptor_message["capabilities"]["deadman"] is True
+                assert descriptor_message["capabilities"]["dexterous_hands"] is True
                 assert (
                     descriptor_message["capabilities"]["blueprint_spec_sha256"]
                     == expected_spec_hash

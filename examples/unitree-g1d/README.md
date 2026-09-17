@@ -5,7 +5,7 @@ the existing Rust `xr-bridge` generic: the bridge connects to this process over
 the standard length-prefixed adapter protocol, while this process owns the
 Unitree SDK2/DDS connection.
 
-The current implementation is the first safe hardware milestone:
+The current implementation provides:
 
 - base forward/reverse and yaw control through `AgvClient::Move`;
 - lift velocity control through `AgvClient::HeightAdjust`;
@@ -15,13 +15,16 @@ The current implementation is the first safe hardware milestone:
 - a robot-authored Blueprint showing the head-camera video panel, connection
   state, and motion-safety state in the headset;
 - a mock backend for tests without a robot;
-- no arm command publishing yet. Joint state is exposed, but `dual_arm` remains
-  false until G1-D-specific kinematics and the low-command takeover sequence are
-  validated on the target robot.
+- simultaneous left/right 7-DoF arm IK from either physical controllers or
+  optically tracked bare hands;
+- controller-driven BrainCo Revo-1 hands through the robot's existing
+  `brainco_hand_server` DDS service;
+- G1-D-specific joint limits, per-cycle joint-rate limiting, relative-pose
+  engagement, fresh-low-state gating, and `rt/lowcmd` CRC generation.
 
 Starting the process does not move the robot. The Unitree backend remains
 read-only unless `--allow-motion` is explicitly supplied, and it does not send
-base/lift zero commands until it has actually taken ownership of that subsystem.
+base/lift/arm commands until it has actually taken ownership of that subsystem.
 
 ## Build
 
@@ -116,6 +119,13 @@ its Annex-B H.264 output to the headset over TCP/UDP port `12345`. The Orin
 therefore needs the existing `teleimager.service`, `pyzmq`, `/usr/bin/ffmpeg`,
 and the `libx264` encoder.
 
+The head-camera helper enables `--tone-correction on` for the current UVC
+camera. It compresses already-clipped highlights and slightly compensates the
+green cast before H.264 encoding. This improves the headset view but cannot
+recover detail that the camera's automatic exposure already clipped in the raw
+JPEG. Disable it with `--tone-correction off` after hardware exposure/white
+balance is corrected in the root-owned `teleimager.service`.
+
 Configure the G1-D C++ build with
 `-DLIBOPERATOR_LIBRARY=/home/unitree/operator/lib/liboperator.a`. The final
 adapter binary contains the Rust core statically and does not need
@@ -163,8 +173,10 @@ CLI. They are starting values for supervised validation, not manufacturer
 limits or a substitute for checking measured motion.
 
 The current defaults are `0.12 m/s` base command, `0.40 rad/s` yaw command,
-`0.20 m/s` measured linear-speed guard, and `0.75 rad/s` measured yaw-speed
-guard. G1-D command values do
+`0.20 m/s` measured linear-speed guard, `0.75 rad/s` measured yaw-speed guard,
+`0.35 m` arm displacement per engagement, `1.0 rad/s` commanded arm joint
+speed, and a `2.0 rad/s` measured arm-speed guard.
+G1-D command values do
 not map one-to-one to measured velocity, so tune from fresh odometry rather
 than treating these values as calibrated physical limits.
 
@@ -188,17 +200,71 @@ the watchdog, or the local E-stop.
 | --- | --- |
 | Left stick Y | base forward/reverse |
 | Right stick X | base yaw |
-| X | lower lift |
-| Y | raise lift |
+| X | upper arms down, elbows slightly outward, forearms forward; open both hands |
+| Y | return both arms to the straight-down initial pose; open both hands |
+| Left/right controller grip | hold to drive that arm from the controller pose |
+| Left/right bare-hand fist | hold to drive that arm from the tracked wrist pose |
+| Left/right trigger | hold to execute that Revo-1 fixed grasp; release to open |
 | B | latch software emergency stop |
 | A twice within 2 seconds, with controls neutral | clear software emergency stop |
 
-Base and lift modes are mutually exclusive. Pressing X/Y while either drive
-stick is active stops both modes as a conflict. After a disconnect, watchdog stop, or feedback fault,
-all motion axes must return to neutral before motion can resume. The two-press
-confirmation is enforced by `xr-bridge`; the native adapter receives one
-sanitized `reset=true` command and independently rejects it if emergency stop
-or any motion axis is active in the same frame.
+Base, lift, and arm modes are mutually exclusive. Both arms may be driven
+simultaneously, but pressing X/Y or moving a drive stick while an arm deadman is
+held stops all modes as a conflict. Arm engagement captures the current wrist,
+measured robot pose, and operator head yaw, so taking control does not command
+a jump. Later wrist motion is interpreted relative to that Grip-edge baseline
+in the yaw-normalized operator frame; for bare hands, opening the hand releases
+the deadman. Tracking loss, stale joint feedback, an unreachable IK
+target, or exceeding the per-engagement workspace radius stops arm updates and
+requires all motion controls to return to neutral before resuming.
+
+X latches a robot-side ready-pose action: shoulder pitch/yaw and wrists return
+near neutral, shoulder roll moves to `+0.20/-0.20 rad`, and elbow joint position
+moves to `0 rad`, so the upper arms hang down, the elbows sit slightly outward,
+and the forearms point forward. Y returns to the straight-down initial pose with
+neutral shoulders/wrists and elbow joint position `pi/2 rad`.
+Both Revo-1 hands open at the same time. The action uses measured joint feedback,
+runs at a bounded joint rate (default `0.5 rad/s`), and ends only after all arm
+joints are within `0.04 rad` of the target.
+
+After a disconnect, watchdog stop, or feedback fault, all motion axes must
+return to neutral before motion can resume. The two-press confirmation is
+enforced by `xr-bridge`; the native adapter receives one sanitized `reset=true`
+command and independently rejects it if emergency stop or any motion axis is
+active in the same frame. Once the arm low-level channel has been acquired, a
+release or emergency stop refreshes the hold target from measured joint state
+instead of continuing toward an old target or dropping upper-body torque.
+
+The IK and protocol paths have offline tests. Treat the first hardware run as a
+supervised bring-up: verify the installed G1-D SDK/firmware joint map, clear the
+workspace, confirm no competing `rt/lowcmd` publisher, start with a reduced
+`--max-arm-joint-velocity`, and keep the physical E-stop available.
+
+The arm mapping follows Unitree's `xr_teleoperate` design where practical: the
+operator head yaw defines forward, IK translation is weighted over orientation,
+solutions use measured joints as the warm start, and a four-sample
+`0.4/0.3/0.2/0.1` weighted filter precedes measured-state velocity clipping.
+Reference implementation: https://github.com/unitreerobotics/xr_teleoperate
+
+### BrainCo Revo-1 controller mode
+
+The adapter does not open BrainCo serial ports. The robot's existing
+`brainco_hand_server` remains their sole owner and exposes normalized DDS topics
+`rt/brainco/{left,right}/{cmd,state}`. The adapter subscribes to fresh state and
+publishes bounded targets while that side's physical controller is actively
+tracked. Releasing trigger/grip commands a smooth return to open; controller
+tracking loss, timeout, disconnect, or stop holds the latest measured position.
+Revo-1 has five controllable motors; the six-slot DDS `ThumbAux`
+position is Revo2-only and is always held at its measured value.
+
+Controller trigger selects one fixed grasp target for all five Revo-1 motors;
+releasing it selects the open target. Grip remains only the corresponding arm
+IK deadman. Trigger hysteresis prevents threshold chatter. Target changes are
+rate-limited by `--max-hand-rate` (default `1.0` normalized unit/s), and measured
+speed is guarded by `--max-measured-hand-speed` (default `1.5`). Absolute
+normalized current is strongly EMA-filtered before applying `--max-hand-current`
+(default `0.8`), so one-sample start/stop spikes do not false-trigger it.
+The fixed close position is configured by `--revo1-grasp-target` (default `0.85`).
 
 The input mapping is carried by `unitree_g1d_descriptor.json`, not by the
 Blueprint. A read-only adapter still receives and validates those commands but

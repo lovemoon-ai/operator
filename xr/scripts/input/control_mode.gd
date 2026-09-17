@@ -221,6 +221,16 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"button_y": return _get_input_bool(tracking, 0, "by_button")
 		"right_controller_pose": return tracking.get_controller_pose(1)
 		"left_controller_pose": return tracking.get_controller_pose(0)
+		"right_hand_pose": return _get_hand_pose(tracking, HAND_RIGHT)
+		"left_hand_pose": return _get_hand_pose(tracking, HAND_LEFT)
+		"right_hand_grip": return _get_hand_grip(tracking, HAND_RIGHT)
+		"left_hand_grip": return _get_hand_grip(tracking, HAND_LEFT)
+		"right_controller_active": return tracking.is_controller_mode_active(HAND_RIGHT)
+		"left_controller_active": return tracking.is_controller_mode_active(HAND_LEFT)
+		"right_arm_pose": return _get_arm_pose(tracking, HAND_RIGHT)
+		"left_arm_pose": return _get_arm_pose(tracking, HAND_LEFT)
+		"right_arm_grip": return _get_arm_grip(tracking, HAND_RIGHT)
+		"left_arm_grip": return _get_arm_grip(tracking, HAND_LEFT)
 		"head_pose": return tracking.get_head_pose()
 		"right_hand_joints": return tracking.get_hand_joints(1)
 		"left_hand_joints": return tracking.get_hand_joints(0)
@@ -238,6 +248,60 @@ func _read_vr_source(source: String, tracking: TrackingProvider) -> Variant:
 		"active_button_b": return _get_input_bool(tracking, _driving_hand, "by_button")
 		"active_hand_joints": return tracking.get_hand_joints(_driving_hand)
 	return null
+
+
+func _get_arm_pose(tracking: TrackingProvider, hand: int) -> Dictionary:
+	if tracking.is_controller_mode_active(hand):
+		return tracking.get_controller_pose(hand)
+	return _get_hand_pose(tracking, hand)
+
+
+func _get_arm_grip(tracking: TrackingProvider, hand: int) -> float:
+	if tracking.is_controller_mode_active(hand):
+		return _get_grip_value(tracking, hand)
+	return _get_hand_grip(tracking, hand)
+
+
+func _get_hand_pose(tracking: TrackingProvider, hand: int) -> Dictionary:
+	if not tracking.is_optical_hand_tracking_active(hand):
+		return {"is_active": false}
+	var joints := _cached_hand_joints(tracking, hand)
+	if joints.size() <= HandGestureMapperScript.JOINT_WRIST:
+		return {"is_active": false}
+	var wrist_v: Variant = joints[HandGestureMapperScript.JOINT_WRIST]
+	if not wrist_v is Dictionary:
+		return {"is_active": false}
+	var wrist := wrist_v as Dictionary
+	var position_v: Variant = wrist.get("position", null)
+	var rotation_v: Variant = wrist.get("rotation", null)
+	if not bool(wrist.get("tracked", false)) \
+			or not bool(wrist.get("orientation_valid", true)) \
+			or not position_v is Vector3 or not rotation_v is Quaternion:
+		return {"is_active": false}
+	return {
+		"position": position_v,
+		"rotation": rotation_v,
+		"is_active": true,
+	}
+
+
+func _get_hand_grip(tracking: TrackingProvider, hand: int) -> float:
+	# Do not use controller-inferred hand joints as a second deadman while a
+	# physical controller is active. Only an optically tracked bare hand may
+	# synthesize grip from finger flexion.
+	if not tracking.is_optical_hand_tracking_active(hand):
+		return 0.0
+	var joints := _cached_hand_joints(tracking, hand)
+	if not HandGestureMapperScript.has_required_joints(joints):
+		return 0.0
+	var targets := HandGestureMapperScript.targets_from_tracking(joints)
+	if targets.size() < 6:
+		return 0.0
+	return clampf(
+		(float(targets[2]) + float(targets[3]) + float(targets[4]) + float(targets[5])) * 0.25,
+		0.0,
+		1.0
+	)
 
 
 func _get_hand_target(tracking: TrackingProvider, hand: int, channel: int) -> float:

@@ -25,18 +25,32 @@
         "range": [-1.0, 1.0],
         "default": 0.0,
         "dead_zone": 0.12
+      },
+      {
+        "name": "revo1_left_grasp",
+        "display": "Left Revo-1 Grasp Action",
+        "range": [0.0, 1.0],
+        "default": 0.0,
+        "dead_zone": 0.02
+      },
+      {
+        "name": "revo1_right_grasp",
+        "display": "Right Revo-1 Grasp Action",
+        "range": [0.0, 1.0],
+        "default": 0.0,
+        "dead_zone": 0.02
       }
     ],
     "buttons": [
       {
-        "name": "lift_down",
-        "display": "Lower Lift",
+        "name": "arm_ready",
+        "display": "Reset Arms and Hands to Ready Pose",
         "toggle": false,
         "confirm": false
       },
       {
-        "name": "lift_up",
-        "display": "Raise Lift",
+        "name": "arm_init",
+        "display": "Reset Arms and Hands to Initial Pose",
         "toggle": false,
         "confirm": false
       },
@@ -51,9 +65,52 @@
         "display": "Clear Software E-Stop",
         "toggle": false,
         "confirm": true
+      },
+      {
+        "name": "left_enable",
+        "display": "Left Arm Deadman",
+        "toggle": false,
+        "confirm": false
+      },
+      {
+        "name": "right_enable",
+        "display": "Right Arm Deadman",
+        "toggle": false,
+        "confirm": false
+      },
+      {
+        "name": "left_hand_enable",
+        "display": "Left Revo-1 Deadman",
+        "toggle": false,
+        "confirm": false
+      },
+      {
+        "name": "right_hand_enable",
+        "display": "Right Revo-1 Deadman",
+        "toggle": false,
+        "confirm": false
       }
     ],
-    "poses": []
+    "poses": [
+      {
+        "name": "left_end_effector",
+        "display": "Left Arm IK Target",
+        "dof": 6,
+        "frame": "left_wrist"
+      },
+      {
+        "name": "right_end_effector",
+        "display": "Right Arm IK Target",
+        "dof": 6,
+        "frame": "right_wrist"
+      },
+      {
+        "name": "operator_frame",
+        "display": "Operator Upper-Body Frame",
+        "dof": 6,
+        "frame": "head"
+      }
+    ]
   },
   "input_mapping": [
     {
@@ -74,7 +131,7 @@
     },
     {
       "source": "button_x",
-      "target": "lift_down",
+      "target": "arm_ready",
       "scale": 1.0,
       "invert": false,
       "offset": 0.0,
@@ -82,7 +139,7 @@
     },
     {
       "source": "button_y",
-      "target": "lift_up",
+      "target": "arm_init",
       "scale": 1.0,
       "invert": false,
       "offset": 0.0,
@@ -99,6 +156,78 @@
     {
       "source": "button_a",
       "target": "reset",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "momentary"
+    },
+    {
+      "source": "head_pose",
+      "target": "operator_frame",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "absolute"
+    },
+    {
+      "source": "left_arm_pose",
+      "target": "left_end_effector",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "absolute"
+    },
+    {
+      "source": "right_arm_pose",
+      "target": "right_end_effector",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "absolute"
+    },
+    {
+      "source": "left_arm_grip",
+      "target": "left_enable",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "momentary"
+    },
+    {
+      "source": "right_arm_grip",
+      "target": "right_enable",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "momentary"
+    },
+    {
+      "source": "left_trigger",
+      "target": "revo1_left_grasp",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "absolute"
+    },
+    {
+      "source": "left_controller_active",
+      "target": "left_hand_enable",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "momentary"
+    },
+    {
+      "source": "right_trigger",
+      "target": "revo1_right_grasp",
+      "scale": 1.0,
+      "invert": false,
+      "offset": 0.0,
+      "mode": "absolute"
+    },
+    {
+      "source": "right_controller_active",
+      "target": "right_hand_enable",
       "scale": 1.0,
       "invert": false,
       "offset": 0.0,
@@ -135,7 +264,17 @@
       {"name": "motor_fault_count", "display": "Upper Body Motor Fault Count", "type": "int"},
       {"name": "mode_machine", "display": "Unitree Machine Mode", "type": "int"},
       {"name": "last_base_result", "display": "Last AgvClient Move Result", "type": "int"},
-      {"name": "last_height_result", "display": "Last HeightAdjust Result", "type": "int"}
+      {"name": "last_height_result", "display": "Last HeightAdjust Result", "type": "int"},
+      {"name": "left_hand_fresh", "display": "Left Revo-1 Feedback Fresh", "type": "bool"},
+      {"name": "right_hand_fresh", "display": "Right Revo-1 Feedback Fresh", "type": "bool"},
+      {"name": "left_hand_age_ms", "display": "Left Revo-1 Feedback Age", "unit": "ms", "type": "float"},
+      {"name": "right_hand_age_ms", "display": "Right Revo-1 Feedback Age", "unit": "ms", "type": "float"},
+      {"name": "revo1_left_position", "display": "Left Revo-1 Position", "unit": "normalized", "type": "array", "length": 6},
+      {"name": "revo1_right_position", "display": "Right Revo-1 Position", "unit": "normalized", "type": "array", "length": 6},
+      {"name": "revo1_left_velocity", "display": "Left Revo-1 Velocity", "unit": "normalized", "type": "array", "length": 6},
+      {"name": "revo1_right_velocity", "display": "Right Revo-1 Velocity", "unit": "normalized", "type": "array", "length": 6},
+      {"name": "revo1_left_current", "display": "Left Revo-1 Filtered Current", "unit": "normalized", "type": "array", "length": 6},
+      {"name": "revo1_right_current", "display": "Right Revo-1 Filtered Current", "unit": "normalized", "type": "array", "length": 6}
     ]
   },
   "video_feeds": [],
@@ -145,29 +284,41 @@
     "channels": [
       {"name": "base_linear", "type": "axis", "frame": "left_joystick_y"},
       {"name": "base_yaw", "type": "axis", "frame": "right_joystick_x"},
-      {"name": "lift_down", "type": "button", "frame": "button_x"},
-      {"name": "lift_up", "type": "button", "frame": "button_y"},
+      {"name": "arm_ready", "type": "button", "frame": "button_x"},
+      {"name": "arm_init", "type": "button", "frame": "button_y"},
       {"name": "emergency_stop", "type": "button", "frame": "button_b"},
-      {"name": "reset", "type": "button", "frame": "button_a"}
+      {"name": "reset", "type": "button", "frame": "button_a"},
+      {"name": "left_end_effector", "type": "pose6d", "frame": "left_controller_or_wrist"},
+      {"name": "right_end_effector", "type": "pose6d", "frame": "right_controller_or_wrist"},
+      {"name": "operator_frame", "type": "pose6d", "frame": "head"},
+      {"name": "left_enable", "type": "button", "frame": "left_grip_or_fist"},
+      {"name": "right_enable", "type": "button", "frame": "right_grip_or_fist"},
+      {"name": "revo1_left_grasp", "type": "axis", "frame": "left_trigger"},
+      {"name": "revo1_right_grasp", "type": "axis", "frame": "right_trigger"},
+      {"name": "left_hand_enable", "type": "button", "frame": "left_controller_active"},
+      {"name": "right_hand_enable", "type": "button", "frame": "right_controller_active"}
     ]
   },
   "capabilities": {
     "teleop": true,
     "emergency_stop": true,
     "reset": true,
-    "deadman": false,
     "mobile_base": true,
     "lift": true,
-    "dual_arm": false,
+    "deadman": true,
+    "dual_arm": true,
+    "dexterous_hands": true,
     "video": false,
-    "implementation_stage": "base_lift_mvp"
+    "implementation_stage": "base_lift_dual_arm_ik_revo1_fixed_grasp"
   },
   "safety": {
     "disconnect_action": "stop",
-    "command_timeout_ms": 300,
+    "command_timeout_ms": 750,
     "limits": {
       "base_linear": [-1.0, 1.0],
-      "base_yaw": [-1.0, 1.0]
+      "base_yaw": [-1.0, 1.0],
+      "revo1_left_grasp": [0.0, 1.0],
+      "revo1_right_grasp": [0.0, 1.0]
     }
   }
 }

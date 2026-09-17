@@ -20,6 +20,16 @@ class MockBackend final : public Backend {
     snapshot_.height_m = 0.75;
     snapshot_.joint_positions_rad.assign(29, 0.0);
     snapshot_.joint_velocities_rad_s.assign(29, 0.0);
+    snapshot_.left_hand_fresh = true;
+    snapshot_.right_hand_fresh = true;
+    snapshot_.left_hand_age_ms = 0.0;
+    snapshot_.right_hand_age_ms = 0.0;
+    snapshot_.left_hand_positions.assign(6, 0.0);
+    snapshot_.right_hand_positions.assign(6, 0.0);
+    snapshot_.left_hand_velocities.assign(6, 0.0);
+    snapshot_.right_hand_velocities.assign(6, 0.0);
+    snapshot_.left_hand_currents.assign(6, 0.0);
+    snapshot_.right_hand_currents.assign(6, 0.0);
     last_update_ = std::chrono::steady_clock::now();
   }
 
@@ -37,6 +47,19 @@ class MockBackend final : public Backend {
         snapshot_.height_m + (command.lift_active ? command.lift_normalized * 0.0765 * dt : 0.0),
         0.0,
         2.0);
+    if (command.arms_active && command.joint_targets_rad.size() == 29) {
+      snapshot_.arm_command_targets_rad = command.joint_targets_rad;
+      snapshot_.joint_positions_rad = command.joint_targets_rad;
+      snapshot_.joint_velocities_rad_s.assign(29, 0.0);
+    }
+    if (command.left_hand_active) {
+      snapshot_.left_hand_positions.assign(
+          command.left_hand_targets.begin(), command.left_hand_targets.end());
+    }
+    if (command.right_hand_active) {
+      snapshot_.right_hand_positions.assign(
+          command.right_hand_targets.begin(), command.right_hand_targets.end());
+    }
     snapshot_.odom_age_ms = 0.0;
     snapshot_.height_age_ms = 0.0;
     snapshot_.lowstate_age_ms = 0.0;
@@ -80,8 +103,8 @@ std::string motion_mode_name(MotionMode mode) {
       return "base";
     case MotionMode::Lift:
       return "lift";
-    case MotionMode::ArmsUnavailable:
-      return "arms_unavailable";
+    case MotionMode::Arms:
+      return "arms";
     case MotionMode::Conflict:
       return "conflict";
     case MotionMode::Stopped:

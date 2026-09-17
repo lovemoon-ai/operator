@@ -327,6 +327,56 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"manual lock stops the right hand")
 	clutch_tracking.free()
 
+	var arm_mode := ControlMode.new()
+	arm_mode.configure({
+		"control_schema": {
+			"buttons": [{"name": "left_enable"}],
+			"poses": [{"name": "left_end_effector"}],
+		},
+		"input_mapping": [
+			{"source": "left_arm_pose", "target": "left_end_effector"},
+			{"source": "left_arm_grip", "target": "left_enable"},
+		],
+	})
+	var arm_tracking := FakeTrackingProvider.new()
+	arm_tracking.set_controller_mode_active(0, false)
+	arm_tracking.set_optical_hand_tracking_active(0, true)
+	arm_tracking.set_hand_joints(0, _hand_skeleton(true))
+	var bare_hand_command := arm_mode.collect_command(arm_tracking)
+	t.is_true(bool(bare_hand_command["buttons"].get("left_enable", false)),
+		"a tracked closed bare hand engages the arm deadman")
+	t.contains(bare_hand_command.get("poses", {}), "left_end_effector",
+		"bare-hand arm control publishes the tracked wrist pose")
+	var invalid_orientation := _hand_skeleton(true)
+	invalid_orientation[1]["orientation_valid"] = false
+	arm_tracking.set_hand_joints(0, invalid_orientation)
+	var invalid_pose_command := arm_mode.collect_command(arm_tracking)
+	t.is_true(not invalid_pose_command["poses"].has("left_end_effector"),
+		"a wrist without valid orientation publishes no arm pose")
+	arm_tracking.set_hand_joints(0, _hand_skeleton(false))
+	var open_hand_command := arm_mode.collect_command(arm_tracking)
+	t.is_true(not bool(open_hand_command["buttons"].get("left_enable", true)),
+		"opening the bare hand releases the arm deadman")
+	arm_tracking.set_optical_hand_tracking_active(0, false)
+	arm_tracking.set_controller_mode_active(0, true)
+	arm_tracking.set_controller_pose(0, {
+		"position": Vector3(0.2, 1.1, -0.4),
+		"rotation": Quaternion.IDENTITY,
+		"is_active": true,
+	})
+	arm_tracking.set_controller_input(0, {"grip": 1.0})
+	var controller_command := arm_mode.collect_command(arm_tracking)
+	t.is_true(bool(controller_command["buttons"].get("left_enable", false)),
+		"the same descriptor accepts a physical controller grip")
+	var controller_position: Array = controller_command["poses"]["left_end_effector"]["position"]
+	t.almost_eq(float(controller_position[0]), 0.2, 0.0001,
+		"the same descriptor selects the physical controller pose X")
+	t.almost_eq(float(controller_position[1]), 1.1, 0.0001,
+		"the same descriptor selects the physical controller pose Y")
+	t.almost_eq(float(controller_position[2]), -0.4, 0.0001,
+		"the same descriptor selects the physical controller pose Z")
+	arm_tracking.free()
+
 	var parsed := FeedbackOverlay.parse_telemetry({"values": {
 		"revo2_left_target": [100, 200, 300, 400, 500, 600],
 		"revo2_left_position": [90, 180, 250, 390, 480, 590],
@@ -583,7 +633,11 @@ func _hand_skeleton(
 	for _i in range(26):
 		joints.append({"tracked": false})
 	joints[0] = {"tracked": true, "position": Vector3(0.0, -0.025, 0.0)}
-	joints[1] = {"tracked": true, "position": Vector3(0.0, -0.05, 0.0)}
+	joints[1] = {
+		"tracked": true,
+		"position": Vector3(0.0, -0.05, 0.0),
+		"rotation": Quaternion.IDENTITY,
+	}
 
 	_set_chain(joints, [6, 7, 8, 9, 10], Vector3(-0.018, 0.0, 0.0), curled)
 	_set_chain(joints, [11, 12, 13, 14, 15], Vector3(0.0, 0.0, 0.0), curled)

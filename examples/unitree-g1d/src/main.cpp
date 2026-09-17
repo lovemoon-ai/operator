@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -48,7 +49,7 @@ struct Options {
   std::string network_interface = "eth0";
   int domain_id = 0;
   int telemetry_hz = 10;
-  int control_hz = 50;
+  int control_hz = 200;
   bool allow_motion = false;
   ControllerConfig controller;
 };
@@ -62,14 +63,23 @@ void print_usage(const char* program) {
       << "  --network-interface NAME      Unitree DDS interface, default: eth0\n"
       << "  --domain ID                   DDS domain, default: 0\n"
       << "  --allow-motion                explicit hardware motion authorization\n"
-      << "  --command-timeout-ms N        local watchdog, default: 200\n"
+      << "  --command-timeout-ms N        local watchdog, default: 750\n"
       << "  --telemetry-hz N              default: 10\n"
-      << "  --control-hz N                default: 50\n"
+      << "  --control-hz N                default: 200\n"
       << "  --max-base-vx MPS             default: 0.12\n"
       << "  --max-base-wz RAD_S           default: 0.40\n"
       << "  --max-lift-command VALUE      normalized, default: 0.20\n"
       << "  --max-measured-vx MPS         default: 0.20\n"
-      << "  --max-measured-wz RAD_S       default: 0.75\n";
+      << "  --max-measured-wz RAD_S       default: 0.75\n"
+      << "  --arm-position-scale VALUE    XR-to-robot translation scale, default: 1.0\n"
+      << "  --max-arm-translation M       per-engagement workspace radius, default: 0.35\n"
+      << "  --max-arm-joint-velocity RPS  target rate limit, default: 1.0\n"
+      << "  --max-measured-arm-velocity RPS  safety limit, default: 2.0\n"
+      << "  --max-arm-ready-velocity RPS  ready-pose rate limit, default: 0.5\n"
+      << "  --max-hand-rate PER_S         normalized target rate, default: 1.0\n"
+      << "  --max-measured-hand-speed VALUE  normalized safety limit, default: 1.5\n"
+      << "  --max-hand-current VALUE      filtered normalized limit, default: 0.8\n"
+      << "  --revo1-grasp-target VALUE    fixed grasp position, default: 0.85\n";
 }
 
 std::string require_value(int argc, char** argv, int& index, const std::string& flag) {
@@ -122,6 +132,33 @@ Options parse_options(int argc, char** argv) {
     } else if (argument == "--max-measured-wz") {
       options.controller.max_measured_wz_rad_s =
           std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--arm-position-scale") {
+      options.controller.arm_position_scale =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--max-arm-translation") {
+      options.controller.max_arm_translation_m =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--max-arm-joint-velocity") {
+      options.controller.max_arm_joint_velocity_rad_s =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--max-measured-arm-velocity") {
+      options.controller.max_measured_arm_velocity_rad_s =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--max-arm-ready-velocity") {
+      options.controller.max_arm_ready_joint_velocity_rad_s =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--max-hand-rate") {
+      options.controller.max_hand_target_rate_per_s =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--max-measured-hand-speed") {
+      options.controller.max_measured_hand_velocity =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--max-hand-current") {
+      options.controller.max_abs_hand_current =
+          std::stod(require_value(argc, argv, index, argument));
+    } else if (argument == "--revo1-grasp-target") {
+      options.controller.revo1_grasp_target =
+          std::stod(require_value(argc, argv, index, argument));
     } else {
       throw std::runtime_error("unknown argument: " + argument);
     }
@@ -159,8 +196,24 @@ Options parse_options(int argc, char** argv) {
   require_positive_finite(options.controller.max_height_command, "max lift command");
   require_positive_finite(options.controller.max_measured_vx_mps, "max measured vx");
   require_positive_finite(options.controller.max_measured_wz_rad_s, "max measured wz");
+  require_positive_finite(options.controller.arm_position_scale, "arm position scale");
+  require_positive_finite(options.controller.max_arm_translation_m, "max arm translation");
+  require_positive_finite(
+      options.controller.max_arm_joint_velocity_rad_s, "max arm joint velocity");
+  require_positive_finite(
+      options.controller.max_measured_arm_velocity_rad_s, "max measured arm velocity");
+  require_positive_finite(
+      options.controller.max_arm_ready_joint_velocity_rad_s, "max arm ready velocity");
+  require_positive_finite(options.controller.max_hand_target_rate_per_s, "max hand rate");
+  require_positive_finite(
+      options.controller.max_measured_hand_velocity, "max measured hand speed");
+  require_positive_finite(options.controller.max_abs_hand_current, "max hand current");
+  require_positive_finite(options.controller.revo1_grasp_target, "Revo-1 grasp target");
   if (options.controller.max_height_command > 1.0) {
     throw std::runtime_error("max lift command must not exceed 1.0");
+  }
+  if (options.controller.revo1_grasp_target > 1.0) {
+    throw std::runtime_error("Revo-1 grasp target must not exceed 1.0");
   }
   if (options.domain_id < 0) {
     throw std::runtime_error("DDS domain must be non-negative");
@@ -196,6 +249,8 @@ TelemetryValues telemetry_values(
   values.booleans["odom_fresh"] = snapshot.odom_fresh;
   values.booleans["height_fresh"] = snapshot.height_fresh;
   values.booleans["lowstate_fresh"] = snapshot.lowstate_fresh;
+  values.booleans["left_hand_fresh"] = snapshot.left_hand_fresh;
+  values.booleans["right_hand_fresh"] = snapshot.right_hand_fresh;
   values.strings["backend"] = backend.name();
   values.strings["control_mode"] = operator_g1d::motion_mode_name(status.mode);
   values.strings["stop_reason"] = status.stop_reason;
@@ -203,6 +258,8 @@ TelemetryValues telemetry_values(
   values.floats["odom_age_ms"] = snapshot.odom_age_ms;
   values.floats["height_age_ms"] = snapshot.height_age_ms;
   values.floats["lowstate_age_ms"] = snapshot.lowstate_age_ms;
+  values.floats["left_hand_age_ms"] = snapshot.left_hand_age_ms;
+  values.floats["right_hand_age_ms"] = snapshot.right_hand_age_ms;
   values.floats["odom_x_m"] = snapshot.odom_x_m;
   values.floats["odom_y_m"] = snapshot.odom_y_m;
   values.floats["odom_yaw_rad"] = snapshot.odom_yaw_rad;
@@ -216,6 +273,12 @@ TelemetryValues telemetry_values(
   values.integers["last_height_result"] = snapshot.last_height_result;
   values.arrays["joint_positions_rad"] = snapshot.joint_positions_rad;
   values.arrays["joint_velocities_rad_s"] = snapshot.joint_velocities_rad_s;
+  values.arrays["revo1_left_position"] = snapshot.left_hand_positions;
+  values.arrays["revo1_right_position"] = snapshot.right_hand_positions;
+  values.arrays["revo1_left_velocity"] = snapshot.left_hand_velocities;
+  values.arrays["revo1_right_velocity"] = snapshot.right_hand_velocities;
+  values.arrays["revo1_left_current"] = snapshot.left_hand_currents;
+  values.arrays["revo1_right_current"] = snapshot.right_hand_currents;
   return values;
 }
 
@@ -224,7 +287,7 @@ TelemetryValues blueprint_values(
     const ControllerStatus& status) {
   TelemetryValues values;
   values.strings["g1d.summary"] =
-      "Left stick: forward/reverse | Right stick: turn | X/Y: lift | B: stop | A x2: reset";
+      "Trigger: grasp | Grip: arm IK | X: ready pose | Y: initial pose | B: stop";
 
   if (!snapshot.connected) {
     values.strings["g1d.connection_state"] = "error";
@@ -252,6 +315,9 @@ TelemetryValues blueprint_values(
   } else if (status.mode == operator_g1d::MotionMode::Lift) {
     values.strings["g1d.motion_state"] = "active";
     values.strings["g1d.motion_text"] = "升降移动";
+  } else if (status.mode == operator_g1d::MotionMode::Arms) {
+    values.strings["g1d.motion_state"] = "active";
+    values.strings["g1d.motion_text"] = "手臂遥操";
   } else if (status.control_conflict) {
     values.strings["g1d.motion_state"] = "warning";
     values.strings["g1d.motion_text"] = "控制冲突";
@@ -412,16 +478,36 @@ int main(int argc, char** argv) {
           }
           previous = now;
 
-          const bool active = command.base_active || command.lift_active;
+          const bool active = command.base_active || command.lift_active || command.arms_active ||
+                              command.left_hand_active || command.right_hand_active;
           const bool state_changed =
               command.mode != last_logged_mode || status.stop_reason != last_logged_reason;
           if (state_changed || (active && now >= next_active_log)) {
+            double left_arm_target_error_rad = 0.0;
+            double right_arm_target_error_rad = 0.0;
+            if (command.arms_active && command.joint_targets_rad.size() >= 29 &&
+                feedback.joint_positions_rad.size() >= 29) {
+              for (std::size_t joint = 15; joint < 22; ++joint) {
+                left_arm_target_error_rad = std::max(
+                    left_arm_target_error_rad,
+                    std::abs(command.joint_targets_rad[joint] -
+                             feedback.joint_positions_rad[joint]));
+              }
+              for (std::size_t joint = 22; joint < 29; ++joint) {
+                right_arm_target_error_rad = std::max(
+                    right_arm_target_error_rad,
+                    std::abs(command.joint_targets_rad[joint] -
+                             feedback.joint_positions_rad[joint]));
+              }
+            }
             std::cerr << "[operator-g1d] control mode=" << motion_mode_name(command.mode)
                       << " base_vx=" << command.base_vx_mps
                       << " base_wz=" << command.base_wz_rad_s
                       << " lift=" << command.lift_normalized
                       << " measured_vx=" << feedback.measured_vx_mps
                       << " measured_wz=" << feedback.measured_wz_rad_s
+                      << " arm_target_error_lr=" << left_arm_target_error_rad
+                      << "/" << right_arm_target_error_rad
                       << " estop=" << (status.estop_latched ? "true" : "false")
                       << " release_required=" << (status.release_required ? "true" : "false")
                       << " reason=" << (status.stop_reason.empty() ? "-" : status.stop_reason)
