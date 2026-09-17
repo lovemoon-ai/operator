@@ -124,6 +124,7 @@ PicoOpenXRExtension::PicoOpenXRExtension() :
 }
 
 PicoOpenXRExtension::~PicoOpenXRExtension() {
+	stop_tracker_calibration_monitor();
 	stop_camera_image_capture();
 	destroy_hand_trackers();
 	destroy_body_tracker();
@@ -150,6 +151,9 @@ void PicoOpenXRExtension::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("start_body_tracking", "bone_lengths"), &PicoOpenXRExtension::start_body_tracking, DEFVAL(Dictionary()));
 	ClassDB::bind_method(D_METHOD("stop_body_tracking"), &PicoOpenXRExtension::stop_body_tracking);
 	ClassDB::bind_method(D_METHOD("start_body_tracking_calibration_app"), &PicoOpenXRExtension::start_body_tracking_calibration_app);
+	ClassDB::bind_method(D_METHOD("get_body_tracking_state"), &PicoOpenXRExtension::get_body_tracking_state);
+	ClassDB::bind_method(D_METHOD("get_tracking_continuity_state", "refresh"), &PicoOpenXRExtension::get_tracking_continuity_state, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("set_tracking_monitor_enabled", "enabled"), &PicoOpenXRExtension::set_tracking_monitor_enabled);
 	ClassDB::bind_method(D_METHOD("sample_body_joints"), &PicoOpenXRExtension::sample_body_joints);
 	ClassDB::bind_method(D_METHOD("get_predicted_display_time_ns"), &PicoOpenXRExtension::get_predicted_display_time_ns);
 	ClassDB::bind_method(D_METHOD("set_boundary_visible", "visible"), &PicoOpenXRExtension::set_boundary_visible);
@@ -191,6 +195,7 @@ void PicoOpenXRExtension::_on_instance_created(uint64_t p_instance) {
 }
 
 void PicoOpenXRExtension::_on_instance_destroyed() {
+	stop_tracker_calibration_monitor();
 	stop_camera_image_capture();
 	destroy_hand_trackers();
 	destroy_body_tracker();
@@ -237,6 +242,7 @@ void PicoOpenXRExtension::_on_instance_destroyed() {
 }
 
 void PicoOpenXRExtension::_on_session_created(uint64_t p_session) {
+	tracking_session_epoch++;
 	session = reinterpret_cast<XrSession>(p_session);
 	PICO_BODY_LOG("session_created body_supported=%d bd_extension=%d", system_body_tracking_properties.supportsBodyTracking == XR_TRUE, bd_body_tracking_ext);
 	UtilityFunctions::print("PicoOpenXRExtension session created");
@@ -250,6 +256,8 @@ void PicoOpenXRExtension::_on_session_created(uint64_t p_session) {
 }
 
 void PicoOpenXRExtension::_on_session_destroyed() {
+	stop_tracker_calibration_monitor();
+	tracking_session_epoch++;
 	stop_camera_image_capture();
 	destroy_hand_trackers();
 	destroy_body_tracker();
@@ -285,6 +293,7 @@ bool PicoOpenXRExtension::_on_event_polled(const void *event) {
 		if (changed->state == XR_MOTION_TRACKER_CONNECTION_STATE_CONNECTED_PICO) {
 			add_motion_tracker_id(changed->trackerId);
 		} else {
+			tracker_disconnect_epoch++;
 			remove_motion_tracker_id(changed->trackerId);
 		}
 		return true;
@@ -319,9 +328,12 @@ Dictionary PicoOpenXRExtension::get_status() const {
 	status["camera_image_extension"] = camera_image_ext;
 	status["motion_tracking_extension"] = motion_tracking_ext;
 	status["pico_body_tracking2_extension"] = pico_body_tracking2_ext;
+	status["tracking_state_query_available"] = xrGetBodyTrackingStatePICO_ptr != nullptr;
 	status["bd_body_tracking_extension"] = bd_body_tracking_ext;
 	status["bd_body_tracking_supported"] = system_body_tracking_properties.supportsBodyTracking == XR_TRUE;
 	status["session_created"] = session != nullptr;
+	status["tracking_session_epoch"] = tracking_session_epoch;
+	status["tracker_disconnect_epoch"] = tracker_disconnect_epoch;
 	status["camera_image_active"] = camera_image_capture_active;
 	status["camera_image_stereo"] = camera_image_stereo;
 	status["camera_image_width"] = camera_image_width;
@@ -825,6 +837,8 @@ Dictionary PicoOpenXRExtension::get_camera_image_info() const {
 
 bool PicoOpenXRExtension::request_motion_trackers(int count) {
 	requested_motion_tracker_count = std::clamp(count, 0, static_cast<int>(XR_MOTION_TRACKER_MAX_SIZE_PICO));
+	motion_request_sent = false;
+	motion_tracker_ids.clear();
 	if (requested_motion_tracker_count <= 0) {
 		return true;
 	}
@@ -929,6 +943,115 @@ bool PicoOpenXRExtension::start_body_tracking_calibration_app() {
 	return XR_SUCCEEDED(result);
 }
 
+Dictionary PicoOpenXRExtension::get_body_tracking_state() {
+	Dictionary result;
+	result["available"] = false;
+	result["status"] = int(XR_BODY_TRACKING_STATUS_INVALID_PICO);
+	result["message"] = int(XR_BODY_TRACKING_MESSAGE_NO_ERROR_PICO);
+	result["state_result"] = XR_ERROR_FEATURE_UNSUPPORTED;
+	if (!bd_body_tracking_ext || !pico_body_tracking2_ext ||
+			system_body_tracking_properties.supportsBodyTracking != XR_TRUE) {
+		return result;
+	}
+	if (!current_session()) {
+		result["state_result"] = XR_ERROR_HANDLE_INVALID;
+		return result;
+	}
+	if (!resolve_functions() || !xrGetBodyTrackingStatePICO_ptr) {
+		return result;
+	}
+	XrBodyTrackingStatePICO state{
+		XR_TYPE_BODY_TRACKING_STATE_PICO,
+		nullptr,
+		XR_BODY_TRACKING_STATUS_INVALID_PICO,
+		XR_BODY_TRACKING_MESSAGE_NO_ERROR_PICO,
+	};
+	{
+		std::lock_guard<std::mutex> lock(calibration_mutex);
+		last_body_state_result = xrGetBodyTrackingStatePICO_ptr(current_session(), &state);
+	}
+	result["state_result"] = last_body_state_result;
+	if (XR_SUCCEEDED(last_body_state_result)) {
+		result["available"] = true;
+		result["status"] = int(state.status);
+		result["message"] = int(state.message);
+	}
+	return result;
+}
+
+Dictionary PicoOpenXRExtension::get_tracking_continuity_state(bool refresh) {
+	// This is tracking availability, NOT proof of a new calibration. PICO's
+	// supported body_tracking2 API has no calibration-completion counter.
+	if (refresh && current_session() && resolve_functions() && xrGetBodyTrackingStatePICO_ptr) {
+		poll_tracking_continuity(current_session());
+	}
+	std::lock_guard<std::mutex> lock(calibration_mutex);
+	Dictionary result;
+	result["available"] = current_session() && XR_SUCCEEDED(continuity_result);
+	result["body_status"] = int(continuity_body_status);
+	result["message"] = int(continuity_message);
+	result["state_result"] = continuity_result;
+	result["body_lost_epoch"] = body_tracking_lost_epoch;
+	return result;
+}
+
+bool PicoOpenXRExtension::set_tracking_monitor_enabled(bool enabled) {
+	if (!enabled) {
+		stop_tracker_calibration_monitor();
+		return true;
+	}
+	if (calibration_monitor_running.load()) {
+		return true;
+	}
+	const XrSession query_session = current_session();
+	if (!query_session || !resolve_functions() || !xrGetBodyTrackingStatePICO_ptr) {
+		return false;
+	}
+	poll_tracking_continuity(query_session);
+	calibration_monitor_running.store(true);
+	calibration_monitor_thread = std::thread([this, query_session]() {
+		while (calibration_monitor_running.load()) {
+			poll_tracking_continuity(query_session);
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		}
+	});
+	return true;
+}
+
+void PicoOpenXRExtension::stop_tracker_calibration_monitor() {
+	calibration_monitor_running.store(false);
+	if (calibration_monitor_thread.joinable()) {
+		calibration_monitor_thread.join();
+	}
+	std::lock_guard<std::mutex> lock(calibration_mutex);
+	continuity_result = XR_ERROR_FEATURE_UNSUPPORTED;
+	continuity_body_status = XR_BODY_TRACKING_STATUS_INVALID_PICO;
+	continuity_message = XR_BODY_TRACKING_MESSAGE_NO_ERROR_PICO;
+	monitor_body_ready = false;
+}
+
+void PicoOpenXRExtension::poll_tracking_continuity(XrSession query_session) {
+	std::lock_guard<std::mutex> lock(calibration_mutex);
+	XrBodyTrackingStatePICO body{XR_TYPE_BODY_TRACKING_STATE_PICO, nullptr,
+		XR_BODY_TRACKING_STATUS_INVALID_PICO, XR_BODY_TRACKING_MESSAGE_NO_ERROR_PICO};
+	const XrResult result = xrGetBodyTrackingStatePICO_ptr(query_session, &body);
+	if (result != continuity_result || body.status != continuity_body_status || body.message != continuity_message) {
+		PICO_BODY_LOG("tracking continuity status=%d message=%d result=%d", int(body.status), int(body.message), result);
+	}
+	continuity_result = result;
+	continuity_body_status = body.status;
+	continuity_message = body.message;
+	if (!calibration_monitor_body_active.load()) {
+		monitor_body_ready = false;
+	} else if (XR_SUCCEEDED(result)) {
+		const bool ready = body.status == XR_BODY_TRACKING_STATUS_VALID_PICO || body.status == XR_BODY_TRACKING_STATUS_LIMITED_PICO;
+		if (monitor_body_ready && !ready) {
+			body_tracking_lost_epoch++;
+		}
+		monitor_body_ready = ready;
+	}
+}
+
 Dictionary PicoOpenXRExtension::sample_body_joints() {
 	Dictionary result;
 	result["supported"] = bd_body_tracking_ext && system_body_tracking_properties.supportsBodyTracking == XR_TRUE;
@@ -952,6 +1075,7 @@ Dictionary PicoOpenXRExtension::sample_body_joints() {
 		XR_BODY_TRACKING_MESSAGE_NO_ERROR_PICO,
 	};
 	if (pico_body_tracking2_ext && xrGetBodyTrackingStatePICO_ptr) {
+		std::lock_guard<std::mutex> lock(calibration_mutex);
 		last_body_state_result = xrGetBodyTrackingStatePICO_ptr(current_session(), &tracking_state);
 	}
 
@@ -2001,10 +2125,17 @@ bool PicoOpenXRExtension::ensure_body_tracker(const Dictionary &bone_lengths) {
 		body_tracker = XR_NULL_BODY_TRACKER_BD;
 		return false;
 	}
+	calibration_monitor_body_active.store(true);
 	return true;
 }
 
 void PicoOpenXRExtension::destroy_body_tracker() {
+	// An intentional recorder/mode stop is not a hardware disconnection.
+	calibration_monitor_body_active.store(false);
+	{
+		std::lock_guard<std::mutex> lock(calibration_mutex);
+		monitor_body_ready = false;
+	}
 	if (body_tracker != XR_NULL_BODY_TRACKER_BD && xrDestroyBodyTrackerBD_ptr) {
 		xrDestroyBodyTrackerBD_ptr(body_tracker);
 	}

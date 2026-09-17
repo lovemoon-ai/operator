@@ -83,6 +83,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	# render in this panel's composition viewport, so the operator would never
 	# see anything but the current selection.
 	var offered := RobotProfileRegistry.ids()
+	var inside_available := not offered.is_empty()
 	var listed: Array = picker.keys()
 	listed.sort()
 	t.eq(listed, offered, "one button per available robot, matching the registry")
@@ -112,8 +113,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	t.eq(
 		pico_body_calibration_button.visible,
-		xrt_available,
-		"PICO Body Calibration visibility follows the default protocol"
+		false,
+		"a selected protocol alone does not create tracking demand"
 	)
 	t.is_false(inside_box.visible, "outside hides the inside settings")
 	var discovery_option: OptionButton = panel.get("_discovery_option")
@@ -262,9 +263,22 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		var xrobot_button: Button = protocol_buttons["xrobot_toolkit_v1"]
 		t.is_true(xrobot_button.button_pressed, "XRoboToolkit-compatible choice stays selected")
 		t.is_false(operator_button.button_pressed, "Operator choice is released")
+		panel.set_tracking_status({"needed": true, "mode": "body", "phase": "required", "can_calibrate": true})
+		var confirm_button: Button = panel.get("_tracking_confirm_button")
+		var confirm_slot: Control = panel.get("_tracking_confirm_slot")
+		t.is_false(confirm_slot.visible, "confirmation is hidden before a setup round trip")
+		panel.set_tracking_status({"needed": true, "mode": "body", "phase": "confirmation_waiting_tracking", "needs_confirmation": true, "can_confirm": false, "can_calibrate": true})
+		t.is_true(confirm_slot.visible and confirm_button.disabled, "return shows confirmation but invalid tracking keeps it disabled")
+		var confirmations: Array = []
+		panel.tracker_calibration_confirm_requested.connect(func() -> void: confirmations.append(true))
+		panel.set_tracking_status({"needed": true, "mode": "body", "phase": "confirming", "needs_confirmation": true, "can_confirm": true, "can_calibrate": true})
+		t.is_false(confirm_button.disabled, "live tracking permits explicit user confirmation")
+		confirm_button.pressed.emit()
+		t.eq(confirmations.size(), 1, "confirmation emits its own action, not another calibration launch")
+		panel.set_tracking_status({"needed": true, "mode": "body", "phase": "required", "can_calibrate": true})
 		t.is_true(
 			pico_body_calibration_button.visible,
-			"XRoboToolkit-compatible Outside settings show PICO Body Calibration"
+			"active body demand shows shared calibration controls"
 		)
 		var calibration_requests: Array = []
 		panel.pico_body_calibration_requested.connect(func() -> void:
@@ -281,9 +295,9 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		t.is_true(panel.saved_options.is_empty(), "PICO Body Calibration does not save settings")
 		operator_button.emit_signal("pressed")
 		t.eq(panel.get_options().get("protocol", ""), "operator", "Operator button changes protocol")
-		t.is_false(
+		t.is_true(
 			pico_body_calibration_button.visible,
-			"switching to Operator hides PICO Body Calibration"
+			"switching protocol cannot hide another consumer's calibration demand"
 		)
 		xrobot_button.emit_signal("pressed")
 		t.eq(
@@ -347,17 +361,23 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var inside_xrobot_options := _options("inside")
 	inside_xrobot_options["protocol"] = "xrobot_toolkit_v1"
 	panel.set_options(inside_xrobot_options)
-	t.eq(panel.get_options().get("target_scope", ""), "inside", "inside selection round-trips")
-	t.is_true(inside_box.visible, "inside shows the robot picker")
-	t.is_false(outside_box.visible, "inside hides the robot-service settings")
-	t.is_false(outside_box.visible and protocol_row.visible, "inside does not show protocol selection")
-	t.is_false(
+	t.eq(panel.get_options().get("target_scope", ""), "inside" if inside_available else "outside", "Inside is selectable only when robot assets exist")
+	t.eq(inside_box.visible, inside_available, "robot picker visibility follows available Inside assets")
+	t.eq(outside_box.visible, not inside_available, "unavailable Inside selection keeps Outside settings")
+	if inside_available:
+		t.is_false(outside_box.visible and protocol_row.visible, "inside does not show protocol selection")
+	t.is_false(outside_box.is_ancestor_of(pico_body_calibration_button), "shared calibration is outside the Outside-only group")
+	t.is_false(inside_box.is_ancestor_of(pico_body_calibration_button), "shared calibration is outside the Inside-only group")
+	t.eq(
 		pico_body_calibration_button.visible,
-		"Inside scope hides PICO Body Calibration even for XRoboToolkit Compatible"
+		xrt_available,
+		"Inside scope shares the same demand-driven calibration controls"
 	)
+	panel.set_tracking_status({"needed": false})
+	t.is_false(pico_body_calibration_button.visible, "last demand release hides calibration controls")
 	t.eq(
 		str(panel.get_options().get("inside_profile", "")),
-		str(offered[0]),
+		str(offered[0]) if not offered.is_empty() else "",
 		"the requested inside robot is selected"
 	)
 
@@ -519,8 +539,9 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(panel.get_options().get("target_scope", ""), "outside", "Outside button switches the page")
 	t.is_true(outside_box.visible, "Outside button reveals the service settings")
 	inside_button.emit_signal("pressed")
-	t.eq(panel.get_options().get("target_scope", ""), "inside", "Inside button switches the page")
-	t.is_true(inside_box.visible, "Inside button reveals the robot picker")
+	t.eq(inside_button.disabled, not inside_available, "Inside button requires generated robot assets")
+	t.eq(panel.get_options().get("target_scope", ""), "inside" if inside_available else "outside", "Inside button respects asset availability")
+	t.eq(inside_box.visible, inside_available, "Inside button reveals only an available robot picker")
 
 	_dispose(panel)
 

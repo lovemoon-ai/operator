@@ -10,6 +10,7 @@ signal saved(options: Dictionary)
 ## `exit_requested` is inherited from BaseSettingsPanel — don't redeclare.
 signal scan_upload_url_requested
 signal tracker_connect_requested
+signal tracker_calibration_confirm_requested
 signal scan_live_server_requested
 signal connect_live_server_requested(options: Dictionary)
 signal manual_upload_requested(sessions: Array, options: Dictionary)
@@ -118,6 +119,8 @@ var _tracker_section_label: Label
 var _tracker_status_label: Label
 var _tracker_connect_button: Button
 var _tracker_connect_slot: PanelContainer
+var _tracker_confirm_button: Button
+var _tracker_confirm_slot: PanelContainer
 var _storage_refresh_accum := STORAGE_REFRESH_SECONDS
 var _storage_plugin: Object
 var _storage_plugin_checked := false
@@ -408,6 +411,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_tracker_connect_button.add_theme_font_size_override("font_size", 21)
 	_tracker_connect_button.pressed.connect(func() -> void: tracker_connect_requested.emit())
 	_tracker_connect_slot = add_interactive(streams, _tracker_connect_button)
+	_tracker_confirm_button = Button.new()
+	_tracker_confirm_button.text = tr("UI_TRACKING_CONFIRM_CALIBRATION")
+	_tracker_confirm_button.custom_minimum_size.y = 55
+	_tracker_confirm_button.add_theme_font_size_override("font_size", 21)
+	_tracker_confirm_button.pressed.connect(func() -> void: tracker_calibration_confirm_requested.emit())
+	_tracker_confirm_slot = add_interactive(streams, _tracker_confirm_button)
 	set_pico_tracker_status(false, false, 0, false, false, false)
 
 	# Audio opens the microphone and is renamed to a plain "Audio" toggle now
@@ -644,8 +653,11 @@ func set_pico_tracker_status(
 	if _tracker_section_label == null or _tracker_status_label == null or _tracker_connect_button == null or _tracker_connect_slot == null:
 		return
 	_tracker_section_label.visible = visible_for_capture
+	_tracker_section_label.text = tr("UI_TRACKER_SETUP")
 	_tracker_status_label.visible = visible_for_capture
 	_tracker_connect_slot.visible = visible_for_capture and not connected
+	if _tracker_confirm_slot != null:
+		_tracker_confirm_slot.visible = false
 	if not visible_for_capture:
 		return
 	if connected:
@@ -660,6 +672,27 @@ func set_pico_tracker_status(
 		_tracker_status_label.text = tr("UI_PICO_TRACKERS_DISCONNECTED")
 	_tracker_connect_button.disabled = not can_open_setup or opening_setup
 	_tracker_connect_button.text = tr("UI_OPENING_TRACKER_SETUP") if opening_setup else tr("UI_CONNECT_PICO_TRACKERS")
+
+
+func set_pico_calibration_status(report: Dictionary, can_calibrate: bool, opening_setup: bool) -> void:
+	var phase := str(report.get("phase", "required"))
+	opening_setup = opening_setup and not bool(report.get("needs_confirmation", false))
+	set_pico_tracker_status(phase != "off", false, 0, false, can_calibrate, opening_setup)
+	if _tracker_status_label == null or _tracker_section_label == null or _tracker_connect_button == null:
+		return
+	_tracker_section_label.text = tr("UI_PICO_BODY_CALIBRATION") if report.get("mode") == "body" else tr("UI_TRACKER_SETUP")
+	var key := TrackingStatusText.key(phase)
+	_tracker_status_label.text = tr("UI_OPENING_TRACKER_SETUP") if opening_setup else tr(key)
+	# Keep the action available even after success: the operator can explicitly
+	# recalibrate without toggling recording options or disconnecting trackers.
+	_tracker_connect_button.text = tr("UI_CONNECT_PICO_TRACKERS") if phase == "motion_setup" else tr("UI_PICO_RECALIBRATE")
+	if opening_setup:
+		_tracker_connect_button.text = tr("UI_OPENING_TRACKER_SETUP")
+	if phase == "mode_conflict":
+		_tracker_connect_button.disabled = true
+	if _tracker_confirm_slot != null:
+		_tracker_confirm_slot.visible = phase != "off" and bool(report.get("needs_confirmation", false))
+		_tracker_confirm_button.disabled = not bool(report.get("can_confirm", false)) or opening_setup
 
 
 ## Push the auto-detected input source ("hands" / "controllers" / "head")

@@ -40,6 +40,8 @@ func configure(
 		sender.connect("protocol_ready", Callable(self, "_on_protocol_ready"))
 	if sender.has_signal("send_failed"):
 		sender.connect("send_failed", Callable(self, "_on_send_failed"))
+	if sender.has_signal("tracking_blocked"):
+		sender.connect("tracking_blocked", Callable(self, "_on_tracking_blocked"))
 
 
 func start(config: Dictionary) -> void:
@@ -54,6 +56,8 @@ func start(config: Dictionary) -> void:
 	endpoint = {"host": host, "port": port}
 	_stopping = false
 	control_enabled = false
+	if sender.has_method("rearm_tracking"):
+		sender.call("rearm_tracking")
 	if sender.has_method("set_sending"):
 		sender.call("set_sending", false)
 	if sender.has_method("reset"):
@@ -104,6 +108,10 @@ func is_transport_ready() -> bool:
 		and bool(sender.call("is_protocol_ready"))
 		and is_ready()
 	)
+
+
+func is_tracking_interlocked() -> bool:
+	return sender != null and sender.has_method("is_tracking_interlocked") and bool(sender.call("is_tracking_interlocked"))
 
 
 func _bind_client_signals() -> void:
@@ -161,3 +169,8 @@ func _on_failed(reason := "XRoboToolkit connection failed") -> void:
 func _on_send_failed(reason: String) -> void:
 	if not _stopping:
 		warning_raised.emit("send_failed", reason)
+
+
+func _on_tracking_blocked(_report: Dictionary) -> void:
+	control_enabled = false
+	warning_raised.emit("tracking_not_ready", tr("UI_TRACKING_REARM_REQUIRED"))

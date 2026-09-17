@@ -565,6 +565,7 @@ func _create_v2_nodes() -> void:
 	_xr_state_sender = XrStateSender.new()
 	_xr_state_sender.name = "XrStateSender"
 	_xr_state_sender.frame_sent.connect(_on_xr_state_frame_sent)
+	_xr_state_sender.tracking_blocked.connect(_on_tracking_blocked)
 	add_child(_xr_state_sender)
 
 	_telemetry_tcp_handler = TcpHandler.new()
@@ -631,12 +632,17 @@ func _create_settings_ui_nodes() -> void:
 	_settings_panel.pico_body_calibration_requested.connect(
 		_on_pico_body_calibration_requested
 	)
+	_settings_panel.tracker_calibration_confirm_requested.connect(_on_tracking_calibration_confirm_requested)
 	_settings_panel.blueprint_visibility_override_requested.connect(
 		_on_blueprint_visibility_override_requested
 	)
 	_settings_panel.exit_requested.connect(_on_settings_exit_requested)
 	_origin.add_child(_settings_panel)
 	_settings_ui = _settings_panel
+	var tracking_sessions := TrackingSessionService.shared()
+	if tracking_sessions != null:
+		tracking_sessions.changed.connect(_on_tracking_sessions_changed)
+		_on_tracking_sessions_changed()
 
 	_settings_button = SettingsLauncherButtonScript.new()
 	_settings_button.name = "TeleopSettingsButton"
@@ -1205,12 +1211,8 @@ func _set_vr_pose_enabled(enabled: bool) -> void:
 	if _tracking_provider == null or _origin == null or _camera == null:
 		return
 	var bridge := _pico_body_bridge()
-	# PICO only reports body joints once body tracking has been started; without
-	# this the provider falls back to head + wrists with an inferred torso. It is
-	# not stopped when the skeleton is turned off: the bridge does not reference-
-	# count, and the XRoboToolkit sampler may be relying on the same session.
-	if bridge != null and bridge.has_method("start_body_tracking"):
-		bridge.call("start_body_tracking", {})
+	# The provider owns one shared tracking lease; removing this overlay cannot
+	# stop a tracker still used by the sender or another body consumer.
 	_vr_pose_provider = BodyPoseProviderScript.new()
 	_vr_pose_provider.name = "TeleopVrPoseProvider"
 	_vr_pose_provider.configure(_tracking_provider, bridge)
@@ -1256,16 +1258,13 @@ func _on_settings_disconnect_requested() -> void:
 
 
 func _on_pico_body_calibration_requested() -> void:
-	var bridge_autoload := get_node_or_null("/root/PicoOpenXRBridge")
-	var bridge: Object = null
-	if bridge_autoload != null and bridge_autoload.has_method("get_bridge"):
-		bridge = bridge_autoload.call("get_bridge")
-	if bridge == null or not bridge.has_method("start_body_tracking_calibration_app"):
+	var sessions := TrackingSessionService.shared()
+	if sessions == null:
 		var unavailable := tr("UI_PICO_BODY_CALIBRATION_UNAVAILABLE")
 		push_warning("[Operator] %s" % unavailable)
 		_set_status(unavailable)
 		return
-	var opened := bool(bridge.call("start_body_tracking_calibration_app"))
+	var opened := sessions.begin_calibration()
 	if opened:
 		print("[Operator] PICO Body Calibration opened")
 		_set_status(tr("UI_PICO_BODY_CALIBRATION_OPENED"))
@@ -1273,6 +1272,35 @@ func _on_pico_body_calibration_requested() -> void:
 		var failed := tr("UI_PICO_BODY_CALIBRATION_FAILED")
 		push_warning("[Operator] %s" % failed)
 		_set_status(failed)
+
+
+func _on_tracking_calibration_confirm_requested() -> void:
+	var sessions := TrackingSessionService.shared()
+	if sessions == null or not sessions.confirm_calibration():
+		_set_status(tr("UI_TRACKING_CONFIRM_REJECTED"))
+	else:
+		_set_status(tr("UI_TRACKING_CALIBRATION_CONFIRMED"))
+	_on_tracking_sessions_changed()
+
+
+func _on_tracking_sessions_changed() -> void:
+	var sessions := TrackingSessionService.shared()
+	if sessions != null and _settings_panel != null:
+		var report := sessions.summary()
+		var rearm := _sdk_mode and _xr_state_sender != null and _xr_state_sender.is_tracking_interlocked()
+		if _active_target != null and _active_target.has_method("is_tracking_interlocked"):
+			rearm = rearm or bool(_active_target.call("is_tracking_interlocked"))
+		report["rearm_required"] = rearm
+		_settings_panel.set_tracking_status(report)
+	# Lease release can happen inside target.stop(). Do not re-enable a target
+	# reentrantly while its teardown is still running.
+	call_deferred("_sync_stream_senders")
+
+
+func _on_tracking_blocked(_report: Dictionary) -> void:
+	_set_link_active(false)
+	_on_tracking_sessions_changed()
+	_show_settings_panel_with_status(tr("UI_TRACKING_REARM_REQUIRED"))
 
 
 ## Exit on the panel returns to the mode-select / launcher scene so the
@@ -1717,6 +1745,10 @@ func _connect_to_robot(ip: String, port: int) -> void:
 
 
 func _start_outside_with_options(options: Dictionary) -> bool:
+	# Explicit Connect (or the initial launch attempt), not transport auto-
+	# reconnection, is the only path that releases the tracking safety latch.
+	if _xr_state_sender != null:
+		_xr_state_sender.rearm_tracking()
 	var protocol := str(options.get("protocol", "operator"))
 	if protocol == "xrobot_toolkit_v1":
 		if _xrt_target == null:
@@ -2770,6 +2802,9 @@ func _on_target_telemetry(data: Dictionary, target: Node) -> void:
 func _on_target_warning(code: String, message: String, target: Node) -> void:
 	if target != _active_target:
 		return
+	if code == "tracking_not_ready":
+		_on_tracking_blocked({})
+		return
 	# Recoverable solve errors stay in the active session. Surface them in
 	# logcat/the current status UI without opening Settings or suspending input.
 	_set_status("%s: %s" % [code, message])
@@ -2785,7 +2820,7 @@ func _on_target_fault(code: String, message: String, target: Node) -> void:
 func _stop_active_target() -> void:
 	_clear_blueprint_runtime()
 	_robot_control_sink.set_sending(false)
-	_xr_state_sender.set_sending(false)
+	_xr_state_sender.shutdown()
 	if _xrt_target != null:
 		_xrt_target.set_control_enabled(false)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):

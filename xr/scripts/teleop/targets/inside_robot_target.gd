@@ -41,7 +41,8 @@ var _deadman_was_enabled := false
 var _controller_reference_position := Vector3.ZERO
 var _controller_reference_rotation := Quaternion.IDENTITY
 var _last_gripper := 0.0
-var _started_pico_body := false
+var _tracking_interlocked := false
+var _ever_controlled := false
 
 
 func _init() -> void:
@@ -59,6 +60,8 @@ func configure_runtime(
 
 func start(config: Dictionary) -> void:
 	stop()
+	_tracking_interlocked = false
+	_ever_controlled = false
 	# The settings page names this `inside_profile`; `profile_id` is accepted so
 	# a caller holding a profile dictionary can start a target directly.
 	var profile_id := str(config.get("inside_profile", config.get("profile_id", "")))
@@ -93,6 +96,9 @@ func start(config: Dictionary) -> void:
 
 
 func _process(delta: float) -> void:
+	if bool(profile.get("requires_body_tracking", false)) and _body_provider != null and not _body_provider.is_tracking_ready():
+		_pause_for_tracking()
+		return
 	if not is_ready() or not control_enabled:
 		return
 	if str(profile.get("profile_id", "")) != "so101":
@@ -105,7 +111,14 @@ func _process(delta: float) -> void:
 
 
 func set_control_enabled(enabled: bool) -> void:
+	if enabled and bool(profile.get("requires_body_tracking", false)) \
+			and (_tracking_interlocked or _body_provider == null or not _body_provider.is_tracking_ready()):
+		_pause_for_tracking()
+		enabled = false
 	super.set_control_enabled(enabled)
+	_ever_controlled = _ever_controlled or enabled
+	if _body_provider != null and bool(profile.get("requires_body_tracking", false)):
+		_body_provider.set_output_enabled(enabled)
 	if not enabled:
 		_deadman_was_enabled = false
 
@@ -133,11 +146,6 @@ func set_show_vr_pose(enabled: bool) -> void:
 	_body_provider.set_enabled(false)
 	_dispose_runtime_node(_body_provider)
 	_body_provider = null
-	if _started_pico_body:
-		var bridge := _pico_bridge()
-		if bridge != null and bridge.has_method("stop_body_tracking"):
-			bridge.call("stop_body_tracking")
-		_started_pico_body = false
 
 
 func reset() -> void:
@@ -152,6 +160,10 @@ func reset() -> void:
 
 func get_control_mode():
 	return _control_mode
+
+
+func is_tracking_interlocked() -> bool:
+	return _tracking_interlocked
 
 
 func stop() -> void:
@@ -182,11 +194,6 @@ func stop() -> void:
 		_simulation.pause()
 		_dispose_runtime_node(_simulation)
 		_simulation = null
-	if _started_pico_body:
-		var bridge := _pico_bridge()
-		if bridge != null and bridge.has_method("stop_body_tracking"):
-			bridge.call("stop_body_tracking")
-		_started_pico_body = false
 	_control_mode = null
 	_so101_native = null
 	profile.clear()
@@ -213,8 +220,6 @@ func _dispose_runtime_node(node: Node) -> void:
 func _create_body_provider() -> void:
 	var bridge := _pico_bridge()
 	var requires_body := bool(profile.get("requires_body_tracking", false))
-	if bridge != null and bridge.has_method("start_body_tracking"):
-		_started_pico_body = bool(bridge.call("start_body_tracking", {}))
 	_body_provider = BodyPoseProviderScript.new()
 	_body_provider.name = "InsideRobotBodyPoseProvider"
 	_body_provider.configure(tracking_provider, bridge)
@@ -231,14 +236,26 @@ func _create_body_provider() -> void:
 	_body_provider.sample_rate_hz = 60.0
 	runtime_root.add_child(_body_provider)
 	_body_provider.set_enabled(true)
+	if requires_body:
+		_body_provider.set_output_enabled(false)
 
 
 func _on_body_tracking_unavailable(source: String, _reason: String) -> void:
 	if source != "pico" or state == State.IDLE or state == State.FAULTED:
 		return
-	var message := tr("UI_PICO_BODY_TRACKING_UNAVAILABLE")
-	stop()
-	_fail("pico_body_tracking_unavailable", message)
+	_pause_for_tracking()
+
+
+func _pause_for_tracking() -> void:
+	super.set_control_enabled(false)
+	if _body_provider != null:
+		_body_provider.set_output_enabled(false)
+		var report: Dictionary = _body_provider.tracking_status()
+		if not _ever_controlled and report.get("phase") in ["waiting_body", "motion_setup"]:
+			return
+	if not _tracking_interlocked:
+		_tracking_interlocked = true
+		warning_raised.emit("tracking_not_ready", tr("UI_TRACKING_REARM_REQUIRED"))
 
 
 func _create_local_embodiment() -> void:
@@ -494,11 +511,13 @@ func _submit_so101_frame() -> void:
 
 
 func _on_remote_result(result: Dictionary) -> void:
+	if not control_enabled or _tracking_interlocked:
+		return
 	_apply_retarget_result(result)
 
 
 func _on_overlay_qpos_updated(qpos: PackedFloat64Array) -> void:
-	if _simulation != null:
+	if _simulation != null and control_enabled and not _tracking_interlocked:
 		_simulation.set_configuration(qpos)
 
 

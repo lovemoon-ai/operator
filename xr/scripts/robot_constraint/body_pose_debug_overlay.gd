@@ -121,6 +121,9 @@ func _ready() -> void:
 func configure(provider: Object) -> void:
 	if provider == null:
 		return
+	visible = false
+	if provider.has_signal("frame_invalidated") and not provider.is_connected("frame_invalidated", _on_frame_invalidated):
+		provider.connect("frame_invalidated", _on_frame_invalidated)
 	if provider.has_signal("canonical_frame_ready"):
 		var callback := Callable(self, "_on_canonical_frame_ready")
 		if not provider.is_connected("canonical_frame_ready", callback):
@@ -129,6 +132,11 @@ func configure(provider: Object) -> void:
 		var latest: Variant = provider.call("get_latest_frame")
 		if typeof(latest) == TYPE_DICTIONARY and not (latest as Dictionary).is_empty():
 			_on_canonical_frame_ready(latest as Dictionary)
+
+
+func _on_frame_invalidated() -> void:
+	visible = false
+	_last_bone_transforms.clear()
 
 
 func set_head_camera(camera: Node3D) -> void:
@@ -238,6 +246,7 @@ func _on_canonical_frame_ready(frame: Dictionary) -> void:
 	var root_record := _source_root_transform(joints)
 	if root_record.is_empty():
 		return
+	visible = true
 	var source_root: Transform3D = root_record["transform"]
 	# The reference robot may still be completing its deferred front-of-view
 	# placement. Do not draw a one-frame skeleton at the world origin while

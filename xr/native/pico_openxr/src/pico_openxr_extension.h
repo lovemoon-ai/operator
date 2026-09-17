@@ -13,6 +13,9 @@
 #include <godot_cpp/variant/transform3d.hpp>
 
 #include <vector>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 using namespace godot;
 
@@ -62,6 +65,11 @@ public:
 	bool start_body_tracking(Dictionary bone_lengths = Dictionary());
 	void stop_body_tracking();
 	bool start_body_tracking_calibration_app();
+	// Read the runtime state without creating a body tracker or requesting
+	// independent motion-tracker mode (safe for the capture settings page).
+	Dictionary get_body_tracking_state();
+	Dictionary get_tracking_continuity_state(bool refresh = true);
+	bool set_tracking_monitor_enabled(bool enabled);
 	Dictionary sample_body_joints();
 	int64_t get_predicted_display_time_ns() const;
 	// Required call is xrSetVirtualBoundaryEnablePICO; the two visibility
@@ -140,6 +148,8 @@ private:
 	};
 
 	bool resolve_functions();
+	void poll_tracking_continuity(XrSession query_session);
+	void stop_tracker_calibration_monitor();
 	bool wait_future_until_ready(XrFutureEXT future, XrResult &poll_result, int timeout_ms = 3000);
 	bool refresh_camera_image_camera_ids();
 	bool query_camera_image_capabilities(XrCameraIdPICO camera_id, CameraImageCapabilitySet &capabilities);
@@ -249,6 +259,17 @@ private:
 	PFN_xrLocateSpace xrLocateSpace_ptr = nullptr;
 
 	bool function_resolution_attempted = false;
+	std::atomic<bool> calibration_monitor_running{false};
+	std::atomic<bool> calibration_monitor_body_active{false};
+	std::thread calibration_monitor_thread;
+	std::mutex calibration_mutex;
+	XrResult continuity_result = XR_ERROR_FEATURE_UNSUPPORTED;
+	XrBodyTrackingStatusPICO continuity_body_status = XR_BODY_TRACKING_STATUS_INVALID_PICO;
+	XrBodyTrackingMessagePICO continuity_message = XR_BODY_TRACKING_MESSAGE_NO_ERROR_PICO;
+	bool monitor_body_ready = false;
+	int64_t body_tracking_lost_epoch = 0;
+	int64_t tracker_disconnect_epoch = 0;
+	int64_t tracking_session_epoch = 0;
 	XrBodyTrackerBD body_tracker = XR_NULL_BODY_TRACKER_BD;
 	Array motion_tracker_ids;
 	bool motion_request_sent = false;

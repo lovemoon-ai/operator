@@ -401,6 +401,68 @@ are sent neutralized rather than omitted; `Body` is the inverse case and is
 omitted, because a receiver stops on an absent body but retargets 24 identity
 poses into a commanded rest pose. See `XrtTrackingEncoder.neutral()`.
 
+## Tracking Session Service
+
+`TrackingSessions` (`TrackingSessionService`) is an application autoload and
+the only owner of Pico tracker startup, shutdown, mode requests, calibration
+launch and body/motion publication. Each consumer acquires a weak-owner lease
+for the capabilities it actually uses and releases only its own lease.
+Recorder preparation and body/motion writing, `XrTrackingSampler`, and
+`BodyPoseProvider` all use this boundary. Inside derives demand from the
+profile's `requires_body_tracking` and optional body display; Outside derives
+it from negotiated streams or the XRoboToolkit protocol, never bundled robot
+model lists. Configuration alone does not activate an Outside sampler.
+
+`PicoTrackingCalibration` owns process-local **user confirmation**, independently
+of pages and recording options. Its compatibility workflow is: successfully open
+PICO system calibration, leave and return to Operator, then explicitly press
+"I completed this calibration" while the requested tracking data is valid.
+Returning (including cancelling setup) alone never authorizes data publication.
+Confirmation is a user attestation, not automatic proof of a new calibration;
+the UI states this explicitly. Disconnect/continuity-loss epochs revoke
+confirmation; normal page changes, releasing one lease, or recreating
+an OpenXR session do not erase a still-valid confirmation. No demand
+means no calibration prompt, and head/controller/hand-only consumers and other
+platforms are unaffected. The last release stops unneeded runtime tracking.
+Pico body-ready to `INVALID` while a tracker is active is conservatively treated
+as continuity loss; `LIMITED` and intentional resource stops are not losses.
+
+The native bridge uses the supported `XR_PICO_body_tracking2` tracking-state
+API, not the obsolete `xrGetBodyTrackerCalibStatePICO` symbol (absent on the
+Pico 5.15.7 runtime). A 20 Hz read-only monitor retains body continuity losses
+across Android pauses; it does not manufacture calibration-completion epochs.
+The monitor is joined before native session/instance destruction. OS pause/resume
+and OpenXR focus events distinguish opening setup from returning to Operator.
+Before accepting the explicit click, the service rechecks live body poses
+(including finite/non-collapsed positions) or valid independent motion poses.
+Invalid data keeps confirmation disabled. Motion-only prepares independent
+tracking after returning from system calibration and before confirmation.
+
+The service arbitrates Pico's mutually exclusive body and independent motion
+modes. Body-priority protocol requests keep their existing semantics, but a new
+consumer cannot preempt a mode another owner still needs: it receives
+`mode_conflict`. In particular, opening body visualization cannot steal an active
+motion-tracking control session. The calibration workflow may probe/start body before
+readiness, but no unconfirmed data is published. Independent tracker counts are
+never interpreted as full-body connectivity. Consumers clear cached frames on
+invalidation; an optional body display hides unavailable geometry instead of
+substituting a synthetic skeleton around the Pico gate.
+
+Recording finalizes the current file if required tracking is lost. Inside
+retargeting stops canonical-frame output and rejects queued results. XRoboToolkit
+sends its defined neutral frame and holds live output; Operator SDK state streaming
+closes its transport because v1 has no universal robot-neutral command. These
+control paths latch loss and require explicit Connect/re-arm; neither calibration
+completion, focus recovery, nor automatic transport reconnection resumes motion.
+Already-calibrated startup may wait for its first data frame without a new latch.
+Optional body visualization does not suspend a controller-only robot target.
+
+Capture and Teleop display the same status vocabulary, recalibration action and
+separate confirmation button; the confirmation button appears only after return.
+The Teleop row is outside the Inside/Outside UI containers and follows demand,
+not the selected protocol. `cicd/validate_tracking_ownership.py` rejects direct
+tracker lifecycle/data calls outside the service; device tests are still required.
+
 ## Capture Runtime
 
 `capture_app_base.gd` handles shared capture-mode lifecycle:
@@ -414,6 +476,13 @@ poses into a commanded rest pose. See `XrtTrackingEncoder.neutral()`.
 Capture modes do not own robot constraints or retargeting UI. Body tracking may
 still be recorded as sensor data, but turning it into a robot pose is a Teleop
 concern.
+
+Capture translates its selected body/motion streams into tracking leases.
+Both the early start check and the controller's final pre-writer check query
+the shared service, covering button, volume-key and automated starts. The
+sampler's publication boundary also checks readiness. Closing settings or
+stopping a recording cannot clear another consumer's calibration or stop its
+tracker. Loss monitoring continues with the settings page closed.
 
 The Output panel also owns the export reference-space contract. Operators
 choose `STAGE`, `LOCAL`, or `LOCAL_FLOOR`; before recording starts the app asks
