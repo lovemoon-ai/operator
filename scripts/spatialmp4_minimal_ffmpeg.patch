@@ -1,0 +1,97 @@
+diff --git a/scripts/build_ffmpeg.sh b/scripts/build_ffmpeg.sh
+index db1dc22..8f14e46 100755
+--- a/scripts/build_ffmpeg.sh
++++ b/scripts/build_ffmpeg.sh
+@@ -119,6 +119,5 @@ build_install_ffmpeg() {
+         --extra-ldflags="-L/usr/local/lib -fPIC" \
+         --enable-gpl \
+-        --enable-libx265 \
+         --enable-version3 \
+         --disable-ffplay \
+         --disable-doc \
+@@ -145,7 +144,11 @@ build_install_opencv() {
+ 
+     BUILD_FLAGS="
+         -D CMAKE_BUILD_TYPE=RELEASE
+-        -D BUILD_LIST=core,imgproc,imgcodecs
++        -D BUILD_LIST=core,imgproc
+         -D WITH_TBB=OFF
+-        -D WITH_OPENEXR=ON
++        -D WITH_IPP=OFF
++        -D WITH_OPENEXR=OFF
++        -D WITH_PROTOBUF=OFF
++        -D BUILD_PROTOBUF=OFF
++        -D WITH_QUIRC=OFF
+         -D WITH_EIGEN=ON
+@@ -157,7 +156,7 @@ build_install_opencv() {
+         -D BUILD_TESTS=OFF
+         -D BUILD_PERF_TESTS=OFF
+         -D BUILD_EXAMPLES=OFF
+-        -D BUILD_opencv_world=ON
++        -D BUILD_opencv_world=OFF
+-        -D BUILD_opencv_imgcodecs=ON
++        -D BUILD_opencv_imgcodecs=OFF
+         -D BUILD_opencv_apps=OFF                                      
+         -D BUILD_opencv_calib3d=OFF
+@@ -210,6 +209,8 @@ if [ -z "$CONDA_PREFIX" ] && [ "${SKIP_DEPS:-0}" != "1" ];then
+     install_deps
+ fi
+-build_install_ffmpeg
++if [ ! -f "$INSTALL_PREFIX/lib/pkgconfig/libavformat.pc" ]; then
++    build_install_ffmpeg
++fi
+ if [ "$SKIP_OPENCV" != "1" ]; then
+     build_install_opencv
+ fi
+diff --git a/cmake/spdlog.cmake b/cmake/spdlog.cmake
+--- a/cmake/spdlog.cmake
++++ b/cmake/spdlog.cmake
+@@ -21,8 +21,6 @@
+ include(FetchContent)
+ FetchContent_Declare(spdlog
+-    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+-    GIT_TAG v1.13.0
+-    GIT_SHALLOW TRUE
+-    GIT_PROGRESS TRUE
++    URL https://codeload.github.com/gabime/spdlog/tar.gz/refs/tags/v1.13.0
++    DOWNLOAD_EXTRACT_TIMESTAMP true
+ )
+ FetchContent_MakeAvailable(spdlog)
+diff --git a/cmake/fmt.cmake b/cmake/fmt.cmake
+--- a/cmake/fmt.cmake
++++ b/cmake/fmt.cmake
+@@ -8,7 +8,7 @@
+ include(FetchContent)
+ FetchContent_Declare(
+     fmt
+-    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+-    GIT_TAG 9.1.0  # 指定版本，可以更改为最新版本
++    URL https://codeload.github.com/fmtlib/fmt/tar.gz/refs/tags/9.1.0
++    DOWNLOAD_EXTRACT_TIMESTAMP true
+ )
+ FetchContent_MakeAvailable(fmt)
+diff --git a/cmake/sophus.cmake b/cmake/sophus.cmake
+--- a/cmake/sophus.cmake
++++ b/cmake/sophus.cmake
+@@ -6,8 +6,6 @@
+ include(FetchContent)
+ FetchContent_Declare(
+     sophus
+-    GIT_REPOSITORY https://github.com/strasdat/Sophus.git
+-    GIT_TAG 1.22.10
+-    GIT_SHALLOW TRUE
+-    GIT_PROGRESS TRUE
++    URL https://codeload.github.com/strasdat/Sophus/tar.gz/refs/tags/1.22.10
++    DOWNLOAD_EXTRACT_TIMESTAMP true
+ )
+diff --git a/cmake/pybind11.cmake b/cmake/pybind11.cmake
+--- a/cmake/pybind11.cmake
++++ b/cmake/pybind11.cmake
+@@ -12,5 +12,5 @@
+ FetchContent_Declare(
+     pybind11
+-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+-    GIT_TAG        v2.11.1  # 使用最新的稳定版本
++    URL https://codeload.github.com/pybind/pybind11/tar.gz/refs/tags/v2.11.1
++    DOWNLOAD_EXTRACT_TIMESTAMP true
+ )

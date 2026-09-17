@@ -67,7 +67,10 @@ Coordinate conventions (mirrored from reference):
   * **world**: ``rr.ViewCoordinates.RUB``
       Quest / OpenXR — X-right, Y-up, Z-back-out-of-page. Head pose
       and all mett rigid_pose tracks live here in absolute world
-      coordinates.
+      coordinates in the capture. For visualization, every 3D world position
+      is translated so the first valid head position's gravity projection onto
+      the floor is at the Rerun world origin; orientation, world-up, and the
+      head's height above the floor are preserved.
   * **camera (RGB + depth)**: Quest and current Operator Pico captures use
       ``rr.ViewCoordinates.RDF`` (OpenCV image axes, X-right, Y-down,
       Z-forward).
@@ -1046,6 +1049,89 @@ def device_logged_capture_pose(T_W_A: np.ndarray, profile: DeviceProfile) -> np.
     return logged_from_capture @ T_W_A @ logged_from_capture.T
 
 
+def recenter_logged_world_points(
+    points: np.ndarray,
+    initial_world_position: np.ndarray,
+) -> np.ndarray:
+    """Translate logged-world positions so the first capture pose is at zero.
+
+    This is deliberately translation-only: the capture's world-up axis and
+    initial viewing direction remain unchanged. Vectors (gaze, velocity, …)
+    must not pass through this helper because they have no world position.
+    """
+    return np.asarray(points, dtype=np.float64) - np.asarray(
+        initial_world_position,
+        dtype=np.float64,
+    ).reshape(1, 3)
+
+
+def recenter_logged_world_pose(
+    pose: np.ndarray,
+    initial_world_position: np.ndarray,
+) -> np.ndarray:
+    """Translation-only counterpart of :func:`recenter_logged_world_points`."""
+    recentered = np.array(pose, dtype=np.float64, copy=True)
+    recentered[:3, 3] -= np.asarray(initial_world_position, dtype=np.float64)
+    return recentered
+
+
+def initial_logged_ground_origin(
+    head_lookup: PoseLookup,
+    profile: DeviceProfile,
+    manifest_data: Optional[dict],
+) -> Tuple[np.ndarray, str]:
+    """Project the first head position along gravity onto the capture floor.
+
+    OpenXR ``stage`` space defines its horizontal floor at Y=0. For older
+    captures that do not declare stage space, retain the converter's existing
+    floor heuristic: 1.2 m below the lowest recorded head position.
+    """
+    if head_lookup.empty():
+        return np.zeros(3, dtype=np.float64), "unavailable (no head pose)"
+
+    capture_options: Dict[str, Any] = {}
+    if isinstance(manifest_data, dict):
+        resolved = manifest_data.get("resolved_capture_options")
+        raw = manifest_data.get("capture_options")
+        if isinstance(resolved, dict):
+            capture_options = resolved
+        elif isinstance(raw, dict):
+            capture_options = raw
+    coordinate_space = str(capture_options.get("export_coordinate_space", "")).lower()
+    coordinate_space_id = str(capture_options.get("export_coordinate_space_id", "")).lower()
+    uses_stage_floor = coordinate_space == "stage" or coordinate_space_id == "openxr_stage"
+
+    first_head = head_lookup.frames[0]
+    first_capture_pose = head_pose_matrix(first_head, profile)
+    if uses_stage_floor:
+        floor_y = 0.0
+        source = "OpenXR stage Y=0"
+    else:
+        head_heights = np.array(
+            [head_pose_matrix(frame, profile)[1, 3] for frame in head_lookup.frames],
+            dtype=np.float64,
+        )
+        floor_y = float(np.min(head_heights)) - 1.2
+        source = "head-height fallback"
+
+    ground_point_capture = np.asarray(
+        [
+            first_capture_pose[0, 3],
+            floor_y,
+            first_capture_pose[2, 3],
+        ],
+        dtype=np.float64,
+    )
+    position = device_logged_capture_points(
+        ground_point_capture.reshape(1, 3),
+        profile,
+    )[0]
+    if not np.all(np.isfinite(position)):
+        info("initial ground origin is non-finite; leaving the capture world origin unchanged")
+        return np.zeros(3, dtype=np.float64), "invalid ground projection"
+    return position.copy(), source
+
+
 # ---------------------------------------------------------------------------
 # OpenXR hand-skeleton metadata (XR_EXT_hand_tracking, 26 joints)
 #   Same naming + bone topology as the reference so behaviour matches.
@@ -1305,15 +1391,23 @@ CONTROLLER_INPUT_BITS: Tuple[Tuple[str, int], ...] = (
 # ---------------------------------------------------------------------------
 
 
-def log_hand_frame(track_id: str, hand_frame, profile: DeviceProfile) -> None:
+def log_hand_frame(
+    track_id: str,
+    hand_frame,
+    profile: DeviceProfile,
+    initial_world_position: np.ndarray,
+) -> None:
     """Log hand joints + bones directly in world coordinates."""
     joints = hand_frame.joints
     if not joints:
         return
 
-    positions = device_logged_capture_points(
-        np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64),
-        profile,
+    positions = recenter_logged_world_points(
+        device_logged_capture_points(
+            np.array([[j.x, j.y, j.z] for j in joints], dtype=np.float64),
+            profile,
+        ),
+        initial_world_position,
     )
     joint_ids = np.array([int(j.joint_id) for j in joints], dtype=np.int32)
     radii = np.array(
@@ -1493,12 +1587,20 @@ def _log_body_points_and_bones(entity_prefix: str, positions: np.ndarray, joint_
         )
 
 
-def log_body_frame(body_frame) -> None:
+def log_body_frame(
+    body_frame,
+    profile: DeviceProfile,
+    initial_world_position: np.ndarray,
+) -> None:
     """Log body joints + bones directly in world coordinates."""
     joints = body_frame.joints
     if not joints:
         return
     positions, joint_ids = _body_positions_and_ids(joints)
+    positions = recenter_logged_world_points(
+        device_logged_capture_points(positions, profile),
+        initial_world_position,
+    )
     _log_body_points_and_bones("world/body", positions, joint_ids)
 
 
@@ -1526,9 +1628,11 @@ def log_rigid_pose(
     track_id: str,
     pose,
     profile: DeviceProfile,
+    initial_world_position: np.ndarray,
     axis_len: float = 0.08,
 ) -> None:
     mat = device_logged_capture_pose(pose_frame_to_matrix(pose), profile)
+    mat = recenter_logged_world_pose(mat, initial_world_position)
     mat[:3, :3] = ensure_right_handed_rotation(mat[:3, :3])
     translation = mat[:3, 3]
     quat = Rotation.from_matrix(mat[:3, :3]).as_quat()
@@ -2247,6 +2351,7 @@ def log_all_rigid_pose_tracks(
     reader,
     track_ids: Sequence[str],
     profile: DeviceProfile,
+    initial_world_position: np.ndarray,
 ) -> None:
     for tid in track_ids:
         if tid == "head":
@@ -2256,20 +2361,21 @@ def log_all_rigid_pose_tracks(
             if pose.timestamp < 0:
                 continue
             set_time_seconds("time", pose.timestamp)
-            log_rigid_pose(tid, pose, profile)
+            log_rigid_pose(tid, pose, profile, initial_world_position)
 
 
 def log_all_hand_tracks(
     reader,
     track_ids: Sequence[str],
     profile: DeviceProfile,
+    initial_world_position: np.ndarray,
 ) -> None:
     for tid in track_ids:
         for frame in reader.get_hand_joint_frames(tid):
             if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
-            log_hand_frame(tid, frame, profile)
+            log_hand_frame(tid, frame, profile, initial_world_position)
 
 
 def log_all_hand_tracks_head_relative(
@@ -2286,6 +2392,8 @@ def log_all_hand_tracks_head_relative(
 def log_all_body_tracks(
     reader,
     track_ids: Sequence[str],
+    profile: DeviceProfile,
+    initial_world_position: np.ndarray,
     fallback_body_frames: Optional[Dict[str, List[_TimedJointFrame]]] = None,
 ) -> None:
     fallback_body_frames = fallback_body_frames or {}
@@ -2294,7 +2402,7 @@ def log_all_body_tracks(
             if frame.timestamp < 0:
                 continue
             set_time_seconds("time", frame.timestamp)
-            log_body_frame(frame)
+            log_body_frame(frame, profile, initial_world_position)
 
 
 def log_all_body_tracks_head_relative(
@@ -2432,6 +2540,7 @@ def _motion_tracker_label(track_id: str, payload: Dict[str, Any]) -> str:
 def log_all_motion_tracker_tracks(
     frames_by_track: Dict[str, List[_TimedJsonFrame]],
     profile: DeviceProfile,
+    initial_world_position: np.ndarray,
 ) -> None:
     pose_count = 0
     event_count = 0
@@ -2454,6 +2563,10 @@ def log_all_motion_tracker_tracks(
                 continue
             label = _motion_tracker_label(track_id, payload)
             logged_pose = device_logged_capture_pose(pose, profile)
+            logged_pose = recenter_logged_world_pose(
+                logged_pose,
+                initial_world_position,
+            )
             logged_pose[:3, :3] = ensure_right_handed_rotation(logged_pose[:3, :3])
             translation = logged_pose[:3, 3]
             quat = Rotation.from_matrix(logged_pose[:3, :3]).as_quat()
@@ -2499,11 +2612,18 @@ def log_all_motion_tracker_tracks(
 # ---------------------------------------------------------------------------
 
 
-def log_head_pose_track(head_lookup: PoseLookup, profile: DeviceProfile) -> None:
+def log_head_pose_track(
+    head_lookup: PoseLookup,
+    profile: DeviceProfile,
+    initial_world_position: np.ndarray,
+) -> None:
     if head_lookup.empty():
         return
 
-    traj = device_logged_capture_points(head_lookup.trajectory_xyz(), profile)
+    traj = recenter_logged_world_points(
+        device_logged_capture_points(head_lookup.trajectory_xyz(), profile),
+        initial_world_position,
+    )
     rr.log(
         "world/trajectory/head",
         rr.LineStrips3D(strips=[traj], colors=[[255, 215, 0]], radii=0.02),
@@ -2537,11 +2657,20 @@ def log_head_pose_track(head_lookup: PoseLookup, profile: DeviceProfile) -> None
 
     for f in head_lookup.frames:
         set_time_seconds("time", f.timestamp)
-        log_rigid_pose("head", f, profile, axis_len=0.1)
+        log_rigid_pose(
+            "head",
+            f,
+            profile,
+            initial_world_position,
+            axis_len=0.1,
+        )
         mat = pose_frame_to_matrix(f)
         # OpenXR head looks down its local -Z axis (RUB convention).
         forward = device_logged_capture_points((-mat[:3, 2]).reshape(1, 3), profile)[0]
-        origin = device_logged_capture_points(mat[:3, 3].reshape(1, 3), profile)[0]
+        origin = recenter_logged_world_points(
+            device_logged_capture_points(mat[:3, 3].reshape(1, 3), profile),
+            initial_world_position,
+        )[0]
         rr.log(
             "world/rigid/head/gaze",
             rr.Arrows3D(
@@ -2656,6 +2785,7 @@ def log_body_hand_bridge_frame(
     hand_lookups: Dict[str, HandFrameLookup],
     profile: DeviceProfile,
     body_to_hand_bridges: BodyHandBridgeMap,
+    initial_world_position: np.ndarray,
 ) -> None:
     if not body_to_hand_bridges or not hand_lookups or not body_frame.joints:
         return
@@ -2675,15 +2805,18 @@ def log_body_hand_bridge_frame(
             continue
         hand_by_id = _joint_position_by_id(hand_frame.joints)
         for body_joint_id, hand_joint_id in joint_pairs:
-            body_pos = body_by_id.get(body_joint_id)
+            body_pos_raw = body_by_id.get(body_joint_id)
             hand_pos_raw = hand_by_id.get(hand_joint_id)
-            if body_pos is None or hand_pos_raw is None:
+            if body_pos_raw is None or hand_pos_raw is None:
                 continue
-            hand_pos = device_logged_capture_points(
-                hand_pos_raw.reshape(1, 3),
-                profile,
-            )[0]
-            strips.append(np.stack([body_pos, hand_pos], axis=0))
+            points = recenter_logged_world_points(
+                device_logged_capture_points(
+                    np.stack([body_pos_raw, hand_pos_raw], axis=0),
+                    profile,
+                ),
+                initial_world_position,
+            )
+            strips.append(points)
             colors.append(HAND_COLORS.get(track_id, BODY_COLOR))
     _log_body_hand_bridge_strips("world/body", strips, colors)
 
@@ -2736,6 +2869,7 @@ def log_all_body_hand_bridges(
     hand_lookups: Dict[str, HandFrameLookup],
     profile: DeviceProfile,
     body_to_hand_bridges: BodyHandBridgeMap,
+    initial_world_position: np.ndarray,
 ) -> None:
     if not body_to_hand_bridges or not hand_lookups:
         return
@@ -2749,6 +2883,7 @@ def log_all_body_hand_bridges(
                 hand_lookups,
                 profile,
                 body_to_hand_bridges,
+                initial_world_position,
             )
 
 
@@ -3411,6 +3546,17 @@ def run(args: argparse.Namespace) -> int:
             "tracking streams. World-space camera transforms, head-relative "
             "views, and camera-image tracking overlays are unavailable."
         )
+    initial_world_position, ground_origin_source = initial_logged_ground_origin(
+        head_lookup,
+        profile,
+        manifest_data,
+    )
+    if has_head_pose:
+        info(
+            "3D world recenter: first-head gravity projection "
+            f"{initial_world_position.tolist()} -> [0.0, 0.0, 0.0] "
+            f"({ground_origin_source}; translation only)"
+        )
 
     duration_reference_timestamps = [
         float(frame.timestamp)
@@ -3462,18 +3608,19 @@ def run(args: argparse.Namespace) -> int:
         static=True,
     )
 
-    # Floor grid keyed off the head trajectory extents so it sits where
-    # the user actually walked. ``y = min(traj.y) - 1.2`` is the same
-    # rough "ground ≈ 1.2 m below the lowest head sample" heuristic the
-    # reference uses (works for standing capture; for floor-level
-    # capture the grid sinks correspondingly).
+    # The world origin is the first head pose's gravity projection onto this
+    # floor, so the grid is always Y=0 after recentering. Its horizontal size
+    # still follows the head trajectory extents.
     if has_head_pose and not args.no_floor:
-        traj = device_logged_capture_points(head_lookup.trajectory_xyz(), profile)
+        traj = recenter_logged_world_points(
+            device_logged_capture_points(head_lookup.trajectory_xyz(), profile),
+            initial_world_position,
+        )
         max_xz = float(np.max(np.abs(np.concatenate([traj[:, 0], traj[:, 2]]))))
         log_floor_grid(
             half_extent_x=max(max_xz, 2.0),
             half_extent_z=max(max_xz, 2.0),
-            y=float(traj[:, 1].min()) - 1.2,
+            y=0.0,
             step=1.0,
         )
 
@@ -3619,10 +3766,26 @@ def run(args: argparse.Namespace) -> int:
         )
 
     # ---- timed-metadata tracks -------------------------------------------
-    log_head_pose_track(head_lookup, profile)
-    log_all_rigid_pose_tracks(reader, tracks["rigid_pose"], profile)
-    log_all_hand_tracks(reader, tracks["hand_joints"], profile)
-    log_all_body_tracks(reader, tracks["body_joints"], body_frames_by_track)
+    log_head_pose_track(head_lookup, profile, initial_world_position)
+    log_all_rigid_pose_tracks(
+        reader,
+        tracks["rigid_pose"],
+        profile,
+        initial_world_position,
+    )
+    log_all_hand_tracks(
+        reader,
+        tracks["hand_joints"],
+        profile,
+        initial_world_position,
+    )
+    log_all_body_tracks(
+        reader,
+        tracks["body_joints"],
+        profile,
+        initial_world_position,
+        body_frames_by_track,
+    )
     log_all_body_hand_bridges(
         reader,
         tracks["body_joints"],
@@ -3630,6 +3793,7 @@ def run(args: argparse.Namespace) -> int:
         hand_lookups,
         profile,
         body_to_hand_bridges,
+        initial_world_position,
     )
     if has_head_pose:
         log_all_hand_tracks_head_relative(reader, tracks["hand_joints"], head_lookup)
@@ -3648,7 +3812,11 @@ def run(args: argparse.Namespace) -> int:
             body_to_hand_bridges,
         )
     log_all_controller_input_tracks(reader, tracks["controller_input"])
-    log_all_motion_tracker_tracks(json_metadata_tracks.get("motion_trackers", {}), profile)
+    log_all_motion_tracker_tracks(
+        json_metadata_tracks.get("motion_trackers", {}),
+        profile,
+        initial_world_position,
+    )
 
     # ---- RFC-003 H2 robot ------------------------------------------------
     if not args.no_robot:
@@ -3769,6 +3937,10 @@ def run(args: argparse.Namespace) -> int:
                     profile,
                 )
             T_W_Sd = device_logged_camera_pose(T_W_Sd_sensor, profile)
+            T_W_Sd = recenter_logged_world_pose(
+                T_W_Sd,
+                initial_world_position,
+            )
             T_W_Sd[:3, :3] = ensure_right_handed_rotation(T_W_Sd[:3, :3])
 
             log_transform3d(
@@ -3826,7 +3998,10 @@ def run(args: argparse.Namespace) -> int:
                 colors = depth_colormap_jet(
                     np.abs(z_local), args.depth_min, args.depth_max
                 )
-                pts_world_logged = device_logged_native_points(pts_world, profile)
+                pts_world_logged = recenter_logged_world_points(
+                    device_logged_native_points(pts_world, profile),
+                    initial_world_position,
+                )
                 rr.log(
                     "world/depth_pointcloud",
                     rr.Points3D(positions=pts_world_logged, colors=colors, radii=0.012),
@@ -3990,6 +4165,10 @@ def run(args: argparse.Namespace) -> int:
                     T_W_Srgb_camera,
                 )
                 T_W_Srgb = device_logged_camera_pose(T_W_Srgb_sensor, profile)
+                T_W_Srgb = recenter_logged_world_pose(
+                    T_W_Srgb,
+                    initial_world_position,
+                )
                 T_W_Srgb[:3, :3] = ensure_right_handed_rotation(T_W_Srgb[:3, :3])
                 log_transform3d(
                     "world/camera",

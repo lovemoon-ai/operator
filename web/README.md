@@ -16,21 +16,30 @@ web/
         └── package.json
 ```
 
-This is an **npm workspace**. Install once at the root and both
-packages share `node_modules`:
+This is an **npm workspace**. Prepare the complete web and Rerun environment at
+the root:
 
 ```bash
 cd web
-npm install
+make env
 ```
+
+This installs the locked npm workspace, a uv-managed Python 3.13 interpreter,
+the Rerun sidecar dependencies, and the matching SpatialMP4 native extension.
+The initial SpatialMP4/FFmpeg build can take several minutes; subsequent runs
+reuse the dependency cache.
 
 ## Run the data-management app
 
 ```bash
 cd web
-npm run dev
-# → http://localhost:3000/
+make run-dev
+# → http://localhost:3001/
 ```
+
+`make run-dev` depends on `make env`, so it also works directly from a fresh
+checkout. The npm environment is reinstalled only when a package manifest or
+the lockfile changes (or when required binaries are missing).
 
 The dev server is `tsx watch server.ts`. It boots a single Express
 process that:
@@ -86,6 +95,11 @@ sequentially (see `app/lib/workers/`):
    so a coordinate-frame intuition built against the local viewer
    transfers 1-for-1 to the embedded one.
 
+   The 3D World display projects the first valid head position along gravity
+   onto the floor and uses that point as its origin. This keeps captures near
+   the viewer center while preserving head height, orientation, world-up, and
+   all 2D RGB/depth projection math.
+
    Captures that intentionally disable head pose still produce an RRD with
    2D RGB/depth plus absolute controller, hand, body, and input streams. The
    converter omits world-space camera transforms, head-relative views, and
@@ -116,13 +130,15 @@ sequentially (see `app/lib/workers/`):
    One-time setup:
 
    ```bash
-   # 1. uv + ffmpeg for the preview worker
-   brew install ffmpeg uv             # macOS
-   # or: sudo apt install ffmpeg && curl -LsSf https://astral.sh/uv/install.sh | sh
+   # 1. Host build tools + ffmpeg for the preview worker
+   brew install cmake ffmpeg pkg-config uv             # macOS
+   # Linux:
+   sudo apt install build-essential cmake ffmpeg git pkg-config
+   curl -LsSf https://astral.sh/uv/install.sh | sh
 
-   # 2. SpatialMP4 SDK — sync into .deps and build once for the
-   # Python ABI uv will pick.
-   scripts/setup_spatialmp4.sh
+   # 2. Install npm/Python dependencies and build SpatialMP4 for the
+   # Python ABI used by the app.
+   cd web && make env
    ```
 
    Subsequent ingests just trigger `uv run --script …`, which is
