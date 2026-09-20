@@ -58,6 +58,8 @@ const ENDPOINT_ROW_FONT_SIZE := 20
 ## Below this the link is up but nothing is leaving the headset.
 const SEND_RATE_IDLE_HZ := 0.5
 const WIFI_STATUS_REFRESH_SEC := 2.0
+const BATTERY_STATUS_REFRESH_SEC := 10.0
+const OPERATOR_INPUT_PLUGIN_SINGLETON := "OperatorInputPlugin"
 const WIFI_CONNECTED_COLOR := Color(0.20, 0.82, 0.42, 1.0)
 const WIFI_DISCONNECTED_COLOR := Color(0.45, 0.48, 0.52, 1.0)
 ## Keys naming *which* link Connect starts. Only Connect persists them: launch
@@ -114,6 +116,65 @@ class DiscoverySpinner:
 		var base_color := Color(accent_color.r, accent_color.g, accent_color.b, 0.18)
 		draw_arc(center, radius, 0.0, PI * 2.0, 40, base_color, 3.0, true)
 		draw_arc(center, radius, _angle, _angle + PI * 1.45, 28, accent_color, 3.4, true)
+
+class BatteryIndicator:
+	extends Control
+
+	const HIGH_COLOR := Color(0.20, 0.82, 0.42, 1.0)
+	const MEDIUM_COLOR := Color(1.0, 0.72, 0.20, 1.0)
+	const LOW_COLOR := Color(0.96, 0.27, 0.24, 1.0)
+	const UNKNOWN_COLOR := Color(0.45, 0.48, 0.52, 1.0)
+
+	## Headset system battery, in percent. A negative value means the platform
+	## did not expose a battery reading (for example, while running in the
+	## editor).
+	var percent: int = -1
+	var _percent_label: Label
+
+	func _ready() -> void:
+		custom_minimum_size = Vector2(94, 40)
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_percent_label = Label.new()
+		_percent_label.position = Vector2(42, 0)
+		_percent_label.size = Vector2(52, 40)
+		_percent_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		_percent_label.add_theme_font_size_override("font_size", 20)
+		add_child(_percent_label)
+		_refresh_visuals()
+
+	func set_percent(value: int) -> void:
+		percent = value if value >= 0 and value <= 100 else -1
+		_refresh_visuals()
+		queue_redraw()
+
+	func _refresh_visuals() -> void:
+		if _percent_label == null:
+			return
+		_percent_label.text = "%d%%" % percent if percent >= 0 else "--"
+		_percent_label.add_theme_color_override("font_color", _battery_color())
+
+	func _battery_color() -> Color:
+		if percent < 0:
+			return UNKNOWN_COLOR
+		if percent > 70:
+			return HIGH_COLOR
+		if percent >= 30:
+			return MEDIUM_COLOR
+		return LOW_COLOR
+
+	func _draw() -> void:
+		var color := _battery_color()
+		var body := Rect2(2, 8, 28, 24)
+		var interior := Rect2(6, 12, 20, 16)
+		# The outline and terminal form the battery logo; the interior is filled
+		# proportionally so the capacity itself carries the status at a glance.
+		draw_rect(body, color, false, 2.5)
+		draw_rect(Rect2(30, 15, 4, 10), color, true)
+		draw_rect(interior, Color(0.16, 0.18, 0.21, 1.0), true)
+		if percent >= 0:
+			var fill_width := 20.0 * float(percent) / 100.0
+			if fill_width > 0.0:
+				draw_rect(Rect2(interior.position, Vector2(fill_width, interior.size.y)), color, true)
 
 ## Time between two trigger presses inside the IP field that counts as a
 ## double-click and enters edit mode. Longer than a mouse double-click because
@@ -187,6 +248,8 @@ var _blueprint_override_modes: Dictionary = {}
 var _status_label: Label
 var _wifi_status_indicator: TextureRect
 var _wifi_status_timer: Timer
+var _battery_indicator: BatteryIndicator
+var _battery_status_timer: Timer
 var _send_rate_label: Label
 var _link_active := false
 ## Last `prefer_*` hints handed to `set_discovery_state`, replayed whenever
@@ -228,6 +291,14 @@ func _init() -> void:
 	_wifi_status_timer.timeout.connect(_refresh_wifi_status)
 	add_child(_wifi_status_timer)
 	_refresh_wifi_status()
+	_battery_indicator = BatteryIndicator.new()
+	_title_row.add_child(_battery_indicator)
+	_battery_status_timer = Timer.new()
+	_battery_status_timer.wait_time = BATTERY_STATUS_REFRESH_SEC
+	_battery_status_timer.autostart = true
+	_battery_status_timer.timeout.connect(_refresh_battery_status)
+	add_child(_battery_status_timer)
+	_refresh_battery_status()
 	# Connection state belongs in the title bar rather than inside the Robot
 	# group: the link is global to the page, so the operator must see frames
 	# going out from whichever group they happen to be looking at.
@@ -853,6 +924,24 @@ func _refresh_wifi_status() -> void:
 	_wifi_status_indicator.self_modulate = (
 		WIFI_CONNECTED_COLOR if connected else WIFI_DISCONNECTED_COLOR
 	)
+
+
+func _refresh_battery_status() -> void:
+	if _battery_indicator == null:
+		return
+	_battery_indicator.set_percent(_system_battery_percent())
+
+
+func _system_battery_percent() -> int:
+	if not Engine.has_singleton(OPERATOR_INPUT_PLUGIN_SINGLETON):
+		return -1
+	var plugin: Object = Engine.get_singleton(OPERATOR_INPUT_PLUGIN_SINGLETON)
+	if plugin == null:
+		return -1
+	# Android Godot plugin singletons do not reliably expose @UsedByGodot
+	# methods through has_method(); call the known plugin contract directly.
+	var percent_v: Variant = plugin.call("get_battery_percent")
+	return int(percent_v) if percent_v is int else -1
 
 
 static func _wifi_connection_address(interfaces: Array) -> String:

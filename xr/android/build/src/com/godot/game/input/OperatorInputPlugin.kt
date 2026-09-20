@@ -1,5 +1,8 @@
 package com.godot.game.input
 
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.BatteryManager
 import android.util.Log
 import org.godotengine.godot.Godot
 import org.godotengine.godot.plugin.GodotPlugin
@@ -34,6 +37,21 @@ class OperatorInputPlugin(private val host: Godot) : GodotPlugin(host) {
 			inputHandler.setOverrideVolumeButtons(captured)
 			Log.i(TAG, "Volume-button capture enabled=$captured")
 		}
+	}
+
+	@UsedByGodot
+	@Suppress("FunctionName")
+	fun get_battery_percent(): Int {
+		val currentActivity = activity ?: return -1
+		val batteryIntent = currentActivity.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+			?: return -1
+		val level = batteryIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+		val scale = batteryIntent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+		if (level < 0 || scale <= 0) {
+			Log.w(TAG, "Unable to read system battery level")
+			return -1
+		}
+		return (level * 100 / scale).coerceIn(0, 100)
 	}
 
 	override fun onMainDestroy() {
