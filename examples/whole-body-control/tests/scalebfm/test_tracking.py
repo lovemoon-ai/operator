@@ -39,20 +39,25 @@ def test_extract_uses_five_named_body_joints_not_head_or_joint_order(joint_set, 
         extract_five_points(replace(frame, body=replace(body, joints=(partial, *joints[1:]))))
 
 
-def test_calibration_neutral_offsets_heading_and_six_dof():
-    neutral = np.array([[0, 0, 1], [0, .4, 1], [0, -.4, 1], [0, .15, 0], [0, -.15, 0.]])
+def test_calibration_scales_absolute_positions_and_aligns_heading():
+    # Upstream ScaleBridge semantics: absolute human positions x scale, then
+    # heading/XY alignment onto the robot (not a robot-anchored delta).
+    neutral = np.array([[0, 0, 1], [-.2, .4, 1.2], [-.2, -.4, 1.2], [.1, .15, 0], [.1, -.15, 0.]])
     heading = Rotation.from_euler("z", .8)
-    human = FivePointFrame(1, heading.apply(neutral), np.tile(wxyz(heading), (5, 1)))
+    human = FivePointFrame(1, heading.apply(neutral) + [2, 3, 0], np.tile(wxyz(heading), (5, 1)))
     robot = neutral * .75
     robot_q = np.tile([1., 0, 0, 0], (5, 1))
     calibration = Calibration(human, robot, robot_q, list(FIVE_POINTS), .75)
     p, q = calibration.apply(human)
-    np.testing.assert_allclose(p, robot)
+    # The first pelvis lands at stage origin XY; heights are absolute x scale.
+    np.testing.assert_allclose(p[0], [0, 0, .75], atol=1e-12)
+    np.testing.assert_allclose(p[1], [-.15, .3, .9], atol=1e-12)
     np.testing.assert_allclose(rotation_wxyz(q).as_matrix(), rotation_wxyz(robot_q).as_matrix(), atol=1e-12)
     moved = replace(human, positions=human.positions + heading.apply([.2, 0, .1]),
                     rotations=wxyz(heading * Rotation.from_euler("z", np.full((5, 1), .3))))
     p, q = calibration.apply(moved)
-    np.testing.assert_allclose(p - robot, np.tile([.15, 0, .075], (5, 1)), atol=1e-12)
+    np.testing.assert_allclose(p - calibration.apply(human)[0],
+                               np.tile([.15, 0, .075], (5, 1)), atol=1e-12)
     np.testing.assert_allclose(rotation_wxyz(q).as_euler("xyz")[:, 2], .3)
 
 

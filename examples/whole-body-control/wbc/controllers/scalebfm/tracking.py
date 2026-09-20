@@ -2,6 +2,7 @@
 from collections import deque
 import numpy as np
 from scipy.spatial.transform import Rotation, Slerp
+from .retarget import HeadingAlignment
 from ...tracking import (
     TrackedPoints as FivePointFrame, TrackingUnavailable, extract_points,
     ROBOT_TO_XR, PICO_BODY_JOINTS, rotation_wxyz, wxyz, base_pose_to_xr,
@@ -24,11 +25,13 @@ def extract_five_points(frame):
 
 
 class Calibration:
-    """Map the operator's neutral stance to the displayed robot reference pose.
+    """Upstream ScaleBridge retargeting semantics on PICO five points.
 
-    Per-link orientation offsets remove vendor-specific joint axes. Position
-    offsets map each neutral tracked point to its robot link; subsequent motion
-    uses one uniform scale and heading, including pelvis translation.
+    Positions follow upstream XsensProcessor + _calibrate: uniform absolute
+    scale, then heading/XY alignment of the streamed skeleton onto the robot
+    (NOT a robot-anchored delta).  Per-link rotation offsets measured at
+    calibration are the PICO analogue of upstream's hardcoded Xsens->G1 arm
+    offsets; see retarget.py for the literal upstream port.
     """
     def __init__(self, human: FivePointFrame, robot_positions: np.ndarray,
                  robot_rotations: np.ndarray, body_names: list[str], scale: float):
@@ -39,24 +42,22 @@ class Calibration:
         left = human.positions[3] - human.positions[4]
         if np.linalg.norm(left[:2]) < 0.08:
             raise TrackingUnavailable("Calibration requires feet apart, facing forward")
-        # Human left -> robot +Y, human forward -> robot +X.
-        yaw = np.arctan2(-left[0], left[1])
-        self.alignment = Rotation.from_euler("z", -yaw)
-        self.human_positions = human.positions.copy()
+        pelvis = body_names.index("pelvis")
+        # The alignment stage runs on the scaled stream, as upstream does.
+        self.alignment = HeadingAlignment(
+            human.positions[0] * scale, human.rotations[0], robot_rotations[pelvis])
         self.robot_positions = robot_positions.copy()
         self.robot_rotations = robot_rotations.copy()
-        aligned = self.alignment * rotation_wxyz(human.rotations)
+        aligned = self.alignment.quat_offset * rotation_wxyz(human.rotations)
         self.rotation_offsets = aligned.inv() * rotation_wxyz(robot_rotations[self.indices])
 
     def apply(self, frame: FivePointFrame) -> tuple[np.ndarray, np.ndarray]:
         positions = self.robot_positions.copy()
         rotations = self.robot_rotations.copy()
-        positions[self.indices] += self.scale * self.alignment.apply(
-            frame.positions - self.human_positions
-        )
-        rotations[self.indices] = wxyz(
-            self.alignment * rotation_wxyz(frame.rotations) * self.rotation_offsets
-        )
+        aligned_pos, aligned_rot = self.alignment.apply(
+            self.scale * frame.positions, frame.rotations)
+        positions[self.indices] = aligned_pos
+        rotations[self.indices] = wxyz(rotation_wxyz(aligned_rot) * self.rotation_offsets)
         # Other body slots are neutral placeholders; control_mode=4 masks them.
         return positions, rotations
 

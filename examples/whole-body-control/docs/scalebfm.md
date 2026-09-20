@@ -184,7 +184,7 @@ Options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--scale` | `0.75` | Uniform human-to-G1 displacement scale |
+| `--scale` | `0.75` | Uniform human-to-G1 absolute position scale (upstream `xsens_scale_factor`) |
 | `--distance` | `2` | Robot display offset along XR world's −Z, metres |
 | `--asset-port` | `63904` | Host HTTP port for immutable model assets |
 | `--tracking` | `global` | BODY only: `global` tracks pelvis displacement; `local` uses reference root position, like ScaleBridge `reference_forcing=True` |
@@ -197,7 +197,13 @@ Options:
 
 The display offset is world-locked, not continually camera-following. Recenter
 XR before calibration. If you recenter or move the tracking origin during a run,
-recalibrate. Human-to-robot alignment is a neutral-pose approximation, not a
+recalibrate. Human-to-robot mapping follows ScaleBridge's deployment
+retargeting: uniform absolute scaling of the tracked skeleton
+(`xsens_scale_factor`, default 0.75), a one-time heading+XY alignment, and
+per-link rotation offsets measured at calibration (the PICO analogue of
+upstream's hardcoded Xsens→G1 arm offsets; see `wbc/controllers/scalebfm/
+retarget.py`, which also carries the literal upstream `XsensProcessor` port and
+a fingerprint-pinned conformance test). This is a uniform-scale mapping, not a
 full anatomical retargeter; extreme motion and poor foot tracking can cause the
 simulated robot to fall. Press ABXY to reset it.
 
