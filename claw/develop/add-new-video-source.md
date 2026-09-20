@@ -49,6 +49,7 @@ Robot-side producers:
          width: 640
          height: 480
          fps: 30
+         stereo: false
          transport: auto
          codec: h264
    ```
@@ -56,6 +57,7 @@ Robot-side producers:
    Configure exactly one of `rtsp_url` or `command`. Commands are executed
    directly without a shell and are supervised with reconnect backoff. Keep
    source-specific capture beside its robot example unless it is reusable.
+   Set `stereo: true` only for a side-by-side stereo frame.
 
 4. Update the device descriptor.
 

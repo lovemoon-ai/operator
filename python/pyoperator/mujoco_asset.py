@@ -2,8 +2,9 @@
 
 Optional MuJoCo/numpy dependencies are imported only when exporting. This is
 independent of Inside Robot and never reads/writes the XR checkout's assets.
-The initial profile supports triangle meshes with solid PBR colors, scalar
-hinge/slide joints (one per body), and one externally driven floating root.
+The profile supports triangle meshes, boxes and spheres with solid PBR colors,
+scalar hinge/slide joints (one per body), and one externally driven floating
+root.
 """
 from __future__ import annotations
 
@@ -54,6 +55,91 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
         })
         return index
 
+    def geom_triangles(geom):
+        geom_type = int(model.geom_type[geom])
+        if geom_type == int(mj.mjtGeom.mjGEOM_MESH):
+            mesh_id = int(model.geom_dataid[geom])
+            start = int(model.mesh_vertadr[mesh_id])
+            vertices = model.mesh_vert[start:start + model.mesh_vertnum[mesh_id]]
+            start = int(model.mesh_faceadr[mesh_id])
+            faces = model.mesh_face[start:start + model.mesh_facenum[mesh_id]]
+            return vertices[faces]
+        if geom_type == int(mj.mjtGeom.mjGEOM_BOX):
+            x, y, z = np.asarray(model.geom_size[geom], dtype=float)
+            vertices = np.asarray(
+                [
+                    [-x, -y, -z],
+                    [x, -y, -z],
+                    [x, y, -z],
+                    [-x, y, -z],
+                    [-x, -y, z],
+                    [x, -y, z],
+                    [x, y, z],
+                    [-x, y, z],
+                ]
+            )
+            faces = np.asarray(
+                [
+                    [0, 2, 1],
+                    [0, 3, 2],
+                    [4, 5, 6],
+                    [4, 6, 7],
+                    [0, 1, 5],
+                    [0, 5, 4],
+                    [1, 2, 6],
+                    [1, 6, 5],
+                    [2, 3, 7],
+                    [2, 7, 6],
+                    [3, 0, 4],
+                    [3, 4, 7],
+                ]
+            )
+            return vertices[faces]
+        if geom_type == int(mj.mjtGeom.mjGEOM_SPHERE):
+            radius = float(model.geom_size[geom, 0])
+            latitude_segments, longitude_segments = 8, 12
+            vertices = [[0.0, 0.0, radius]]
+            for latitude in range(1, latitude_segments):
+                phi = np.pi * latitude / latitude_segments
+                for longitude in range(longitude_segments):
+                    theta = 2.0 * np.pi * longitude / longitude_segments
+                    vertices.append(
+                        [
+                            radius * np.sin(phi) * np.cos(theta),
+                            radius * np.sin(phi) * np.sin(theta),
+                            radius * np.cos(phi),
+                        ]
+                    )
+            vertices.append([0.0, 0.0, -radius])
+            north, south = 0, len(vertices) - 1
+            faces = []
+            for longitude in range(longitude_segments):
+                following = (longitude + 1) % longitude_segments
+                faces.append([north, 1 + longitude, 1 + following])
+            for latitude in range(latitude_segments - 2):
+                first = 1 + latitude * longitude_segments
+                following = first + longitude_segments
+                for longitude in range(longitude_segments):
+                    right = (longitude + 1) % longitude_segments
+                    faces.extend(
+                        [
+                            [
+                                first + longitude,
+                                following + longitude,
+                                following + right,
+                            ],
+                            [first + longitude, following + right, first + right],
+                        ]
+                    )
+            last = 1 + (latitude_segments - 2) * longitude_segments
+            for longitude in range(longitude_segments):
+                following = (longitude + 1) % longitude_segments
+                faces.append([last + longitude, south, last + following])
+            return np.asarray(vertices)[np.asarray(faces)]
+        raise ValueError(
+            "selected visual groups must contain triangle meshes, boxes, or spheres"
+        )
+
     body_nodes = {}
     joints = {}
     for body in range(root, model.nbody):
@@ -88,14 +174,7 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
         for geom in range(int(model.body_geomadr[body]), int(model.body_geomadr[body] + model.body_geomnum[body])):
             if int(model.geom_group[geom]) not in visual_groups:
                 continue
-            if model.geom_type[geom] != mj.mjtGeom.mjGEOM_MESH:
-                raise ValueError("selected visual groups must contain triangle meshes only")
-            mesh_id = int(model.geom_dataid[geom])
-            start = int(model.mesh_vertadr[mesh_id])
-            vertices = model.mesh_vert[start:start + model.mesh_vertnum[mesh_id]]
-            start = int(model.mesh_faceadr[mesh_id])
-            faces = model.mesh_face[start:start + model.mesh_facenum[mesh_id]]
-            triangles = vertices[faces] @ basis.T
+            triangles = geom_triangles(geom) @ basis.T
             normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
             lengths = np.linalg.norm(normals, axis=1)
             keep = lengths > 1e-12

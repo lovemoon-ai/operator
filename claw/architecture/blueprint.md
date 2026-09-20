@@ -318,7 +318,9 @@ pivot relative to the rest transform; the root receives the floating base pose.
 compiled MuJoCo model, including its real visual meshes, transforms, scalar
 joint axes/pivots, and reference offsets. It has no Inside Robot dependency.
 Current exporter support is one scalar joint per non-root body, one externally
-driven root, and mesh geoms in explicitly selected visual groups (default 1).
+driven root, and mesh, box, or sphere geoms in explicitly selected visual
+groups (default 1). Box and sphere primitives are tessellated into the same
+triangle-only GLB asset contract.
 
 The base pose is `[x,y,z,qx,qy,qz,qw]`, relative to the component transform in
 the XR Y-up coordinate system. The host publishes joints, base pose and sample

@@ -14,7 +14,7 @@ from .models import (
     Pose,
     XrFrame,
 )
-from .session import BridgeConfig, XrSession
+from .session import BridgeConfig, VideoFeedConfig, XrSession
 from .robot_assets import RobotModelAsset, RobotAssetServer
 from .robot import EndEffectorTarget, JointTarget, Robot, RobotState
 from .retargeting import PoseDeltaRetargeter, Retargeter
@@ -35,6 +35,7 @@ __all__ = [
     "RobotModelAsset",
     "RobotAssetServer",
     "BridgeConfig",
+    "VideoFeedConfig",
     "XrFrame",
     "Pose",
     "ControllerInput",

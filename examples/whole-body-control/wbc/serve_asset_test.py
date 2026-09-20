@@ -9,14 +9,26 @@ from pyoperator.mujoco_asset import from_mujoco
 from pyoperator import RobotAssetServer
 
 
+def scalar_joint_names(model) -> list[str]:
+    """Return named MuJoCo hinge/slide joints across enum binding versions."""
+    scalar_types = {
+        int(mujoco.mjtJoint.mjJNT_HINGE),
+        int(mujoco.mjtJoint.mjJNT_SLIDE),
+    }
+    return [
+        model.joint(joint).name
+        for joint in range(model.njnt)
+        if int(model.jnt_type[joint]) in scalar_types
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args()
     model = mujoco.MjModel.from_xml_path(str(args.model.resolve()))
-    names = [model.joint(j).name for j in range(model.njnt)
-             if model.jnt_type[j] in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE)]
+    names = scalar_joint_names(model)
     asset = from_mujoco(model, root_body="pelvis", joint_names=names)
     with RobotAssetServer([asset], host="127.0.0.1") as server:
         component = asset.component("g1", asset_port=server.port,

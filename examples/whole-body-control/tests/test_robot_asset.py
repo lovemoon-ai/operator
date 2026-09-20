@@ -8,6 +8,78 @@ from scipy.spatial.transform import Rotation
 
 from pyoperator.mujoco_asset import from_mujoco
 from pyoperator.robot_assets import glb_document
+from wbc.serve_asset_test import scalar_joint_names
+
+
+def test_box_visual_is_tessellated_into_triangles():
+    model = mj.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="pelvis">
+              <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+              <freejoint/>
+              <body name="link">
+                <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+                <joint name="joint" type="hinge"/>
+                <geom type="box" size=".1 .2 .3" group="1" rgba="1 0 0 1"/>
+              </body>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    asset = from_mujoco(model, root_body="pelvis", joint_names=("joint",))
+    document = glb_document(asset.data)
+    primitive = document["meshes"][0]["primitives"][0]
+    positions = document["accessors"][primitive["attributes"]["POSITION"]]
+    assert positions["count"] == 36
+
+
+def test_sphere_visual_is_tessellated_into_triangles():
+    model = mj.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="pelvis">
+              <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+              <freejoint/>
+              <body name="link">
+                <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+                <joint name="joint" type="hinge"/>
+                <geom type="sphere" size=".1" group="1" rgba="0 1 0 1"/>
+              </body>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    asset = from_mujoco(model, root_body="pelvis", joint_names=("joint",))
+    document = glb_document(asset.data)
+    primitive = document["meshes"][0]["primitives"][0]
+    positions = document["accessors"][primitive["attributes"]["POSITION"]]
+    assert positions["count"] > 36
+
+
+def test_asset_server_joint_enumeration_handles_mujoco_enum_scalars():
+    model = mj.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="pelvis">
+              <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+              <freejoint/>
+              <body name="hinged">
+                <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+                <joint name="hinge" type="hinge"/>
+                <geom type="box" size=".1 .1 .1"/>
+              </body>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    assert scalar_joint_names(model) == ["hinge"]
 
 
 @pytest.mark.parametrize("model_variable", ["SCALEBFM_G1_XML", "SCALEBFM_DEX3_XML", "SONIC_G1_XML"])

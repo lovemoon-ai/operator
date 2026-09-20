@@ -21,6 +21,74 @@ else:
 
 DEFAULT_XR_STREAMS = ("head", "controllers", "hands")
 XR_STREAMS = frozenset((*DEFAULT_XR_STREAMS, "body", "motion_trackers"))
+VIDEO_TRANSPORTS = frozenset(("tcp", "udp", "auto"))
+VIDEO_CODECS = frozenset(("h264", "hevc"))
+
+
+@dataclass(frozen=True)
+class VideoFeedConfig:
+    """One host video source advertised and relayed to Operator XR.
+
+    Exactly one of ``rtsp_url`` and ``command`` must be configured. Command
+    sources write an Annex-B elementary stream to stdout.
+    """
+
+    name: str
+    tcp_port: int
+    rtsp_url: str | None = None
+    command: tuple[str, ...] = ()
+    udp_port: int | None = None
+    width: int = 1280
+    height: int = 720
+    fps: int = 30
+    transport: str = "tcp"
+    codec: str = "h264"
+    stereo: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ValueError("video feed name must not be empty")
+        has_rtsp = isinstance(self.rtsp_url, str) and bool(self.rtsp_url.strip())
+        if not isinstance(self.command, (tuple, list)):
+            raise ValueError("video feed command must be a sequence")
+        command = tuple(self.command)
+        has_command = bool(command) and all(
+            isinstance(part, str) and part for part in command
+        )
+        if has_rtsp == has_command:
+            raise ValueError(
+                "video feed must configure exactly one of rtsp_url or command"
+            )
+        if not 1 <= int(self.tcp_port) <= 65535:
+            raise ValueError("video feed tcp_port must be in 1..65535")
+        if self.udp_port is not None and not 1 <= int(self.udp_port) <= 65535:
+            raise ValueError("video feed udp_port must be in 1..65535")
+        if min(int(self.width), int(self.height), int(self.fps)) <= 0:
+            raise ValueError("video feed width, height, and fps must be positive")
+        if self.transport not in VIDEO_TRANSPORTS:
+            raise ValueError(
+                f"video feed transport must be one of {sorted(VIDEO_TRANSPORTS)}"
+            )
+        if self.codec not in VIDEO_CODECS:
+            raise ValueError(
+                f"video feed codec must be one of {sorted(VIDEO_CODECS)}"
+            )
+        object.__setattr__(self, "command", command)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "rtsp_url": self.rtsp_url,
+            "command": list(self.command),
+            "tcp_port": int(self.tcp_port),
+            "udp_port": self.udp_port,
+            "width": int(self.width),
+            "height": int(self.height),
+            "fps": int(self.fps),
+            "transport": self.transport,
+            "codec": self.codec,
+            "stereo": bool(self.stereo),
+        }
 
 
 @dataclass(frozen=True)
@@ -36,6 +104,7 @@ class BridgeConfig:
     telemetry_port: int = 63903
     discovery_unicast_targets: tuple[str, ...] = ()
     streams: tuple[str, ...] = DEFAULT_XR_STREAMS
+    video_feeds: tuple[VideoFeedConfig, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.streams, (tuple, list)) or not self.streams:
@@ -45,6 +114,16 @@ class BridgeConfig:
         if len(set(self.streams)) != len(self.streams):
             raise ValueError("streams must not contain duplicates")
         object.__setattr__(self, "streams", tuple(self.streams))
+        if not isinstance(self.video_feeds, (tuple, list)):
+            raise ValueError("video_feeds must be a sequence")
+        feeds = tuple(self.video_feeds)
+        if any(not isinstance(feed, VideoFeedConfig) for feed in feeds):
+            raise ValueError("video_feeds must contain VideoFeedConfig values")
+        if len({feed.name for feed in feeds}) != len(feeds):
+            raise ValueError("video feed names must not contain duplicates")
+        if len({feed.tcp_port for feed in feeds}) != len(feeds):
+            raise ValueError("video feed tcp ports must not contain duplicates")
+        object.__setattr__(self, "video_feeds", feeds)
 
 
 class XrSession:
@@ -69,6 +148,10 @@ class XrSession:
             telemetry_port=self.config.telemetry_port,
             discovery_unicast_targets=list(self.config.discovery_unicast_targets),
             streams=list(self.config.streams),
+            video_feeds_json=json.dumps(
+                [feed.to_dict() for feed in self.config.video_feeds],
+                separators=(",", ":"),
+            ),
         )
         self.blueprint = BlueprintClient(self._native, lambda: self.is_running)
 

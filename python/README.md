@@ -46,6 +46,32 @@ control. Optional local body display has separate status and cannot turn a
 controller-only robot into a body-tracking consumer. Robot-policy calibration
 (for example ABXY in whole-body-control) is separate from tracker calibration.
 
+SDK sessions may also advertise and relay an RTSP or command-produced Annex-B
+video feed. The command writes only encoded video bytes to stdout; diagnostics
+belong on stderr:
+
+```python
+from pyoperator import BridgeConfig, VideoFeedConfig, XrSession
+
+feed = VideoFeedConfig(
+    name="simulation_head",
+    command=("python3", "produce_h264.py"),
+    tcp_port=12345,
+    width=2560,
+    height=720,
+    fps=30,
+    stereo=True,
+)
+with XrSession(BridgeConfig(video_feeds=(feed,))) as session:
+    frame = session.wait_next(timeout=5.0)
+```
+
+The feed transport remains independent of Blueprint. Declare a
+`BlueprintComponent.video_panel` when the robot should control whether the
+headset displays the advertised feed. `XrSession.start()` acquires every
+configured TCP/UDP video port before reporting success, so an occupied relay
+port fails startup instead of advertising an unavailable feed.
+
 Migration: consumers that previously relied on the SDK requesting everything
 must explicitly include `body` or `motion_trackers`. `control_loop.run` honors a
 retargeter's optional `required_streams` when it creates its own session;

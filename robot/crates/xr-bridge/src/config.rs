@@ -126,6 +126,9 @@ pub struct VideoFeedConfig {
     /// is also advertised so the headset starts the correct decoder.
     #[serde(default = "default_video_codec")]
     pub codec: String,
+    /// Whether the frame is side-by-side stereo.
+    #[serde(default)]
+    pub stereo: bool,
 }
 
 fn default_video_width() -> u32 {
@@ -251,7 +254,7 @@ impl BridgeConfig {
     }
 }
 
-fn validate_video_feeds(feeds: &[VideoFeedConfig]) -> Result<()> {
+pub fn validate_video_feeds(feeds: &[VideoFeedConfig]) -> Result<()> {
     for feed in feeds {
         let has_rtsp = feed
             .rtsp_url
@@ -380,6 +383,7 @@ video:
       height: 480
       fps: 30
       transport: udp
+      stereo: true
     - name: head
       rtsp_url: \"rtsp://127.0.0.1:8554/head\"
       tcp_port: 12347
@@ -399,6 +403,7 @@ video:
         assert_eq!(wl.width, 640);
         assert_eq!(wl.height, 480);
         assert_eq!(wl.transport, "udp");
+        assert!(wl.stereo);
         // Codec defaults to h264 when the field is absent.
         assert_eq!(wl.codec, "h264");
 
@@ -412,6 +417,7 @@ video:
         assert_eq!(head.fps, 30);
         assert_eq!(head.transport, "tcp");
         assert_eq!(head.codec, "h264");
+        assert!(!head.stereo);
     }
 
     #[test]

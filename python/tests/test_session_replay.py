@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from pyoperator.models import frame_from_dict
 from pyoperator.replay import FrameRecorder, ReplaySession, load
-from pyoperator.session import BridgeConfig, XrSession
+from pyoperator.session import BridgeConfig, VideoFeedConfig, XrSession
 
 from test_models import sample_frame
 
@@ -78,6 +78,28 @@ class SessionReplayTests(unittest.TestCase):
         session = XrSession(config, _native_factory=FakeNative)
         self.assertEqual(config.streams, ("controllers", "body"))
         self.assertEqual(session._native.kwargs["streams"], ["controllers", "body"])
+
+    def test_video_feeds_are_validated_and_forwarded_to_native(self):
+        feed = VideoFeedConfig(
+            name="sim_head",
+            command=("python3", "-m", "example.video_source"),
+            tcp_port=12345,
+            width=2560,
+            height=720,
+            fps=30,
+            stereo=True,
+        )
+        session = XrSession(
+            BridgeConfig(video_feeds=(feed,)), _native_factory=FakeNative
+        )
+        self.assertEqual(
+            json.loads(session._native.kwargs["video_feeds_json"]),
+            [feed.to_dict()],
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            VideoFeedConfig(name="invalid", tcp_port=12345)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            BridgeConfig(video_feeds=(feed, feed))
 
     def test_session_makes_one_native_call_per_frame(self) -> None:
         config = BridgeConfig(name="test", pose_port=1001, discovery_unicast_targets=("127.0.0.1",))

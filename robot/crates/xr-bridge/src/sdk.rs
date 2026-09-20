@@ -204,29 +204,32 @@ async fn run_sdk_mode_inner(
         let discovery = discovery::prepare(&config, &device_type, &device_name)
             .await
             .context("starting XR discovery")?;
+        let video_feeds = video::prepare(video_feeds).await?;
         Ok::<_, anyhow::Error>((
             pose_listener,
             pose_udp_socket,
             telemetry_listener,
             discovery,
+            video_feeds,
         ))
     }
     .await;
 
-    let (pose_listener, pose_udp_socket, telemetry_listener, discovery) = match prepared {
-        Ok(prepared) => {
-            if let Some(startup) = startup {
-                let _ = startup.send(Ok(()));
+    let (pose_listener, pose_udp_socket, telemetry_listener, discovery, video_feeds) =
+        match prepared {
+            Ok(prepared) => {
+                if let Some(startup) = startup {
+                    let _ = startup.send(Ok(()));
+                }
+                prepared
             }
-            prepared
-        }
-        Err(error) => {
-            if let Some(startup) = startup {
-                let _ = startup.send(Err(format!("{error:#}")));
+            Err(error) => {
+                if let Some(startup) = startup {
+                    let _ = startup.send(Err(format!("{error:#}")));
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
-    };
+        };
 
     tracing::info!(
         "pyoperator network up: pose={} discovery={}",
@@ -255,7 +258,7 @@ async fn run_sdk_mode_inner(
             ),
             telemetry_server::run_on(telemetry_listener, telemetry_rx),
             latency::run_aggregator(latency),
-            video::run(video_feeds),
+            video::run_prepared(video_feeds),
         )?;
         Ok::<(), anyhow::Error>(())
     };
@@ -316,5 +319,51 @@ mod tests {
             .expect_err("service must stop after startup failure")
             .to_string()
             .contains(&format!("pose TCP port {occupied_port}")));
+    }
+
+    #[tokio::test]
+    async fn startup_reports_video_bind_failure() {
+        let occupied = StdTcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let config = BridgeConfig {
+            pose_port: 0,
+            discovery_port: 0,
+            pose_udp_port: 0,
+            telemetry_port: 0,
+            video: crate::config::VideoConfig {
+                feeds: vec![crate::config::VideoFeedConfig {
+                    name: "occupied".to_string(),
+                    rtsp_url: None,
+                    command: vec!["true".to_string()],
+                    tcp_port: occupied_port,
+                    udp_port: None,
+                    width: 64,
+                    height: 64,
+                    fps: 30,
+                    transport: "tcp".to_string(),
+                    codec: "h264".to_string(),
+                    stereo: false,
+                }],
+            },
+            ..BridgeConfig::default()
+        };
+        let (sink, _frame_rx) = state_channel();
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (startup_tx, startup_rx) = oneshot::channel();
+
+        let (service, startup) = tokio::join!(
+            run_sdk_mode_with_startup(config, sink, shutdown_rx, startup_tx),
+            startup_rx,
+        );
+
+        let expected = format!("video TCP port {occupied_port}");
+        let startup_error = startup
+            .expect("service should report startup")
+            .expect_err("occupied video port must fail startup");
+        assert!(startup_error.contains(&expected));
+        assert!(service
+            .expect_err("service must stop after startup failure")
+            .to_string()
+            .contains(&expected));
     }
 }

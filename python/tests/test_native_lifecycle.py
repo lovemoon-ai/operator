@@ -2,6 +2,7 @@ from dataclasses import replace
 import json
 import socket
 import struct
+import sys
 import threading
 import time
 import unittest
@@ -11,7 +12,7 @@ import pytest
 
 from pyoperator._blueprint_spec import SPEC_CAPABILITY
 from pyoperator.blueprint import BlueprintComponent, Blueprint
-from pyoperator.session import BridgeConfig, XrSession
+from pyoperator.session import BridgeConfig, VideoFeedConfig, XrSession
 
 try:
     from pyoperator import _native  # noqa: F401
@@ -148,6 +149,56 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 @unittest.skipUnless(HAS_NATIVE, "requires the built pyoperator native extension")
 class NativeLifecycleTests(unittest.TestCase):
+    def test_start_rejects_occupied_video_port(self):
+        with socket.socket() as occupied:
+            occupied.bind(("0.0.0.0", 0))
+            occupied.listen(1)
+            video_port = occupied.getsockname()[1]
+            feed = VideoFeedConfig(
+                name="occupied",
+                command=(sys.executable, "-c", "import time; time.sleep(30)"),
+                tcp_port=video_port,
+            )
+            session = XrSession(replace(_config(), video_feeds=(feed,)))
+            with self.assertRaisesRegex(RuntimeError, f"video TCP port {video_port}"):
+                session.start()
+
+    @pytest.mark.fake_headset
+    def test_descriptor_carries_python_sdk_stereo_video_feed(self):
+        video_port = _tcp_port()
+        feed = VideoFeedConfig(
+            name="simulation_head",
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+            tcp_port=video_port,
+            width=2560,
+            height=720,
+            fps=30,
+            stereo=True,
+        )
+        config = replace(_config(), video_feeds=(feed,))
+        with XrSession(config):
+            peer, descriptor = _connect_fake_headset(config.pose_port)
+            try:
+                self.assertEqual(
+                    descriptor["video_feeds"],
+                    [
+                        {
+                            "name": "simulation_head",
+                            "display": "simulation_head",
+                            "port": video_port,
+                            "width": 2560,
+                            "height": 720,
+                            "fps": 30,
+                            "stereo": True,
+                            "transport": "tcp",
+                            "udp_port": 0,
+                            "codec": "h264",
+                        }
+                    ],
+                )
+            finally:
+                peer.close()
+
     @pytest.mark.fake_headset
     def test_descriptor_carries_exact_requested_tracking_streams(self):
         for streams in (("controllers",), ("head", "controllers", "body"), ("motion_trackers",)):

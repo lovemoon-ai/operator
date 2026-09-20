@@ -18,11 +18,12 @@ pub mod fanout;
 pub mod nal;
 pub mod source;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::broadcast;
 
 use crate::protocol::TimedVideoFrame;
-use crate::video::fanout::{serve_udp_broadcast, serve_video_clients};
+use crate::video::fanout::{serve_udp_broadcast_on, serve_video_clients_on};
 use crate::video::nal::ParamSetCache;
 use crate::video::source::{AnnexBCommandSource, RtspSource, SourceCtx, VideoSource};
 
@@ -50,9 +51,48 @@ pub struct VideoFeed {
     pub codec: Codec,
 }
 
+/// A video feed whose XR-facing sockets have already been acquired.
+pub struct PreparedVideoFeed {
+    feed: VideoFeed,
+    tcp_listener: TcpListener,
+    udp_socket: Option<UdpSocket>,
+}
+
 /// Broadcast channel depth per feed. Generous so a brief consumer stall (e.g.
 /// a slow headset) doesn't immediately lag the source.
 const BROADCAST_DEPTH: usize = 256;
+
+/// Acquire every XR-facing video socket before the enclosing service reports
+/// startup success.
+pub async fn prepare(feeds: Vec<VideoFeed>) -> Result<Vec<PreparedVideoFeed>> {
+    let mut prepared = Vec::with_capacity(feeds.len());
+    for feed in feeds {
+        let tcp_listener = TcpListener::bind(("0.0.0.0", feed.tcp_port))
+            .await
+            .with_context(|| {
+                format!(
+                    "binding XR video TCP port {} for feed {:?}",
+                    feed.tcp_port, feed.name
+                )
+            })?;
+        let udp_socket = match feed.udp_port {
+            Some(port) => {
+                let socket = UdpSocket::bind(("0.0.0.0", port)).await.with_context(|| {
+                    format!("binding XR video UDP port {port} for feed {:?}", feed.name)
+                })?;
+                socket.set_broadcast(true)?;
+                Some(socket)
+            }
+            None => None,
+        };
+        prepared.push(PreparedVideoFeed {
+            feed,
+            tcp_listener,
+            udp_socket,
+        });
+    }
+    Ok(prepared)
+}
 
 /// Run the video relay for every feed concurrently.
 ///
@@ -62,6 +102,11 @@ const BROADCAST_DEPTH: usize = 256;
 /// tear down the others. Returns only if `feeds` is empty (immediately) or all
 /// tasks somehow complete (they normally loop forever).
 pub async fn run(feeds: Vec<VideoFeed>) -> Result<()> {
+    run_prepared(prepare(feeds).await?).await
+}
+
+/// Run feeds whose sockets were acquired during service startup.
+pub async fn run_prepared(feeds: Vec<PreparedVideoFeed>) -> Result<()> {
     if feeds.is_empty() {
         tracing::info!("Video relay: no feeds configured, skipping");
         return Ok(());
@@ -70,7 +115,12 @@ pub async fn run(feeds: Vec<VideoFeed>) -> Result<()> {
     tracing::info!("Video relay: starting {} feed(s)", feeds.len());
     let mut handles = Vec::new();
 
-    for feed in feeds {
+    for prepared in feeds {
+        let PreparedVideoFeed {
+            feed,
+            tcp_listener,
+            udp_socket,
+        } = prepared;
         let (nal_tx, _) = broadcast::channel::<TimedVideoFrame>(BROADCAST_DEPTH);
         // The cache carries the feed's codec — every downstream stage (ffmpeg
         // args, NAL classification, join-priming) reads it from here.
@@ -106,19 +156,19 @@ pub async fn run(feeds: Vec<VideoFeed>) -> Result<()> {
             let port = feed.tcp_port;
             let name = feed.name.clone();
             handles.push(tokio::spawn(async move {
-                if let Err(e) = serve_video_clients(port, nal_tx, params).await {
+                if let Err(e) = serve_video_clients_on(tcp_listener, nal_tx, params).await {
                     tracing::error!("[{name}] TCP video server (port {port}) exited: {e}");
                 }
             }));
         }
 
         // Optional UDP fan-out.
-        if let Some(udp_port) = feed.udp_port {
+        if let (Some(udp_port), Some(udp_socket)) = (feed.udp_port, udp_socket) {
             let nal_rx = nal_tx.subscribe();
             let params = params.clone();
             let name = feed.name.clone();
             handles.push(tokio::spawn(async move {
-                if let Err(e) = serve_udp_broadcast(udp_port, nal_rx, params).await {
+                if let Err(e) = serve_udp_broadcast_on(udp_socket, nal_rx, params).await {
                     tracing::error!("[{name}] UDP video server (port {udp_port}) exited: {e}");
                 }
             }));

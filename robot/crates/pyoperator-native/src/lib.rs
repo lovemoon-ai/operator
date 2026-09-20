@@ -10,7 +10,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use operator::BlueprintPublisher;
 use teleop_protocol::{Blueprint, BlueprintEvent, BlueprintState, XrStateFrame};
-use xr_bridge::config::{default_xr_streams, validate_xr_streams, BridgeConfig};
+use xr_bridge::config::{
+    default_xr_streams, validate_video_feeds, validate_xr_streams, BridgeConfig, VideoConfig,
+    VideoFeedConfig,
+};
 use xr_bridge::sdk::{
     run_sdk_mode_with_startup_and_blueprint, state_channel, BlueprintStreams, XrStateStats,
 };
@@ -163,7 +166,8 @@ impl NativeSession {
         pose_udp_port = 63902,
         telemetry_port = 63903,
         discovery_unicast_targets = Vec::new(),
-        streams = None
+        streams = None,
+        video_feeds_json = "[]".to_string()
     ))]
     fn new(
         name: String,
@@ -173,6 +177,7 @@ impl NativeSession {
         telemetry_port: u16,
         discovery_unicast_targets: Vec<String>,
         streams: Option<Vec<String>>,
+        video_feeds_json: String,
     ) -> PyResult<Self> {
         let streams = streams.unwrap_or_else(default_xr_streams);
         validate_xr_streams(&streams).map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -184,6 +189,10 @@ impl NativeSession {
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;
+        let video_feeds: Vec<VideoFeedConfig> = serde_json::from_str(&video_feeds_json)
+            .map_err(|error| PyValueError::new_err(format!("invalid video_feeds_json: {error}")))?;
+        validate_video_feeds(&video_feeds)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let config = BridgeConfig {
             name,
             pose_port,
@@ -192,6 +201,7 @@ impl NativeSession {
             telemetry_port,
             discovery_unicast_targets: targets,
             xr_streams: streams,
+            video: VideoConfig { feeds: video_feeds },
             ..BridgeConfig::default()
         };
         Ok(Self {

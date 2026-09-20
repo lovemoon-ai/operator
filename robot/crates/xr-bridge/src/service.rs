@@ -258,7 +258,7 @@ fn feed_config_to_info(fc: &VideoFeedConfig) -> VideoFeedInfo {
         width: fc.width,
         height: fc.height,
         fps: fc.fps,
-        stereo: false,
+        stereo: fc.stereo,
         transport: fc.transport.clone(),
         udp_port: fc.udp_port.unwrap_or(0),
         codec: Codec::parse(&fc.codec).as_str().to_string(),
@@ -293,6 +293,7 @@ video:
       height: 1080
       fps: 60
       transport: udp
+      stereo: true
 "#,
         )
         .unwrap();
@@ -315,6 +316,7 @@ video:
         assert_eq!(feed.width, 1920);
         assert_eq!(feed.height, 1080);
         assert_eq!(feed.fps, 60);
+        assert!(feed.stereo);
         assert_eq!(feed.transport, "udp");
         assert_eq!(
             descriptor.capabilities.get("video"),
