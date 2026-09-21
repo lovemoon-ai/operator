@@ -1,0 +1,9 @@
+# Host dependencies for the Light-O1 G1 example. Install pyoperator from
+# ../../python first (its native module is built with maturin and needs Rust).
+# Light-O1's Sonic stack is imported from the checkout given by --light-o1 and
+# only needs these packages; torch and vLLM stay in Light-O1's own GPU service.
+# pyoperator -> rerun-sdk requires NumPy 2.
+numpy>=2,<3
+mujoco>=3.3.6,<4
+onnxruntime>=1.20
+pillow>=10
