@@ -4,6 +4,7 @@ signal item_activated(item: Dictionary)
 const MENU_ACTION := &"menu_button"
 const HEIGHT_ABOVE_CONTROLLER_M := 0.24
 const PAGE_SIZE := 2
+const SYSTEM_ROW_LIMIT := 3
 var _groups := {"system": [], "robot": []}
 var _rows: Dictionary = {}
 var _page := 0
@@ -40,8 +41,8 @@ func configure_controller(left: XRController3D, right_tracker: StringName, head:
 func set_content(groups: Dictionary, detail: String) -> void:
 	if groups != _groups:
 		cancel_interaction()
-		var old_system_rows := mini(2, _groups["system"].size())
-		var new_system_rows := mini(2, groups["system"].size())
+		var old_system_rows := mini(SYSTEM_ROW_LIMIT, _groups["system"].size())
+		var new_system_rows := mini(SYSTEM_ROW_LIMIT, groups["system"].size())
 		var needs_layout: bool = (
 			old_system_rows != new_system_rows
 			or _groups["robot"].is_empty() != groups["robot"].is_empty()
@@ -64,11 +65,11 @@ func _build_slots() -> void:
 	_flashes.clear()
 	_action_rects.clear()
 	var expanded: bool = not _groups["robot"].is_empty()
-	var system_rows := mini(2, _groups["system"].size())
-	var hidden_system_height := (2 - system_rows) * 74
+	var system_rows := mini(SYSTEM_ROW_LIMIT, _groups["system"].size())
+	var hidden_system_height := (SYSTEM_ROW_LIMIT - system_rows) * 74
 	# Robot rows can arrive while the menu is open; resizing through the
 	# rebinding path keeps the panel from being drawn into its old swapchain.
-	set_viewport_size(Vector2i(360, (500 if expanded else 280) - hidden_system_height))
+	set_viewport_size(Vector2i(360, (574 if expanded else 354) - hidden_system_height))
 	var root := Control.new()
 	_viewport.add_child(root)
 	_title = _label(root, tr("UI_CONTROLLER_SESSION_MENU"), Rect2(18, 8, 324, 34), 25)
@@ -77,13 +78,13 @@ func _build_slots() -> void:
 			root, StringName("system_%d" % index), Rect2(18, 48 + index * 74, 324, 64)
 		)
 	if expanded:
-		var robot_heading_y := 190 - hidden_system_height
+		var robot_heading_y := 264 - hidden_system_height
 		_label(root, tr("UI_MENU_ROBOT_ACTIONS"), Rect2(18, robot_heading_y, 324, 26), 18)
 		_add_action_button(root, &"robot_0", Rect2(18, robot_heading_y + 30, 324, 70))
 		_add_action_button(root, &"robot_1", Rect2(18, robot_heading_y + 110, 324, 70))
 		_add_action_button(root, &"previous", Rect2(18, robot_heading_y + 190, 156, 44))
 		_add_action_button(root, &"next", Rect2(186, robot_heading_y + 190, 156, 44))
-	var detail_y := (430 if expanded else 196) - hidden_system_height
+	var detail_y := (504 if expanded else 270) - hidden_system_height
 	_detail_label = _label(root, "", Rect2(18, detail_y, 324, 74), 17)
 	_detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	for button_v in _buttons.values():
@@ -108,7 +109,7 @@ func _label(root: Node, text_value: String, rect: Rect2, font_size: int) -> Labe
 
 func _assign_rows() -> void:
 	_rows.clear()
-	for index in range(mini(2, _groups["system"].size())):
+	for index in range(mini(SYSTEM_ROW_LIMIT, _groups["system"].size())):
 		_rows[StringName("system_%d" % index)] = _groups["system"][index]
 	for index in range(PAGE_SIZE):
 		var remote_index := _page * PAGE_SIZE + index

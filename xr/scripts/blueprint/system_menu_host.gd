@@ -1,6 +1,7 @@
 extends Node
 ## One system-owned menu, shared across input modes and robot sessions.
 signal connection_requested(connect_requested: bool)
+signal settings_requested
 
 const Runtime := preload("res://scripts/blueprint/blueprint_runtime.gd")
 const SystemBlueprint := preload("res://scripts/blueprint/system_menu_blueprint.gd")
@@ -69,8 +70,11 @@ func update_context(connected: bool, connecting: bool, enabled: bool) -> void:
 		detail = _last_error
 	elif connecting:
 		detail = tr("UI_CONNECTION_PENDING")
+	var detail_changed := detail != _detail
 	_detail = detail
 	var values := {
+		"local.settings_value": false,
+		"local.settings_available": enabled,
 		"local.connection_active": connected or connecting,
 		# Always actionable while the menu is live: it disconnects a session, or
 		# while disconnected asks to connect, which the owner routes to Settings.
@@ -81,7 +85,12 @@ func update_context(connected: bool, connecting: bool, enabled: bool) -> void:
 		"local.right_tracked": enabled and _tracked(_right),
 	}
 	if values == _last_values:
-		_refresh_menu()
+		# Menu declarations notify us when their bound state changes. Re-composing
+		# and deep-comparing the complete menu every render frame after a robot
+		# connects is wasted GUI-thread work; only a standalone detail change
+		# needs an explicit refresh here.
+		if detail_changed:
+			_refresh_menu()
 		return
 	_last_values = values.duplicate()
 	_sequence += 1
@@ -90,7 +99,7 @@ func update_context(connected: bool, connecting: bool, enabled: bool) -> void:
 		"blueprint_revision": 1, "sequence": _sequence, "timestamp_ns": Time.get_ticks_usec() * 1000,
 		"values": values,
 	})
-	_refresh_menu()
+	# apply_state emits menu_changed, which refreshes the composed menu once.
 
 
 func _refresh_menu() -> void:
@@ -154,6 +163,8 @@ func _on_local_action(event: Dictionary) -> void:
 	if not _enabled:
 		return
 	match str(event.get("component_id", "")):
+		"settings":
+			settings_requested.emit()
 		"connection":
 			_last_error = ""
 			connection_requested.emit(bool(event.get("value", false)))

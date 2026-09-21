@@ -265,8 +265,7 @@ static func _field_value_error(value: Variant, field_spec: Dictionary) -> String
 	return ""
 
 
-static func validate_bound_values(components: Array, values: Dictionary) -> Array[String]:
-	var errors: Array[String] = []
+static func compile_binding_contracts(components: Array) -> Dictionary:
 	var binding_contracts: Dictionary = {}
 	for component_v in components:
 		if not component_v is Dictionary:
@@ -287,6 +286,20 @@ static func validate_bound_values(components: Array, values: Dictionary) -> Arra
 			value_contract.erase("required")
 			value_contract.erase("semantics")
 			binding_contracts[state_key] = value_contract
+	return binding_contracts
+
+
+static func validate_bound_values(
+	components: Array,
+	values: Dictionary,
+	compiled_contracts: Variant = null,
+) -> Array[String]:
+	var errors: Array[String] = []
+	var binding_contracts: Dictionary = (
+		compiled_contracts as Dictionary
+		if compiled_contracts is Dictionary
+		else compile_binding_contracts(components)
+	)
 	for state_key_v in values:
 		var state_key := str(state_key_v)
 		if not binding_contracts.has(state_key):

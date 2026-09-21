@@ -2,9 +2,9 @@
 
 Optional MuJoCo/numpy dependencies are imported only when exporting. This is
 independent of Inside Robot and never reads/writes the XR checkout's assets.
-The profile supports triangle meshes, boxes and spheres with solid PBR colors,
-scalar hinge/slide joints (one per body), and one externally driven floating
-root.
+The profile supports triangle meshes, boxes and spheres with safe PBR colors,
+zero or more scalar hinge/slide joints (one per child body), and one externally
+driven root pose. Zero-joint assets represent rigid scene objects.
 """
 from __future__ import annotations
 
@@ -19,8 +19,10 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
     import numpy as np
 
     names = tuple(joint_names)
-    if not names or len(set(names)) != len(names):
-        raise ValueError("joint_names must be unique and nonempty")
+    if len(set(names)) != len(names) or any(
+        not isinstance(name, str) or not name for name in names
+    ):
+        raise ValueError("joint_names must contain unique nonempty names")
     root = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, root_body)
     if root <= 0:
         raise ValueError("root_body must name a non-world body")
@@ -31,6 +33,7 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
         "meshes": [], "materials": [], "bufferViews": [], "accessors": [],
     }
     binary = bytearray()
+    texture_average_cache = {}
 
     def transform(pos, quat):
         rotation = np.empty(9)
@@ -140,6 +143,52 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
             "selected visual groups must contain triangle meshes, boxes, or spheres"
         )
 
+    def geom_rgba(geom):
+        material_id = int(model.geom_matid[geom])
+        rgba = np.asarray(
+            model.mat_rgba[material_id]
+            if material_id >= 0
+            else model.geom_rgba[geom],
+            dtype=float,
+        ).copy()
+        if material_id < 0 or not hasattr(model, "mat_texid"):
+            return rgba
+        try:
+            rgb_role = int(mj.mjtTextureRole.mjTEXROLE_RGB)
+            texture_id = int(model.mat_texid[material_id, rgb_role])
+        except (AttributeError, IndexError, TypeError):
+            return rgba
+        if texture_id < 0:
+            return rgba
+        average = texture_average_cache.get(texture_id)
+        if average is None:
+            width = int(model.tex_width[texture_id])
+            height = int(model.tex_height[texture_id])
+            channels = int(model.tex_nchannel[texture_id])
+            start = int(model.tex_adr[texture_id])
+            end = start + width * height * channels
+            pixels = np.asarray(model.tex_data[start:end], dtype=np.float32).reshape(
+                -1, channels
+            )
+            # MuJoCo texture bytes are sRGB-encoded, but glTF baseColorFactor is
+            # linear. Averaging in gamma space and writing the result straight
+            # into a linear factor washes out mid-tones, so convert per texel
+            # first and average in linear space.
+            srgb = pixels[:, : min(3, channels)] / 255.0
+            linear = np.where(
+                srgb <= 0.04045,
+                srgb / 12.92,
+                np.power((srgb + 0.055) / 1.055, 2.4),
+            )
+            average = linear.mean(axis=0)
+            if average.size == 1:
+                average = np.repeat(average, 3)
+            elif average.size == 2:
+                average = np.asarray([average[0], average[0], average[0]])
+            texture_average_cache[texture_id] = average
+        rgba[:3] *= average[:3]
+        return rgba
+
     body_nodes = {}
     joints = {}
     for body in range(root, model.nbody):
@@ -155,8 +204,11 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
             document["nodes"][body_nodes[parent]]["children"].append(index)
         body_joints = list(range(int(model.body_jntadr[body]), int(model.body_jntadr[body] + model.body_jntnum[body])))
         if body == root:
-            if any(model.jnt_type[j] != mj.mjtJoint.mjJNT_FREE for j in body_joints):
-                raise ValueError("root motion must be supplied by base_pose")
+            # The root body's complete world transform is supplied through the
+            # Blueprint base_pose binding. It may therefore be fixed, free, or
+            # world-attached through scalar joints without duplicating that
+            # motion in the asset articulation.
+            pass
         elif body_joints:
             if len(body_joints) != 1:
                 raise ValueError("robot asset profile supports one scalar joint per body")
@@ -165,6 +217,12 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
             if kind is None:
                 raise ValueError("robot asset profile supports hinge and slide joints only")
             name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_JOINT, j)
+            if not name:
+                body_name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_BODY, body) or f"body_{body}"
+                raise ValueError(
+                    f"scalar joint {j} on body {body_name!r} has no name; "
+                    "name every articulated joint in the MJCF so it can be bound"
+                )
             joints[name] = {
                 "name": name, "node": index, "type": kind,
                 "axis": (basis @ model.jnt_axis[j]).tolist(),
@@ -174,6 +232,9 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
         for geom in range(int(model.body_geomadr[body]), int(model.body_geomadr[body] + model.body_geomnum[body])):
             if int(model.geom_group[geom]) not in visual_groups:
                 continue
+            rgba = geom_rgba(geom)
+            if float(rgba[3]) <= 1e-6:
+                continue
             triangles = geom_triangles(geom) @ basis.T
             normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
             lengths = np.linalg.norm(normals, axis=1)
@@ -182,8 +243,6 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
             normals = normals[keep] / lengths[keep, None]
             if not len(triangles):
                 continue
-            material_id = int(model.geom_matid[geom])
-            rgba = model.mat_rgba[material_id] if material_id >= 0 else model.geom_rgba[geom]
             material = len(document["materials"])
             document["materials"].append({"pbrMetallicRoughness": {
                 "baseColorFactor": np.clip(rgba, 0, 1).tolist(), "metallicFactor": 0.0, "roughnessFactor": 0.75,
@@ -197,7 +256,12 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
                                       "matrix": transform(model.geom_pos[geom], model.geom_quat[geom])})
             node["children"].append(visual)
     if set(names) != set(joints):
-        raise ValueError("joint_names must exactly cover all scalar joints under root_body")
+        raise ValueError(
+            "joint_names must exactly cover all scalar joints under root_body, "
+            "excluding any joint on root_body itself (the root's world transform "
+            "is supplied by the Blueprint base_pose binding); "
+            f"expected {sorted(joints)}, got {sorted(names)}"
+        )
     if not document["meshes"]:
         raise ValueError("selected visual groups contain no meshes")
     document["buffers"] = [{"byteLength": len(binary)}]

@@ -1,6 +1,6 @@
 """Generated from specs/blueprint/v1.json. Do not edit."""
 
-SPEC_SHA256 = "a202130232e4b52a317bc94b609c238ab4aa83c84506356c252db43d771b5359"
+SPEC_SHA256 = "85fc4ff0499ed3dbc3949778f9d5ba57806c2ab5632693be909108af1e4395b2"
 SPEC_VERSION = 1
 SPEC = {'schema': 'operator.blueprint_primitive_spec.v1',
  'version': 1,
@@ -399,7 +399,11 @@ SPEC = {'schema': 'operator.blueprint_primitive_spec.v1',
                                                             'maximum': 20.0}},
                                 'bindings': {'visible': {'type': 'boolean', 'required': False},
                                              'follow_camera': {'type': 'boolean',
-                                                               'required': False}},
+                                                               'required': False},
+                                             'system_performance_text': {'type': 'string',
+                                                                         'required': False},
+                                             'status_state': {'type': 'string', 'required': False},
+                                             'status_text': {'type': 'string', 'required': False}},
                                 'events': {}},
                 'controller_help': {'host': 'external_view',
                                     'implementation': 'controller_help',
@@ -437,7 +441,7 @@ SPEC = {'schema': 'operator.blueprint_primitive_spec.v1',
                                                                   'required': False}},
                                          'events': {}}}}
 WIRE = SPEC["wire"]
-SPEC_CAPABILITY = WIRE["capability"] + "@sha256:a202130232e4b52a317bc94b609c238ab4aa83c84506356c252db43d771b5359"
+SPEC_CAPABILITY = WIRE["capability"] + "@sha256:85fc4ff0499ed3dbc3949778f9d5ba57806c2ab5632693be909108af1e4395b2"
 LIMITS = SPEC["limits"]
 WIRE_INTEGER_CONFORMANCE = SPEC["wire_integer_conformance"]
 ANCHOR_SPECS = SPEC["anchors"]

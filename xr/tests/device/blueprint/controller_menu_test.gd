@@ -37,8 +37,10 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	host.set_process(false)
 	var menu: Node3D = host.menu
 	var local_events: Array = []
+	var settings_events: Array = []
 	var remote_events: Array = []
 	host.connection_requested.connect(func(wanted: bool) -> void: local_events.append(wanted))
+	host.settings_requested.connect(func() -> void: settings_events.append(true))
 	remote.event_emitted.connect(func(event: Dictionary) -> void: remote_events.append(event))
 	host.update_context(true, false, true)
 	var spec := _definition()
@@ -49,10 +51,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(remote.component_node("controller"), null, "legacy controller declaration cannot create another panel")
 	t.eq(remote.menu_entries().size(), 5, "explicit shared identity merges only identical rows")
 	var groups: Dictionary = menu.get("_groups")
-	t.eq(groups["system"].size(), 2, "system controls are retained")
+	t.eq(groups["system"].size(), 2, "Settings and connection remain without a robot model")
+	t.eq(str(groups["system"][0]["text"]), "Settings", "Settings is the first menu item")
 	t.eq(groups["robot"].size(), 5, "robot rows are appended separately")
 	var menu_viewport: SubViewport = menu.get("_viewport")
-	t.eq(menu_viewport.size.y, 500, "robot rows grow the menu panel")
+	t.eq(menu_viewport.size.y, 500, "two visible system rows and robot rows grow the menu panel")
 	t.eq(
 		menu.layer_viewport,
 		menu_viewport,
@@ -122,7 +125,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	remote.apply_blueprint(spec)
 	_state(remote, 1, true)
 	t.is_false(remote.dispatch_menu(prior, false), "same ID/revision replacement still invalidates old clicks")
-	_aim(trackers[1], menu, &"system_0")
+	_aim(trackers[1], menu, &"system_1")
 	router._on_controller_button_pressed(&"trigger_click", controllers[1])
 	trackers[1].invalidate_pose(&"default")
 	router.controller_source_filter = Callable()
@@ -138,7 +141,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		280,
 		"dropping the robot rows shrinks the menu panel back"
 	)
-	t.eq(groups["system"].size(), 2, "connection controls remain after disconnect")
+	t.eq(groups["system"].size(), 2, "Settings and connection remain after disconnect")
+	t.eq(settings_events.size(), 0, "tracking loss cannot activate Settings")
 	t.is_false(remote.dispatch_menu(prior, false), "old robot token cannot affect the system after disconnect")
 	await _ordinary_button_cancel(origin, tree, t)
 	host.free()

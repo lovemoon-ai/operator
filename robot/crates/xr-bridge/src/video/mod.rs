@@ -58,9 +58,18 @@ pub struct PreparedVideoFeed {
     udp_socket: Option<UdpSocket>,
 }
 
-/// Broadcast channel depth per feed. Generous so a brief consumer stall (e.g.
-/// a slow headset) doesn't immediately lag the source.
-const BROADCAST_DEPTH: usize = 256;
+/// Per-feed handoff depth. Staleness is bounded by *time*, not by this depth:
+/// the TCP fan-out drops any packet older than `TCP_MAX_PACKET_AGE` (500 ms)
+/// and disconnects clients that block for `TCP_WRITE_TIMEOUT`, so a recovering
+/// headset never replays seconds of old motion regardless of how deep this is.
+///
+/// Keep it comfortably above one GOP of slots. Frames are split per-NAL, so a
+/// single access unit can occupy several slots and a shallow channel turns an
+/// ordinary scheduler hiccup into `RecvError::Lagged` — which forces a primer
+/// reset and leaves that client black until the next IDR (seconds, at a 1-2 s
+/// GOP). The age check makes the extra depth free, so spend it on jitter
+/// tolerance.
+const BROADCAST_DEPTH: usize = 128;
 
 /// Acquire every XR-facing video socket before the enclosing service reports
 /// startup success.

@@ -134,20 +134,26 @@ func _test_system_scope(origin: XROrigin3D, camera: XRCamera3D, controllers: Arr
 	origin.add_child(shell)
 	shell.configure(origin, camera, controllers[0], controllers[1], null, remote)
 	var connections: Array = []
+	var settings_events: Array = []
 	var remote_events: Array = []
 	shell.connection_requested.connect(func(wanted: bool) -> void: connections.append(wanted))
+	shell.settings_requested.connect(func() -> void: settings_events.append(true))
 	remote.event_emitted.connect(func(event: Dictionary) -> void: remote_events.append(event))
 	shell.update_context(false, false, true)
 	var menu: Node3D = shell.menu
 	t.is_true(menu != null, "system menu exists before a remote Blueprint")
 	var buttons: Dictionary = menu.get("_buttons")
-	t.eq(buttons.size(), 1, "system menu only creates a slot for the available connection action")
+	t.eq(buttons.size(), 2, "system menu creates Settings and connection slots")
 	var groups: Dictionary = menu.get("_groups")
-	t.eq((groups.get("system", []) as Array).size(), 1, "unavailable recenter is omitted from the menu")
-	t.is_false(buttons.has(&"system_1"), "the unavailable recenter button leaves no empty slot")
+	t.eq((groups.get("system", []) as Array).size(), 2, "unavailable recenter is omitted from the menu")
+	t.eq(str((groups["system"][0] as Dictionary)["text"]), "Settings", "Settings is first")
+	t.is_true(buttons.has(&"system_1"), "connection follows Settings without an empty slot")
 	var menu_viewport_size := Vector2i(menu.get("_viewport_size"))
-	t.eq(menu_viewport_size.y, 206, "the menu shrinks after omitting recenter")
-	var connection_row: Dictionary = shell.runtime.menu_entries()[0]
+	t.eq(menu_viewport_size.y, 280, "the menu shrinks after omitting recenter")
+	var settings_row: Dictionary = shell.runtime.menu_entries()[0]
+	shell.runtime.dispatch_menu(settings_row["token"], true)
+	t.eq(settings_events.size(), 1, "Settings is dispatched locally from the first row")
+	var connection_row: Dictionary = shell.runtime.menu_entries()[1]
 	t.eq(
 		str(connection_row["text"]),
 		str(TranslationServer.translate("UI_CONNECT_ROBOT")),
@@ -161,7 +167,7 @@ func _test_system_scope(origin: XROrigin3D, camera: XRCamera3D, controllers: Arr
 	t.eq(connections, [true], "connect is dispatched locally; the owner routes it to Settings")
 	t.eq(remote_events.size(), 0, "system actions are not sent to the robot")
 	shell.update_context(true, false, true)
-	shell.runtime.dispatch_menu(shell.runtime.menu_entries()[0]["token"], true)
+	shell.runtime.dispatch_menu(shell.runtime.menu_entries()[1]["token"], true)
 	t.eq(connections, [true, false], "same button disconnects the real session through local owner")
 	remote.clear()
 	shell.update_context(false, false, true)
@@ -183,7 +189,7 @@ func _test_system_scope(origin: XROrigin3D, camera: XRCamera3D, controllers: Arr
 	router.configure(origin, camera, controllers[0], controllers[1], null)
 	router.set_targets([menu])
 	var rects: Dictionary = menu.get("_action_rects")
-	var primary: Rect2 = rects[&"system_0"]
+	var primary: Rect2 = rects[&"system_1"]
 	menu.set("_pointer_position", primary.get_center())
 	menu.call("set_feedback_input_mode", "controllers", controllers[1])
 	menu.call("set_pointer_pressed", true)

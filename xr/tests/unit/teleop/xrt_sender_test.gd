@@ -79,6 +79,20 @@ class FakeSampler:
 		return (frames[index] as Dictionary).duplicate(true)
 
 
+class LatestStateTransport:
+	extends TcpHandler
+	var latest_commands: Array[Dictionary] = []
+	var reliable_commands := 0
+
+	func send_latest_command(command: String, data: PackedByteArray = PackedByteArray()) -> Error:
+		latest_commands.append({"command": command, "data": data.duplicate()})
+		return OK
+
+	func send_command(_command: String, _data: PackedByteArray = PackedByteArray()) -> Error:
+		reliable_commands += 1
+		return OK
+
+
 class DeterministicSender:
 	extends XrtSender
 
@@ -105,6 +119,7 @@ class DeterministicSender:
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
+	_test_operator_state_uses_latest_only_transport(t)
 	_test_identity_fields_are_protocol_safe(t)
 	_test_handshake_neutral_then_live_and_disable(t)
 	_test_handshake_failure_blocks_protocol_traffic(t)
@@ -115,6 +130,48 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_test_focus_loss_sends_one_neutral(t)
 	_test_v1_body_schema_keeps_a_fixed_joint_array(t)
 	_test_calibration_loss_interlock(t)
+
+
+func _test_operator_state_uses_latest_only_transport(t: OperatorTestAssertions) -> void:
+	var sender := XrStateSenderScript.new()
+	var transport := LatestStateTransport.new()
+	sender.tcp_handler = transport
+	var result: Error = sender.call("_send_frame", {
+		"schema_version": 1,
+		"frame_id": 7,
+		"timestamp_ns": 11,
+	})
+	t.eq(result, OK, "Operator state enqueue succeeds")
+	t.eq(transport.latest_commands.size(), 1,
+		"Operator state uses the replaceable latest-only transport slot")
+	t.eq(transport.reliable_commands, 0,
+		"high-rate state never enters the reliable FIFO")
+	var payload: Dictionary = JSON.parse_string(
+		(transport.latest_commands[0].get("data", PackedByteArray()) as PackedByteArray)
+			.get_string_from_utf8()
+	)
+	t.eq(int(payload.get("frame_id", 0)), 7,
+		"latest-only transport preserves the XrState payload")
+	sender.free()
+	transport.free()
+
+	var queue := TcpHandler.new()
+	queue.set("_active_send_frame", PackedByteArray([1, 2]))
+	queue.set("_active_send_replaceable", true)
+	queue.set("_active_send_offset", 0)
+	queue.call("_queue_latest_frame", PackedByteArray([3, 4]))
+	t.eq(queue.get("_active_send_frame"), PackedByteArray([3, 4]),
+		"an unsent active state is replaced in place")
+	queue.set("_active_send_offset", 1)
+	queue.call("_queue_latest_frame", PackedByteArray([5, 6]))
+	t.eq(queue.get("_active_send_frame"), PackedByteArray([3, 4]),
+		"a partially written frame remains intact for TCP framing")
+	t.eq(queue.get("_latest_send_frame"), PackedByteArray([5, 6]),
+		"the newest state waits in the single replaceable slot")
+	queue.call("_queue_latest_frame", PackedByteArray([7, 8]))
+	t.eq(queue.get("_latest_send_frame"), PackedByteArray([7, 8]),
+		"new state replaces stale unsent state under backpressure")
+	queue.free()
 
 
 func _test_calibration_loss_interlock(t: OperatorTestAssertions) -> void:

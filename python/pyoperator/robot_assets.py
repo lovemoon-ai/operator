@@ -1,6 +1,6 @@
-"""Content-addressed, robot-owned visual assets. No headset build tools involved.
+"""Content-addressed, host-owned model assets. No headset build tools involved.
 
-A self-contained GLB carries its articulation in ``extras.operator_robot``.
+A self-contained GLB carries its optional articulation in ``extras.operator_robot``.
 The server exposes only explicitly registered immutable assets, not directories.
 Use on the same trusted LAN as the robot session; hashes provide integrity, not
 peer authentication. Keep this static transfer separate from pose traffic.
@@ -48,9 +48,9 @@ class RobotModelAsset:
         if rig.get("schema") != ROBOT_ASSET_SCHEMA:
             raise ValueError("missing operator.robot_asset.v1 articulation")
         names = tuple(joint["name"] for joint in rig.get("joints", []))
-        if not names or len(names) > 256 or any(not isinstance(n, str) or not n for n in names) \
+        if len(names) > 256 or any(not isinstance(n, str) or not n for n in names) \
                 or len(set(names)) != len(names):
-            raise ValueError("asset must have 1..256 uniquely named joints")
+            raise ValueError("asset must have 0..256 uniquely named joints")
         object.__setattr__(self, "data", data)
         object.__setattr__(self, "joint_names", names)
         object.__setattr__(self, "sha256", hashlib.sha256(data).hexdigest())
@@ -136,6 +136,27 @@ class RobotAssetServer:
             if total + len(asset.data) > MAX_CACHE_BYTES:
                 raise ValueError("registered robot assets exceed 256 MiB")
             self._assets[asset.sha256] = asset
+
+    def replace(self, assets) -> None:
+        """Atomically replace the served asset set without changing the port.
+
+        Hashes not present in ``assets`` stop resolving immediately. Because
+        blueprints reference assets by ``sha256`` over a separate channel,
+        publish the updated blueprint *before* calling this, or a headset that
+        re-fetches the previously advertised hash gets a 404 and silently
+        renders nothing.
+        """
+        if self._closed:
+            raise RuntimeError("asset server has been closed")
+        replacement: dict[str, RobotModelAsset] = {}
+        for asset in assets:
+            if not isinstance(asset, RobotModelAsset):
+                raise TypeError("replace expects RobotModelAsset values")
+            replacement[asset.sha256] = asset
+        if sum(len(asset.data) for asset in replacement.values()) > MAX_CACHE_BYTES:
+            raise ValueError("registered robot assets exceed 256 MiB")
+        with self._lock:
+            self._assets = replacement
 
     def start(self):
         if self._closed:

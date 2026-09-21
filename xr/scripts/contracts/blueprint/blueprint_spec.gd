@@ -2,13 +2,13 @@ class_name BlueprintPrimitiveSpec
 extends RefCounted
 
 ## Generated from specs/blueprint/v1.json. Do not edit.
-const SPEC_SHA256 := "a202130232e4b52a317bc94b609c238ab4aa83c84506356c252db43d771b5359"
+const SPEC_SHA256 := "85fc4ff0499ed3dbc3949778f9d5ba57806c2ab5632693be909108af1e4395b2"
 const SPEC_VERSION := 1
 const BLUEPRINT_SCHEMA := "operator.blueprint.v1"
 const STATE_SCHEMA := "operator.blueprint_state.v1"
 const EVENT_SCHEMA := "operator.blueprint_event.v1"
 const CAPABILITY := "blueprint_v1"
-const SPEC_CAPABILITY := "blueprint_v1@sha256:a202130232e4b52a317bc94b609c238ab4aa83c84506356c252db43d771b5359"
+const SPEC_CAPABILITY := "blueprint_v1@sha256:85fc4ff0499ed3dbc3949778f9d5ba57806c2ab5632693be909108af1e4395b2"
 const SPEC_HASH_CAPABILITY := "blueprint_spec_sha256"
 const BLUEPRINT_COMMAND := "Blueprint"
 const STATE_COMMAND := "BlueprintState"
@@ -1026,6 +1026,18 @@ const PRIMITIVES := {
 			},
 			"follow_camera": {
 				"type": "boolean",
+				"required": false,
+			},
+			"system_performance_text": {
+				"type": "string",
+				"required": false,
+			},
+			"status_state": {
+				"type": "string",
+				"required": false,
+			},
+			"status_text": {
+				"type": "string",
 				"required": false,
 			},
 		},

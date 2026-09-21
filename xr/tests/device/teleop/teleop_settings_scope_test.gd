@@ -160,11 +160,21 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			"the Wi-Fi icon sits immediately beside the hand/controller icon",
 		)
 	var title_send_rate_label: Label = panel.get("_send_rate_label")
-	if title_send_rate_label != null and wifi_status_indicator != null:
+	var title_network_rate_label: Label = panel.get("_network_rate_label")
+	if (
+		title_send_rate_label != null
+		and title_network_rate_label != null
+		and wifi_status_indicator != null
+	):
+		t.eq(
+			title_network_rate_label.get_index(),
+			wifi_status_indicator.get_index() - 1,
+			"network throughput sits immediately before Wi-Fi",
+		)
 		t.eq(
 			title_send_rate_label.get_index(),
-			wifi_status_indicator.get_index() - 1,
-			"send FPS is third from the right, before Wi-Fi and input mode",
+			title_network_rate_label.get_index() - 1,
+			"send FPS sits before network throughput",
 		)
 	t.eq(
 		TeleopSettingsPanel._wifi_connection_address([
@@ -511,7 +521,9 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	# The send rate is the page's proof that frames are going out; it belongs
 	# to Connect/Disconnect, not to opening or closing the page.
 	var send_rate_label: Label = panel.get("_send_rate_label")
+	var network_rate_label: Label = panel.get("_network_rate_label")
 	t.is_true(send_rate_label != null, "the page exposes a send-rate indicator")
+	t.is_true(network_rate_label != null, "the page exposes a network-rate indicator")
 	if send_rate_label != null:
 		t.is_false(send_rate_label.visible, "the send rate is hidden while disconnected")
 		panel.set_link_active(true)
@@ -534,6 +546,15 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		)
 		panel.set_link_active(false)
 		t.is_false(send_rate_label.visible, "Disconnect hides the send rate again")
+	if network_rate_label != null:
+		t.is_false(network_rate_label.visible, "network rate is hidden while disconnected")
+		panel.set_link_active(true)
+		panel.set_network_rate(1536.0, 2.5 * 1024.0 * 1024.0)
+		t.is_true(network_rate_label.visible, "Connect reveals network throughput")
+		t.eq(network_rate_label.text, "↑ 1.5 KB/s  ↓ 2.5 MB/s",
+			"network throughput uses compact upload/download units")
+		panel.set_link_active(false)
+		t.is_false(network_rate_label.visible, "Disconnect hides network throughput")
 
 	# Pointing at or clicking the page must never also drive the robot.
 	t.is_true(
@@ -619,6 +640,8 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 	var video_sbs_toggle: CheckButton = panel.get("_video_sbs_toggle")
 	var video_face_toggle: CheckButton = panel.get("_video_face_toggle")
 	var show_video_panel_toggle: CheckButton = panel.get("_show_video_panel_toggle")
+	var show_system_performance_toggle: CheckButton = panel.get("_show_system_performance_toggle")
+	var show_video_performance_toggle: CheckButton = panel.get("_show_video_performance_toggle")
 	var operation_trajectory_toggle: CheckButton = panel.get("_show_operation_trajectory_toggle")
 	var connect_button: Button = panel.get("_video_connect_button")
 	var status_label: Label = panel.get("_video_status_label")
@@ -632,6 +655,8 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 		and video_sbs_toggle != null
 		and video_face_toggle != null
 		and show_video_panel_toggle != null
+		and show_system_performance_toggle != null
+		and show_video_performance_toggle != null
 		and operation_trajectory_toggle != null
 		and connect_button != null
 		and status_label != null,
@@ -657,6 +682,8 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 	)
 	t.is_true(video_group.is_ancestor_of(video_face_toggle), "face lock moved into Video")
 	t.is_true(video_group.is_ancestor_of(show_video_panel_toggle), "video visibility moved into Video")
+	t.is_true(video_group.is_ancestor_of(show_system_performance_toggle), "system performance is configured in Video")
+	t.is_true(video_group.is_ancestor_of(show_video_performance_toggle), "video performance is configured in Video")
 	t.is_false(display_group.is_ancestor_of(video_face_toggle), "Display no longer owns face lock")
 	t.is_false(
 		display_group.is_ancestor_of(show_video_panel_toggle),
@@ -699,6 +726,8 @@ func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssert
 	t.eq(defaults.get("video_port", 0), 12345, "Operator video defaults to port 12345")
 	t.is_false(defaults.has("video_receive_port"), "PICO receive port is not user-configurable")
 	t.is_false(bool(defaults.get("video_sbs", true)), "SBS defaults off")
+	t.is_false(bool(defaults.get("show_system_performance", true)), "system performance defaults off")
+	t.is_true(bool(defaults.get("show_video_performance", false)), "video performance preserves its visible default")
 	t.eq(video_port_label.text, panel.tr("UI_VIDEO_STREAM_PORT"), "Operator video labels its stream port")
 	t.eq(
 		video_ip_input.get_parent().get_parent(),

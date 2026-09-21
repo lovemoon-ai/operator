@@ -25,13 +25,40 @@ def extract_five_points(frame):
 
 
 class Calibration:
-    """Upstream ScaleBridge retargeting semantics on PICO five points.
+    """PICO five-point retargeting: heading+XY alignment from upstream, plus a
+    per-link Cartesian anchor so the operator's calibration pose maps to the
+    robot's reset standing pose.
 
-    Positions follow upstream XsensProcessor + _calibrate: uniform absolute
-    scale, then heading/XY alignment of the streamed skeleton onto the robot
-    (NOT a robot-anchored delta).  Per-link rotation offsets measured at
-    calibration are the PICO analogue of upstream's hardcoded Xsens->G1 arm
-    offsets; see retarget.py for the literal upstream port.
+    Upstream ScaleBridge's Xsens deployment zeroes only ``pos_offset``'s XY
+    and lets ``scale * human.hip.z`` drive the target pelvis Z directly, then
+    lets the other 13 links ride along at their scaled absolute heights. That
+    works only because Xsens skeleton dimensions and ``xsens_scale_factor=0.75``
+    together happen to bring an average adult's link heights close to the G1
+    training standing pose (pelvis 0.782 m, wrists ~0.70 m, ankles ~0.03 m).
+
+    PICO body tracking measures the operator's actual joint heights in world
+    Z. Applying a single absolute scale sends every link to a wrong height:
+    a standing operator's wrists land ~7 cm low, ankles ~9 cm off the floor,
+    pelvis 5-8 cm low. The policy tracks all of them at once and folds the
+    disagreement into a persistent crouch. Even a pelvis-only Z anchor
+    leaves the ankles floating and the wrists dragging, so the crouch shrinks
+    but does not disappear.
+
+    We anchor every five-point link (pelvis, both wrists, both ankles) on
+    the robot's reset pose: at calibration each target lands exactly on the
+    corresponding robot body, and subsequent frames apply ``scale`` * the
+    heading-aligned displacement of that link from its calibration sample.
+    This is the standard robot-anchored delta scheme; upstream's shared
+    heading+XY math (``HeadingAlignment``) still supplies the yaw.
+
+    Note the per-link anchor changes the XY reference relative to upstream:
+    because the offset cancels the alignment's translation exactly, the
+    pelvis is anchored on the robot's *reset pelvis XY*, not on the
+    alignment's stage origin. BODY-mode locomotion is therefore shifted by
+    the robot's reset pelvis offset when that is not at the origin.
+    Per-link rotation offsets measured at calibration are the PICO analogue
+    of upstream's hardcoded Xsens->G1 arm offsets; see retarget.py for the
+    literal upstream port.
     """
     def __init__(self, human: FivePointFrame, robot_positions: np.ndarray,
                  robot_rotations: np.ndarray, body_names: list[str], scale: float):
@@ -48,6 +75,12 @@ class Calibration:
             human.positions[0] * scale, human.rotations[0], robot_rotations[pelvis])
         self.robot_positions = robot_positions.copy()
         self.robot_rotations = robot_rotations.copy()
+        # Per-link anchor: at calibration each aligned point must land on the
+        # robot's reset body position. Store the offset so ``apply`` reduces
+        # to identity on the calibration frame and to scaled deltas after.
+        aligned_pos, _ = self.alignment.apply(
+            self.scale * human.positions, human.rotations)
+        self.position_offsets = robot_positions[self.indices] - aligned_pos
         aligned = self.alignment.quat_offset * rotation_wxyz(human.rotations)
         self.rotation_offsets = aligned.inv() * rotation_wxyz(robot_rotations[self.indices])
 
@@ -56,7 +89,7 @@ class Calibration:
         rotations = self.robot_rotations.copy()
         aligned_pos, aligned_rot = self.alignment.apply(
             self.scale * frame.positions, frame.rotations)
-        positions[self.indices] = aligned_pos
+        positions[self.indices] = aligned_pos + self.position_offsets
         rotations[self.indices] = wxyz(rotation_wxyz(aligned_rot) * self.rotation_offsets)
         # Other body slots are neutral placeholders; control_mode=4 masks them.
         return positions, rotations

@@ -38,6 +38,8 @@ const DEFAULT_FACE_LOCKED: bool = true
 # front of the user. Showing the panel requires both this opt-in AND the robot
 # actually sending frames — see LiveVideoView._update_panel_visibility.
 const DEFAULT_SHOW_VIDEO_PANEL: bool = false
+const DEFAULT_SHOW_SYSTEM_PERFORMANCE: bool = false
+const DEFAULT_SHOW_VIDEO_PERFORMANCE: bool = true
 const DEFAULT_SHOW_OPERATION_TRAJECTORY: bool = false
 const DEFAULT_SHOW_VR_POSE: bool = false
 const DEFAULT_MENU_WORLD_LOCKED: bool = false
@@ -236,6 +238,8 @@ var _video_connect_button: Button
 var _video_status_label: Label
 var _video_face_toggle: CheckButton
 var _show_video_panel_toggle: CheckButton
+var _show_system_performance_toggle: CheckButton
+var _show_video_performance_toggle: CheckButton
 var _show_operation_trajectory_toggle: CheckButton
 var _show_vr_pose_toggle: CheckButton
 var _menu_lock_buttons: Dictionary = {}
@@ -251,6 +255,7 @@ var _wifi_status_timer: Timer
 var _battery_indicator: BatteryIndicator
 var _battery_status_timer: Timer
 var _send_rate_label: Label
+var _network_rate_label: Label
 var _link_active := false
 ## Last `prefer_*` hints handed to `set_discovery_state`, replayed whenever
 ## the endpoint list is rebuilt for a different wire protocol.
@@ -308,8 +313,15 @@ func _init() -> void:
 	_send_rate_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_send_rate_label.visible = false
 	_title_row.add_child(_send_rate_label)
-	# Right-to-left: input mode, WiFi, send rate.
+	# Right-to-left: input mode, WiFi, network throughput, send rate.
 	_title_row.move_child(_send_rate_label, 1)
+	_network_rate_label = Label.new()
+	_network_rate_label.add_theme_font_size_override("font_size", 18)
+	_network_rate_label.add_theme_color_override("font_color", COL_STATUS)
+	_network_rate_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_network_rate_label.visible = false
+	_title_row.add_child(_network_rate_label)
+	_title_row.move_child(_network_rate_label, 2)
 	var settings := _load_settings()
 	set_options(settings)
 	set_status(tr("UI_LOADED_SETTINGS" if bool(settings.get("loaded", false)) else "UI_USING_DEFAULTS"))
@@ -685,6 +697,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	_video_sbs_toggle = add_toggle(video, tr("UI_VIDEO_SBS"), false, 22)
 	_video_face_toggle = add_toggle(video, tr("UI_FACE_LOCKED_VIDEO"), DEFAULT_FACE_LOCKED, 22)
 	_show_video_panel_toggle = add_toggle(video, tr("UI_SHOW_VIDEO_PANEL"), DEFAULT_SHOW_VIDEO_PANEL, 22)
+	_show_system_performance_toggle = add_toggle(
+		video, tr("UI_SHOW_SYSTEM_PERFORMANCE"), DEFAULT_SHOW_SYSTEM_PERFORMANCE, 22
+	)
+	_show_video_performance_toggle = add_toggle(
+		video, tr("UI_SHOW_VIDEO_PERFORMANCE"), DEFAULT_SHOW_VIDEO_PERFORMANCE, 22
+	)
 
 	_video_status_label = Label.new()
 	_video_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -724,7 +742,12 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	# Nothing here is part of the connection decision, so each option applies
 	# (and persists) as it is flipped rather than waiting for Connect.
-	for display_toggle in [_show_operation_trajectory_toggle, _show_vr_pose_toggle]:
+	for display_toggle in [
+		_show_system_performance_toggle,
+		_show_video_performance_toggle,
+		_show_operation_trajectory_toggle,
+		_show_vr_pose_toggle,
+	]:
 		display_toggle.toggled.connect(_on_display_option_toggled)
 
 	# --- Robot-authored UI group -------------------------------------------
@@ -914,6 +937,9 @@ func set_link_active(active: bool) -> void:
 	if _send_rate_label != null:
 		_send_rate_label.visible = active
 		_send_rate_label.text = tr("UI_SEND_RATE_IDLE") if active else ""
+	if _network_rate_label != null:
+		_network_rate_label.visible = active
+		_network_rate_label.text = "↑ 0 B/s  ↓ 0 B/s" if active else ""
 
 
 func _refresh_wifi_status() -> void:
@@ -984,6 +1010,24 @@ func set_send_rate(hz: float) -> void:
 		_send_rate_label.text = tr("UI_SEND_RATE_IDLE")
 	else:
 		_send_rate_label.text = tr("UI_SEND_RATE") % hz
+
+
+func set_network_rate(upload_bytes_per_sec: float, download_bytes_per_sec: float) -> void:
+	if _network_rate_label == null or not _link_active:
+		return
+	_network_rate_label.text = "↑ %s  ↓ %s" % [
+		_format_network_rate(upload_bytes_per_sec),
+		_format_network_rate(download_bytes_per_sec),
+	]
+
+
+static func _format_network_rate(bytes_per_sec: float) -> String:
+	var rate := maxf(bytes_per_sec, 0.0)
+	if rate >= 1024.0 * 1024.0:
+		return "%.1f MB/s" % (rate / (1024.0 * 1024.0))
+	if rate >= 1024.0:
+		return "%.1f KB/s" % (rate / 1024.0)
+	return "%.0f B/s" % rate
 
 
 ## The pointer on this page is a UI gesture, never a robot one. While it rests
@@ -1194,6 +1238,8 @@ func get_options() -> Dictionary:
 		"video_sbs": _video_sbs_toggle.button_pressed,
 		"video_face_locked": _video_face_toggle.button_pressed,
 		"show_video_panel": _show_video_panel_toggle.button_pressed,
+		"show_system_performance": _show_system_performance_toggle.button_pressed,
+		"show_video_performance": _show_video_performance_toggle.button_pressed,
 		"show_operation_trajectory": _show_operation_trajectory_toggle.button_pressed,
 		"show_vr_pose": _show_vr_pose_toggle.button_pressed,
 		"menu_world_locked": _menu_world_locked,
@@ -1224,6 +1270,12 @@ func set_options(options: Dictionary) -> void:
 	_video_sbs_toggle.button_pressed = bool(options.get("video_sbs", false))
 	_video_face_toggle.button_pressed = bool(options.get("video_face_locked", DEFAULT_FACE_LOCKED))
 	_show_video_panel_toggle.button_pressed = bool(options.get("show_video_panel", DEFAULT_SHOW_VIDEO_PANEL))
+	_show_system_performance_toggle.button_pressed = bool(
+		options.get("show_system_performance", DEFAULT_SHOW_SYSTEM_PERFORMANCE)
+	)
+	_show_video_performance_toggle.button_pressed = bool(
+		options.get("show_video_performance", DEFAULT_SHOW_VIDEO_PERFORMANCE)
+	)
 	_show_operation_trajectory_toggle.button_pressed = bool(
 		options.get("show_operation_trajectory", DEFAULT_SHOW_OPERATION_TRAJECTORY)
 	)
@@ -1552,6 +1604,8 @@ static func _default_options() -> Dictionary:
 		"video_sbs": false,
 		"video_face_locked": DEFAULT_FACE_LOCKED,
 		"show_video_panel": DEFAULT_SHOW_VIDEO_PANEL,
+		"show_system_performance": DEFAULT_SHOW_SYSTEM_PERFORMANCE,
+		"show_video_performance": DEFAULT_SHOW_VIDEO_PERFORMANCE,
 		"show_operation_trajectory": DEFAULT_SHOW_OPERATION_TRAJECTORY,
 		"show_vr_pose": DEFAULT_SHOW_VR_POSE,
 		"menu_world_locked": DEFAULT_MENU_WORLD_LOCKED,

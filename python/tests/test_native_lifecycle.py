@@ -149,6 +149,28 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 @unittest.skipUnless(HAS_NATIVE, "requires the built pyoperator native extension")
 class NativeLifecycleTests(unittest.TestCase):
+    @pytest.mark.fake_headset
+    def test_dedicated_telemetry_capability_disables_command_mirror(self):
+        config = _config()
+        with XrSession(config):
+            command_peer, _descriptor = _connect_fake_headset(
+                config.pose_port,
+                ["xr_state_v1", "dedicated_telemetry_v1"],
+            )
+            telemetry_peer = socket.create_connection(
+                ("127.0.0.1", config.telemetry_port), timeout=2.0
+            )
+            try:
+                command_peer.settimeout(0.2)
+                with self.assertRaises(socket.timeout):
+                    _recv_command(command_peer)
+                telemetry_peer.settimeout(1.0)
+                command, _payload = _recv_command(telemetry_peer)
+                self.assertEqual(command, "Telemetry")
+            finally:
+                command_peer.close()
+                telemetry_peer.close()
+
     def test_start_rejects_occupied_video_port(self):
         with socket.socket() as occupied:
             occupied.bind(("0.0.0.0", 0))

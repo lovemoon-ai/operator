@@ -240,6 +240,16 @@ Video transport is independent. Declaring or hiding `video_panel` changes only
 the existing view's visibility and options; packet receive, decode, texture
 upload, and frame cadence continue unchanged. The per-frame Blueprint work is
 limited to primitives attached to moving XR anchors and local hand interaction.
+The optional `status_state`, `status_text`, and `system_performance_text`
+bindings decorate that mode-owned video view without giving the Blueprint
+runtime knowledge of application-specific IDs. Whether video and performance
+diagnostics are visible remains a headset-local Settings preference; robot state
+supplies content, not the user's diagnostic preference.
+
+`robot_model` may describe either an articulated model or a rigid scene object.
+A rigid asset declares an empty `joint_names`/`joints` list and is updated using
+only its required `base_pose` and `sample` bindings. This lets a host publish
+dynamic props without inventing dummy joints or shipping executable scenes.
 
 ## Version 1 Primitives
 

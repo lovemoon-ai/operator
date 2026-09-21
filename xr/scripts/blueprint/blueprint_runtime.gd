@@ -109,6 +109,7 @@ var _local_view_offsets: Dictionary = {}
 var _event_sequence := 0
 var _state_values: Dictionary = {}
 var _blueprint_components: Array = []
+var _binding_contracts: Dictionary = {}
 var _components: Dictionary = {}
 var _component_order: Array[String] = []
 var _dynamic_components: Array = []
@@ -184,6 +185,7 @@ func apply_blueprint(blueprint: Dictionary) -> bool:
 	_blueprint_id = str(blueprint.get("blueprint_id", ""))
 	_blueprint_revision = int(blueprint.get("revision", 0))
 	_blueprint_components = (blueprint.get("components", []) as Array).duplicate(true)
+	_binding_contracts = BlueprintContract.compile_binding_contracts(_blueprint_components)
 	_load_user_overrides()
 	for component_v in blueprint.get("components", []):
 		var component := component_v as Dictionary
@@ -233,15 +235,25 @@ func apply_state(state: Dictionary) -> bool:
 	var values_v: Variant = state.get("values", {})
 	if values_v is Dictionary:
 		var value_errors := BlueprintContract.validate_bound_values(
-			_blueprint_components, values_v as Dictionary
+			_blueprint_components,
+			values_v as Dictionary,
+			_binding_contracts,
 		)
 		if not value_errors.is_empty():
 			warning_raised.emit("Invalid BlueprintState values: %s" % str(value_errors))
 			return false
-		_state_values = (values_v as Dictionary).duplicate(true)
-	_last_state_sequence = sequence
-	_last_state_received_us = Time.get_ticks_usec()
-	_refresh_components()
+		# Session JSON parsing creates a fresh state dictionary and never mutates
+		# it after emission. Retain that snapshot instead of recursively copying
+		# every robot/scene joint array at Blueprint rate on the render thread.
+		var next_values := values_v as Dictionary
+		var changed_keys := _changed_state_keys(_state_values, next_values)
+		_state_values = next_values
+		_last_state_sequence = sequence
+		_last_state_received_us = Time.get_ticks_usec()
+		_refresh_components(changed_keys)
+	else:
+		_last_state_sequence = sequence
+		_last_state_received_us = Time.get_ticks_usec()
 	if sequence == 1:
 		print(
 			"[Blueprint] Initial state applied id=%s values=%d"
@@ -275,6 +287,7 @@ func clear() -> void:
 	_frame_hand_joints.clear()
 	_state_values.clear()
 	_blueprint_components.clear()
+	_binding_contracts.clear()
 	_user_visibility_overrides.clear()
 	_blueprint_id = ""
 	_blueprint_revision = 0
@@ -298,7 +311,8 @@ func set_user_visibility_override(component_id: String, visible: Variant) -> voi
 	var entry_v: Variant = _components.get(component_id, null)
 	if not entry_v is Dictionary:
 		return
-	var spec: Dictionary = (entry_v as Dictionary).get("spec", {})
+	var entry := entry_v as Dictionary
+	var spec: Dictionary = entry.get("spec", {})
 	if not BlueprintContract.user_visibility_overridable(spec):
 		return
 	if visible == null:
@@ -379,10 +393,20 @@ func _create_component(spec: Dictionary) -> Dictionary:
 	var primitive_spec := BlueprintContract.primitive(component_type)
 	var implementation := str(primitive_spec.get("implementation", ""))
 	var node: Node3D
+	var properties := BlueprintContract.resolved_properties(spec)
+	var binding_keys: Array[String] = []
+	var bindings_v: Variant = spec.get("bindings", {})
+	if bindings_v is Dictionary:
+		for state_key_v: Variant in (bindings_v as Dictionary).values():
+			var state_key := str(state_key_v)
+			if not state_key.is_empty() and state_key not in binding_keys:
+				binding_keys.append(state_key)
 	var entry := {
 		"type": component_type,
 		"implementation": implementation,
 		"spec": spec,
+		"properties": properties,
+		"binding_keys": binding_keys,
 	}
 	if str(primitive_spec.get("host", "")) == "external_view":
 		entry["external_view"] = true
@@ -396,7 +420,6 @@ func _create_component(spec: Dictionary) -> Dictionary:
 		"ground_grid":
 			node = GroundGridScript.new()
 			node.name = "BlueprintGroundGrid_%s" % str(spec.get("id", ""))
-			var properties := BlueprintContract.resolved_properties(spec)
 			node.call("configure", properties, _parse_color(properties["color"], Color.WHITE),
 				_parse_color(properties["major_color"], Color.WHITE))
 		"model_lighting":
@@ -404,7 +427,7 @@ func _create_component(spec: Dictionary) -> Dictionary:
 			node.name = "BlueprintModelLighting_%s" % str(spec.get("id", ""))
 		"input_binding":
 			node = InputBindingScript.new()
-			var configured: bool = node.call("configure", BlueprintContract.resolved_properties(spec), _left_controller, _right_controller)
+			var configured: bool = node.call("configure", properties, _left_controller, _right_controller)
 			if not configured:
 				warning_raised.emit("Unsupported Blueprint input gesture")
 				node.free()
@@ -415,7 +438,7 @@ func _create_component(spec: Dictionary) -> Dictionary:
 			node = RobotModelScript.new()
 			node.name = "BlueprintRobot_%s" % str(spec.get("id", ""))
 			node.connect("warning_raised", func(message: String) -> void: warning_raised.emit(message))
-			var configured: bool = node.call("configure", BlueprintContract.resolved_properties(spec), asset_host)
+			var configured: bool = node.call("configure", properties, asset_host)
 			if not configured:
 				node.free()
 				return {}
@@ -482,15 +505,29 @@ func _create_status_lamp(spec: Dictionary, entry: Dictionary) -> Node3D:
 	return root
 
 
-func _refresh_components() -> void:
+func _refresh_components(changed_keys: Variant = null) -> void:
+	var filter_changes := changed_keys is Dictionary
+	var menu_dirty := not filter_changes
 	for entry_v in _components.values():
-		_refresh_component(entry_v as Dictionary)
-	menu_changed.emit()
+		var entry := entry_v as Dictionary
+		var implementation := str(entry.get("implementation", ""))
+		var affected := not filter_changes or implementation == "input_binding"
+		if filter_changes and not affected:
+			for state_key_v: Variant in entry.get("binding_keys", []):
+				if (changed_keys as Dictionary).has(str(state_key_v)):
+					affected = true
+					break
+		if not affected:
+			continue
+		_refresh_component(entry)
+		menu_dirty = menu_dirty or bool(entry.get("menu", false))
+	if menu_dirty:
+		menu_changed.emit()
 
 
 func _refresh_component(entry: Dictionary) -> void:
 	var spec: Dictionary = entry.get("spec", {})
-	var properties := BlueprintContract.resolved_properties(spec)
+	var properties: Dictionary = entry.get("properties", {})
 	var visible := bool(_bound_value(spec, "visible", properties["visible"]))
 	var component_id := str(spec.get("id", ""))
 	if BlueprintContract.user_visibility_overridable(spec) \
@@ -501,7 +538,7 @@ func _refresh_component(entry: Dictionary) -> void:
 	var implementation := str(entry.get("implementation", ""))
 	if bool(entry.get("external_view", false)):
 		var effective_visible := visible and not _suspended
-		var effective_properties := _resolved_properties(spec)
+		var effective_properties := _resolved_properties(entry)
 		var previous_visible: Variant = entry.get("effective_visible", null)
 		var previous_properties: Dictionary = entry.get("effective_properties", {})
 		entry["effective_visible"] = effective_visible
@@ -589,7 +626,8 @@ func _update_anchor(entry: Dictionary) -> void:
 		node.global_transform = (anchor_transform_v as Transform3D) * local_transform
 		var placement_id := str(spec.get("id", ""))
 		if str(entry.get("implementation", "")) == "ground_grid":
-			placement_id = str(BlueprintContract.resolved_properties(spec).get("placement_target", ""))
+			var properties: Dictionary = entry.get("properties", {})
+			placement_id = str(properties.get("placement_target", ""))
 		node.global_position += Vector3(_local_view_offsets.get(placement_id, Vector3.ZERO))
 		node.visible = true
 	else:
@@ -653,7 +691,8 @@ func _on_palm_menu_action(
 	var entry_v: Variant = _components.get(component_id, null)
 	if not entry_v is Dictionary:
 		return
-	var spec: Dictionary = (entry_v as Dictionary).get("spec", {})
+	var entry := entry_v as Dictionary
+	var spec: Dictionary = entry.get("spec", {})
 	var primitive_spec := BlueprintContract.primitive(str(spec.get("type", "")))
 	var events_v: Variant = primitive_spec.get("events", {})
 	if not events_v is Dictionary:
@@ -666,7 +705,8 @@ func _on_palm_menu_action(
 		return
 	var event_spec := event_spec_v as Dictionary
 	var action_property := str(event_spec.get("action_property", ""))
-	var action := str(BlueprintContract.resolved_properties(spec).get(action_property, ""))
+	var properties: Dictionary = entry.get("properties", {})
+	var action := str(properties.get(action_property, ""))
 	if action.is_empty():
 		warning_raised.emit("Blueprint action property is empty")
 		return
@@ -694,7 +734,7 @@ func _update_lamp(entry: Dictionary) -> void:
 	if material == null:
 		return
 	var spec: Dictionary = entry.get("spec", {})
-	var properties := BlueprintContract.resolved_properties(spec)
+	var properties: Dictionary = entry.get("properties", {})
 	var state := str(_bound_value(spec, "state", "inactive"))
 	var color := _status_color(state, properties)
 	if state in properties.get("pulse_states", []):
@@ -741,7 +781,8 @@ func recenter_target() -> String:
 		if str(entry.get("implementation", "")) == "robot_model":
 			models.append(id)
 		elif str(entry.get("implementation", "")) == "input_binding":
-			target = str(BlueprintContract.resolved_properties(entry["spec"]).get("target_component", ""))
+			var properties: Dictionary = entry.get("properties", {})
+			target = str(properties.get("target_component", ""))
 	if not target.is_empty():
 		return target if target in models else ""
 	return models[0] if models.size() == 1 else ""
@@ -791,8 +832,9 @@ func _bound_value(spec: Dictionary, property: String, fallback: Variant) -> Vari
 	return _state_values.get(key, fallback) if not key.is_empty() else fallback
 
 
-func _resolved_properties(spec: Dictionary) -> Dictionary:
-	var properties := BlueprintContract.resolved_properties(spec)
+func _resolved_properties(entry: Dictionary) -> Dictionary:
+	var spec: Dictionary = entry.get("spec", {})
+	var properties: Dictionary = (entry.get("properties", {}) as Dictionary).duplicate()
 	var bindings_v: Variant = spec.get("bindings", {})
 	if not bindings_v is Dictionary:
 		return properties
@@ -802,6 +844,17 @@ func _resolved_properties(spec: Dictionary) -> Dictionary:
 			continue
 		properties[property] = _bound_value(spec, property, properties.get(property))
 	return properties
+
+
+static func _changed_state_keys(previous: Dictionary, current: Dictionary) -> Dictionary:
+	var changed := {}
+	for key_v: Variant in previous:
+		if not current.has(key_v) or previous[key_v] != current[key_v]:
+			changed[str(key_v)] = true
+	for key_v: Variant in current:
+		if not previous.has(key_v):
+			changed[str(key_v)] = true
+	return changed
 
 
 func _anchor_transform(anchor: String) -> Variant:

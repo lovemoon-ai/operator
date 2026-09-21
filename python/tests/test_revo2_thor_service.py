@@ -72,7 +72,7 @@ class Revo2ThorServiceTests(unittest.TestCase):
         self.assertNotIn("text", components["left_hand_status"]["bindings"])
         self.assertNotIn("text", components["right_hand_status"]["bindings"])
         self.assertEqual(
-            components[service.REVO2_CONTROL_COMPONENT_ID]["type"], "palm_menu"
+            components[service.REVO2_CONTROL_COMPONENT_ID]["type"], "menu_item"
         )
         self.assertTrue(
             components[service.REVO2_CONTROL_COMPONENT_ID]["user_overridable"]

@@ -1,5 +1,5 @@
 extends Node3D
-## Render-only, robot-owned articulated GLB. No Inside Robot dependency.
+## Render-only, host-owned rigid or articulated GLB. No Inside Robot dependency.
 
 signal warning_raised(message: String)
 signal asset_loaded(from_cache: bool)
@@ -37,8 +37,8 @@ func configure(properties: Dictionary, asset_host: String = "") -> bool:
 		if not name_v is String or joint_name.is_empty() or unique.has(joint_name):
 			return _reject("Duplicate or empty joint name")
 		unique[joint_name] = true
-	if names.is_empty() or names.size() > 256:
-		return _reject("Robot must declare 1..256 joints")
+	if names.size() > 256:
+		return _reject("Model must declare 0..256 joints")
 	_joint_names = names.duplicate()
 	_properties = properties.duplicate(true)
 	_asset_host = asset_host
@@ -121,7 +121,7 @@ func _on_asset_loaded(bytes: PackedByteArray, from_cache: bool) -> void:
 	_configure_visuals(instance)
 	_instance.visible = false
 	add_child(instance)
-	if not _target.is_empty():
+	if _received_us > 0:
 		_shown = _target.duplicate()
 		_apply(1.0)
 	asset_source = "cache" if from_cache else "network"

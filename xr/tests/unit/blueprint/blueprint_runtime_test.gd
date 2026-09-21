@@ -4,6 +4,7 @@ const CASE_ID := "blueprint.runtime"
 const RuntimeScript = preload(
 	"res://scripts/blueprint/blueprint_runtime.gd"
 )
+const RobotModelScript = preload("res://scripts/blueprint/robot_model_view.gd")
 const TeleopControllerScript = preload(
 	"res://scripts/app/modes/teleop_controller.gd"
 )
@@ -11,6 +12,24 @@ const SessionScript = preload("res://scripts/network/session.gd")
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
+	var rigid_view := RobotModelScript.new()
+	t.is_true(
+		rigid_view.configure(
+			{
+				"asset_sha256": "a".repeat(64),
+				"asset_size": 100,
+				"asset_port": 63904,
+				"joint_names": [],
+			},
+			"127.0.0.1",
+		),
+		"zero-joint rigid model is accepted",
+	)
+	t.is_true(
+		rigid_view.update_sample([], [0, 0, 0, 0, 0, 0, 1], 1),
+		"zero-joint rigid model accepts a base-pose sample",
+	)
+	rigid_view.free()
 	t.is_true(
 		SessionScript.descriptor_supports_blueprint({
 			"capabilities": {
@@ -28,6 +47,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			},
 		}),
 		"headset rejects a stale descriptor spec hash",
+	)
+	t.is_true(
+		SessionScript.DEDICATED_TELEMETRY_CAPABILITY \
+			in (SessionScript.hello_payload().get("capabilities", []) as Array),
+		"headset negotiates the dedicated telemetry channel in Hello",
 	)
 	var json_envelope := {
 		"revision": 2.0,
@@ -165,7 +189,9 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var tracking_provider := Node.new()
 	var runtime := RuntimeScript.new()
 	var runtime_warnings: Array[String] = []
+	var menu_change_count := 0
 	runtime.warning_raised.connect(func(message: String) -> void: runtime_warnings.append(message))
+	runtime.menu_changed.connect(func() -> void: menu_change_count += 1)
 	origin.add_child(camera)
 	origin.add_child(left_controller)
 	origin.add_child(right_controller)
@@ -384,6 +410,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		runtime.apply_state(wire_state_v as Dictionary),
 		"wire BlueprintState accepts integral JSON numbers in integer arrays",
 	)
+	var menu_changes_after_initial_state := menu_change_count
 	var robot_node := runtime.component_node("robot_model")
 	var grid := runtime.component_node("ground") as MeshInstance3D
 	t.is_true(grid.mesh is PlaneMesh, "ground uses a bounded two-triangle plane")
@@ -435,6 +462,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		int((tactile.get("_last_update_usec") as Dictionary)["left"]),
 		123,
 		"an unchanged sample token does not refresh stale tactile data",
+	)
+	t.eq(
+		menu_change_count,
+		menu_changes_after_initial_state,
+		"scene and status-only changes do not invalidate the controller menu",
 	)
 	var refreshed_tactile := unchanged_tactile.duplicate(true)
 	refreshed_tactile["touch.sample_ns"] = 123457

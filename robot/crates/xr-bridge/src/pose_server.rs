@@ -30,7 +30,8 @@ use tokio_util::codec::Framed;
 use teleop_protocol::{
     Blueprint, BlueprintEvent, BlueprintState, DeviceCommand, DeviceDescriptor, DeviceTelemetry,
     XrStateFrame, BLUEPRINT_CAPABILITY, BLUEPRINT_COMMAND, BLUEPRINT_EVENT_COMMAND,
-    BLUEPRINT_SPEC_CAPABILITY, BLUEPRINT_STATE_COMMAND, XR_STATE_SCHEMA_VERSION,
+    BLUEPRINT_SPEC_CAPABILITY, BLUEPRINT_STATE_COMMAND, DEDICATED_TELEMETRY_CAPABILITY,
+    XR_STATE_SCHEMA_VERSION,
 };
 
 use crate::latency::{self, LatencyRecorder};
@@ -263,6 +264,7 @@ async fn handle_connection(
     let mut negotiated_state_rx = None;
     let mut negotiated_active_blueprint = None;
     let mut pending_initial_blueprint_state = None;
+    let mut send_legacy_telemetry = true;
 
     // --- Phase 1: Handshake (sequential, before split) ---
     let handshake_timeout = tokio::time::Duration::from_secs(5);
@@ -273,6 +275,8 @@ async fn handle_connection(
                     hello_supports_capability(&frame.data, BLUEPRINT_CAPABILITY);
                 let headset_blueprint_spec_matches =
                     hello_supports_capability(&frame.data, BLUEPRINT_SPEC_CAPABILITY);
+                send_legacy_telemetry =
+                    !hello_supports_capability(&frame.data, DEDICATED_TELEMETRY_CAPABILITY);
                 let source_has_blueprint_stream = blueprint.is_some()
                     && descriptor
                         .capabilities
@@ -311,6 +315,7 @@ async fn handle_connection(
                     headset_advertises_blueprint,
                     headset_blueprint_spec_matches,
                     blueprint_enabled,
+                    send_legacy_telemetry,
                     "Blueprint capability negotiated for {addr}"
                 );
                 let resp = build_descriptor_frame(&descriptor);
@@ -437,6 +442,7 @@ async fn handle_connection(
         negotiated_state_rx,
         negotiated_active_blueprint,
         pending_initial_blueprint_state,
+        send_legacy_telemetry,
     )));
 
     // Command receiver: read frames from headset.
@@ -586,6 +592,7 @@ async fn write_outbound(
     mut state_rx: Option<watch::Receiver<Option<Arc<BlueprintState>>>>,
     mut active_blueprint: Option<Arc<Blueprint>>,
     mut pending_state: Option<Arc<BlueprintState>>,
+    send_legacy_telemetry: bool,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
     loop {
@@ -670,7 +677,7 @@ async fn write_outbound(
                     }
                 }
             }
-            _ = interval.tick() => {
+            _ = interval.tick(), if send_legacy_telemetry => {
                 let telemetry = telemetry_rx.borrow_and_update().clone();
                 match json_frame("Telemetry", &telemetry) {
                     Ok(frame) => frame,
@@ -786,6 +793,49 @@ mod tests {
         assert!(!hello_supports_xr_state(b"not json"));
     }
 
+    #[test]
+    fn dedicated_telemetry_capability_is_detected() {
+        assert!(hello_supports_capability(
+            br#"{"capabilities":["xr_state_v1","dedicated_telemetry_v1"]}"#,
+            DEDICATED_TELEMETRY_CAPABILITY,
+        ));
+        assert!(!hello_supports_capability(
+            br#"{"capabilities":["xr_state_v1"]}"#,
+            DEDICATED_TELEMETRY_CAPABILITY,
+        ));
+    }
+
+    #[tokio::test]
+    async fn outbound_writer_omits_legacy_telemetry_for_dedicated_clients() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = tokio::spawn(TcpStream::connect(address));
+        let (server_socket, _) = listener.accept().await.unwrap();
+        let client_socket = client.await.unwrap().unwrap();
+        let (writer, _) = Framed::new(server_socket, CommandCodec).split();
+        let mut client = Framed::new(client_socket, CommandCodec);
+        let (_direct_tx, direct_rx) = mpsc::channel(1);
+        let (_telemetry_tx, telemetry_rx) = watch::channel(DeviceTelemetry::default());
+        let writer_task = tokio::spawn(write_outbound(
+            writer,
+            direct_rx,
+            telemetry_rx,
+            None,
+            None,
+            None,
+            None,
+            false,
+        ));
+
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(150), client.next())
+                .await
+                .is_err(),
+            "dedicated clients must not receive the legacy telemetry mirror"
+        );
+        writer_task.abort();
+    }
+
     #[tokio::test]
     async fn outbound_writer_sends_replacement_before_deferred_state() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -809,6 +859,7 @@ mod tests {
             Some(state_rx),
             initial_blueprint,
             Some(Arc::new(test_blueprint_state(2))),
+            false,
         ));
 
         let replacement = next_frame(&mut client).await;

@@ -210,3 +210,64 @@ async fn timed_codec_roundtrip_matches_wire_bytes() {
     assert_eq!(decoded.frame_id, 7);
     assert_eq!(decoded.nal, idr());
 }
+
+#[tokio::test]
+async fn stalled_tcp_client_is_dropped_instead_of_buffering_old_video() {
+    // Keep the broadcast deep enough that the writer timeout, rather than the
+    // lag detector, is what closes this deliberately non-reading client.
+    let (tx, _) = broadcast::channel::<TimedVideoFrame>(256);
+    let params = ParamSetCache::new();
+    params.observe(&sps());
+    params.observe(&pps());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_tx = tx.clone();
+    tokio::spawn(async move {
+        let _ = serve_video_clients_on(listener, server_tx, params).await;
+    });
+
+    // Keep the socket open but intentionally never read from it.
+    let _stalled_client = TcpStream::connect(addr).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while tx.receiver_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server did not register the stalled client");
+
+    let flood = tokio::spawn({
+        let tx = tx.clone();
+        async move {
+            for id in 0..48u64 {
+                let mut large_idr = idr();
+                large_idr.resize(512 * 1024, id as u8);
+                let _ = tx.send(frame(id, large_idr));
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    let blocked_at = std::time::Instant::now();
+    flood.await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while tx.receiver_count() != 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stalled client retained a video subscription");
+
+    // `receiver_count() == 0` alone cannot tell the write-timeout path from the
+    // lag detector or any other early return, so pin *which* path ran: the lag
+    // detector drops a client as soon as the channel overruns, whereas the
+    // writer must first block for TCP_WRITE_TIMEOUT (1 s). Without this,
+    // deleting the write timeout entirely would still leave the test green.
+    let elapsed = blocked_at.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "client was dropped after {elapsed:?}, too fast to be the 1s write \
+         timeout - the lag detector or another early return closed it instead",
+    );
+}

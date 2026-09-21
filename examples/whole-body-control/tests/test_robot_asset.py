@@ -61,6 +61,62 @@ def test_sphere_visual_is_tessellated_into_triangles():
     assert positions["count"] > 36
 
 
+def test_static_body_exports_as_zero_joint_rigid_asset():
+    model = mj.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body name="table" pos="1 2 .4">
+              <geom type="box" size=".5 .3 .4" group="0" rgba=".4 .2 .1 1"/>
+              <geom type="box" size=".6 .4 .5" group="0" rgba="1 1 1 0"/>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    asset = from_mujoco(
+        model,
+        root_body="table",
+        joint_names=(),
+        visual_groups=range(6),
+    )
+    document = glb_document(asset.data)
+    assert asset.joint_names == ()
+    assert document["extras"]["operator_robot"]["joints"] == []
+    assert len(document["meshes"]) == 1
+
+
+def test_texture_color_is_preserved_as_a_safe_solid_material_average():
+    model = mj.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <asset>
+            <texture name="red" type="2d" builtin="flat"
+                     width="8" height="8" rgb1="1 .05 .02"/>
+            <material name="red_material" texture="red"/>
+          </asset>
+          <worldbody>
+            <body name="pepper">
+              <geom type="sphere" size=".04" group="0" material="red_material"/>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    document = glb_document(
+        from_mujoco(
+            model,
+            root_body="pepper",
+            joint_names=(),
+            visual_groups=range(6),
+        ).data
+    )
+    rgba = document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    assert rgba[0] > 0.9
+    assert rgba[1] < 0.1
+    assert rgba[2] < 0.1
+
+
 def test_asset_server_joint_enumeration_handles_mujoco_enum_scalars():
     model = mj.MjModel.from_xml_string(
         """

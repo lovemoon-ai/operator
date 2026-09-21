@@ -1,11 +1,21 @@
 extends RefCounted
 ## Local system Blueprint: its lifetime does not depend on a robot session.
-## The two actions are dispatched only by the local owner of this runtime.
+## These actions are dispatched only by the local owner of this runtime.
 const ID := "system.teleop.menu"
 
 
 static func definition() -> Dictionary:
 	var components: Array = [{
+		"id": "settings", "type": "menu_item", "user_overridable": false,
+		"properties": {
+			"title": "", "action": "settings.open",
+			"locked_text": "Settings", "unlocked_text": "Settings",
+			"unavailable_text": "Settings",
+		},
+		"bindings": {
+			"value": "local.settings_value", "available": "local.settings_available",
+		},
+	}, {
 		"id": "connection", "type": "menu_item", "user_overridable": false,
 		"properties": {
 			"title": "",

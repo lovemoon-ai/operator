@@ -41,6 +41,8 @@ var _host: String = ""
 var _port: int = 0
 var _hello_timer: Timer
 var _last_packet_received_ns: int = 0
+var _total_received_bytes: int = 0
+var _total_sent_bytes: int = 0
 
 ## Reassembly buffer. Key = "frame_id:nal_index", value = Dictionary:
 ##   {
@@ -92,6 +94,7 @@ func _process(_delta: float) -> void:
 		var bytes := _udp.get_packet()
 		if bytes.is_empty():
 			continue
+		_total_received_bytes += bytes.size()
 
 		var frag := XRoboProtocol.decode_udp_fragment(bytes)
 		if not frag.is_empty():
@@ -222,6 +225,14 @@ func get_drop_count() -> int:
 	return _reassembly_drop_count
 
 
+func get_total_received_bytes() -> int:
+	return _total_received_bytes
+
+
+func get_total_sent_bytes() -> int:
+	return _total_sent_bytes
+
+
 func _evict_stale_reassemblies() -> void:
 	if _reassembler.is_empty():
 		return
@@ -303,4 +314,7 @@ func get_port() -> int:
 func _send_hello() -> void:
 	if not _connected:
 		return
-	var _err: int = int(_udp.put_packet("Hello".to_utf8_buffer()))
+	var hello := "Hello".to_utf8_buffer()
+	var error: int = int(_udp.put_packet(hello))
+	if error == OK:
+		_total_sent_bytes += hello.size()

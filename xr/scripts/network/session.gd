@@ -20,6 +20,7 @@ var _blueprint_enabled: bool = false
 var _descriptor: Dictionary = {}
 var _handshake_timer: float = 0.0
 const HANDSHAKE_TIMEOUT: float = 3.0
+const DEDICATED_TELEMETRY_CAPABILITY := "dedicated_telemetry_v1"
 
 
 func start_handshake() -> void:
@@ -27,11 +28,19 @@ func start_handshake() -> void:
 	_is_legacy = false
 	_handshake_timer = 0.0
 	# Send Hello
-	var hello = {
+	var hello := hello_payload()
+	var json_bytes = JSON.stringify(hello).to_utf8_buffer()
+	tcp_handler.send_command("Hello", json_bytes)
+	print("[Session] Hello sent, waiting for DeviceDescriptor...")
+
+
+static func hello_payload() -> Dictionary:
+	return {
 		"version": "2.0",
 		"client": "godot",
 		"capabilities": [
 			"xr_state_v1",
+			DEDICATED_TELEMETRY_CAPABILITY,
 			BlueprintPrimitiveSpec.CAPABILITY,
 			BlueprintPrimitiveSpec.SPEC_CAPABILITY,
 			"hand_tracking",
@@ -40,9 +49,6 @@ func start_handshake() -> void:
 			"controller",
 		],
 	}
-	var json_bytes = JSON.stringify(hello).to_utf8_buffer()
-	tcp_handler.send_command("Hello", json_bytes)
-	print("[Session] Hello sent, waiting for DeviceDescriptor...")
 
 
 func handle_command(command: String, data: PackedByteArray) -> bool:

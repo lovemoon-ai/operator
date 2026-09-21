@@ -112,10 +112,14 @@ func _process(delta: float) -> void:
 		_on_tracking_invalidated({"phase": "waiting_body"})
 		return
 	var frame := _frame_v1(snapshot)
-	var payload := JSON.stringify(frame).to_utf8_buffer()
-	if tcp_handler.send_command("XrStateFrame", payload) == OK:
+	if _send_frame(frame) == OK:
 		_has_published_tracking = true
 		frame_sent.emit(int(frame.get("frame_id", 0)), int(frame.get("timestamp_ns", 0)))
+
+
+func _send_frame(frame: Dictionary) -> Error:
+	var payload := JSON.stringify(frame).to_utf8_buffer()
+	return tcp_handler.send_latest_command("XrStateFrame", payload)
 
 
 func _ensure_sampler() -> XrTrackingSampler:

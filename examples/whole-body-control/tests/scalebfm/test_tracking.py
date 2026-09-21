@@ -40,8 +40,10 @@ def test_extract_uses_five_named_body_joints_not_head_or_joint_order(joint_set, 
 
 
 def test_calibration_scales_absolute_positions_and_aligns_heading():
-    # Upstream ScaleBridge semantics: absolute human positions x scale, then
-    # heading/XY alignment onto the robot (not a robot-anchored delta).
+    # PICO port semantics: upstream heading+XY alignment plus a per-link
+    # Cartesian anchor. At calibration each of the five points lands exactly
+    # on the corresponding robot reset body; subsequent motion is the
+    # heading-aligned scaled delta of each link from its calibration sample.
     neutral = np.array([[0, 0, 1], [-.2, .4, 1.2], [-.2, -.4, 1.2], [.1, .15, 0], [.1, -.15, 0.]])
     heading = Rotation.from_euler("z", .8)
     human = FivePointFrame(1, heading.apply(neutral) + [2, 3, 0], np.tile(wxyz(heading), (5, 1)))
@@ -49,16 +51,47 @@ def test_calibration_scales_absolute_positions_and_aligns_heading():
     robot_q = np.tile([1., 0, 0, 0], (5, 1))
     calibration = Calibration(human, robot, robot_q, list(FIVE_POINTS), .75)
     p, q = calibration.apply(human)
-    # The first pelvis lands at stage origin XY; heights are absolute x scale.
-    np.testing.assert_allclose(p[0], [0, 0, .75], atol=1e-12)
-    np.testing.assert_allclose(p[1], [-.15, .3, .9], atol=1e-12)
+    # Every five-point link lands exactly on the robot's reset pose.
+    np.testing.assert_allclose(p, robot, atol=1e-12)
     np.testing.assert_allclose(rotation_wxyz(q).as_matrix(), rotation_wxyz(robot_q).as_matrix(), atol=1e-12)
+    # Any subsequent motion applies a heading-aligned scaled delta uniformly
+    # to all five links.
     moved = replace(human, positions=human.positions + heading.apply([.2, 0, .1]),
                     rotations=wxyz(heading * Rotation.from_euler("z", np.full((5, 1), .3))))
     p, q = calibration.apply(moved)
     np.testing.assert_allclose(p - calibration.apply(human)[0],
                                np.tile([.15, 0, .075], (5, 1)), atol=1e-12)
     np.testing.assert_allclose(rotation_wxyz(q).as_euler("xyz")[:, 2], .3)
+
+
+def test_calibration_anchors_every_five_point_to_robot_reset_pose():
+    # Regression: a single pelvis-Z anchor still left the wrists and ankles
+    # tracking scaled human-absolute Z, which for a standing PICO operator
+    # sends the ankles ~9 cm off the floor and the wrists ~7 cm below the
+    # trained standing pose (training G1 ankles ~0.03m, wrists ~0.70m).
+    # The policy folded the disagreement into a persistent crouch. Anchoring
+    # every five-point link removes it.
+    neutral = np.array([[0, 0, .95], [0, .2, .75], [0, -.2, .75], [0, .1, 0.06], [0, -.1, 0.06]])
+    human = FivePointFrame(1, neutral, np.tile([1., 0, 0, 0], (5, 1)))
+    robot_positions = np.array([[0, 0, .793], [0, .2, .70], [0, -.2, .70], [0, .1, 0.034], [0, -.1, 0.034]])
+    robot_rotations = np.tile([1., 0, 0, 0], (5, 1))
+    calibration = Calibration(human, robot_positions, robot_rotations, list(FIVE_POINTS), .75)
+    p, _ = calibration.apply(human)
+    np.testing.assert_allclose(p, robot_positions, atol=1e-9)
+    # The calibration-frame identity above holds for any scale, so it cannot on
+    # its own show that each link tracks its *own* scaled delta. Pin motion too:
+    # a 10 cm human squat must drop every link 7.5 cm from its robot reset
+    # height, rather than falling back to scaled human-absolute Z (which would
+    # put the ankles at .75 * -.04 = -.03 m, through the floor).
+    squat = replace(human, positions=human.positions + [0, 0, -.10])
+    np.testing.assert_allclose(
+        calibration.apply(squat)[0], robot_positions + [0, 0, -.075], atol=1e-9
+    )
+    # ...and that the delta really is scaled: a different scale must move it.
+    half = Calibration(human, robot_positions, robot_rotations, list(FIVE_POINTS), .5)
+    np.testing.assert_allclose(
+        half.apply(squat)[0], robot_positions + [0, 0, -.05], atol=1e-9
+    )
 
 
 def test_reference_buffer_delays_without_predicting_and_slerps():

@@ -203,9 +203,17 @@ retargeting: uniform absolute scaling of the tracked skeleton
 per-link rotation offsets measured at calibration (the PICO analogue of
 upstream's hardcoded Xsens→G1 arm offsets; see `wbc/controllers/scalebfm/
 retarget.py`, which also carries the literal upstream `XsensProcessor` port and
-a fingerprint-pinned conformance test). This is a uniform-scale mapping, not a
-full anatomical retargeter; extreme motion and poor foot tracking can cause the
-simulated robot to fall. Press ABXY to reset it.
+a fingerprint-pinned conformance test). Each of the five tracked links
+(pelvis, both wrists, both ankles) is additionally anchored on the robot's
+reset pose at calibration so operator height and skeleton proportions do not
+force the policy into a persistent crouch: upstream's Xsens scale coincides
+with the trained G1 link heights for an average Xsens operator, but PICO
+body tracking measures the operator's actual joint heights, and without the
+per-link anchor the wrists drag ~7 cm low, the ankles float ~9 cm off the
+floor, and the policy folds the disagreement into a half-squat. This is a
+uniform-scale mapping, not a full anatomical retargeter; extreme motion and
+poor foot tracking can cause the simulated robot to fall. Press ABXY to
+reset it.
 
 For USB-only testing, reverse the command and telemetry TCP ports, then launch
 Outside Robot against `127.0.0.1:63901`:

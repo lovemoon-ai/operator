@@ -7,6 +7,9 @@ extends Node3D
 
 const VideoLatencyTracker = preload("res://addons/live_video/live_video_latency.gd")
 const VideoPanelSidecarScript = preload("res://scripts/ui/video_panel_sidecar.gd")
+const VideoPerformancePanelScript = preload("res://scripts/ui/video_performance_panel.gd")
+const VideoPanelMoreButtonScript = preload("res://scripts/ui/video_panel_more_button.gd")
+const VideoStatusBarScript = preload("res://scripts/ui/video_status_bar.gd")
 const DEFAULT_VIDEO_DECODER_SINGLETON := "KotlinVideoDecoderPlugin"
 const TARGET_GROUP := "operator_interaction_target"
 const DEFAULT_PANEL_DISTANCE := 3.0
@@ -14,6 +17,8 @@ const MIN_PANEL_DISTANCE := 2.0
 const MAX_PANEL_DISTANCE := 6.0
 const DISTANCE_METERS_PER_SCROLL_PIXEL := 0.0015
 const PERFORMANCE_PANEL_GAP_METERS := 0.10
+const VIDEO_MENU_GAP_METERS := 0.08
+const VIDEO_MORE_INSET_METERS := 0.08
 const SIDECAR_Z_OFFSET_METERS := 0.02
 const VIDEO_INTERACTION_PRIORITY := 10
 const YUV_COLOR_STANDARD_AUTO := "auto"
@@ -25,6 +30,13 @@ const MAX_DRAW_INTERVAL_SAMPLES := 120
 
 @onready var _display_mesh: MeshInstance3D = get_node_or_null("DisplayMesh") as MeshInstance3D
 var _panel_sidecar: Node3D
+var _performance_panel: Node3D
+var _system_performance_panel: Node3D
+var _more_button: Node3D
+var _status_bar: Node3D
+var _video_menu_open := false
+var _status_state := ""
+var _status_message := ""
 
 # How often to refresh the performance sidecar. Once every 200 ms keeps the numbers
 # legible while still being fresh enough to react to network blips.
@@ -124,6 +136,8 @@ var _submitted_video_packets: Array[Dictionary] = []
 ## park a placeholder quad in front of the operator before they've connected
 ## to anything.
 @export var show_video_panel: bool = false
+@export var show_performance_info: bool = true
+@export var show_system_performance_info: bool = false
 @export var panel_distance_locked: bool = true
 
 var _xr_camera: XRCamera3D = null
@@ -185,6 +199,19 @@ func _ensure_panel_sidecar() -> void:
 	add_child(_panel_sidecar)
 	if _panel_sidecar.has_method("set_distance_locked"):
 		_panel_sidecar.call("set_distance_locked", panel_distance_locked)
+	_performance_panel = VideoPerformancePanelScript.new()
+	_performance_panel.name = "VideoPerformancePanel"
+	add_child(_performance_panel)
+	_system_performance_panel = VideoPerformancePanelScript.new()
+	_system_performance_panel.name = "SystemPerformancePanel"
+	add_child(_system_performance_panel)
+	_more_button = VideoPanelMoreButtonScript.new()
+	_more_button.name = "VideoPanelMoreButton"
+	_more_button.connect("pressed", _toggle_video_menu)
+	add_child(_more_button)
+	_status_bar = VideoStatusBarScript.new()
+	_status_bar.name = "VideoStatusBar"
+	add_child(_status_bar)
 	_sync_sidecar_transform()
 
 
@@ -222,6 +249,35 @@ func set_show_video_panel(value: bool) -> void:
 	_update_panel_visibility()
 
 
+func set_show_performance_info(value: bool) -> void:
+	show_performance_info = value
+	_update_panel_visibility()
+
+
+func set_show_system_performance_info(value: bool) -> void:
+	show_system_performance_info = value
+	_update_panel_visibility()
+
+
+func set_system_performance_text(text: String) -> void:
+	if _system_performance_panel != null \
+			and _system_performance_panel.has_method("set_performance_text"):
+		_system_performance_panel.call("set_performance_text", text)
+
+
+func set_status_text(state: String, message: String) -> void:
+	_status_state = state
+	_status_message = message
+	if _status_bar != null and _status_bar.has_method("set_status"):
+		_status_bar.call("set_status", state, message)
+	_update_panel_visibility()
+
+
+func _toggle_video_menu() -> void:
+	_video_menu_open = not _video_menu_open
+	_update_panel_visibility()
+
+
 ## Single source of truth for whether the 3D panel should be on screen.
 ## The panel is visible iff (a) the active owner requested `show_video_panel`,
 ## AND (b) we've seen at least one frame from the robot. Called from
@@ -233,8 +289,22 @@ func _update_panel_visibility() -> void:
 	var became_visible := want_visible and not visible
 	if visible != want_visible:
 		visible = want_visible
+	if not want_visible:
+		_video_menu_open = false
 	if _panel_sidecar != null:
-		_panel_sidecar.visible = want_visible
+		_panel_sidecar.visible = want_visible and _video_menu_open
+	if _performance_panel != null:
+		_performance_panel.visible = want_visible and show_performance_info
+	if _system_performance_panel != null:
+		_system_performance_panel.visible = (
+			want_visible and show_system_performance_info
+		)
+	if _more_button != null:
+		_more_button.visible = want_visible
+		if _more_button.has_method("set_expanded"):
+			_more_button.call("set_expanded", _video_menu_open)
+	if _status_bar != null:
+		_status_bar.visible = want_visible and not _status_message.is_empty()
 	if became_visible and not follow_camera:
 		_place_panel_in_front_of_camera(follow_distance)
 
@@ -413,13 +483,55 @@ func _display_dimensions() -> Vector2:
 func _sync_sidecar_transform() -> void:
 	if _panel_sidecar == null or _display_mesh == null:
 		return
-	var sidecar_size_value: Variant = _panel_sidecar.get("quad_size")
-	var sidecar_size := Vector2(3.2, 0.45)
-	if sidecar_size_value is Vector2:
-		sidecar_size = sidecar_size_value
+	var video_size := _display_dimensions()
+	var status_size := _quad_size(_status_bar, Vector2(3.2, 0.23)) if _status_bar != null else Vector2.ZERO
+	var menu_size := _quad_size(_panel_sidecar, Vector2(0.9, 0.39))
 	_panel_sidecar.global_transform = _display_mesh.global_transform * Transform3D(
-		Basis.IDENTITY, _performance_panel_local_offset(_display_dimensions(), sidecar_size)
+		Basis.IDENTITY, _video_menu_local_offset(video_size, menu_size, status_size)
 	)
+	if _status_bar != null:
+		_status_bar.global_transform = _display_mesh.global_transform * Transform3D(
+			Basis.IDENTITY, _video_status_local_offset(video_size, status_size)
+		)
+	if _performance_panel != null:
+		var performance_size := _quad_size(_performance_panel, Vector2(3.2, 0.45))
+		_performance_panel.global_transform = _display_mesh.global_transform * Transform3D(
+			Basis.IDENTITY,
+			_performance_panel_local_offset(video_size, performance_size),
+		)
+	if _system_performance_panel != null:
+		var system_performance_size := _quad_size(
+			_system_performance_panel, Vector2(3.2, 0.45)
+		)
+		var video_performance_height := (
+			_quad_size(_performance_panel, Vector2(3.2, 0.45)).y
+			if show_performance_info
+			else 0.0
+		)
+		_system_performance_panel.global_transform = (
+			_display_mesh.global_transform
+			* Transform3D(
+				Basis.IDENTITY,
+				_system_performance_panel_local_offset(
+					video_size,
+					system_performance_size,
+					video_performance_height,
+				),
+			)
+		)
+	if _more_button != null:
+		var button_size := _quad_size(_more_button, Vector2(0.16, 0.16))
+		_more_button.global_transform = _display_mesh.global_transform * Transform3D(
+			Basis.IDENTITY,
+			_video_more_button_local_offset(video_size, button_size),
+		)
+
+
+static func _quad_size(node: Node3D, fallback: Vector2) -> Vector2:
+	var size_value: Variant = node.get("quad_size")
+	if size_value is Vector2:
+		return size_value as Vector2
+	return fallback
 
 
 static func _performance_panel_local_offset(
@@ -432,6 +544,53 @@ static func _performance_panel_local_offset(
 	)
 
 
+static func _system_performance_panel_local_offset(
+	video_size: Vector2,
+	panel_size: Vector2,
+	video_performance_height: float,
+) -> Vector3:
+	return Vector3(
+		0.0,
+		video_size.y * 0.5
+		+ PERFORMANCE_PANEL_GAP_METERS
+		+ video_performance_height
+		+ (PERFORMANCE_PANEL_GAP_METERS if video_performance_height > 0.0 else 0.0)
+		+ panel_size.y * 0.5,
+		SIDECAR_Z_OFFSET_METERS,
+	)
+
+
+static func _video_status_local_offset(video_size: Vector2, status_size: Vector2) -> Vector3:
+	return Vector3(
+		0.0,
+		-video_size.y * 0.5 - VIDEO_MENU_GAP_METERS - status_size.y * 0.5,
+		SIDECAR_Z_OFFSET_METERS,
+	)
+
+
+static func _video_menu_local_offset(
+	video_size: Vector2, menu_size: Vector2, status_size: Vector2 = Vector2.ZERO
+) -> Vector3:
+	return Vector3(
+		0.0,
+		-video_size.y * 0.5
+		- VIDEO_MENU_GAP_METERS * 2.0
+		- status_size.y
+		- menu_size.y * 0.5,
+		SIDECAR_Z_OFFSET_METERS,
+	)
+
+
+static func _video_more_button_local_offset(
+	video_size: Vector2, button_size: Vector2
+) -> Vector3:
+	return Vector3(
+		video_size.x * 0.5 - button_size.x * 0.5 - VIDEO_MORE_INSET_METERS,
+		-video_size.y * 0.5 + button_size.y * 0.5 + VIDEO_MORE_INSET_METERS,
+		SIDECAR_Z_OFFSET_METERS * 1.5,
+	)
+
+
 func get_panel_anchor_transform(local_offset: Vector3) -> Transform3D:
 	if _display_mesh == null:
 		return global_transform
@@ -439,8 +598,8 @@ func get_panel_anchor_transform(local_offset: Vector3) -> Transform3D:
 
 
 func _set_performance_text(text: String) -> void:
-	if _panel_sidecar != null and _panel_sidecar.has_method("set_performance_text"):
-		_panel_sidecar.call("set_performance_text", text)
+	if _performance_panel != null and _performance_panel.has_method("set_performance_text"):
+		_performance_panel.call("set_performance_text", text)
 
 
 func _set_performance_metrics() -> void:
@@ -629,7 +788,7 @@ func _poll_ahb_frame() -> void:
 ## decoded and uploaded frames separately makes mailbox skips visible instead
 ## of reporting a misleading callback rate as display FPS.
 func _update_latency_hud() -> void:
-	if _panel_sidecar == null:
+	if _performance_panel == null:
 		return
 	var now_ns := VideoLatencyTracker.now_ns()
 	if now_ns - _last_hud_update_ns < _HUD_UPDATE_INTERVAL_NS:
@@ -1078,7 +1237,6 @@ func _disconnect_decoder_signal(signal_name: String, method_name: String) -> voi
 		_video_decoder.disconnect(signal_name, callable)
 
 
-var _frame_diag_count: int = 0
 var _shader_video_bound_logged: bool = false
 
 # Plan B: GPU YUV path. We keep three reusable ImageTextures (Y full
@@ -1179,8 +1337,6 @@ func _on_video_yuv_frame_ready(
 		])
 		return
 
-	_frame_diag_count += 1
-
 	# [plan C] Reuse the same Image instances across frames. set_data()
 	# replaces the pixel bytes in place; the GPU upload that
 	# ImageTexture.update() does next reads from the same Image. Saves
@@ -1227,10 +1383,9 @@ func _on_video_yuv_frame_ready(
 	_uploaded_frame_count += 1
 	_pending_draw_sequence = frame_sequence if frame_sequence > 0 else _uploaded_frame_count
 
-	# [plan C] Latency log was per-frame. At 30 fps that's 30
-	# print()-to-logcat calls per second, each requiring a string
-	# format pass. Throttle to ~1 Hz: emit only when we've crossed a
-	# 1-second boundary, plus any latency outliers (>200 ms total).
+	# print()-to-logcat is synchronous enough to disturb an XR render loop.
+	# Keep latency diagnostics to one line per second even during an outlier;
+	# logging every slow frame creates a self-reinforcing slowdown.
 	# The mailbox poll already correlated this decoded sequence with the newest
 	# submitted access unit. Legacy direct callers may omit packet metadata.
 	if packet.is_empty() and not _last_video_packet.is_empty():
@@ -1245,11 +1400,7 @@ func _on_video_yuv_frame_ready(
 	_last_video_packet["present_ns"] = present_ns
 	_record_local_latency(_last_video_packet, present_ns)
 
-	var receive_ns: int = int(_last_video_packet.get("receive_ns", 0))
 	var should_log: bool = present_ns - _last_latency_log_ns >= 1_000_000_000
-	if not should_log:
-		if receive_ns > 0 and present_ns - receive_ns > 200_000_000:
-			should_log = true
 	if should_log:
 		_last_latency_log_ns = present_ns
 		print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(_last_video_packet, _clock_offset_ns, _clock_samples))
@@ -1283,66 +1434,9 @@ func _on_video_frame_ready(
 		print("[LiveVideo] Video frame size mismatch: %d bytes for %dx%d" % [rgba.size(), width, height])
 		return
 
-	# Diagnostic: every 60 frames sample pixels and dump mesh state.
-	_frame_diag_count += 1
-	if _frame_diag_count % 60 == 1:
-		var sample_count := 16
-		var r_sum := 0
-		var g_sum := 0
-		var b_sum := 0
-		var step := maxi(4, (rgba.size() / 4 / sample_count) * 4)
-		var taken := 0
-		var off := 0
-		while off + 2 < rgba.size() and taken < sample_count:
-			r_sum += int(rgba[off])
-			g_sum += int(rgba[off + 1])
-			b_sum += int(rgba[off + 2])
-			off += step
-			taken += 1
-		var t := maxi(1, taken)
-		# First 4 RGBA bytes (one pixel) so we can tell if conversion is sane.
-		var first_pixel := "[%d,%d,%d,%d]" % [
-			int(rgba[0]) if rgba.size() > 0 else -1,
-			int(rgba[1]) if rgba.size() > 1 else -1,
-			int(rgba[2]) if rgba.size() > 2 else -1,
-			int(rgba[3]) if rgba.size() > 3 else -1,
-		]
-		var mesh_visible: bool = _display_mesh != null and _display_mesh.is_visible_in_tree()
-		var mat_ok: bool = _display_mesh != null and _display_mesh.material_override == _shader_material
-		var mesh_pos: Vector3 = Vector3.ZERO
-		if _display_mesh:
-			mesh_pos = _display_mesh.global_transform.origin
-		var bound_id: int = -1
-		if _shader_material:
-			var bound: Variant = _shader_material.get_shader_parameter("video_texture")
-			if bound != null:
-				bound_id = bound.get_instance_id()
-		var ph_id: int = -1
-		if _placeholder_texture:
-			ph_id = _placeholder_texture.get_instance_id()
-		var vid_id: int = -1
-		if _video_texture:
-			vid_id = _video_texture.get_instance_id()
-		print("[LiveVideo] DIAG f=%d size=%dx%d avgRGB=(%d,%d,%d) px0=%s mesh=%s mat=%s pos=%s stereo=%s shader_bound=%d placeholder=%d video_tex=%d" % [
-			_frame_diag_count, width, height,
-			r_sum / t, g_sum / t, b_sum / t,
-			first_pixel,
-			mesh_visible, mat_ok, mesh_pos, _video_layout_stereo,
-			bound_id, ph_id, vid_id,
-		])
-
 	var image := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, rgba)
 	if image.get_width() <= 0 or image.get_height() <= 0:
 		return
-
-	# Diagnostic: dump every 120th decoded frame to disk so we can pull it
-	# via adb and visually verify what the YUV->RGB conversion produced.
-	if _frame_diag_count % 120 == 1:
-		var path := "user://decoded_frame_%d.png" % _frame_diag_count
-		var err := image.save_png(path)
-		print("[LiveVideo] DIAG saved decoded frame to %s err=%d (= %s)" % [
-			path, err, ProjectSettings.globalize_path(path),
-		])
 
 	if packet.is_empty() and not _last_video_packet.is_empty():
 		packet = _last_video_packet
@@ -1398,10 +1492,7 @@ func update_video_texture(
 	var present_ns := VideoLatencyTracker.now_ns()
 	_last_video_packet["present_ns"] = present_ns
 	_record_local_latency(_last_video_packet, present_ns)
-	var receive_ns := int(_last_video_packet.get("receive_ns", 0))
 	var should_log := present_ns - _last_latency_log_ns >= 1_000_000_000
-	if not should_log and receive_ns > 0 and present_ns - receive_ns > 200_000_000:
-		should_log = true
 	if should_log:
 		_last_latency_log_ns = present_ns
 		print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(
@@ -1501,6 +1592,7 @@ var _stale_dropped_count: int = 0
 # Submission failures indicate decoder shutdown/reconfiguration or frames
 # intentionally rejected while waiting for a random-access frame.
 var _decoder_busy_count: int = 0
+var _last_decoder_busy_log_ns: int = 0
 
 
 ## Report a received video packet before decoding.
@@ -1508,16 +1600,27 @@ func report_video_packet(packet: Dictionary) -> void:
 	if packet.is_empty():
 		return
 
-	_last_video_packet = packet.duplicate(true)
+	# Keep only timing metadata. A deep duplicate here copied the full compressed
+	# NAL on the Godot render thread before immediately copying it again into an
+	# access unit; large IDRs made the entire XR UI hitch on connection.
+	_last_video_packet = packet.duplicate(false)
+	var nal_data: PackedByteArray = _last_video_packet.get("nal_data", PackedByteArray())
+	_last_video_packet.erase("nal_data")
+	_last_video_packet.erase("bytes_consumed")
 
 	var nal_index: int = int(_last_video_packet.get("nal_index", 0))
 	var nal_count: int = int(_last_video_packet.get("nal_count", 1))
-	var nal_data: PackedByteArray = _last_video_packet.get("nal_data", PackedByteArray())
 
 	if nal_index == 0:
 		_pending_access_unit = PackedByteArray()
 
-	_pending_access_unit.append_array(nal_data)
+	# Most encoder packets already contain one complete access unit. Preserve
+	# PackedByteArray's copy-on-write reference in that common path instead of
+	# allocating and copying every compressed frame once more.
+	if nal_count <= 1:
+		_pending_access_unit = nal_data
+	else:
+		_pending_access_unit.append_array(nal_data)
 	if nal_index + 1 < nal_count:
 		return
 
@@ -1532,14 +1635,25 @@ func report_video_packet(packet: Dictionary) -> void:
 
 	if _video_decoder and decoder_running:
 		_decoder_busy_count += 1
-		print("[LiveVideo] Video decoder busy, dropping frame %d" % int(_last_video_packet.get("frame_id", -1)))
+		var now_ns := VideoLatencyTracker.now_ns()
+		if now_ns - _last_decoder_busy_log_ns >= 1_000_000_000:
+			_last_decoder_busy_log_ns = now_ns
+			print("[LiveVideo] Video decoder busy; dropped=%d latest_frame=%d" % [
+				_decoder_busy_count,
+				int(_last_video_packet.get("frame_id", -1)),
+			])
 		return
 
 	# If no decoder is available, keep the old latency logging path.
 	if int(_last_video_packet.get("decoded_ns", 0)) <= 0:
 		_last_video_packet["decoded_ns"] = VideoLatencyTracker.now_ns()
-	_last_video_packet["present_ns"] = VideoLatencyTracker.now_ns()
-	print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(_last_video_packet, _clock_offset_ns, _clock_samples))
+	var present_ns := VideoLatencyTracker.now_ns()
+	_last_video_packet["present_ns"] = present_ns
+	if present_ns - _last_latency_log_ns >= 1_000_000_000:
+		_last_latency_log_ns = present_ns
+		print("[LiveVideo] Video latency: %s" % VideoLatencyTracker.format_packet(
+			_last_video_packet, _clock_offset_ns, _clock_samples
+		))
 
 
 ## Backward-compatible alias used by older hooks.
@@ -1554,6 +1668,7 @@ func clear_video_stream() -> void:
 	_smoothed_local_latency_ms = -1.0
 	_stale_dropped_count = 0
 	_decoder_busy_count = 0
+	_last_decoder_busy_log_ns = 0
 	_last_video_packet.clear()
 	_receiving_video = false
 	_configured_width = 0

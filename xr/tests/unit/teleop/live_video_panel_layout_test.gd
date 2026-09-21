@@ -107,6 +107,10 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		display.position.is_equal_approx(camera.position + Vector3(0.0, 0.0, -3.0)),
 		"a newly visible world-locked panel starts in front of the current view"
 	)
+	view.set_show_performance_info(false)
+	t.is_false(view.show_performance_info, "video performance information can be hidden")
+	view.set_show_performance_info(true)
+	t.is_true(view.show_performance_info, "video performance information can be restored")
 
 	t.is_true(view.update_pointer_from_ray(camera.position, Vector3.FORWARD),
 		"controller ray can target the video surface")
@@ -122,6 +126,21 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"performance panel is positioned above the video")
 	t.is_true(performance_offset.z > 0.0,
 		"performance panel renders slightly in front of the video plane")
+	var menu_offset := LiveVideoViewScript._video_menu_local_offset(
+		Vector2(3.2, 1.8), Vector2(0.9, 0.39), Vector2(3.2, 0.23)
+	)
+	t.is_true(menu_offset.y < -1.8 * 0.5,
+		"the expanded video menu is positioned below the video")
+	var status_offset := LiveVideoViewScript._video_status_local_offset(
+		Vector2(3.2, 1.8), Vector2(3.2, 0.23)
+	)
+	t.is_true(status_offset.y < -1.8 * 0.5 and status_offset.y > menu_offset.y,
+		"the status bar stays between the video and expanded controls")
+	var more_offset := LiveVideoViewScript._video_more_button_local_offset(
+		Vector2(3.2, 1.8), Vector2(0.16, 0.16)
+	)
+	t.is_true(more_offset.x > 0.0 and more_offset.y < 0.0,
+		"the compact menu button sits inside the video's lower-right corner")
 
 	view._record_local_latency({"receive_ns": 1_000_000_000}, 1_025_000_000)
 	t.is_true(is_equal_approx(view._smoothed_local_latency_ms, 25.0),

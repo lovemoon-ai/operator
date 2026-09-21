@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 
 /// Current schema version emitted by robot-service.
 pub const CURRENT_DEVICE_DESCRIPTOR_VERSION: u32 = 2;
+/// Headset Hello capability indicating that telemetry will be consumed from
+/// the dedicated telemetry port and must not also be mirrored on the command
+/// connection.
+pub const DEDICATED_TELEMETRY_CAPABILITY: &str = "dedicated_telemetry_v1";
 
 fn legacy_descriptor_version() -> u32 {
     1

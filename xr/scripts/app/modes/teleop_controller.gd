@@ -17,7 +17,6 @@ extends Node3D
 ##    status label while the panel is open.
 
 const SettingsUI = preload("res://scripts/ui/teleop_settings_panel.gd")
-const SettingsLauncherButtonScript = preload("res://scripts/ui/settings_launcher_button.gd")
 const TeleopControllerPanelScript = preload("res://scripts/ui/teleop_controller_panel.gd")
 const BodyPoseProviderScript = preload("res://scripts/robot_constraint/body_pose_provider.gd")
 const BodyPoseDebugOverlayScript = preload(
@@ -41,9 +40,9 @@ const INSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/inside_robot_tar
 const VIDEO_PROTOCOL_OPERATOR := "operator_timed_h264"
 const VIDEO_PROTOCOL_XROBOT_TOOLKIT := "xrobot_toolkit_fpv"
 const VIDEO_TEST_FIRST_FRAME_TIMEOUT_SEC := 8.0
+const VIDEO_RECONNECT_DELAY_SEC := 0.5
 
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
-const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const VIDEO_PREVIEW_CLOSE_INSET := Vector2(0.13, 0.13)
 const VIDEO_PREVIEW_CLOSE_Z_OFFSET := 0.04
 const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
@@ -58,7 +57,13 @@ const BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS := [
 const BLUEPRINT_EXTERNAL_VIEW_CONTRACTS := {
 	"video_panel": {
 		"properties": ["visible", "settings_label", "follow_camera", "distance"],
-		"bindings": ["visible", "follow_camera"],
+		"bindings": [
+			"visible",
+			"follow_camera",
+			"system_performance_text",
+			"status_state",
+			"status_text",
+		],
 		"events": [],
 	},
 	"controller_help": {
@@ -150,6 +155,7 @@ var _video_udp_handler: UdpVideoHandler
 var _xrt_video_session: Node
 var _active_video_transport: String = "tcp"  # "tcp" or "udp"
 var _last_video_feed: Dictionary = {}
+var _video_retry_remaining := -1.0
 var _active_telemetry_port := DEFAULT_TELEMETRY_PORT
 var _telemetry_retry_remaining := 0.0
 var _clock_sync: RobotClockSync
@@ -166,7 +172,6 @@ var _inside_target: Node
 var _active_target: Node
 
 var _settings_panel: Node3D
-var _settings_button: Node3D
 var _settings_ui: Node = null
 var _teleop_controller_panel: Node3D
 var _blueprint_external_view_visibility: Dictionary = {}
@@ -190,6 +195,8 @@ var _settings_menu_open := false
 var _link_active := false
 var _send_frame_count := 0
 var _send_rate_elapsed := 0.0
+var _last_network_received_bytes := 0
+var _last_network_sent_bytes := 0
 var _manual_video_protocol := ""
 var _manual_video_options: Dictionary = {}
 var _video_test_active := false
@@ -347,7 +354,6 @@ func _ready() -> void:
 	# composition layers. `_begin_launch_window` opens the panel immediately
 	# instead of waiting for discovery to finish.
 	_settings_panel.visible = false
-	_settings_button.visible = false
 
 	# Apply persisted runtime options immediately. The settings page's Test
 	# actions are previews only; the confirmed options own the working page.
@@ -373,28 +379,12 @@ func _process(_delta: float) -> void:
 	if _camera:
 		if _settings_panel and not _menu_world_locked:
 			_settings_panel.transform = _camera.transform * SETTINGS_PANEL_OFFSET
-		if _settings_button:
-			if (
-				_video_test_active
-				and _robot_view
-				and _robot_view.has_method("get_panel_anchor_transform")
-			):
-				var panel_size := _video_panel_size()
-				_settings_button.global_transform = _robot_view.call(
-					"get_panel_anchor_transform",
-					Vector3(
-						panel_size.x * 0.5 - VIDEO_PREVIEW_CLOSE_INSET.x,
-						panel_size.y * 0.5 - VIDEO_PREVIEW_CLOSE_INSET.y,
-						VIDEO_PREVIEW_CLOSE_Z_OFFSET,
-					)
-				)
-			else:
-				_settings_button.transform = _camera.transform * SETTINGS_BUTTON_OFFSET
 	_tick_send_rate(_delta)
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
 	_update_controller_shell()
 	_tick_telemetry_reconnect(_delta)
+	_tick_video_reconnect(_delta)
 	# Position refreshes every frame so the gizmo tracks the controller smoothly;
 	# its orientation only changes when telemetry reports a new captured frame.
 	_update_control_frame_gizmo()
@@ -413,8 +403,6 @@ func _apply_settings_input_indicator(mode: String) -> void:
 	if _settings_ui != null and _settings_ui.has_method("set_input_mode_indicator"):
 		_settings_ui.call("set_input_mode_indicator", mode)
 	var controller := _right_controller if mode == "controllers" else null
-	if _settings_button and _settings_button.has_method("set_feedback_input_mode"):
-		_settings_button.call("set_feedback_input_mode", mode, controller)
 
 
 func _bind_operator_interaction() -> void:
@@ -644,12 +632,6 @@ func _create_settings_ui_nodes() -> void:
 		tracking_sessions.changed.connect(_on_tracking_sessions_changed)
 		_on_tracking_sessions_changed()
 
-	_settings_button = SettingsLauncherButtonScript.new()
-	_settings_button.name = "TeleopSettingsButton"
-	_settings_button.pressed.connect(_on_settings_button_pressed)
-	_origin.add_child(_settings_button)
-
-
 	_teleop_controller_panel = TeleopControllerPanelScript.new()
 	_teleop_controller_panel.name = "TeleopControllerPanel"
 	# Keep the controller overlay in origin space and drive its global transform
@@ -673,6 +655,7 @@ func _create_settings_ui_nodes() -> void:
 	add_child(_controller_shell)
 	_controller_shell.call("configure", _origin, _camera, _left_controller, _right_controller, _tracking_provider, _blueprint_runtime)
 	_controller_shell.connect("connection_requested", _on_controller_connection_requested)
+	_controller_shell.connect("settings_requested", _on_settings_button_pressed)
 
 
 func _update_controller_shell() -> void:
@@ -807,7 +790,6 @@ func _on_xr_started() -> void:
 			_settings_panel.close()
 		else:
 			_settings_panel.visible = false
-		_settings_button.visible = true
 		_set_menu_guards(false)
 		_apply_runtime_settings(launch_options)
 		print(
@@ -917,6 +899,16 @@ func _apply_runtime_settings(options: Dictionary) -> void:
 	if not robot_authored_views:
 		show_video_panel = bool(options.get("show_video_panel", false))
 	if _robot_view:
+		if _robot_view.has_method("set_show_system_performance_info"):
+			_robot_view.call(
+				"set_show_system_performance_info",
+				bool(options.get("show_system_performance", false)),
+			)
+		if _robot_view.has_method("set_show_performance_info"):
+			_robot_view.call(
+				"set_show_performance_info",
+				bool(options.get("show_video_performance", true)),
+			)
 		if robot_authored_views and not _robot_authored_views_active:
 			var distance_value: Variant = _robot_view.get("follow_distance")
 			if distance_value is float or distance_value is int:
@@ -1132,6 +1124,15 @@ func _on_settings_close_requested() -> void:
 ## Only the display bits are read here: the scope and endpoint belong to the
 ## session that is actually running, not to whatever the form currently says.
 func _on_display_options_changed(options: Dictionary) -> void:
+	# Keep live preferences authoritative when a robot replaces its Blueprint
+	# (for example while toggling the MuJoCo scene). The replacement callback
+	# reapplies these values to the newly created components.
+	_applied_options["show_system_performance"] = bool(
+		options.get("show_system_performance", false)
+	)
+	_applied_options["show_video_performance"] = bool(
+		options.get("show_video_performance", true)
+	)
 	_menu_world_locked = bool(options.get("menu_world_locked", false))
 	if _menu_world_locked:
 		_place_settings_panel()
@@ -1150,6 +1151,16 @@ func _on_display_options_changed(options: Dictionary) -> void:
 		_ee_pose_trajectory.set_enabled(
 			bool(options.get("show_operation_trajectory", false))
 		)
+	if _robot_view and _robot_view.has_method("set_show_performance_info"):
+		_robot_view.call(
+			"set_show_performance_info",
+			bool(options.get("show_video_performance", true)),
+		)
+	if _robot_view and _robot_view.has_method("set_show_system_performance_info"):
+		_robot_view.call(
+			"set_show_system_performance_info",
+			bool(options.get("show_system_performance", false)),
+		)
 
 
 ## Target readiness owns this flag; opening or closing the page does not.
@@ -1158,6 +1169,8 @@ func _set_link_active(active: bool) -> void:
 	if not active:
 		_send_frame_count = 0
 		_send_rate_elapsed = 0.0
+	_last_network_received_bytes = _network_byte_total("get_total_received_bytes")
+	_last_network_sent_bytes = _network_byte_total("get_total_sent_bytes")
 	if _settings_ui and _settings_ui.has_method("set_link_active"):
 		_settings_ui.call("set_link_active", active)
 
@@ -1180,10 +1193,32 @@ func _tick_send_rate(delta: float) -> void:
 	if _send_rate_elapsed < 0.5:
 		return
 	var hz := float(_send_frame_count) / _send_rate_elapsed
+	var received_bytes := _network_byte_total("get_total_received_bytes")
+	var sent_bytes := _network_byte_total("get_total_sent_bytes")
+	var download_rate := float(maxi(0, received_bytes - _last_network_received_bytes)) / _send_rate_elapsed
+	var upload_rate := float(maxi(0, sent_bytes - _last_network_sent_bytes)) / _send_rate_elapsed
+	_last_network_received_bytes = received_bytes
+	_last_network_sent_bytes = sent_bytes
 	_send_frame_count = 0
 	_send_rate_elapsed = 0.0
 	if _settings_ui and _settings_ui.has_method("set_send_rate"):
 		_settings_ui.call("set_send_rate", hz)
+	if _settings_ui and _settings_ui.has_method("set_network_rate"):
+		_settings_ui.call("set_network_rate", upload_rate, download_rate)
+
+
+func _network_byte_total(method_name: String) -> int:
+	var total := 0
+	for handler_value: Variant in [
+		_tcp_handler,
+		_telemetry_tcp_handler,
+		_video_tcp_handler,
+		_video_udp_handler,
+	]:
+		var handler := handler_value as Node
+		if handler != null and handler.has_method(method_name):
+			total += int(handler.call(method_name))
+	return total
 
 
 func _on_xr_state_frame_sent(_frame_id: int, _timestamp_ns: int) -> void:
@@ -1455,8 +1490,6 @@ func _show_settings_panel() -> void:
 	_push_discovery_to_settings_ui()
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
-	if _settings_button and _settings_button.has_method("clear_pointer"):
-		_settings_button.clear_pointer()
 	if _settings_panel and _settings_panel.has_method("set_feedback_input_mode"):
 		var mode := _current_interaction_mode()
 		_settings_panel.set_feedback_input_mode(
@@ -1466,7 +1499,6 @@ func _show_settings_panel() -> void:
 		_settings_panel.open()
 	else:
 		_settings_panel.visible = true
-	_settings_button.visible = false
 
 
 func _hide_settings_panel() -> void:
@@ -1475,7 +1507,6 @@ func _hide_settings_panel() -> void:
 		_settings_panel.close()
 	else:
 		_settings_panel.visible = false
-	_settings_button.visible = true
 	_set_menu_guards(false)
 
 
@@ -1545,7 +1576,6 @@ func _begin_launch_window() -> void:
 				"XRoboToolkit mode uses the configured RoboticsService endpoint"
 			)
 			return
-		_settings_button.visible = true
 		_set_menu_guards(false)
 		print(
 			"[Operator] Auto-connecting XRoboToolkit compatibility target @ %s:%d"
@@ -1647,7 +1677,6 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 		_settings_panel.close()
 	else:
 		_settings_panel.visible = false
-	_settings_button.visible = true
 	_set_menu_guards(false)
 	print(
 		"[Operator] Auto-connecting to discovered %s endpoint @ %s:%d"
@@ -1667,7 +1696,6 @@ func _show_settings_panel_with_status(text: String) -> void:
 		_settings_panel.open()
 	else:
 		_settings_panel.visible = true
-	_settings_button.visible = false
 	if _settings_ui and _settings_ui.has_method("set_status"):
 		_settings_ui.set_status(text)
 
@@ -1676,13 +1704,10 @@ func _show_settings_panel_discovering() -> void:
 	_place_settings_panel()
 	_set_menu_guards(true)
 	_push_discovery_to_settings_ui()
-	if _settings_button and _settings_button.has_method("clear_pointer"):
-		_settings_button.clear_pointer()
 	if _settings_panel and _settings_panel.has_method("open"):
 		_settings_panel.open()
 	else:
 		_settings_panel.visible = true
-	_settings_button.visible = false
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(true, tr("UI_DISCOVERING_ROBOTS"))
 
@@ -1949,6 +1974,18 @@ func _apply_blueprint_video_panel(visible: bool, properties: Dictionary) -> void
 		_robot_view.follow_camera = bool(properties["follow_camera"])
 	if properties.has("distance") and _robot_view.has_method("set_panel_distance"):
 		_robot_view.call("set_panel_distance", float(properties["distance"]))
+	if _robot_view.has_method("set_status_text"):
+		_robot_view.call(
+			"set_status_text",
+			str(properties.get("status_state", "")),
+			str(properties.get("status_text", "")),
+		)
+	if properties.has("system_performance_text") \
+			and _robot_view.has_method("set_system_performance_text"):
+		_robot_view.call(
+			"set_system_performance_text",
+			str(properties["system_performance_text"]),
+		)
 	if not _video_test_active and _robot_view.has_method("set_show_video_panel"):
 		_robot_view.call("set_show_video_panel", visible)
 
@@ -2043,6 +2080,7 @@ func _telemetry_port_for(ip: String, pose_port: int) -> int:
 
 
 func _on_video_connected() -> void:
+	_video_retry_remaining = -1.0
 	print("[Operator] Video stream connected")
 	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
 		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_CONNECTED"))
@@ -2053,7 +2091,11 @@ func _on_video_disconnected() -> void:
 	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
 		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_DISCONNECTED"))
 		_return_from_failed_video_test()
-	if _robot_view and _robot_view.has_method("clear_video_stream"):
+	var retrying := _schedule_operator_video_reconnect()
+	# Keep the last decoded texture and decoder alive across a transient video
+	# reconnect. Clearing here hides the Blueprint-owned panel and makes every
+	# brief Wi-Fi stall rebuild MediaCodec on the render thread.
+	if not retrying and _robot_view and _robot_view.has_method("clear_video_stream"):
 		_robot_view.clear_video_stream()
 
 
@@ -2062,6 +2104,42 @@ func _on_video_connection_failed(reason: String) -> void:
 	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
 		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_FAILED") % reason)
 		_return_from_failed_video_test()
+	_schedule_operator_video_reconnect()
+
+
+func _schedule_operator_video_reconnect() -> bool:
+	if (
+		_active_video_transport == "tcp"
+		and _active_target == _outside_target
+		and _tcp_handler != null
+		and _tcp_handler.is_connected_to_robot()
+	):
+		_video_retry_remaining = VIDEO_RECONNECT_DELAY_SEC
+		return true
+	return false
+
+
+func _tick_video_reconnect(delta: float) -> void:
+	if _video_retry_remaining < 0.0:
+		return
+	if (
+		_active_video_transport != "tcp"
+		or _active_target != _outside_target
+		or _tcp_handler == null
+		or not _tcp_handler.is_connected_to_robot()
+		or _video_tcp_handler == null
+	):
+		_video_retry_remaining = -1.0
+		return
+	if _video_tcp_handler.get_state() != TcpHandler.State.DISCONNECTED:
+		_video_retry_remaining = -1.0
+		return
+	_video_retry_remaining -= maxf(delta, 0.0)
+	if _video_retry_remaining > 0.0:
+		return
+	_video_retry_remaining = -1.0
+	print("[Operator] Reconnecting latest-frame video stream")
+	_connect_video_stream(_tcp_handler.get_host(), _tcp_handler.get_port())
 
 
 func _on_video_frame_received(packet: Dictionary) -> void:
@@ -2178,10 +2256,6 @@ func _begin_video_test(_options: Dictionary) -> void:
 		_settings_panel.close()
 	elif _settings_panel:
 		_settings_panel.visible = false
-	if _settings_button:
-		if _settings_button.has_method("set_video_preview_mode"):
-			_settings_button.call("set_video_preview_mode", true)
-		_settings_button.visible = true
 	_watch_video_test_first_frame(_video_test_generation)
 
 
@@ -2221,8 +2295,6 @@ func _end_video_test() -> void:
 				_blueprint_external_view_visibility.get("video_panel", false)
 			)
 		_robot_view.set_show_video_panel(restore_visible)
-	if _settings_button and _settings_button.has_method("set_video_preview_mode"):
-		_settings_button.call("set_video_preview_mode", false)
 
 
 func _video_is_streaming() -> bool:
@@ -2906,7 +2978,6 @@ func _start_inside_from_launch_args() -> void:
 		_settings_panel.close()
 	else:
 		_settings_panel.visible = false
-	_settings_button.visible = true
 	_set_menu_guards(false)
 	_on_settings_applied(options)
 

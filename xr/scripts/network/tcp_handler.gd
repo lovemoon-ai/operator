@@ -83,6 +83,19 @@ const READ_CHUNK_SIZE := 65536
 ## DEFAULT_MAX_RECV_BUFFER but configurable by callers that know they
 ## need more headroom (e.g. the dedicated video stream handler).
 var _max_recv_buffer: int = DEFAULT_MAX_RECV_BUFFER
+## Lifetime wire-byte counters. They intentionally survive reconnects so a
+## UI sampler can compute deltas without racing a connection-state reset.
+var _total_received_bytes: int = 0
+var _total_sent_bytes: int = 0
+## All writes are non-blocking and serialized through one framed queue. An
+## active frame must finish before another starts or the TCP byte stream would
+## be corrupted. Reliable control frames retain FIFO order; high-rate state
+## keeps only the newest frame that has not started writing yet.
+var _active_send_frame := PackedByteArray()
+var _active_send_offset: int = 0
+var _active_send_replaceable := false
+var _reliable_send_queue: Array[PackedByteArray] = []
+var _latest_send_frame := PackedByteArray()
 
 
 ## [issue 005 / item 6] Override the receive buffer cap for this
@@ -106,6 +119,15 @@ func get_max_recv_buffer() -> int:
 ## access unit larger than one chunk), without risking livelock if a
 ## buggy producer feeds us forever.
 const MAX_DRAIN_PER_TICK: int = 32
+## StreamPeerTCP is polled on the Godot main thread. Draining a whole burst
+## (especially a 1--2 MiB video IDR) in one render tick causes a visible XR UI
+## hitch. 256 KiB/tick still permits >20 MiB/s at 90 Hz while bounding the
+## synchronous read/copy work of one frame.
+const MAX_DRAIN_BYTES_PER_TICK: int = 256 * 1024
+## Parsing emits into MediaCodec synchronously, so cap that work as well. The
+## unread complete packets remain in `_recv_buffer` for the next render tick.
+const MAX_VIDEO_PARSE_USEC_PER_TICK: int = 2_000
+const MAX_RELIABLE_SEND_QUEUE: int = 64
 
 
 func _ready() -> void:
@@ -173,6 +195,9 @@ func _process_connected() -> void:
 		disconnected_from_server.emit()
 		return
 	_bad_status_ticks = 0
+	_flush_outbound()
+	if _state != State.CONNECTED:
+		return
 
 	# [opt 7] Drain the kernel receive buffer in a loop. With one read
 	# per process tick (~11 ms at 90 fps) a single 1280x720 NAL larger
@@ -181,13 +206,20 @@ func _process_connected() -> void:
 	# keeps `tx=` honest. We cap at MAX_DRAIN_PER_TICK iterations so a
 	# pathological producer can't starve other process tasks.
 	var drained_iterations: int = 0
-	while drained_iterations < MAX_DRAIN_PER_TICK:
+	var drained_bytes: int = 0
+	while (
+		drained_iterations < MAX_DRAIN_PER_TICK
+		and drained_bytes < MAX_DRAIN_BYTES_PER_TICK
+	):
 		drained_iterations += 1
 		var bytes_available := _tcp.get_available_bytes()
 		if bytes_available <= 0:
 			break
 
-		var to_read := mini(bytes_available, READ_CHUNK_SIZE)
+		var to_read := mini(
+			bytes_available,
+			mini(READ_CHUNK_SIZE, MAX_DRAIN_BYTES_PER_TICK - drained_bytes),
+		)
 		var result := _tcp.get_data(to_read)
 		var error: int = result[0]
 		var data: PackedByteArray = result[1]
@@ -200,6 +232,8 @@ func _process_connected() -> void:
 			return
 
 		_recv_buffer.append_array(data)
+		drained_bytes += data.size()
+		_total_received_bytes += data.size()
 
 		# Prevent buffer from growing unbounded. See D-5 in
 		# claw/issues/005-decisions.md for why we hard-disconnect
@@ -224,10 +258,12 @@ func _parse_frames() -> void:
 
 	# Try to parse as many complete command frames as possible
 	var safety_counter := 0
-	while _recv_buffer.size() >= 8 and safety_counter < 100:
+	var read_offset := 0
+	var latest_blueprint_state := PackedByteArray()
+	while _recv_buffer.size() - read_offset >= 8 and safety_counter < 100:
 		safety_counter += 1
 
-		var result := XRoboProtocol.decode_command(_recv_buffer)
+		var result := XRoboProtocol.decode_command(_recv_buffer, read_offset)
 		if result.is_empty():
 			# Not enough data yet
 			break
@@ -241,26 +277,52 @@ func _parse_frames() -> void:
 		var command: String = result["command"]
 		var frame_data: PackedByteArray = result["data"]
 
-		# Remove consumed bytes from buffer
-		_recv_buffer = _recv_buffer.slice(bytes_consumed)
+		read_offset += bytes_consumed
 
 		# Dispatch
 		if command == "VideoFrame":
+			_emit_latest_blueprint_state(latest_blueprint_state)
+			latest_blueprint_state = PackedByteArray()
 			video_frame_received.emit({
 				"legacy": true,
 				"receive_ns": VideoLatencyTracker.now_ns(),
 				"nal_data": frame_data,
 			})
+		elif command == "BlueprintState":
+			# BlueprintState is a complete snapshot. If render work allowed several
+			# states to accumulate, applying every stale intermediate state creates
+			# a feedback loop of JSON/UI work. Keep only the newest consecutive one.
+			latest_blueprint_state = frame_data
 		else:
+			_emit_latest_blueprint_state(latest_blueprint_state)
+			latest_blueprint_state = PackedByteArray()
 			command_received.emit(command, frame_data)
+	_emit_latest_blueprint_state(latest_blueprint_state)
+	# Compact once per tick. Slicing after every command repeatedly copied the
+	# entire unconsumed tail and amplified telemetry bursts on the GUI thread.
+	if read_offset > 0:
+		_recv_buffer = _recv_buffer.slice(read_offset)
+
+
+func _emit_latest_blueprint_state(data: PackedByteArray) -> void:
+	if not data.is_empty():
+		command_received.emit("BlueprintState", data)
 
 
 func _parse_video_packets() -> void:
 	var safety_counter := 0
-	while _recv_buffer.size() >= 60 and safety_counter < 100:
+	var read_offset := 0
+	var parse_started_usec := Time.get_ticks_usec()
+	while _recv_buffer.size() - read_offset >= XRoboProtocol.TIMED_VIDEO_HEADER_SIZE \
+			and safety_counter < 100:
+		if (
+			safety_counter > 0
+			and Time.get_ticks_usec() - parse_started_usec >= MAX_VIDEO_PARSE_USEC_PER_TICK
+		):
+			break
 		safety_counter += 1
 
-		var result := XRoboProtocol.decode_timed_video_frame(_recv_buffer)
+		var result := XRoboProtocol.decode_timed_video_frame(_recv_buffer, read_offset)
 		if result.is_empty():
 			break
 
@@ -270,9 +332,12 @@ func _parse_video_packets() -> void:
 			break
 
 		var bytes_consumed: int = result["bytes_consumed"]
-		_recv_buffer = _recv_buffer.slice(bytes_consumed)
+		read_offset += bytes_consumed
 		result["receive_ns"] = VideoLatencyTracker.now_ns()
 		video_frame_received.emit(result)
+	# One tail copy per render tick, rather than one full-buffer copy per NAL.
+	if read_offset > 0:
+		_recv_buffer = _recv_buffer.slice(read_offset)
 
 
 ## Connect to a robot at the given address.
@@ -297,6 +362,7 @@ func _connect(host: String, port: int, mode: StreamMode) -> void:
 	_mode = mode
 	_connect_elapsed = 0.0
 	_recv_buffer.clear()
+	_clear_outbound()
 
 	var err := _tcp.connect_to_host(host, port)
 	if err != OK:
@@ -316,30 +382,104 @@ func disconnect_from_robot() -> void:
 	_connect_elapsed = 0.0
 	_bad_status_ticks = 0
 	_recv_buffer.clear()
+	_clear_outbound()
 	if was_active:
 		disconnected_from_server.emit()
 
 
-## Send raw bytes over TCP.
+## Queue a reliable frame without waiting for socket writability. This method
+## is called from the Godot render thread, so `StreamPeerTCP.put_data()` is not
+## safe here: it may wait until the peer drains the complete payload.
 func send_raw(data: PackedByteArray) -> Error:
 	if _state != State.CONNECTED:
 		return ERR_CONNECTION_ERROR
 	if _mode != StreamMode.COMMAND:
 		return ERR_CONNECTION_ERROR
+	if _reliable_send_queue.size() >= MAX_RELIABLE_SEND_QUEUE:
+		return ERR_BUSY
+	_reliable_send_queue.append(data)
+	_flush_outbound()
+	return OK if _state == State.CONNECTED else ERR_CONNECTION_ERROR
 
-	var err := _tcp.put_data(data)
-	if err != OK:
-		print("[TcpHandler] Send error: %d" % err)
+
+## Queue a replaceable state snapshot. Once a frame has started writing it is
+## completed to preserve TCP framing; any not-yet-started snapshot is replaced.
+func send_latest_raw(data: PackedByteArray) -> Error:
+	if _state != State.CONNECTED or _mode != StreamMode.COMMAND:
+		return ERR_CONNECTION_ERROR
+	_queue_latest_frame(data)
+	_flush_outbound()
+	return OK if _state == State.CONNECTED else ERR_CONNECTION_ERROR
+
+
+func _queue_latest_frame(data: PackedByteArray) -> void:
+	if _active_send_replaceable and _active_send_offset == 0:
+		_active_send_frame = data
+	else:
+		_latest_send_frame = data
+
+
+func _flush_outbound() -> void:
+	if _state != State.CONNECTED:
+		return
+	if _active_send_frame.is_empty():
+		if not _reliable_send_queue.is_empty():
+			_active_send_frame = _reliable_send_queue.pop_front()
+			_active_send_replaceable = false
+		elif not _latest_send_frame.is_empty():
+			_active_send_frame = _latest_send_frame
+			_latest_send_frame = PackedByteArray()
+			_active_send_replaceable = true
+		else:
+			return
+		_active_send_offset = 0
+
+	var remaining := _active_send_frame.slice(_active_send_offset)
+	var result := _tcp.put_partial_data(remaining)
+	var error := int(result[0])
+	var written := clampi(int(result[1]), 0, remaining.size())
+	if error != OK and error != ERR_BUSY:
+		print("[TcpHandler] Send error: %d" % error)
 		_state = State.DISCONNECTED
 		_recv_buffer.clear()
+		_clear_outbound()
 		disconnected_from_server.emit()
-	return err
+		return
+	if written <= 0:
+		return
+	_active_send_offset += written
+	_total_sent_bytes += written
+	if _active_send_offset >= _active_send_frame.size():
+		_active_send_frame = PackedByteArray()
+		_active_send_offset = 0
+		_active_send_replaceable = false
+
+
+func _clear_outbound() -> void:
+	_active_send_frame = PackedByteArray()
+	_active_send_offset = 0
+	_active_send_replaceable = false
+	_reliable_send_queue.clear()
+	_latest_send_frame = PackedByteArray()
+
+
+func get_total_received_bytes() -> int:
+	return _total_received_bytes
+
+
+func get_total_sent_bytes() -> int:
+	return _total_sent_bytes
 
 
 ## Send a protocol command frame.
 func send_command(command: String, data: PackedByteArray = PackedByteArray()) -> Error:
 	var frame := XRoboProtocol.encode_command(command, data)
 	return send_raw(frame)
+
+
+func send_latest_command(command: String, data: PackedByteArray = PackedByteArray()) -> Error:
+	var frame := XRoboProtocol.encode_command(command, data)
+	return send_latest_raw(frame)
 
 
 ## Check if currently connected.

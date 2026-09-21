@@ -72,6 +72,10 @@ headset displays the advertised feed. `XrSession.start()` acquires every
 configured TCP/UDP video port before reporting success, so an occupied relay
 port fails startup instead of advertising an unavailable feed.
 
+`robot_model` also accepts a model asset with an empty `joint_names` list. Such
+an asset is a rigid scene object driven entirely by its `base_pose` and
+`sample` bindings; articulated robot assets keep their existing joint contract.
+
 Migration: consumers that previously relied on the SDK requesting everything
 must explicitly include `body` or `motion_trackers`. `control_loop.run` honors a
 retargeter's optional `required_streams` when it creates its own session;

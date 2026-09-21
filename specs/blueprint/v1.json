@@ -322,7 +322,10 @@
         "distance": {"type": "number", "default": 3.0, "minimum": 0.1, "maximum": 20.0}
       },
       "bindings": {
-        "follow_camera": {"type": "boolean", "required": false}
+        "follow_camera": {"type": "boolean", "required": false},
+        "system_performance_text": {"type": "string", "required": false},
+        "status_state": {"type": "string", "required": false},
+        "status_text": {"type": "string", "required": false}
       },
       "events": {}
     },

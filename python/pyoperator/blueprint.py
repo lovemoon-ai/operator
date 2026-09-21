@@ -637,6 +637,9 @@ class BlueprintComponent:
         follow_camera: bool = _VIDEO_PANEL_FOLLOW_CAMERA,
         visible_binding: str | None = None,
         follow_camera_binding: str | None = None,
+        system_performance_text_binding: str | None = None,
+        status_state_binding: str | None = None,
+        status_text_binding: str | None = None,
         properties: Mapping[str, Any] | None = None,
         user_overridable: bool | None = None,
     ) -> "BlueprintComponent":
@@ -647,6 +650,12 @@ class BlueprintComponent:
             bindings["visible"] = visible_binding
         if follow_camera_binding:
             bindings["follow_camera"] = follow_camera_binding
+        if system_performance_text_binding:
+            bindings["system_performance_text"] = system_performance_text_binding
+        if status_state_binding:
+            bindings["status_state"] = status_state_binding
+        if status_text_binding:
+            bindings["status_text"] = status_text_binding
         return cls(
             id=id,
             type="video_panel",

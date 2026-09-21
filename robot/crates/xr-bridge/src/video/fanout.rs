@@ -20,8 +20,11 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use futures::SinkExt;
+use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::broadcast;
+use tokio::time::timeout;
 use tokio_util::codec::{Encoder, Framed};
 
 use crate::protocol::{TimedVideoFrame, TimedVideoFrameCodec, TIMED_VIDEO_HEADER_BYTES};
@@ -37,6 +40,17 @@ const UDP_FRAGMENT_MAGIC: [u8; 4] = *b"NLFR";
 const UDP_FRAGMENT_VERSION: u8 = 1;
 /// Size of the fragment sub-header that precedes the timed video header.
 const UDP_FRAGMENT_HEADER_BYTES: usize = 4 + 1 + 1 + 2 + 2 + 8;
+/// Bound the amount of stale compressed video that the kernel may retain for
+/// a headset that has stopped reading. Linux doubles the requested value.
+const TCP_SEND_BUFFER_BYTES: usize = 256 * 1024;
+/// Drop compressed packets that have already spent too long waiting inside
+/// the relay. Continuing from an arbitrary P-frame is unsafe, so delivery
+/// resumes at the next random-access frame.
+const TCP_MAX_PACKET_AGE: Duration = Duration::from_millis(500);
+/// A live video packet that cannot be written promptly is already stale. An
+/// abortive disconnect discards queued bytes and lets the headset reconnect at
+/// the next clean GOP instead of replaying old frames.
+const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
 // Join-in-progress priming
@@ -153,6 +167,13 @@ pub async fn serve_video_clients_on(
     loop {
         let (socket, addr) = listener.accept().await?;
         socket.set_nodelay(true)?;
+        if let Err(error) =
+            socket2::SockRef::from(&socket).set_send_buffer_size(TCP_SEND_BUFFER_BYTES)
+        {
+            tracing::warn!(
+                "Could not bound video send buffer for {addr}: {error}; write timeout remains active"
+            );
+        }
         tracing::info!("Video client connected from {addr}");
 
         // Subscribe BEFORE sending priming frames so we don't miss the IDR
@@ -163,12 +184,12 @@ pub async fn serve_video_clients_on(
         tokio::spawn(async move {
             let mut framed = Framed::new(socket, TimedVideoFrameCodec);
             let mut primer = JoinPrimer::with_codec(params.codec());
+            let mut dropping_stale = false;
 
             // 1. Prime with cached SPS+PPS as one access unit so MediaCodec
             // sees both parameter sets before it configures.
             for frame in priming_frames(JoinPrimer::priming_nals(&params), now_ns()) {
-                if framed.send(frame).await.is_err() {
-                    tracing::info!("Video client disconnected from {addr}");
+                if !send_tcp_frame(&mut framed, frame, addr).await {
                     return;
                 }
             }
@@ -177,22 +198,77 @@ pub async fn serve_video_clients_on(
             loop {
                 match nal_rx.recv().await {
                     Ok(packet) => {
+                        if packet_is_stale(&packet, now_ns(), TCP_MAX_PACKET_AGE) {
+                            if !dropping_stale {
+                                tracing::warn!(
+                                    "Video client {addr} fell behind; dropping stale packets until the next keyframe"
+                                );
+                            }
+                            dropping_stale = true;
+                            primer = JoinPrimer::with_codec(params.codec());
+                            continue;
+                        }
                         if primer.on_frame(&packet.nal) == PrimeAction::Skip {
                             continue;
                         }
+                        dropping_stale = false;
                         let packet = packet.with_send_ns(now_ns());
-                        if framed.send(packet).await.is_err() {
-                            break;
+                        if !send_tcp_frame(&mut framed, packet, addr).await {
+                            return;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Video client {addr} lagged {n} frames, skipping");
+                        // The receiver cursor now points at the oldest retained
+                        // packet. Jump to the live edge and wait for a clean
+                        // GOP rather than replaying the retained tail. This
+                        // keeps transient backpressure from churning the XR
+                        // decoder and UI.
+                        tracing::warn!(
+                            "Video client {addr} lagged {n} packets; skipping to the live edge"
+                        );
+                        nal_rx = nal_rx.resubscribe();
+                        primer = JoinPrimer::with_codec(params.codec());
+                        dropping_stale = true;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             tracing::info!("Video client disconnected from {addr}");
         });
+    }
+}
+
+fn packet_is_stale(packet: &TimedVideoFrame, now: u64, max_age: Duration) -> bool {
+    packet.send_ns > 0 && now.saturating_sub(packet.send_ns) > max_age.as_nanos() as u64
+}
+
+async fn send_tcp_frame(
+    framed: &mut Framed<tokio::net::TcpStream, TimedVideoFrameCodec>,
+    frame: TimedVideoFrame,
+    addr: SocketAddr,
+) -> bool {
+    match timeout(TCP_WRITE_TIMEOUT, framed.send(frame)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::info!("Video client disconnected from {addr}: {error}");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                "Video client {addr} write blocked for {:?}; dropping stale video and reconnecting",
+                TCP_WRITE_TIMEOUT,
+            );
+            abort_tcp_client(framed.get_ref());
+            false
+        }
+    }
+}
+
+fn abort_tcp_client(socket: &tokio::net::TcpStream) {
+    // RST is deliberate here: a normal FIN may continue draining already
+    // queued bytes, which is exactly the stale-video behavior we must avoid.
+    if let Err(error) = socket.set_zero_linger() {
+        tracing::debug!("Could not enable abortive video close: {error}");
     }
 }
 
@@ -439,6 +515,28 @@ mod tests {
         cache.observe(&pps());
         let primed = JoinPrimer::priming_nals(&cache);
         assert_eq!(primed, vec![sps(), pps()], "SPS then PPS");
+    }
+
+    #[test]
+    fn stale_packet_detection_uses_source_timestamp() {
+        let mut packet = TimedVideoFrame {
+            frame_id: 1,
+            nal_index: 0,
+            nal_count: 1,
+            pipeline_mode: crate::protocol::VIDEO_PIPELINE_MODE_FFMPEG,
+            capture_start_ns: 0,
+            capture_end_ns: 0,
+            encode_start_ns: 0,
+            encode_end_ns: 0,
+            read_wait_ns: 0,
+            parse_ns: 0,
+            send_ns: 1_000_000_000,
+            nal: idr(),
+        };
+        assert!(!packet_is_stale(&packet, 1_400_000_000, TCP_MAX_PACKET_AGE));
+        assert!(packet_is_stale(&packet, 1_600_000_000, TCP_MAX_PACKET_AGE));
+        packet.send_ns = 0;
+        assert!(!packet_is_stale(&packet, u64::MAX, TCP_MAX_PACKET_AGE));
     }
 
     #[test]

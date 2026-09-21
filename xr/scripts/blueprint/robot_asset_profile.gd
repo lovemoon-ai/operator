@@ -161,7 +161,7 @@ static func parse(bytes: PackedByteArray) -> Dictionary:
 			current = int(parents.get(current, -1))
 		if current != root:
 			return _invalid("articulation, check 143")
-	if not rig.get("joints") is Array or rig["joints"].is_empty() or rig["joints"].size() > 256:
+	if not rig.get("joints") is Array or rig["joints"].size() > 256:
 		return _invalid("articulation, check 145")
 	var names := {}
 	var joint_nodes := {}
