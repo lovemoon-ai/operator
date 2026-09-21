@@ -3,8 +3,8 @@ import numpy as np
 import pytest
 
 from light_o1_vr.presentation import (
-    FACE_USER_ROTATION, MENU_ROWS, ROBOT_TO_XR, base_pose_to_xr, blueprint, frame_to_state,
-    matrix_to_quaternion_xyzw, quaternion_to_matrix,
+    FACE_USER_ROTATION, ROBOT_TO_XR, base_pose_to_xr, frame_to_state, matrix_to_quaternion_xyzw,
+    quaternion_to_matrix,
 )
 from fakes import JOINT_NAMES, blueprint_for_tests
 
@@ -54,7 +54,7 @@ def test_blueprint_declares_generic_primitives_only():
     spec = blueprint_for_tests(distance=2.0)
     by_id = {component.id: component for component in spec.components}
     assert spec.blueprint_id == "example.light_o1"
-    assert set(by_id) == {"ground", "lighting", "g1", "prompt_status"} | {row[0] for row in MENU_ROWS}
+    assert set(by_id) == {"ground", "lighting", "g1", "prompt_status"}
     g1 = by_id["g1"]
     assert g1.type == "robot_model" and tuple(g1.properties["joint_names"]) == JOINT_NAMES
     assert g1.transform.position == (0, 0, -2.0) and g1.transform.rotation == FACE_USER_ROTATION
@@ -64,16 +64,8 @@ def test_blueprint_declares_generic_primitives_only():
     assert by_id["ground"].transform.position == (0, 0.002, -2.0)
     label = by_id["prompt_status"]
     assert label.type == "label" and label.anchor == "left_controller" and label.bindings["text"] == "ui.text"
-    motion = by_id["motion"]
-    assert motion.type == "menu_item" and motion.properties["action"] == "motion.toggle"
-    assert (motion.properties["locked_text"], motion.properties["unlocked_text"]) == ("Generate", "Stop")
-    assert motion.bindings == {"value": "motion.active", "available": "motion.available"}
-    assert by_id["replay"].bindings["available"] == "motion.replay_available"
-    assert by_id["prompt_next"].bindings == {"value": "prompt.cycle"}
-    # Menu rows appear in declaration order: page 1 = Generate + Next, page 2 = Prev + Replay.
-    rows = [component.id for component in spec.components if component.type == "menu_item"]
-    assert rows == ["motion", "prompt_next", "prompt_prev", "replay"]
-    assert not any(component.type in ("input_binding", "controller_menu", "palm_menu")
+    # Controller input comes from XrFrame: no menu rows, events, or trigger bindings are declared.
+    assert not any(component.type in ("menu_item", "input_binding", "controller_menu", "palm_menu")
                    for component in spec.components)
     away = blueprint_for_tests(face_user=False)
     assert {c.id: c for c in away.components}["g1"].transform.rotation == (0.0, 0.0, 0.0, 1.0)
@@ -84,11 +76,10 @@ def test_blueprint_declares_generic_primitives_only():
 def test_blueprint_state_contract_covers_every_session_key():
     spec = blueprint_for_tests()
     state = {"g1.joints": [0.0] * 29, "g1.base": [0, 0.8, 0, 0, 0, 0, 1], "g1.sample": 1, "g1.visible": True,
-             "ui.text": "Prompt 1/1: wave\nReady", "motion.active": False, "motion.available": True,
-             "motion.replay_available": False, "prompt.cycle": False}
+             "ui.text": "Prompt 1/1: wave\nReady\nhelp"}
     spec.validate_state_values(state)
     assert set(spec.binding_types()) == set(state)
     with pytest.raises(ValueError):
-        spec.validate_state_values({"motion.active": "yes"})
+        spec.validate_state_values({"ui.text": 3})
     with pytest.raises(ValueError):
         spec.validate_state_values({"g1.sample": -1})

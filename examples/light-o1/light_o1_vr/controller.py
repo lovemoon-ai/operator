@@ -1,11 +1,12 @@
 """Prompt selection, one text->motion pipeline at a time, and 50 Hz playback.
 
-``MotionSession`` knows nothing about XR transport. It consumes Blueprint menu
-events and typed prompts, runs Light-O1 generation plus the Sonic rollout on a
-worker thread, and on every host tick returns the complete Blueprint state:
-the G1 pose to show right now plus the menu/label values. Playback starts as
-soon as a short prefix of the rollout exists and simply holds the newest frame
-if the simulation ever falls behind real time.
+``MotionSession`` knows nothing about XR transport. It consumes controller
+commands (stick: prompt, A: generate, B: replay) and typed prompts, runs
+Light-O1 generation plus the Sonic rollout on a worker thread, and on every
+host tick returns the complete Blueprint state: the G1 pose to show right now
+plus the label text. Playback starts as soon as a short prefix of the rollout
+exists and simply holds the newest frame if the simulation ever falls behind
+real time.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from typing import Callable
 
 import numpy as np
 
+from .controls import Commands, HELP
 from .generator import GenerationCancelled, GenerationError, GeneratedAction
 from .presentation import frame_to_state
 from .prompts import PromptLibrary
@@ -78,6 +80,8 @@ class MotionSession:
         self._last_ok: Trajectory | None = None
         self._sample = 0
         self._closed = False
+        self._notice = ""
+        self._notice_until = 0.0
 
     # -- public API ---------------------------------------------------------
     @property
@@ -100,22 +104,31 @@ class MotionSession:
         with self._lock:
             return self._status_text_locked(self._job, now).replace("\n", " | ")
 
-    def handle_event(self, event) -> bool:
-        """Apply one Blueprint menu event; returns whether it was recognized."""
-        if event is None:
-            return False
-        action, value = event.action, bool(event.value)
-        if action == "motion.toggle":
-            self.start() if value else self.stop()
-        elif action == "motion.replay":
-            self.replay() if value else self.stop()
-        elif action == "prompt.next":
+    def handle_commands(self, commands: Commands | None, now: float | None = None) -> None:
+        """Apply one tick of controller edges: stick selects, A generates, B replays."""
+        if not commands:
+            return
+        now = self.clock() if now is None else now
+        if commands.next:
             self.prompts.next()
-        elif action == "prompt.prev":
+        if commands.prev:
             self.prompts.prev()
-        else:
-            return False
-        return True
+        busy = self.phase in (Phase.GENERATING, Phase.SIMULATING)
+        if commands.generate:
+            if busy:
+                self._notify("Still generating - wait for the motion to start", now)
+            else:
+                self.start()
+        if commands.replay:
+            if busy:
+                self._notify("Still generating - replay is available afterwards", now)
+            elif self.replay() is None:
+                self._notify("Nothing to replay yet - press A to generate first", now)
+
+    def _notify(self, text: str, now: float, seconds: float = 2.0) -> None:
+        with self._lock:
+            self._notice = text
+            self._notice_until = now + seconds
 
     def submit(self, text: str) -> str:
         """Typed prompt from the host: select it and start generating."""
@@ -175,16 +188,11 @@ class MotionSession:
             job = self._job
             frame = self._advance_locked(job, now)
             text = self._status_text_locked(job, now)
-            active = job is not None and job.phase in ACTIVE_PHASES
-            replay_available = self._last_ok is not None
         self._shown = frame
         self._sample += 1
         joints, base = frame_to_state(frame)
-        return {
-            "g1.joints": joints, "g1.base": base, "g1.sample": self._sample, "g1.visible": True,
-            "ui.text": text, "motion.active": active, "motion.available": True,
-            "motion.replay_available": replay_available, "prompt.cycle": False,
-        }
+        return {"g1.joints": joints, "g1.base": base, "g1.sample": self._sample, "g1.visible": True,
+                "ui.text": text}
 
     # -- worker -------------------------------------------------------------
     def _default_rollout(self, reference, trajectory, cancel):
@@ -271,8 +279,12 @@ class MotionSession:
 
     def _status_text_locked(self, job: Job | None, now: float) -> str:
         header = f"Prompt {self.prompts.index + 1}/{len(self.prompts)}: {self.prompts.current}"
+        footer = self._notice if self._notice and now < self._notice_until else HELP
+        return f"{header}\n{self._phase_text_locked(job, now)}\n{footer}"
+
+    def _phase_text_locked(self, job: Job | None, now: float) -> str:
         if job is None:
-            return f"{header}\nReady - left menu: Generate"
+            return "Ready - press A to generate"
         trajectory = job.trajectory
         suffix = " (replay)" if job.replay else ""
         if job.phase == Phase.GENERATING:
@@ -302,4 +314,4 @@ class MotionSession:
             status = "Stopped"
         if job.prompt.lower() != self.prompts.current.lower():
             status += f" [{job.prompt[:40]}]"
-        return f"{header}\n{status}"
+        return status

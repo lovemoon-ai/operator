@@ -1,29 +1,45 @@
 """The XR host loop against a fake native session: no headset, checkout, or GPU."""
 import json
-import threading
 import time
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 import pyoperator
 import pyoperator.session
+from pyoperator import ControllerInput, ControllerPair, ControllerState, HandPair, Pose, XrFrame
 from pyoperator._blueprint_spec import SPEC_SHA256
+from pyoperator.models import frame_to_dict
 
 from light_o1_vr import app
 from light_o1_vr.app import parse_args, run
 from fakes import JOINT_NAMES, FakeGenerator, FakeLightO1, FakeSimulator
 
 
-class FakeNative:
-    """Just enough of pyoperator's native session for BlueprintClient and XrSession."""
+def frame_json(frame_id, right_values=None):
+    """Wire-format XrFrame with a tracked right controller and the given input values."""
+    right = ControllerState(pose=Pose(valid=True, sample_timestamp_ns=frame_id),
+                            input=ControllerInput(sample_timestamp_ns=frame_id, values=right_values or {}))
+    frame = XrFrame(schema_version=1, frame_id=frame_id, timestamp_ns=frame_id * 1_000_000,
+                    coordinate_space="xr_origin", head=Pose(valid=True),
+                    controllers=ControllerPair(left=None, right=right), hands=HandPair(), body=None,
+                    motion_trackers=())
+    return json.dumps(frame_to_dict(frame))
 
-    def __init__(self, ticks=60, events=(), stop_when=None):
-        self.ticks = ticks  # safety cap; stop_when ends the loop deterministically
-        self.events = list(events)  # (tick, action, component_id, value)
+
+class FakeNative:
+    """Just enough of pyoperator's native session for BlueprintClient and XrSession.
+
+    ``inputs`` maps a host tick to the right-controller values reported from
+    that tick on; ``stop_when`` ends the loop deterministically.
+    """
+
+    def __init__(self, ticks=60, inputs=None, stop_when=None):
+        self.ticks = ticks  # safety cap
+        self.inputs = dict(inputs or {})
         self.stop_when = stop_when
         self.tick = 0
+        self.current_values = {}
         self.blueprints = []
         self.updates = []
         self.cleared = 0
@@ -39,6 +55,8 @@ class FakeNative:
 
     def is_running(self):
         self.tick += 1
+        if self.tick in self.inputs:
+            self.current_values = self.inputs[self.tick]
         if self.stop_when is not None and self.updates and self.stop_when(self.updates[-1]):
             return False
         time.sleep(0.0005)  # let the pipeline thread progress between host ticks
@@ -46,6 +64,9 @@ class FakeNative:
 
     def stats_json(self):
         return json.dumps({"connected": True})
+
+    def latest_json(self):
+        return frame_json(self.tick, self.current_values)
 
     def blueprint_spec_sha256(self):
         return SPEC_SHA256
@@ -62,16 +83,6 @@ class FakeNative:
         return self.sequence
 
     def poll_blueprint_event_json(self, timeout):
-        for entry in list(self.events):
-            tick, action, component_id, value = entry
-            if self.tick >= tick:
-                self.events.remove(entry)
-                blueprint = self.blueprints[-1]
-                return json.dumps({
-                    "schema": "operator.blueprint_event.v1", "blueprint_id": blueprint["blueprint_id"],
-                    "blueprint_revision": blueprint["revision"], "sequence": tick, "timestamp_ns": 1,
-                    "component_id": component_id, "action": action, "value": value,
-                })
         return None
 
 
@@ -106,7 +117,6 @@ def harness(monkeypatch):
     generator = FakeGenerator(frames=4)
     native = FakeNative()
     sessions = []
-
     real_session = pyoperator.session.XrSession
 
     def xr_session(config, *, _native_factory=None):
@@ -123,37 +133,53 @@ def harness(monkeypatch):
                            sessions=sessions)
 
 
-def test_run_publishes_blueprint_streams_state_and_handles_menu_events(harness, capsys):
+def done(update):
+    status = update["ui.text"].split("\n")[1]
+    return status.startswith("Done") or status.startswith("Failed")
+
+
+def test_run_publishes_blueprint_streams_state_and_follows_the_controller(harness, capsys):
     native = harness.native
     native.ticks = 5000
-    native.stop_when = lambda update: "Done" in update["ui.text"] or "Failed" in update["ui.text"]
-    native.events = [(5, "prompt.next", "prompt_next", True), (10, "motion.toggle", "motion", True)]
+    native.stop_when = done
+    # Stick right (one prompt forward), recentre, press A, release A.
+    native.inputs = {5: {"primary_x": 1.0}, 7: {}, 10: {"ax_button": 1.0}, 12: {}}
     run(parse_args(["--no-stdin", "--headset-ip", "10.0.0.9", "--asset-port", "60000", "--distance", "1.5"]))
     assert native.started and native.closed and native.cleared == 1
     assert harness.sessions[0].name == "Light-O1 G1" and harness.sessions[0].discovery_unicast_targets == ("10.0.0.9",)
     assert harness.sessions[0].streams == ("head", "controllers")
     blueprint = native.blueprints[0]
     assert blueprint["blueprint_id"] == "example.light_o1"
+    assert [c["type"] for c in blueprint["components"]] == ["ground_grid", "model_lighting", "robot_model", "label"]
     g1 = next(c for c in blueprint["components"] if c["id"] == "g1")
     assert g1["properties"]["asset_port"] == 60000 and g1["transform"]["position"] == [0, 0, -1.5]
     assert 12 <= len(native.updates) < 5000
     first, last = native.updates[0], native.updates[-1]
-    assert len(first["g1.joints"]) == 29 and first["g1.sample"] == 1 and first["motion.active"] is False
-    assert "Prompt 1/" in first["ui.text"]
-    # The prompt row advanced the selection, then Generate ran the pipeline through to completion.
-    assert any("Prompt 2/" in update["ui.text"] for update in native.updates[5:])
-    assert harness.generator.calls and harness.generator.calls[0][0] == "walk forward and turn around"
-    assert any(update["motion.active"] for update in native.updates)
-    assert last["motion.replay_available"] is True and last["motion.active"] is False
-    assert "Done - 0.2s" in last["ui.text"]
+    assert set(first) == {"g1.joints", "g1.base", "g1.sample", "g1.visible", "ui.text"}
+    assert len(first["g1.joints"]) == 29 and first["g1.sample"] == 1
+    assert first["ui.text"].startswith("Prompt 1/")
+    assert native.updates[6]["ui.text"].startswith("Prompt 2/")  # the stick step showed up on the next tick
+    assert harness.generator.calls == [("walk forward and turn around", 0, True)]
+    assert any("Playing" in update["ui.text"] for update in native.updates)
+    assert "Done - 0.2s, G1 stayed up" in last["ui.text"]
     out = capsys.readouterr().out
     assert "Select Outside Robot > Operator > Light-O1 G1" in out and "Robot asset: " in out
+    assert "A: generate" in out
+
+
+def test_run_ignores_a_button_held_while_connecting(harness):
+    native = harness.native
+    native.ticks = 40
+    native.inputs = {1: {"ax_button": 1.0}}  # held from the first frame, never released
+    run(parse_args(["--no-stdin"]))
+    assert harness.generator.calls == []
+    assert all(update["ui.text"].split("\n")[1].startswith("Ready") for update in native.updates)
 
 
 def test_run_forwards_typed_prompts(harness, monkeypatch):
     native = harness.native
     native.ticks = 5000
-    native.stop_when = lambda update: "do a cartwheel" in update["ui.text"] and "Done" in update["ui.text"]
+    native.stop_when = lambda update: "do a cartwheel" in update["ui.text"] and done(update)
     lines = ["do a cartwheel\n"]
 
     class Typed(app.StdinPrompts):
@@ -163,7 +189,6 @@ def test_run_forwards_typed_prompts(harness, monkeypatch):
     monkeypatch.setattr(app, "StdinPrompts", Typed)
     run(parse_args([]))
     assert harness.generator.calls[0][0] == "do a cartwheel"
-    assert any("do a cartwheel" in update["ui.text"] for update in native.updates)
 
 
 def test_run_batch_path_skips_xr(harness, tmp_path, capsys):

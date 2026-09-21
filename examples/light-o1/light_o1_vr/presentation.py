@@ -1,10 +1,10 @@
 """Blueprint for the Light-O1 G1 scene and MuJoCo -> XR pose conversion.
 
 Everything the headset shows is declared here with generic Blueprint
-primitives: the host-served G1 asset, a floor grid, lighting, a controller
-label with the current prompt/status, and system-menu rows that select a
-prompt and start/stop/replay motion. No XR script or primitive is specific to
-this example.
+primitives: the host-served G1 asset, a floor grid, lighting, and a
+controller-anchored label with the current prompt, live status, and the
+stick/A/B hints. Controller input arrives through ``XrFrame``; no Blueprint
+menu, event, or example-specific XR primitive is involved.
 """
 from __future__ import annotations
 
@@ -17,15 +17,6 @@ ROBOT_TO_XR = np.array([[0., -1., 0.], [0., 0., 1.], [-1., 0., 0.]])
 # 180 degrees about XR up (xyzw): the G1 starts facing the wearer instead of away.
 FACE_USER_ROTATION = (0.0, 1.0, 0.0, 0.0)
 IDENTITY_ROTATION = (0.0, 0.0, 0.0, 1.0)
-
-# (component id, action, title, off text, on text, value binding, available binding)
-MENU_ROWS = (
-    ("motion", "motion.toggle", "Light-O1 motion", "Generate", "Stop", "motion.active", "motion.available"),
-    ("prompt_next", "prompt.next", "Prompt", "Next >", "Next >", "prompt.cycle", None),
-    ("prompt_prev", "prompt.prev", "Prompt", "< Prev", "< Prev", "prompt.cycle", None),
-    ("replay", "motion.replay", "Last motion", "Replay", "Stop", "motion.active", "motion.replay_available"),
-)
-MENU_ACTIONS = frozenset(row[1] for row in MENU_ROWS)
 
 
 def quaternion_to_matrix(wxyz) -> np.ndarray:
@@ -72,7 +63,7 @@ def blueprint(asset, asset_port: int, *, distance: float = 2.5, face_user: bool 
     if not np.isfinite(distance) or distance <= 0:
         raise ValueError("distance must be finite and positive")
     rotation = FACE_USER_ROTATION if face_user else IDENTITY_ROTATION
-    components = [
+    components = (
         BlueprintComponent.ground_grid(
             "ground", placement_target="g1", visible_binding="g1.visible",
             transform=BlueprintTransform(position=(0, 0.002, -distance)),
@@ -91,13 +82,7 @@ def blueprint(asset, asset_port: int, *, distance: float = 2.5, face_user: bool 
         BlueprintComponent.label(
             "prompt_status", anchor="left_controller", text_binding="ui.text",
             transform=BlueprintTransform(position=(0, 0.09, 0)),
-            properties={"settings_label": "Prompt and motion status", "font_size": 22},
+            properties={"settings_label": "Prompt, motion status and controls", "font_size": 22},
         ),
-    ]
-    for component_id, action, title, off, on, value_binding, available_binding in MENU_ROWS:
-        components.append(BlueprintComponent.menu_item(
-            component_id, title=title, action=action, value_binding=value_binding,
-            available_binding=available_binding, locked_text=off, unlocked_text=on,
-            properties={"settings_label": f"Menu: {title} ({off})"},
-        ))
-    return Blueprint(blueprint_id="example.light_o1", components=tuple(components))
+    )
+    return Blueprint(blueprint_id="example.light_o1", components=components)

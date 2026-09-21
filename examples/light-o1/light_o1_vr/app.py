@@ -19,6 +19,7 @@ import threading
 import time
 
 from .controller import MotionSession, Phase
+from .controls import HELP, Commands, Gamepad
 from .generator import ControlServerClient, FileGenerator, GenerationError, GpuApiClient
 from .light_o1 import LightO1
 from .presentation import blueprint
@@ -169,10 +170,11 @@ def run(args) -> None:
         xr.blueprint.set_blueprint(blueprint(asset, assets.port, distance=args.distance, face_user=args.face_user))
         print(f"Select Outside Robot > Operator > {SESSION_NAME}", flush=True)
         print(f"Robot asset: {asset.sha256} ({len(asset.data)} bytes), port {assets.port}", flush=True)
-        print(f"Prompts: {len(prompts)} (left menu: Prompt Next/Prev, Generate/Stop, Replay); "
-              f"type a prompt here + Enter to run it; Ctrl-C: stop", flush=True)
+        print(f"Prompts: {len(prompts)} | right controller: {HELP} | "
+              f"type a prompt here + Enter to run it | Ctrl-C: stop", flush=True)
         if typed is not None:
             typed.start()
+        gamepad = Gamepad()
         period = 1.0 / light_o1.control_hz
         deadline = next_report = time.monotonic()
         try:
@@ -180,19 +182,18 @@ def run(args) -> None:
                 if typed is not None:
                     for text in typed.drain():
                         print(f"Typed prompt: {session.submit(text)!r}", flush=True)
-                for _ in range(16):  # bounded per tick; events are rare
-                    try:
-                        event = xr.blueprint.poll_event(timeout=0)
-                    except ValueError as exc:
-                        print(f"Ignored invalid Blueprint event: {exc}", flush=True)
-                        continue
-                    if event is None or not session.handle_event(event):
-                        break
+                connected = xr.stats().connected
+                if connected:
+                    commands = gamepad.update(xr.latest())
+                else:
+                    gamepad.invalidate()  # a button held while (re)connecting must not fire
+                    commands = Commands()
                 now = time.monotonic()
+                session.handle_commands(commands, now)
                 xr.blueprint.update(session.tick(now))
                 if now >= next_report:
-                    print(f"[{session.phase.value}] {session.status_line(now)} | "
-                          f"connected={xr.stats().connected}", flush=True)
+                    print(f"[{session.phase.value}] {session.status_line(now)} | connected={connected}",
+                          flush=True)
                     next_report = now + 2
                 deadline += period
                 delay = deadline - time.monotonic()
