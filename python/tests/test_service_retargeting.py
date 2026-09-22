@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import unittest
 from dataclasses import dataclass, field
 from typing import Any
 
-from pyoperator.protocol.retargeting import ProtocolError
-from pyoperator.services.retargeting import (
+from operator_xr.protocol.retargeting import ProtocolError
+from operator_xr.services.retargeting import (
     MAX_PENDING_CONTROL_MESSAGES,
     MAX_PENDING_MESSAGES,
     RetargetingConnection,

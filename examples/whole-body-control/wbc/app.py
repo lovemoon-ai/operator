@@ -3,8 +3,8 @@ import argparse
 import math
 import time
 
-from pyoperator import BridgeConfig, XrSession, RobotAssetServer
-from pyoperator.mujoco_asset import from_mujoco
+from operator_xr import BridgeConfig, XrSession, RobotAssetServer
+from operator_xr.mujoco_asset import from_mujoco
 from .desktop_viewer import DesktopViewer
 from .loop import ControlLoop
 from .presentation import blueprint

@@ -7,7 +7,7 @@ collection.
 
 - `robot/` - Rust crates for `teleop-protocol`, `xr-bridge`, and
   `robot-adapter`.
-- `python/` - Python-first `pyoperator` package, examples, and tests.
+- `python/` - Python-first `operator_xr` package, examples, and tests.
 - `xr/` - Godot 4.5 Android XR client APK. It runs in-headset.
 - `web/` - local ingest and review app for egocentric recordings.
 - `claw/` - current architecture documentation.
@@ -84,7 +84,7 @@ cargo test
 
 - `scripts/make-robot/` (`make_robot`) is **Inside Robot only**. It generates
   headset-local robot bundles for the in-headset simulator and robot picker.
-- Outside Robot, including `pyoperator` examples and Blueprint `robot_model`,
+- Outside Robot, including `operator_xr` examples and Blueprint `robot_model`,
   must obtain robot assets from the connected robot/host. Do not require
   `make_robot`, `xr/assets/robots/`, APK-bundled joint tables, hardcoded model
   allowlists, or rebuilding the APK to add/change an Outside robot.
@@ -128,7 +128,7 @@ bash cicd/08_inside_robot_display.sh --screenshots /tmp/robot_shots
 
 # Inside Robot remote retargeting, on-device against a live host service.
 # Start the service and forward it to the headset first:
-#   cd python && .venv/bin/python -m pyoperator serve --service retargeting --port 8000
+#   cd python && .venv/bin/python -m operator_xr serve --service retargeting --port 8000
 #   adb reverse tcp:8000 tcp:8000
 bash cicd/xr_module_harness.sh --suite teleop.remote
 ```
@@ -141,6 +141,7 @@ bundles under `xr/assets/robots/` are per-checkout, not committed.
 Static checks that do not run the XR runtime:
 
 ```bash
+python3 scripts/version.py check
 python3 cicd/validate_xr_features.py
 python3 cicd/validate_xr_test_manifests.py
 bash cicd/03_godot_mujoco_static.sh

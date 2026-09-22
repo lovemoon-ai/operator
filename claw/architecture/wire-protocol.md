@@ -76,7 +76,7 @@ monotonic.
 ### Robot-authored Blueprint
 
 An Operator session may also advertise `blueprint_v1`. Both the embedded
-`XrSession` path and the standalone `xr-bridge` + pyoperator hosted adapter path
+`XrSession` path and the standalone `xr-bridge` + operator_xr hosted adapter path
 support it. The protocol is mode-independent. Outside Robot is the first
 integration; VR operation or Realtime Feed can reuse the same contract through
 their own lifecycle adapters. Inside Robot does not currently use it because it
@@ -144,7 +144,7 @@ switching targets, clearing from Python, or leaving Teleop removes it.
 
 The data path is designed not to become a control-loop bottleneck. Blueprints
 are low-frequency structural updates. Embedded Blueprint state is a Rust
-`watch` value; hosted pyoperator uses the same latest-snapshot semantics and a
+`watch` value; hosted operator_xr uses the same latest-snapshot semantics and a
 single coalesced wake-up per connected bridge. A slow socket writer therefore
 does not build an unbounded state queue. The socket reader remains a separate
 task, and XR state/control sampling does not wait for Blueprint rendering.
@@ -512,10 +512,10 @@ XR reassembles fragments in `xr/scripts/network/udp_video_handler.gd`.
 ## Inside Robot remote retargeting
 
 Default development port: `8000`. This is a separate WebSocket protocol, owned
-and served by pyoperator (`pyoperator serve --service retargeting`, or the
-`retargeting-service` alias); it is not a robot-service control plane. The
-protocol lives in `python/pyoperator/protocol/retargeting.py` and the service
-in `python/pyoperator/services/retargeting.py`. Solving is delegated to the
+and served by operator_xr (`operator serve --service retargeting`, or the
+`operator-retargeting` alias); it is not a robot-service control plane. The
+protocol lives in `python/operator_xr/protocol/retargeting.py` and the service
+in `python/operator_xr/services/retargeting.py`. Solving is delegated to the
 `retargeting` library, which owns profiles, solvers, and model fingerprints and
 never sees this protocol.
 
@@ -608,7 +608,7 @@ XR push path:
 XR pull path:
 
 - `xr/addons/live-pull/`
-- `python/pyoperator/live_feed/server.py`
+- `python/operator_xr/live_feed/server.py`
 
 The pull connection starts with client-first `result_hello` (type 100). Its
 `operator.result_hello.v1` JSON carries the same optional auth token as the

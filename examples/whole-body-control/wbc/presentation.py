@@ -1,6 +1,6 @@
 """Shared G1 presentation; no controller or physics assumptions."""
 from collections import deque
-from pyoperator import Blueprint, BlueprintComponent, BlueprintTransform, RobotModelAsset
+from operator_xr import Blueprint, BlueprintComponent, BlueprintTransform, RobotModelAsset
 
 def claim_reset_request(event, recent_requests: deque[str]) -> str:
     """Deduplicate remote gesture requests; acknowledgements echo this ID."""

@@ -108,7 +108,7 @@ python -m pip install -e ./python
 ```
 
 ```python
-from pyoperator import xr_bridge
+from operator_xr import xr_bridge
 
 xr_bridge.start()
 frame = xr_bridge.wait_next(timeout=5.0)  # one atomic immutable snapshot
@@ -123,7 +123,7 @@ retargeting/IK, record/replay, and the existing standalone-bridge hosted mode.
 # Robot-authored Outside Robot UI without physical hardware.
 python python/examples/blueprint.py
 
-# Complete pyoperator custom-robot teleop + Blueprint example.
+# Complete operator_xr custom-robot teleop + Blueprint example.
 python python/examples/custom_robot.py
 
 # BrainCo Revo2 dual-hand hosted Blueprint example.

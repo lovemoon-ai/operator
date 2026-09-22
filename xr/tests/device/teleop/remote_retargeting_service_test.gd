@@ -1,9 +1,9 @@
 extends RefCounted
 ## Device conformance probe: Inside Robot remote retargeting, end-effector path.
 ##
-## Runs the real `RemoteRetargeter` on the headset against a live pyoperator
+## Runs the real `RemoteRetargeter` on the headset against a live operator_xr
 ## retargeting service, so the whole seam is exercised on target: Godot
-## WebSocketPeer -> pyoperator protocol/service -> retargeting Python solver ->
+## WebSocketPeer -> operator_xr protocol/service -> retargeting Python solver ->
 ## joint positions back into XR.
 
 const CASE_ID := "teleop.remote_retargeting_service"

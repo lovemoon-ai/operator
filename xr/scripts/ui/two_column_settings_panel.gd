@@ -17,6 +17,8 @@ class_name TwoColumnSettingsPanel
 
 signal group_changed(key: String)
 
+const BuildInfo := preload("res://scripts/app/build_info.gd")
+
 const SIDEBAR_WIDTH := 200
 const SIDEBAR_BUTTON_HEIGHT := 56
 const SIDEBAR_BUTTON_HSEP := 8
@@ -99,6 +101,33 @@ func register_group(key: String, title_key: String, icon_name: String = "") -> V
 	if _active_group.is_empty():
 		select_group(key)
 	return container
+
+
+## Read-only "Version info" group (release version, source commit, build time)
+## shared by the Teleop and Ego settings menus.
+func register_build_info_group() -> VBoxContainer:
+	var group := register_group("build_info", "UI_GROUP_BUILD_INFO", "info")
+	_add_build_info_row(group, "UI_BUILD_VERSION", BuildInfo.version())
+	_add_build_info_row(group, "UI_BUILD_COMMIT", BuildInfo.commit())
+	_add_build_info_row(group, "UI_BUILD_TIME", BuildInfo.build_time())
+	return group
+
+
+func _add_build_info_row(parent: Container, label_key: String, value: String) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	parent.add_child(row)
+	var name_label := Label.new()
+	name_label.text = tr(label_key)
+	name_label.custom_minimum_size.x = 120
+	name_label.add_theme_font_size_override("font_size", 21)
+	name_label.add_theme_color_override("font_color", COL_SECTION)
+	row.add_child(name_label)
+	var value_label := Label.new()
+	value_label.text = value
+	value_label.add_theme_font_size_override("font_size", 21)
+	value_label.add_theme_color_override("font_color", COL_TITLE)
+	row.add_child(value_label)
 
 
 func select_group(key: String) -> void:

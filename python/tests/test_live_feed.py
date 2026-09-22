@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from pyoperator.live_feed import (
+from operator_xr.live_feed import (
     AlgorithmDemand,
     capabilities_from_session_start,
     QUEST_CAPTURE_PROFILE,
@@ -23,7 +23,7 @@ from pyoperator.live_feed import (
     read_frame,
     validate_demand,
 )
-from pyoperator.live_feed.protocol import read_exact, to_plain
+from operator_xr.live_feed.protocol import read_exact, to_plain
 
 
 class LiveFeedTests(unittest.TestCase):
@@ -141,7 +141,7 @@ class LiveFeedTests(unittest.TestCase):
             self.assertEqual(main(["--print-plan"]), 0)
         self.assertIn('"schema": "operator.capture_request.v1"', output.getvalue())
 
-        with patch("pyoperator.live_feed.cli.LiveFeedServer") as server_class:
+        with patch("operator_xr.live_feed.cli.LiveFeedServer") as server_class:
             result = main(
                 [
                     "--host", "0.0.0.0",
@@ -197,9 +197,9 @@ class LiveFeedTests(unittest.TestCase):
             send_frame.assert_called_once()
 
     def test_module_entry_point_delegates_to_cli(self) -> None:
-        with patch("pyoperator.live_feed.cli.main", return_value=7):
+        with patch("operator_xr.live_feed.cli.main", return_value=7):
             with self.assertRaises(SystemExit) as raised:
-                runpy.run_module("pyoperator.live_feed.__main__", run_name="__main__")
+                runpy.run_module("operator_xr.live_feed.__main__", run_name="__main__")
         self.assertEqual(raised.exception.code, 7)
 
 

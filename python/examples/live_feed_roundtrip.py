@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example 2 - bidirectional Live Feed: headset -> pyoperator -> headset.
+"""Example 2 - bidirectional Live Feed: headset -> operator_xr -> headset.
 
 The headset pushes its head pose; this script turns the recent trajectory into a
 coloured point cloud and streams it back, where the headset renders it in 3D.
@@ -38,7 +38,7 @@ from pathlib import Path
 # Allow running straight from a source checkout without installing.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pyoperator.live_feed import (  # noqa: E402
+from operator_xr.live_feed import (  # noqa: E402
     DensePoint,
     HeadPoseSample,
     LiveFeedReceiver,

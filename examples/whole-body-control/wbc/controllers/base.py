@@ -1,7 +1,7 @@
 """Small example-local contract. Algorithms own references and physics."""
 from typing import Protocol, Any
 
-from pyoperator.models import XrFrame
+from operator_xr.models import XrFrame
 
 
 class Controller(Protocol):

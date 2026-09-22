@@ -20,7 +20,7 @@ def test_unified_cli_selects_controller_without_conflating_backend():
 @pytest.mark.parametrize("controller", ["sonic", "scalebfm"])
 def test_presentation_does_not_capture_hand_controls(controller):
     from types import SimpleNamespace
-    from pyoperator import BlueprintComponent
+    from operator_xr import BlueprintComponent
     from wbc.presentation import blueprint
     from wbc.controllers.sonic.controller import SonicController
     assert "A+B+X+Y" in SonicController.initial_status

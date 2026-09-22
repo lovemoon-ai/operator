@@ -192,7 +192,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "e2e-tests"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "robot-adapter",
@@ -593,7 +593,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "operator"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "teleop-protocol",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "operator-c"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "operator",
 ]
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "pyoperator-native"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "operator",
  "pyo3",
@@ -792,7 +792,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "robot-adapter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "robot-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1006,7 +1006,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "teleop-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1372,7 +1372,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "xr-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

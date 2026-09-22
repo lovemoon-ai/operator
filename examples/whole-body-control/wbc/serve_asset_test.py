@@ -5,8 +5,8 @@ from pathlib import Path
 import threading
 
 import mujoco
-from pyoperator.mujoco_asset import from_mujoco
-from pyoperator import RobotAssetServer
+from operator_xr.mujoco_asset import from_mujoco
+from operator_xr import RobotAssetServer
 
 
 def scalar_joint_names(model) -> list[str]:

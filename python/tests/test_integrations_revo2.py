@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import math
 import unittest
@@ -6,7 +8,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pyoperator.integrations.revo2 import (
+from operator_xr.integrations.revo2 import (
     CHANNELS,
     COMMAND_FLAG_HOLD,
     CurrentEma,
@@ -23,8 +25,8 @@ from pyoperator.integrations.revo2 import (
     target_packet_v3,
     telemetry_values,
 )
-from pyoperator.integrations.revo2_udp import Revo2UdpHostedAdapter, make_revo2_descriptor
-from pyoperator.models import ControllerInput, ControllerState, HandState, Joint, Pose
+from operator_xr.integrations.revo2_udp import Revo2UdpHostedAdapter, make_revo2_descriptor
+from operator_xr.models import ControllerInput, ControllerState, HandState, Joint, Pose
 
 
 def _joint(index: int, position: tuple[float, float, float]) -> Joint:
@@ -504,7 +506,7 @@ class Revo2IntegrationTests(unittest.TestCase):
         )
         received_ns = adapter._value_received_ns["revo2_left_position"]
         with patch(
-            "pyoperator.integrations.revo2_udp.time.monotonic_ns",
+            "operator_xr.integrations.revo2_udp.time.monotonic_ns",
             return_value=received_ns + adapter.telemetry_timeout_ns + 1,
         ):
             self.assertEqual(adapter.telemetry()["values"], {})

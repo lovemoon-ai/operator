@@ -1,8 +1,8 @@
 from collections import deque
 from types import SimpleNamespace
 from wbc.presentation import blueprint, claim_reset_request
-from pyoperator import BlueprintEvent
-from pyoperator.blueprint import BlueprintComponent
+from operator_xr import BlueprintEvent
+from operator_xr.blueprint import BlueprintComponent
 
 
 class ContractAsset:

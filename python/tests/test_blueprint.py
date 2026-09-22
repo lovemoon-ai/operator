@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import json
 import unittest
 
-from pyoperator.blueprint import (
+from operator_xr.blueprint import (
     Blueprint,
     BlueprintClient,
     BlueprintComponent,
@@ -10,7 +12,7 @@ from pyoperator.blueprint import (
     _matches_type,
     _is_wire_integer,
 )
-from pyoperator._blueprint_spec import SPEC, SPEC_SHA256
+from operator_xr._blueprint_spec import SPEC, SPEC_SHA256
 
 
 class FakeNative:

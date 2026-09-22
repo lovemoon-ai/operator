@@ -15,7 +15,7 @@ from unittest import mock
 
 import pytest
 
-from pyoperator.live_feed import qr
+from operator_xr.live_feed import qr
 
 
 _TRUECOLOR = re.compile(

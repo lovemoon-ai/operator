@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from pyoperator.mujoco_asset import from_mujoco
-from pyoperator.robot_assets import glb_document
+from operator_xr.mujoco_asset import from_mujoco
+from operator_xr.robot_assets import glb_document
 from wbc.serve_asset_test import scalar_joint_names
 
 

@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pyoperator.models import frame_from_dict
-from pyoperator.replay import FrameRecorder, ReplaySession, load
-from pyoperator.session import BridgeConfig, VideoFeedConfig, XrSession
+from operator_xr.models import frame_from_dict
+from operator_xr.replay import FrameRecorder, ReplaySession, load
+from operator_xr.session import BridgeConfig, VideoFeedConfig, XrSession
 
 from test_models import sample_frame
 
@@ -150,8 +150,8 @@ class SessionReplayTests(unittest.TestCase):
         self.assertEqual(session._native.wait_calls, [(0, 0.1), (1, 0.1), (2, 0.1)])
 
     def test_missing_native_extension_has_actionable_error(self) -> None:
-        with patch("pyoperator.session._NativeSession", None), patch(
-            "pyoperator.session._native_import_error", ImportError("missing")
+        with patch("operator_xr.session._NativeSession", None), patch(
+            "operator_xr.session._native_import_error", ImportError("missing")
         ):
             with self.assertRaisesRegex(RuntimeError, r"pip install -e ./python"):
                 XrSession()
@@ -186,8 +186,8 @@ class SessionReplayTests(unittest.TestCase):
                 recorder.write(frame_from_dict(first))
                 recorder.write(frame_from_dict(second))
 
-            with patch("pyoperator.replay.time.monotonic", side_effect=[10.0, 10.0, 10.0]), patch(
-                "pyoperator.replay.time.sleep"
+            with patch("operator_xr.replay.time.monotonic", side_effect=[10.0, 10.0, 10.0]), patch(
+                "operator_xr.replay.time.sleep"
             ) as sleep:
                 replay = ReplaySession(path, realtime=True).start()
                 frames = list(replay.frames())

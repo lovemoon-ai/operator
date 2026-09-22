@@ -139,7 +139,7 @@ var _blueprint_runtime: BlueprintRuntime
 var _robot_control_sink: RobotControlSink
 var _command_sender: CommandSender
 ## Raw atomic state publisher, enabled only when the descriptor advertises
-## `xr_stream` (the embedded pyoperator SDK mode).
+## `xr_stream` (the embedded operator_xr SDK mode).
 var _xr_state_sender: XrStateSender
 ## Dedicated telemetry connection. xr-bridge intentionally separates the
 ## command and telemetry sockets so slow UI consumers cannot delay commands.

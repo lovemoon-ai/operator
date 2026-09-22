@@ -6,7 +6,7 @@ extends RefCounted
 ## chance to deliver `_process` while a case is executing.
 ##
 ## Host requirements for any case using this probe:
-##   pyoperator serve --service retargeting --port 8000
+##   operator serve --service retargeting --port 8000
 ##   adb reverse tcp:8000 tcp:8000
 
 const RemoteRetargeterScript := preload("res://scripts/teleop/retargeting/remote_retargeter.gd")
@@ -36,7 +36,7 @@ func open(profile: Dictionary) -> String:
 		return ""
 	return _reason(
 		(
-			"no handshake within %dms; start `pyoperator serve --service retargeting` "
+			"no handshake within %dms; start `operator serve --service retargeting` "
 			+ "and `adb reverse tcp:%d tcp:%d`"
 		)
 		% [TIMEOUT_MSEC, PORT, PORT]

@@ -239,6 +239,31 @@ The Rust workspace contains:
 - `crates/robot-adapter`
 - `crates/e2e-tests`
 
+## Versioning And Release
+
+The root `VERSION` file holds the one release version (SemVer, e.g. `0.2.0` or
+`0.3.0-rc.1`) for all components:
+
+- Rust: `robot/Cargo.toml` `[workspace.package] version`, inherited by every crate.
+- Python: `operator_xr` (published on PyPI as `operator-xr`) uses
+  `dynamic = ["version"]`, so maturin takes the Cargo version (`0.3.0-rc.1`
+  becomes `0.3.0rc1`). Read it with `operator_xr.__version__` or
+  `operator --version`.
+- C++: `cpp/liboperator` reads `VERSION` at configure time; the linked library
+  reports its version through `operator_version()` / `operator_sdk::version()`.
+- XR: `xr/project.godot` `application/config/version`. The `operator-features`
+  export plugin sets the APK versionName to that value and versionCode to
+  `git rev-list --count HEAD`, and writes the short commit into the PCK. Teleop
+  and Ego settings show the version, commit, and build time on their
+  **Version info** page.
+
+`scripts/version.py set X.Y.Z` updates every copy and `scripts/version.py check`
+fails if anything has drifted. Releases follow `claw/sop/release.md`. Pushing a
+`vX.Y.Z` tag triggers `.github/workflows/python-release.yml`, which builds
+`operator-xr` wheels (Linux x86_64/aarch64, macOS arm64) and an sdist, then
+publishes them through PyPI Trusted Publishing. Pre-release tags publish as PyPI
+pre-releases, which `pip` only installs with `--pre` or an exact version.
+
 ## Web App
 
 Run from `web/`:

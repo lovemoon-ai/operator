@@ -769,6 +769,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	# --- Startup group -----------------------------------------------------
 	var startup := register_group("startup", "UI_GROUP_STARTUP", "power")
 	_show_on_launch_toggle = add_toggle(startup, tr("UI_SHOW_SETTINGS_ON_LAUNCH"), DEFAULT_SHOW_ON_LAUNCH, 22)
+	register_build_info_group()
 
 	# The robot group is shown by default (first registered).
 	call_deferred("_refresh_scope_ui")

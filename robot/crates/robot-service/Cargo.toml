@@ -1,6 +1,6 @@
 [package]
 name = "robot-service"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Robot-side service: starts the adapter and XR bridge from one shared YAML config"
 

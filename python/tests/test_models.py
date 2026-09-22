@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from pyoperator.models import frame_from_dict, frame_from_json, frame_to_dict, frame_to_json
+from operator_xr.models import frame_from_dict, frame_from_json, frame_to_dict, frame_to_json
 
 
 def sample_frame(frame_id: int = 1) -> dict:

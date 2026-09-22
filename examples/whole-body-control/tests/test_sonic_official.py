@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
-from pyoperator import (BodyState, ControllerInput, ControllerPair, ControllerState,
+from operator_xr import (BodyState, ControllerInput, ControllerPair, ControllerState,
                         HandPair, Joint, Pose, XrFrame)
 from wbc.controllers.sonic.pico_input import OfficialThreePoint, extract_pico_sample, require_full_body
 from wbc.controllers.sonic.controls import OfficialControls

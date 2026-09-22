@@ -1,6 +1,6 @@
 """Print raw XR snapshots; intentionally does not publish Teleop UI."""
 
-from pyoperator import XrSession
+from operator_xr import XrSession
 
 
 def main() -> None:

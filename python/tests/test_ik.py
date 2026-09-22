@@ -4,9 +4,9 @@ import unittest
 from types import MappingProxyType
 from unittest.mock import patch
 
-from pyoperator.ik import CallableIK, DampedLeastSquaresIK
-from pyoperator.models import Pose
-from pyoperator.robot import EndEffectorTarget, JointTarget, RobotState
+from operator_xr.ik import CallableIK, DampedLeastSquaresIK
+from operator_xr.models import Pose
+from operator_xr.robot import EndEffectorTarget, JointTarget, RobotState
 
 try:
     import numpy  # noqa: F401
@@ -46,7 +46,7 @@ class CallableIKTests(unittest.TestCase):
         self.assertIs(result, expected)
 
 
-@unittest.skipUnless(HAS_NUMPY, "requires the pyoperator[test] numpy dependency")
+@unittest.skipUnless(HAS_NUMPY, "requires the operator-xr[test] numpy dependency")
 class DampedLeastSquaresIKTests(unittest.TestCase):
     def test_converges_for_identity_jacobian(self) -> None:
         requested = target()
@@ -90,5 +90,5 @@ class DampedLeastSquaresIKTests(unittest.TestCase):
             return real_import(name, *args, **kwargs)
 
         with patch("builtins.__import__", side_effect=without_numpy):
-            with self.assertRaisesRegex(RuntimeError, r"pyoperator\[ik\]"):
+            with self.assertRaisesRegex(RuntimeError, r"operator-xr\[ik\]"):
                 solver.solve(target(), state(0.0))

@@ -175,7 +175,7 @@ locally persisted stream selection.
 
 ## Python Package Layout
 
-`pyoperator.live_feed` separates transport from algorithm so applications do not
+`operator_xr.live_feed` separates transport from algorithm so applications do not
 have to copy server internals:
 
 | Module | Responsibility |
@@ -204,8 +204,8 @@ Two runnable examples show the two directions:
 
 ## Example Server
 
-`python/pyoperator/live_feed/server.py` is the current runnable server
-implementation. It is packaged with `pyoperator`, while
+`python/operator_xr/live_feed/server.py` is the current runnable server
+implementation. It is packaged with `operator_xr`, while
 `examples/live-feed-demo/operator_live_feed_server.py` remains a compatibility
 entry point. The server:
 
@@ -219,7 +219,7 @@ entry point. The server:
 Run:
 
 ```bash
-PYTHONPATH=python python3 -m pyoperator.live_feed \
+PYTHONPATH=python python3 -m operator_xr.live_feed \
   --algorithm depth_fusion_pointcloud \
   --push-port 63910 \
   --pull-port 63912

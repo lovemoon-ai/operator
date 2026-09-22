@@ -6,6 +6,7 @@
 
 int main() {
   operator_sdk::BlueprintPublisher publisher;
+  assert(operator_sdk::version() == LIBOPERATOR_EXPECTED_VERSION);
   assert(operator_sdk::BlueprintPublisher::spec_version() == 1);
   assert(operator_sdk::BlueprintPublisher::spec_sha256().size() == 64);
   assert(publisher

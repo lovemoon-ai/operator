@@ -10,7 +10,7 @@ import threading
 import time
 from types import MappingProxyType
 
-from pyoperator import (
+from operator_xr import (
     Pose,
     PoseDeltaRetargeter,
     BlueprintComponent,
@@ -20,7 +20,7 @@ from pyoperator import (
     Blueprint,
     XrSession,
 )
-from pyoperator.control_loop import run
+from operator_xr.control_loop import run
 
 
 def build_blueprint() -> Blueprint:

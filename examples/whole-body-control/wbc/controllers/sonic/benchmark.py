@@ -3,7 +3,7 @@ import argparse
 import json
 import time
 import numpy as np
-from pyoperator import BodyState, ControllerInput, ControllerPair, ControllerState, HandPair, Joint, Pose, XrFrame
+from operator_xr import BodyState, ControllerInput, ControllerPair, ControllerState, HandPair, Joint, Pose, XrFrame
 from .controller import add_arguments, SonicController, yaw
 from .pico_input import extract_pico_sample
 

@@ -1,12 +1,13 @@
 """Host format/server tests. Actual GLTF import is tested on the headset."""
 import json
 import struct
+import sys
 import urllib.error
 import urllib.request
 
 import pytest
-from pyoperator import RobotModelAsset, RobotAssetServer
-from pyoperator.robot_assets import glb_document
+from operator_xr import RobotModelAsset, RobotAssetServer
+from operator_xr.robot_assets import glb_document
 
 
 def asset():
@@ -81,7 +82,15 @@ def test_rigid_asset_has_empty_joint_contract_and_can_replace_server_set():
 
 @pytest.mark.parametrize("digest", ["../asset", "A" * 64, "0" * 63, "g" * 64])
 def test_component_rejects_invalid_hash(digest):
-    from pyoperator import BlueprintComponent
+    from operator_xr import BlueprintComponent
     with pytest.raises(ValueError):
         BlueprintComponent.robot_model("robot", asset_sha256=digest, asset_size=100, asset_port=63904,
             joint_names=["joint"], joint_positions_binding="q", base_pose_binding="base", sample_binding="seq")
+
+
+def test_from_mujoco_names_its_optional_extra(monkeypatch):
+    from operator_xr.mujoco_asset import from_mujoco
+
+    monkeypatch.setitem(sys.modules, "mujoco", None)
+    with pytest.raises(RuntimeError, match=r"operator-xr\[mujoco\]"):
+        from_mujoco(None, root_body="base", joint_names=())

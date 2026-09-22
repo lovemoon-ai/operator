@@ -1,11 +1,11 @@
 """End-to-end retargeting service: the exact traffic the XR client speaks.
 
-Needs FastAPI (the `retargeting` pyoperator extra) and the solver library.
+Needs FastAPI (the `retargeting` operator_xr extra) and the solver library.
 """
 
 import unittest
 
-from pyoperator.services.retargeting import create_app
+from operator_xr.services.retargeting import create_app
 
 try:
     import retargeting

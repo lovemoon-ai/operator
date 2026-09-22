@@ -16,7 +16,7 @@ from pathlib import Path
 
 import fake_headset
 
-from pyoperator.live_feed import (
+from operator_xr.live_feed import (
     DensePoint,
     LiveFeedReceiver,
     ReceiverConfig,
@@ -31,7 +31,7 @@ from pyoperator.live_feed import (
     sample_kinds,
     transform_to_matrix,
 )
-from pyoperator.live_feed.models import (
+from operator_xr.live_feed.models import (
     DepthCameraModel,
     RgbCameraModel,
     RgbFrame,
@@ -43,9 +43,9 @@ from pyoperator.live_feed.models import (
     transform_from_position_rotation,
     transform_from_record,
 )
-from pyoperator.live_feed.protocol import StreamEvent, encode_json, read_frame
-from pyoperator.live_feed.results import monotonic_pts_ns, pack_dense_points
-from pyoperator.live_feed.runtime import (
+from operator_xr.live_feed.protocol import StreamEvent, encode_json, read_frame
+from operator_xr.live_feed.results import monotonic_pts_ns, pack_dense_points
+from operator_xr.live_feed.runtime import (
     DroppingQueue,
     SessionRecorder,
     connect_push_client,

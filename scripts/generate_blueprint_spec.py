@@ -80,7 +80,7 @@ PRIMITIVE_KEYS = {
 CONSTRAINT_KEYS = {"at_least_one_complete_binding_group"}
 EVENT_KEYS = {"action_property", "value_type"}
 TARGETS = {
-    "python": ROOT / "python/pyoperator/_blueprint_spec.py",
+    "python": ROOT / "python/operator_xr/_blueprint_spec.py",
     "rust": ROOT / "robot/crates/teleop-protocol/src/blueprint_spec.rs",
     "godot": ROOT / "xr/scripts/contracts/blueprint/blueprint_spec.gd",
 }

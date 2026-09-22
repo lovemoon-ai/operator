@@ -101,7 +101,7 @@ def test_shared_reset_modes_velocities_hands_and_no_exit(controller):
 def test_shared_loop_emits_only_declared_blueprint_state(controller):
     from wbc.loop import ControlLoop
     from wbc.presentation import blueprint
-    from pyoperator import BlueprintComponent
+    from operator_xr import BlueprintComponent
     def component(id, asset_port, **kwargs):
         return BlueprintComponent.robot_model(id, asset_port=asset_port,
             asset_sha256="a"*64, asset_size=100, joint_names=controller.simulation.joint_names, **kwargs)

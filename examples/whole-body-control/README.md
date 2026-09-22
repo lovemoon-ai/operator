@@ -25,7 +25,7 @@ Linux, Python 3.10/3.11, MuJoCo 3.3.6, a compatible real headset, and host/heads
 LAN connectivity are required. SONIC additionally needs a C++20 compiler: it
 builds a small adapter around the actual upstream planner/timeline methods.
 For a one-shot setup, `examples/whole-body-control/setup.sh` creates the shared
-venv at `python/.venv`, installs pyoperator editable plus both controllers'
+venv at `python/.venv`, installs operator_xr editable plus both controllers'
 dependencies, and picks the GPU or CPU ONNX Runtime requirements automatically
 (`FORCE_CPU=1` overrides detection). To install manually in your own chosen
 environment instead:
@@ -34,9 +34,9 @@ environment instead:
 pip install -e ./python -r examples/whole-body-control/requirements.txt
 ```
 
-The SDK and both controllers share `numpy>=2,<3` (SciPy >=1.13). In particular,
-pyoperator's required rerun-sdk dependency needs NumPy 2; do not downgrade this
-environment to NumPy 1 or bypass dependency resolution with `--no-deps`.
+Both controllers share `numpy>=2,<3` (SciPy >=1.13), the combination they are
+tested with; do not downgrade this environment to NumPy 1 or bypass dependency
+resolution with `--no-deps`.
 
 For ScaleBFM, follow the [ScaleBFM guide](docs/scalebfm.md), including real weights,
 metadata, mode table and the pinned ScaleBridge robot model. Install a matching
@@ -299,7 +299,7 @@ prove live three-point control. Never run the XR project in desktop headless mod
 own shared orchestration; `controllers/scalebfm` and `controllers/sonic` own
 calibration, policy inputs/outputs and simulation configuration. Controller-specific
 dependencies are imported only for the selected controller. This is an example-local
-contract, not a new general-purpose framework in pyoperator.
+contract, not a new general-purpose framework in operator_xr.
 
 `examples/` is a general directory, **not a Python package API**. Direct script
 execution already places this example directory on Python's import path. To
@@ -311,7 +311,7 @@ PYTHONPATH=/path/to/operator/examples/whole-body-control python -c \
   'from wbc.controllers.sonic.pico_input import OfficialThreePoint'
 ```
 
-Install pyoperator normally as described above. Example directories are not
+Install operator_xr normally as described above. Example directories are not
 package APIs; add this directory to `PYTHONPATH` and import `wbc` explicitly.
 
 The former `examples/scalebfm` tree has been removed. There is one runtime loop;

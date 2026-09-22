@@ -1,7 +1,7 @@
 """Test-side helpers for driving a Live Feed server without a headset.
 
 The OLCP payload builders and the push client live in
-:mod:`pyoperator.live_feed.simulator` so tests and the shipped simulator CLI
+:mod:`operator_xr.live_feed.simulator` so tests and the shipped simulator CLI
 cannot drift apart. This module only adds test-only extras (the stub ffmpeg).
 """
 
@@ -13,7 +13,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-from pyoperator.live_feed.simulator import (  # noqa: F401 - re-exported for tests
+from operator_xr.live_feed.simulator import (  # noqa: F401 - re-exported for tests
     SyntheticHeadset,
     controller_input_payload,
     controller_pose_payload,

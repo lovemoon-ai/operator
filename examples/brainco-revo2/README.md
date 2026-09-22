@@ -6,7 +6,7 @@ head label, per-hand status lamps, a system-menu control item, and five-finger
 tactile feedback; the headset owns rendering, hand interaction, tracked
 fingertip placement, and user visibility overrides.
 
-The PICO APK, ARM64 `xr-bridge`, and deployed `pyoperator` files must come from
+The PICO APK, ARM64 `xr-bridge`, and deployed `operator_xr` files must come from
 the same checkout. Blueprint negotiation includes the generated
 `specs/blueprint/v1.json` SHA-256 digest; a mixed deployment keeps tracking,
 commands, telemetry, and video connected but deliberately disables Blueprint

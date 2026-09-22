@@ -7,6 +7,7 @@ extends RefCounted
 ## fixture would not prove the operator can actually reach these controls.
 
 const CASE_ID := "teleop.settings_scope"
+const BuildInfo := preload("res://scripts/app/build_info.gd")
 
 
 class TestPanel:
@@ -78,6 +79,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	_test_video_settings(panel, groups, t)
 	_test_blueprint_settings(panel, t)
+	_test_build_info(panel, t)
 
 	# Every robot is its own always-visible button: a dropdown popup cannot
 	# render in this panel's composition viewport, so the operator would never
@@ -629,6 +631,18 @@ func _test_blueprint_settings(panel: TestPanel, t: OperatorTestAssertions) -> vo
 	t.is_false(blueprint_button.visible, "robot UI hides again when the blueprint clears")
 
 
+func _test_build_info(panel: TestPanel, t: OperatorTestAssertions) -> void:
+	var group_containers: Dictionary = panel.get("_group_containers")
+	t.eq(group_containers.keys().back(), "build_info", "Teleop sidebar ends with Version info")
+	var build_texts := _label_texts(group_containers.get("build_info"))
+	t.ne(BuildInfo.version(), "", "the release version is baked into the project")
+	t.contains(build_texts, BuildInfo.version(), "Version info shows the release version")
+	t.is_true(BuildInfo.commit().is_valid_hex_number(), "the exported APK carries its source commit")
+	t.contains(build_texts, BuildInfo.commit(), "Version info shows the source commit")
+	t.eq(BuildInfo.build_time().length(), 16, "the exported APK carries its build time")
+	t.contains(build_texts, BuildInfo.build_time(), "Version info shows the build time")
+
+
 func _test_video_settings(panel: TestPanel, groups: Array, t: OperatorTestAssertions) -> void:
 	var containers: Dictionary = panel.get("_group_containers")
 	var video_group: Control = containers.get("video")
@@ -864,3 +878,11 @@ func _dispose(panel: Node) -> void:
 	if panel.get_parent() != null:
 		panel.get_parent().remove_child(panel)
 	panel.queue_free()
+
+
+func _label_texts(group: Node) -> Array:
+	var texts: Array = []
+	if group != null:
+		for label in group.find_children("*", "Label", true, false):
+			texts.append((label as Label).text)
+	return texts

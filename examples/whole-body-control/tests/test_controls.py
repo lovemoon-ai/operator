@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 import numpy as np
 import pytest
-from pyoperator import ControllerInput, ControllerPair, ControllerState, Pose
+from operator_xr import ControllerInput, ControllerPair, ControllerState, Pose
 from wbc.controls import Commands, ControlMode, Gamepad
 from wbc.hands import hand_targets
 
