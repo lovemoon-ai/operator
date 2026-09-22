@@ -63,7 +63,39 @@ class OperatorFeaturesExportPlugin:
 		{"name": "operator_feature_debug_metrics", "default": false},
 		{"name": "operator_feature_test_harness", "default": false},
 	]
+	# KEEP IN SYNC with xr/scripts/app/build_info.gd.
+	const BUILD_INFO_PATH := "res://build_info.cfg"
 	var _invalid_quick_entry_warned := false
+
+	# The APK version follows the repo-wide VERSION (synced into
+	# application/config/version by scripts/version.py), pre-release suffix
+	# included; Godot's own empty-name fallback only accepts digits. versionCode
+	# is the commit count so every newer build installs over an older one.
+	func _get_export_options_overrides(_platform: EditorExportPlatform) -> Dictionary:
+		var overrides := {
+			"version/name": String(ProjectSettings.get_setting("application/config/version", "")),
+		}
+		var commit_count := _git(["rev-list", "--count", "HEAD"])
+		if commit_count.is_valid_int():
+			overrides["version/code"] = commit_count.to_int()
+		return overrides
+
+	# Bakes the source commit into the PCK for the in-headset Build info page.
+	func _export_begin(
+		_features: PackedStringArray, _is_debug: bool, _path: String, _flags: int
+	) -> void:
+		var commit := _git(["rev-parse", "--short", "HEAD"])
+		var build_info := ConfigFile.new()
+		build_info.set_value("build", "commit", commit if not commit.is_empty() else "unknown")
+		add_file(BUILD_INFO_PATH, build_info.encode_to_text().to_utf8_buffer(), false)
+
+	func _git(args: PackedStringArray) -> String:
+		var command := PackedStringArray(["-C", ProjectSettings.globalize_path("res://")])
+		command.append_array(args)
+		var output: Array = []
+		if OS.execute("git", command, output) != 0 or output.is_empty():
+			return ""
+		return String(output[0]).strip_edges()
 
 	func _supports_platform(platform: EditorExportPlatform) -> bool:
 		return platform is EditorExportPlatformAndroid

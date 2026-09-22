@@ -7,7 +7,7 @@ transform and, crucially, the per-joint OFFSETS before pelvis normalization.
 """
 from dataclasses import dataclass
 import numpy as np
-from pyoperator.models import XrFrame
+from operator_xr.models import XrFrame
 from ...tracking import TrackingUnavailable
 
 # Upstream _process_3pt_pose selects [0,22,23,12], not [20,21,15].

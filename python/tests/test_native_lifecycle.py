@@ -10,12 +10,12 @@ import uuid
 
 import pytest
 
-from pyoperator._blueprint_spec import SPEC_CAPABILITY
-from pyoperator.blueprint import BlueprintComponent, Blueprint
-from pyoperator.session import BridgeConfig, VideoFeedConfig, XrSession
+from operator_xr._blueprint_spec import SPEC_CAPABILITY
+from operator_xr.blueprint import BlueprintComponent, Blueprint
+from operator_xr.session import BridgeConfig, VideoFeedConfig, XrSession
 
 try:
-    from pyoperator import _native  # noqa: F401
+    from operator_xr import _native  # noqa: F401
 except ImportError:
     HAS_NATIVE = False
 else:
@@ -130,7 +130,7 @@ def _frame(frame_id: int) -> dict:
 
 def _config() -> BridgeConfig:
     return BridgeConfig(
-        name=f"pyoperator-test-{uuid.uuid4().hex}",
+        name=f"operator_xr-test-{uuid.uuid4().hex}",
         pose_port=_tcp_port(),
         discovery_port=_udp_port(),
         pose_udp_port=_udp_port(),
@@ -147,7 +147,7 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
     return bool(predicate())
 
 
-@unittest.skipUnless(HAS_NATIVE, "requires the built pyoperator native extension")
+@unittest.skipUnless(HAS_NATIVE, "requires the built operator_xr native extension")
 class NativeLifecycleTests(unittest.TestCase):
     @pytest.mark.fake_headset
     def test_dedicated_telemetry_capability_disables_command_mirror(self):
@@ -339,7 +339,7 @@ class NativeLifecycleTests(unittest.TestCase):
             occupied.bind(("0.0.0.0", 0))
             occupied.listen()
             config = BridgeConfig(
-                name=f"pyoperator-test-{uuid.uuid4().hex}",
+                name=f"operator_xr-test-{uuid.uuid4().hex}",
                 pose_port=int(occupied.getsockname()[1]),
                 discovery_port=_udp_port(),
                 pose_udp_port=_udp_port(),

@@ -68,7 +68,7 @@ make install-pico
 
 Use a single selected device (`ANDROID_SERIAL=...` with multiple headsets).
 Always install with `--no-incremental` (the make targets already do).
-**Rebuild pyoperator and the APK from this same checkout**: Blueprint negotiates
+**Rebuild operator_xr and the APK from this same checkout**: Blueprint negotiates
 an exact spec hash; older APKs cannot display `robot_model`.
 
 On startup the host exports its actual MuJoCo G1 visual model and articulation

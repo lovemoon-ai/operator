@@ -3,10 +3,10 @@ import unittest
 from types import MappingProxyType
 from unittest.mock import patch
 
-from pyoperator.control_loop import run
-from pyoperator.models import Pose, frame_from_dict
-from pyoperator.retargeting import PoseDeltaRetargeter
-from pyoperator.robot import EndEffectorTarget, JointTarget, RobotState
+from operator_xr.control_loop import run
+from operator_xr.models import Pose, frame_from_dict
+from operator_xr.retargeting import PoseDeltaRetargeter
+from operator_xr.robot import EndEffectorTarget, JointTarget, RobotState
 
 from test_models import sample_frame
 
@@ -115,12 +115,12 @@ class ControlLoopTests(unittest.TestCase):
         retargeter = ResettingRetargeter()
         retargeter.required_streams = ("body",)
         owned = SequenceSession([])
-        with patch("pyoperator.control_loop.XrSession", return_value=owned) as factory:
+        with patch("operator_xr.control_loop.XrSession", return_value=owned) as factory:
             run(FakeRobot(), retargeter)
         self.assertEqual(factory.call_args.args[0].streams, ("body",))
 
     def test_supplied_session_cannot_silently_omit_required_tracking(self):
-        from pyoperator.session import BridgeConfig
+        from operator_xr.session import BridgeConfig
         retargeter = ResettingRetargeter()
         retargeter.required_streams = ("body",)
         session = SequenceSession([])
@@ -193,7 +193,7 @@ class ControlLoopTests(unittest.TestCase):
 
         robot = FakeRobot()
         retargeter = ResettingRetargeter()
-        with patch("pyoperator.control_loop.time.monotonic", side_effect=[0.0, 0.6, 0.7, 0.8]):
+        with patch("operator_xr.control_loop.time.monotonic", side_effect=[0.0, 0.6, 0.7, 0.8]):
             stats = run(
                 robot,
                 retargeter,
@@ -214,12 +214,12 @@ class ControlLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "robot read failed"):
             run(robot, ResettingRetargeter(JointTarget((0.1,))), session=session)
         self.assertFalse(robot.connected)
-        self.assertIn("pyoperator control loop ended", robot.stops)
+        self.assertIn("operator_xr control loop ended", robot.stops)
 
     def test_owned_session_is_started_and_closed(self) -> None:
         robot = FakeRobot()
         owned = SequenceSession([])
-        with patch("pyoperator.control_loop.XrSession", return_value=owned):
+        with patch("operator_xr.control_loop.XrSession", return_value=owned):
             stats = run(robot, ResettingRetargeter())
         self.assertEqual(stats.frames, 0)
         self.assertTrue(owned.started)
@@ -233,11 +233,11 @@ class ControlLoopTests(unittest.TestCase):
 
         robot = FakeRobot()
         owned = FailingStartSession([])
-        with patch("pyoperator.control_loop.XrSession", return_value=owned):
+        with patch("operator_xr.control_loop.XrSession", return_value=owned):
             with self.assertRaisesRegex(RuntimeError, "bind failed"):
                 run(robot, ResettingRetargeter())
         self.assertFalse(robot.connected)
-        self.assertIn("pyoperator control loop ended", robot.stops)
+        self.assertIn("operator_xr control loop ended", robot.stops)
         self.assertTrue(owned.closed)
 
     def test_cleanup_continues_after_stop_failure(self) -> None:
@@ -248,7 +248,7 @@ class ControlLoopTests(unittest.TestCase):
 
         robot = StopFailingRobot()
         owned = SequenceSession([])
-        with patch("pyoperator.control_loop.XrSession", return_value=owned):
+        with patch("operator_xr.control_loop.XrSession", return_value=owned):
             with self.assertRaisesRegex(RuntimeError, "stop failed"):
                 run(robot, ResettingRetargeter())
         self.assertFalse(robot.connected)
@@ -264,4 +264,4 @@ class ControlLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "connect failed"):
             run(robot, ResettingRetargeter(), session=SequenceSession([]))
         self.assertFalse(robot.connected)
-        self.assertIn("pyoperator control loop ended", robot.stops)
+        self.assertIn("operator_xr control loop ended", robot.stops)

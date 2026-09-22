@@ -178,8 +178,8 @@
     {
       "id": "teleop.pyoperator_real_headset_stream",
       "level": "device",
-      "suite": "python.pyoperator",
-      "module": "python/pyoperator",
+      "suite": "python.operator_xr",
+      "module": "python/operator_xr",
       "required_device": "quest_or_pico",
       "host_test": "python/tests/test_real_headset.py::test_pyoperator_receives_real_headset_frames"
     },

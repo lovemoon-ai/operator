@@ -1,0 +1,99 @@
+# Builds the operator-xr wheels and sdist (import name: operator_xr) and
+# publishes them to PyPI.
+#
+# Pushing a v<VERSION> tag releases it (see scripts/version.py). Pre-release
+# tags such as v0.3.0-rc.1 publish to TestPyPI instead. Running the workflow by
+# hand (workflow_dispatch) builds and smoke-tests without publishing.
+# Publishing uses PyPI Trusted Publishing, so no API token is stored anywhere.
+name: Python release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Every component and the tag agree with VERSION
+        run: python3 scripts/version.py check ${{ github.ref_type == 'tag' && format('--tag {0}', github.ref_name) || '' }}
+
+  wheels:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: x86_64 }
+          - { runner: ubuntu-24.04-arm, target: aarch64 }
+          - { runner: macos-14, target: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # abi3-py39: one wheel per platform covers every Python >= 3.9.
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+      - name: Smoke test the wheel
+        run: |
+          python -m pip install packaging python/dist/*.whl
+          operator --version
+          python - <<'EOF'
+          from pathlib import Path
+          from packaging.version import Version
+          import operator_xr, operator_xr._native
+          expected = Version(Path("VERSION").read_text().strip())
+          assert Version(operator_xr.__version__) == expected, operator_xr.__version__
+          EOF
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.runner }}-${{ matrix.target }}
+          path: python/dist
+
+  sdist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: python
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-sdist
+          path: python/dist
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: ${{ contains(github.ref_name, '-') && 'testpypi' || 'pypi' }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Publish to TestPyPI
+        if: contains(github.ref_name, '-')
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+      - name: Publish to PyPI
+        if: ${{ !contains(github.ref_name, '-') }}
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -16,8 +16,8 @@ from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 
-from pyoperator.live_feed import LiveFeedReceiver, ReceiverConfig
-from pyoperator.live_feed.simulator import (
+from operator_xr.live_feed import LiveFeedReceiver, ReceiverConfig
+from operator_xr.live_feed.simulator import (
     SyntheticHeadset,
     main,
     parse_args,

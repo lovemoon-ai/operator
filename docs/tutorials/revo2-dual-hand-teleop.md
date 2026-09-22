@@ -59,7 +59,7 @@ disconnecting, reconnecting, or leaving Teleop locks both hands again. The
 adapter sends one latest-actual-position hold when a hand is disabled; it never
 sends an open/reset command.
 
-`pyoperator.integrations.revo2.merge_descriptor()` adds the twelve axes, input
+`operator_xr.integrations.revo2.merge_descriptor()` adds the twelve axes, input
 mappings, eight motor telemetry definitions, and ten tactile telemetry
 definitions to an existing G1 descriptor.
 
@@ -72,7 +72,7 @@ The existing G1 process should own one Revo2 context per serial bus and merge
 hand handling into the same command/watchdog loop:
 
 ```python
-from pyoperator.integrations.revo2 import (
+from operator_xr.integrations.revo2 import (
     CurrentEma,
     Revo2HandFeedback,
     command_packet_v3,
@@ -144,7 +144,7 @@ safety state governs the whole upper body.
 For isolated hand tuning before merging with the G1 adapter, deploy the
 `examples/brainco-revo2` service as one self-contained bundle to Thor.
 `revo2_thor_service.py` is the only robot-side entry point: it owns both serial
-ports, runs the guarded hand loop, hosts the pyoperator adapter on loopback,
+ports, runs the guarded hand loop, hosts the operator_xr adapter on loopback,
 and supervises `xr-bridge`.
 
 ### Bundle layout
@@ -156,7 +156,7 @@ The default paths expect this directory structure:
 ├── revo2_thor_service.py
 ├── bin/xr-bridge
 ├── config/revo2_tuning.yaml
-├── lib/pyoperator/
+├── lib/operator_xr/
 └── sdk/bc_stark_sdk/
 ```
 
@@ -184,20 +184,20 @@ install -D -m 0755 robot/target/release/xr-bridge \
 install -D -m 0644 robot/configs/revo2_tuning.yaml \
   /tmp/operator-hand/config/revo2_tuning.yaml
 mkdir -p \
-  /tmp/operator-hand/lib/pyoperator/integrations \
-  /tmp/operator-hand/lib/pyoperator/protocol \
+  /tmp/operator-hand/lib/operator_xr/integrations \
+  /tmp/operator-hand/lib/operator_xr/protocol \
   /tmp/operator-hand/sdk/bc_stark_sdk \
   /tmp/operator-hand/sdk/bc_stark_sdk.libs
 for module in __init__.py _blueprint_spec.py hosted.py ik.py models.py blueprint.py retargeting.py robot.py session.py xr_bridge.py; do
-  install -m 0644 "python/pyoperator/$module" "/tmp/operator-hand/lib/pyoperator/$module"
+  install -m 0644 "python/operator_xr/$module" "/tmp/operator-hand/lib/operator_xr/$module"
 done
 for module in __init__.py revo2.py revo2_udp.py; do
-  install -m 0644 "python/pyoperator/integrations/$module" \
-    "/tmp/operator-hand/lib/pyoperator/integrations/$module"
+  install -m 0644 "python/operator_xr/integrations/$module" \
+    "/tmp/operator-hand/lib/operator_xr/integrations/$module"
 done
 for module in __init__.py retargeting.py; do
-  install -m 0644 "python/pyoperator/protocol/$module" \
-    "/tmp/operator-hand/lib/pyoperator/protocol/$module"
+  install -m 0644 "python/operator_xr/protocol/$module" \
+    "/tmp/operator-hand/lib/operator_xr/protocol/$module"
 done
 rm -rf /tmp/revo2-sdk-wheel
 python3 -m zipfile -e /path/to/bc_stark_sdk-*-linux_aarch64.whl \
@@ -223,9 +223,9 @@ cd /home/unitree/ws/operator-hand
 ```
 
 The check validates the ARM64 bridge, bridge config, SDK import, BCH2 protocol
-agreement between the runtime and bundled `pyoperator`, and automatic left/right
+agreement between the runtime and bundled `operator_xr`, and automatic left/right
 discovery by Modbus ID and hand serial. Always redeploy the complete bundle when
-either the service or `python/pyoperator` changes; mixing a v3 runtime with the
+either the service or `python/operator_xr` changes; mixing a v3 runtime with the
 legacy v2 adapter connects successfully but cannot deliver motion commands.
 Explicit `--left-port` and `--right-port` overrides remain available, but
 persistent `/dev/serial/by-id/...-port0` paths should be used instead of

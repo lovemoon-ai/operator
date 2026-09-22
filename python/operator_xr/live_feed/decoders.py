@@ -28,7 +28,7 @@ from .protocol import StreamEvent, read_exact
 
 
 class RgbHevcDecoder:
-    """Decode the OLCP RGB stream to :class:`~pyoperator.live_feed.models.RgbFrame`.
+    """Decode the OLCP RGB stream to :class:`~operator_xr.live_feed.models.RgbFrame`.
 
     Feed it ``rgb_csd`` config via :meth:`configure` and ``rgb_packet`` frames
     via :meth:`submit_packet`; decoded frames land in a bounded ring buffer that

@@ -1,7 +1,7 @@
 """Typed Live Feed sample models, camera models, and rigid-transform helpers.
 
 This module holds the pure-data layer of the Live Feed stack: it turns raw OLCP
-:class:`~pyoperator.live_feed.protocol.StreamEvent` frames into typed samples
+:class:`~operator_xr.live_feed.protocol.StreamEvent` frames into typed samples
 that examples and algorithms can consume without touching sockets, files, or
 queues.  Nothing here performs I/O.
 """

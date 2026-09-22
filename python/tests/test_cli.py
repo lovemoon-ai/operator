@@ -1,7 +1,12 @@
+import contextlib
+import io
+from pathlib import Path
 import unittest
 
-from pyoperator import cli
-from pyoperator.services import retargeting as retargeting_service
+import operator_xr
+
+from operator_xr import cli
+from operator_xr.services import retargeting as retargeting_service
 
 
 class CliTests(unittest.TestCase):
@@ -38,3 +43,31 @@ class CliTests(unittest.TestCase):
     def test_unknown_service_is_rejected(self) -> None:
         with self.assertRaises(SystemExit):
             cli.main(["serve", "--service", "nope"])
+
+    def test_version_matches_the_repo_version(self) -> None:
+        if operator_xr.__version__ == "0+unknown":
+            self.skipTest("operator-xr is not installed; its version comes from the package metadata")
+        # VERSION is SemVer; the wheel carries its PEP 440 form (0.3.0-rc.1 -> 0.3.0rc1).
+        version = (Path(__file__).resolve().parents[2] / "VERSION").read_text().strip()
+        for semver, pep440 in (("-alpha.", "a"), ("-beta.", "b"), ("-rc.", "rc")):
+            version = version.replace(semver, pep440)
+        self.assertEqual(
+            operator_xr.__version__, version,
+            "stale install: reinstall ./python after scripts/version.py set",
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli.main(["--version"])
+        self.assertEqual(out.getvalue().strip(), f"operator {version}")
+
+    def test_version_falls_back_outside_an_install(self) -> None:
+        import importlib
+        from unittest import mock
+
+        def not_installed(name: str) -> str:
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        with mock.patch("importlib.metadata.version", not_installed):
+            importlib.reload(operator_xr)
+            self.assertEqual(operator_xr.__version__, "0+unknown")
+        importlib.reload(operator_xr)

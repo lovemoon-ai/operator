@@ -3,8 +3,9 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "pyoperator"
-version = "0.1.0"
+name = "operator-xr"
+# maturin takes the version from the Cargo workspace (= /VERSION).
+dynamic = ["version"]
 description = "Python-first XR library for Operator"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -18,11 +19,14 @@ dependencies = [
     "rerun-sdk>=0.26.2",
 ]
 
+[project.urls]
+Repository = "https://github.com/lovemoon-ai/operator"
+
 [project.optional-dependencies]
 ik = ["numpy>=1.24"]
 # Hosting the retargeting service. The solver library itself lives in the
 # retargeting repository (`pip install ./python` there) and is imported lazily,
-# so the rest of pyoperator works without it.
+# so the rest of operator_xr works without it.
 retargeting = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.34",
@@ -36,15 +40,15 @@ test = [
 ]
 
 [project.scripts]
-pyoperator = "pyoperator.cli:main"
-# Compatibility with existing deployments; the service is pyoperator's.
-retargeting-service = "pyoperator.services.retargeting:main"
-pyoperator-live-feed = "pyoperator.live_feed:main"
+operator = "operator_xr.cli:main"
+# Shortcut for `operator serve --service retargeting`.
+operator-retargeting = "operator_xr.services.retargeting:main"
+operator-live-feed = "operator_xr.live_feed:main"
 
 [tool.maturin]
 manifest-path = "../robot/crates/pyoperator-native/Cargo.toml"
 python-source = "."
-module-name = "pyoperator._native"
+module-name = "operator_xr._native"
 bindings = "pyo3"
 
 [tool.pytest.ini_options]
@@ -53,7 +57,7 @@ addopts = [
   "-ra",
   "--strict-config",
   "--strict-markers",
-  "--cov=pyoperator",
+  "--cov=operator_xr",
   "--cov-branch",
   "--cov-report=term-missing",
 ]
@@ -65,13 +69,13 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["pyoperator"]
+source = ["operator_xr"]
 branch = true
 # Only the depth-fusion reference server is omitted: its socket accept loop and
 # fusion worker need a headset, and are covered by cicd/04_live_feed_e2e.sh.
 # The reusable layers it is built from (protocol, models, decoders, runtime,
 # results) are host-testable and are NOT omitted.
-omit = ["pyoperator/live_feed/server.py"]
+omit = ["operator_xr/live_feed/server.py"]
 
 [tool.coverage.report]
 fail_under = 90

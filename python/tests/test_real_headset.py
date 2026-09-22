@@ -1,4 +1,4 @@
-"""Opt-in smoke test for the physical headset -> pyoperator state path."""
+"""Opt-in smoke test for the physical headset -> operator_xr state path."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Optional, Protocol
 
 import pytest
 
-from pyoperator.session import BridgeConfig, XrSession
+from operator_xr.session import BridgeConfig, XrSession
 
 
 PACKAGE = "com.lovemoon.operator"

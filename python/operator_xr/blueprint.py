@@ -943,14 +943,14 @@ class BlueprintClient:
         if not callable(spec_hash_reader):
             raise RuntimeError(
                 "Blueprint backend does not expose its primitive spec hash; "
-                "rebuild or redeploy pyoperator"
+                "rebuild or redeploy operator_xr"
             )
         native_spec_hash = spec_hash_reader()
         if native_spec_hash != SPEC_SHA256:
             raise RuntimeError(
                 "Blueprint primitive spec mismatch between Python and backend: "
                 f"python={SPEC_SHA256} backend={native_spec_hash!r}; "
-                "rebuild or redeploy pyoperator from one checkout"
+                "rebuild or redeploy operator_xr from one checkout"
             )
         payload = blueprint.to_dict()
         binding_specs = blueprint.binding_specs()

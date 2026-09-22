@@ -1,11 +1,11 @@
-# pyoperator
+# operator_xr
 
-`pyoperator` is the Python-first, in-process entry point for Operator. Python
+`operator_xr` is the Python-first, in-process entry point for Operator. Python
 owns the process; the library owns headset discovery, the XR TCP session, state
 framing, and shutdown. It does not launch `xr-bridge` as a subprocess.
 
 ```python
-from pyoperator import xr_bridge
+from operator_xr import xr_bridge
 
 xr_bridge.start()
 frame = xr_bridge.wait_next(timeout=5.0)
@@ -24,7 +24,7 @@ not require Pico tracker calibration. Configure the actual inputs your consumer
 needs; these are sent in the existing `DeviceDescriptor.xr_stream.streams`:
 
 ```python
-from pyoperator import BridgeConfig, XrSession
+from operator_xr import BridgeConfig, XrSession
 
 with XrSession(BridgeConfig(streams=("head", "controllers", "body"))) as session:
     frame = session.wait_next(timeout=5.0)
@@ -51,7 +51,7 @@ video feed. The command writes only encoded video bytes to stdout; diagnostics
 belong on stderr:
 
 ```python
-from pyoperator import BridgeConfig, VideoFeedConfig, XrSession
+from operator_xr import BridgeConfig, VideoFeedConfig, XrSession
 
 feed = VideoFeedConfig(
     name="simulation_head",
@@ -79,7 +79,7 @@ an asset is a rigid scene object driven entirely by its `base_pose` and
 Migration: consumers that previously relied on the SDK requesting everything
 must explicitly include `body` or `motion_trackers`. `control_loop.run` honors a
 retargeter's optional `required_streams` when it creates its own session;
-`PyOperatorRetargeter` declares this from its body/controller source. Supplied
+`OperatorRetargeter` declares this from its body/controller source. Supplied
 live sessions missing declared requirements are rejected before robot connection.
 
 Pico acceptance (wear the headset with room tracking active): build/install the
@@ -97,7 +97,7 @@ uses only built-in primitives and keeps rendering and hand interaction local to
 the headset:
 
 ```python
-from pyoperator import BlueprintComponent, Blueprint, xr_bridge
+from operator_xr import BlueprintComponent, Blueprint, xr_bridge
 
 session = xr_bridge.start()
 session.blueprint.set_blueprint(
@@ -200,18 +200,18 @@ python -m pip install -e ./python
 
 ## Live Feed Server
 
-`pyoperator.live_feed` contains the OLCP Live Feed server, bounded stream
+`operator_xr.live_feed` contains the OLCP Live Feed server, bounded stream
 queues, depth-fusion reference worker, and XR result publisher. Run it from a
 checkout with:
 
 ```bash
-PYTHONPATH=python python3 -m pyoperator.live_feed --print-plan
-PYTHONPATH=python python3 -m pyoperator.live_feed --self-test
+PYTHONPATH=python python3 -m operator_xr.live_feed --print-plan
+PYTHONPATH=python python3 -m operator_xr.live_feed --self-test
 ```
 
-An installed editable package also provides the `pyoperator-live-feed`
+An installed editable package also provides the `operator-live-feed`
 command. Live Feed carries RGB/depth and result streams over OLCP; it is
-separate from `pyoperator.xr_bridge`, which exposes local pose, controller,
+separate from `operator_xr.xr_bridge`, which exposes local pose, controller,
 hand, body, and tracker snapshots.
 
 On startup the server prints its LAN address and a QR code encoding it, so the
@@ -224,7 +224,7 @@ fall back to high-contrast half-cell blocks. The complete QR remains the last
 startup output so its quiet zone is not scrolled away. Pass `--no-qr` to
 suppress the code entirely.
 
-The QR encoder is dependency-free (`pyoperator.live_feed.qr`), so no imaging
+The QR encoder is dependency-free (`operator_xr.live_feed.qr`), so no imaging
 stack is pulled in just to draw a code on a terminal.
 
 ### Building your own Live Feed app
@@ -234,7 +234,7 @@ the runtime API directly: `LiveFeedReceiver` owns the sockets, the reader
 thread, and the bounded drop-oldest queues, and hands you typed samples.
 
 ```python
-from pyoperator.live_feed import LiveFeedReceiver, ReceiverConfig
+from operator_xr.live_feed import LiveFeedReceiver, ReceiverConfig
 
 with LiveFeedReceiver(ReceiverConfig()) as receiver:
     for session in receiver.sessions():
@@ -270,12 +270,12 @@ session.results.publish_points(
 Two runnable examples in `python/examples/`:
 
 ```bash
-# One-way: headset -> pyoperator, visualised live.
+# One-way: headset -> operator_xr, visualised live.
 # Terminal dashboard by default; --viewer rerun needs `pip install rerun-sdk`.
 python python/examples/live_feed_viewer.py
 python python/examples/live_feed_viewer.py --viewer rerun
 
-# Bidirectional: headset -> pyoperator -> headset.
+# Bidirectional: headset -> operator_xr -> headset.
 # Turns the head-pose trail into a point cloud and streams it back for the
 # headset to render. Confirm with:
 #   adb logcat -s godot | grep "Live-pull rendered chunk"
@@ -289,7 +289,7 @@ algorithm results, so the capture data path stays one-way.
 
 ### Testing the examples without a headset
 
-`pyoperator.live_feed.simulator` is a synthetic headset: it speaks live-push
+`operator_xr.live_feed.simulator` is a synthetic headset: it speaks live-push
 with the same payload shapes as the real device (walking head pose, controllers,
 hands, depth, RGB packets). Run an example in one terminal and the simulator in
 another:
@@ -299,7 +299,7 @@ another:
 python python/examples/live_feed_viewer.py
 
 # terminal 2
-python -m pyoperator.live_feed.simulator --duration 20
+python -m operator_xr.live_feed.simulator --duration 20
 ```
 
 It is a development aid, not a headset substitute: RGB packets carry dummy bytes
@@ -345,7 +345,7 @@ python -m pytest -m xr_device --no-cov --run-device --require-device \
   --xr-device auto --adb-serial SERIAL
 
 # CI report includes <skipped> when no device run was requested.
-python -m pytest -ra --junitxml=../cicd/results/pyoperator-pytest.xml
+python -m pytest -ra --junitxml=../cicd/results/operator_xr-pytest.xml
 ```
 
 The real test uses `adb reverse`, launches the normal Teleop/OpenXR path, and
@@ -372,7 +372,7 @@ Implement the five-method `Robot` protocol (`connect`, `disconnect`,
 `read_state`, `write`, `stop`). `PoseDeltaRetargeter` provides a safe deadman
 and reference-capture mapping: releasing the deadman immediately calls the
 robot's `stop`. Pass a custom `IKSolver`, `CallableIK`, or the generic
-`DampedLeastSquaresIK` to `pyoperator.control_loop.run`.
+`DampedLeastSquaresIK` to `operator_xr.control_loop.run`.
 
 Raw controller poses and robot EE targets are deliberately different types:
 `frame.controllers.right.pose` is measured XR state;
@@ -381,45 +381,45 @@ Raw controller poses and robot EE targets are deliberately different types:
 ## Robot-specific retargeting and the retargeting service
 
 Robot-specific retargeting (Unitree G1/H2, Galbot G1, SO-101) is computed by
-the separate `retargeting` library. pyoperator owns the wire protocol and calls
+the separate `retargeting` library. operator_xr owns the wire protocol and calls
 it; the library never learns about Operator or opens a socket.
 
 ```bash
-pip install 'pyoperator[retargeting]'
+pip install 'operator-xr[retargeting]'
 pip install ./python                     # from the retargeting repository
-pyoperator serve --service retargeting --host 0.0.0.0 --port 8000
+operator serve --service retargeting --host 0.0.0.0 --port 8000
 ```
 
 `GET /healthz` and `GET /v1/profiles` report the profiles this host can serve
 and why any are unavailable; `WS /v1/retarget` runs one warm-started, latest-only
-solver session for an Inside Robot in the headset. `retargeting-service` remains
-as an alias of the same command.
+solver session for an Inside Robot in the headset. `operator-retargeting` is
+an alias of the same command.
 
 The same profiles drive a host-side control loop, so an Outside Robot solves
 exactly what the headset would have:
 
 ```python
-from pyoperator.integrations.retargeting import PyOperatorRetargeter
+from operator_xr.integrations.retargeting import OperatorRetargeter
 
-retargeter = PyOperatorRetargeter("unitree_g1", source="body")
+retargeter = OperatorRetargeter("unitree_g1", source="body")
 # or source="controller" for end-effector profiles such as SO-101
-pyoperator.control_loop.run(robot, retargeter)
+operator_xr.control_loop.run(robot, retargeter)
 # Its automatically owned session requests the retargeter's required streams.
 ```
 
 ## Debugging
 
 `xr_bridge.stats()` exposes connection state, frame/parse counts, last frame and
-last error. `FrameRecorder` and `ReplaySession` in `pyoperator.replay` record
+last error. `FrameRecorder` and `ReplaySession` in `operator_xr.replay` record
 and deterministically replay the same immutable `XrFrame` model.
 
 ## Existing hosted workflow
 
 Stable Python backends can still run behind the standalone bridge with
-`pyoperator.hosted.serve`. It implements the existing length-prefixed adapter
+`operator_xr.hosted.serve`. It implements the existing length-prefixed adapter
 protocol; point `xr-bridge --adapter-endpoint tcp:127.0.0.1:63910` at it. This
 mode is intentionally separate from the embedded `xr_bridge.start()` mode.
-Pass a `pyoperator.hosted.HostedBlueprint` to `serve`, `serve_async`, or
+Pass a `operator_xr.hosted.HostedBlueprint` to `serve`, `serve_async`, or
 `create_server` to publish the same Blueprint/state/event contract through the
 standalone bridge. The BrainCo Revo2 service is the reference hosted example.
 Its runnable entry point is

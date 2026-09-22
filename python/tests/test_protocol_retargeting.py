@@ -1,6 +1,6 @@
 import unittest
 
-from pyoperator.protocol.retargeting import (
+from operator_xr.protocol.retargeting import (
     PROTOCOL_VERSION,
     ProtocolError,
     RetargetingRequest,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Example 1 - one-way Live Feed: headset -> pyoperator, visualised live.
+"""Example 1 - one-way Live Feed: headset -> operator_xr, visualised live.
 
 Capture data flows in a single direction.  The headset pushes RGB, depth,
 head/controller pose, hand joints and controller input over OLCP; this script
@@ -37,7 +37,7 @@ from typing import Any
 # Allow running straight from a source checkout without installing.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pyoperator.live_feed import (  # noqa: E402
+from operator_xr.live_feed import (  # noqa: E402
     ControllerInputSample,
     ControllerPoseSample,
     DepthCameraModel,
@@ -1052,7 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
         result_host=args.host,
         result_port=args.result_port,
         # Accept the live-pull connection but never publish: this example is
-        # headset -> pyoperator except for the one capture-request control
+        # headset -> operator_xr except for the one capture-request control
         # message that makes the requested data types visible in the XR UI.
         accept_results=not args.no_accept_results,
         publish_results=False,

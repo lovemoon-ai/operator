@@ -8,7 +8,7 @@ them in sync is what makes host-side testing meaningful.
 Run a server in one terminal and this in another::
 
     python python/examples/live_feed_viewer.py
-    python -m pyoperator.live_feed.simulator
+    python -m operator_xr.live_feed.simulator
 
 This is a development aid, not a headset substitute: RGB packets carry dummy
 bytes (no real HEVC bitstream) and depth is a flat synthetic plane.  Behaviour

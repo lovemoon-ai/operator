@@ -1,15 +1,15 @@
 """Boundary between Operator data and the `retargeting` compute library.
 
-Dependency direction is one-way: pyoperator knows about retargeting, never the
+Dependency direction is one-way: operator_xr knows about retargeting, never the
 reverse. Everything Operator-shaped — wire payloads, ``XrFrame`` snapshots,
 OpenXR joint sets, quaternion order — is translated here, so the solver library
 only ever sees its own canonical types.
 
 Two callers use this module:
 
-- :mod:`pyoperator.services.retargeting` — the Inside Robot remote path, where
+- :mod:`operator_xr.services.retargeting` — the Inside Robot remote path, where
   a payload arrives from the headset and joint positions go back to it;
-- :class:`PyOperatorRetargeter` — the Outside Python path, where an ``XrFrame``
+- :class:`OperatorRetargeter` — the Outside Python path, where an ``XrFrame``
   is solved in-process and written to a robot.
 """
 
@@ -77,7 +77,7 @@ def require_retargeting():
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise RetargetingUnavailableError(
             "the retargeting library is required: "
-            "pip install 'pyoperator[retargeting]' (the solver package lives in "
+            "pip install 'operator-xr[retargeting]' (the solver package lives in "
             "the retargeting repository, `pip install ./python` there)"
         ) from exc
     return retargeting
@@ -233,12 +233,12 @@ def end_effector_input_from_pose(pose: Pose, timestamp_ns: int = 0, gripper: flo
     )
 
 
-class PyOperatorRetargeter:
-    """A pyoperator :class:`~pyoperator.retargeting.Retargeter` backed by a
+class OperatorRetargeter:
+    """An operator_xr :class:`~operator_xr.retargeting.Retargeter` backed by a
     retargeting profile.
 
     Use it in an Outside Python control loop when the robot is driven from the
-    host: ``XrFrame`` in, :class:`~pyoperator.robot.JointTarget` out, solved by
+    host: ``XrFrame`` in, :class:`~operator_xr.robot.JointTarget` out, solved by
     exactly the same profile and solver the Inside Remote service would use.
 
     ``source`` selects how the frame becomes solver input:
@@ -246,7 +246,7 @@ class PyOperatorRetargeter:
     - ``"body"`` — canonical skeleton from body tracking (humanoid profiles);
     - ``"controller"`` — a controller pose as an end-effector target, with the
       deadman-anchored mapping of
-      :class:`~pyoperator.retargeting.PoseDeltaRetargeter`.
+      :class:`~operator_xr.retargeting.PoseDeltaRetargeter`.
     """
 
     def __init__(

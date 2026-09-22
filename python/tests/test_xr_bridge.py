@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from pyoperator import xr_bridge
-from pyoperator.models import BridgeStats
+from operator_xr import xr_bridge
+from operator_xr.models import BridgeStats
 
 
 class FakeSession:
@@ -57,7 +57,7 @@ class XrBridgeTests(unittest.TestCase):
             xr_bridge.session()
 
     def test_singleton_start_delegates_all_public_operations(self) -> None:
-        with patch("pyoperator.xr_bridge.XrSession", FakeSession):
+        with patch("operator_xr.xr_bridge.XrSession", FakeSession):
             started = xr_bridge.start(name="sdk", pose_port=1234)
             self.assertIs(xr_bridge.start(name="ignored"), started)
             self.assertEqual(len(FakeSession.instances), 1)
@@ -74,7 +74,7 @@ class XrBridgeTests(unittest.TestCase):
             xr_bridge.stop()
 
     def test_start_replaces_a_stopped_default_session(self) -> None:
-        with patch("pyoperator.xr_bridge.XrSession", FakeSession):
+        with patch("operator_xr.xr_bridge.XrSession", FakeSession):
             first = xr_bridge.start()
             first.is_running = False
             second = xr_bridge.start()

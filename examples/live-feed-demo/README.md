@@ -1,6 +1,6 @@
 # Live Feed Depth-Fusion Server Example
 
-The server implementation now lives in `pyoperator.live_feed`. This directory
+The server implementation now lives in `operator_xr.live_feed`. This directory
 keeps the example documentation and a compatibility script for older checkout
 commands.
 
@@ -18,14 +18,14 @@ From the repository root:
 ```bash
 adb -s 2G0YC1ZF7S0C2D reverse tcp:63910 tcp:63910
 adb -s 2G0YC1ZF7S0C2D reverse tcp:63912 tcp:63912
-PYTHONPATH=python python3 -m pyoperator.live_feed \
+PYTHONPATH=python python3 -m operator_xr.live_feed \
   --algorithm depth_fusion_pointcloud \
   --push-port 63910 \
   --pull-port 63912
 ```
 
-After installing `pyoperator`, the equivalent command is
-`pyoperator-live-feed`. The historical
+After installing `operator_xr`, the equivalent command is
+`operator-live-feed`. The historical
 `examples/live-feed-demo/operator_live_feed_server.py` path remains a thin
 compatibility entry point.
 
@@ -46,7 +46,7 @@ See `../../claw/architecture/live-feed-cloud.md` for the protocol contract.
 ## Inspect The Capture Plan
 
 ```bash
-PYTHONPATH=python python3 -m pyoperator.live_feed --print-plan
+PYTHONPATH=python python3 -m operator_xr.live_feed --print-plan
 ```
 
 This prints the validated server request. Required streams must be supported by
@@ -99,7 +99,7 @@ decode/coloring:
 Useful tuning flags:
 
 ```bash
-PYTHONPATH=python python3 -m pyoperator.live_feed \
+PYTHONPATH=python python3 -m operator_xr.live_feed \
   --point-stride 4 \
   --publish-interval-s 1.0 \
   --max-points-per-update 80000 \

@@ -100,7 +100,7 @@ Key paths:
 
 ### `pyoperator-native`
 
-PyO3 `abi3` extension loaded by the `python/pyoperator` package. It exposes the
+PyO3 `abi3` extension loaded by the `python/operator_xr` package. It exposes the
 Rust `operator::BlueprintPublisher` to both embedded and hosted Python paths,
 and starts the shared `xr-bridge` SDK service on a background Tokio runtime for
 `XrSession`. It owns no robot policy: Python receives serialized immutable

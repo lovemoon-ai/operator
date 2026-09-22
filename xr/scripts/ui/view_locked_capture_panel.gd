@@ -524,6 +524,7 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 	add_interactive(_upload_main_view, _manual_upload_button)
 	_sync_manual_upload_button_state()
 	_build_local_upload_menu(parent)
+	register_build_info_group()
 
 
 func _build_live_server_group() -> void:

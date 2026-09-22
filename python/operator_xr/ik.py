@@ -57,7 +57,7 @@ class DampedLeastSquaresIK:
         try:
             import numpy as np
         except ImportError as error:
-            raise RuntimeError("DampedLeastSquaresIK requires `pip install pyoperator[ik]`") from error
+            raise RuntimeError("DampedLeastSquaresIK requires `pip install operator-xr[ik]`") from error
         q = np.asarray(state.joint_positions, dtype=float).copy()
         if q.size == 0:
             raise ValueError("robot state has no joint positions")

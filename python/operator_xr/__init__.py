@@ -1,5 +1,12 @@
 """Python-first Operator XR SDK."""
 
+from importlib.metadata import PackageNotFoundError, version as _dist_version
+
+try:
+    __version__ = _dist_version("operator-xr")
+except PackageNotFoundError:  # running from a source tree that was never installed
+    __version__ = "0+unknown"
+
 from . import xr_bridge
 from .models import (
     BodyState,
@@ -30,6 +37,7 @@ from .blueprint import (
 )
 
 __all__ = [
+    "__version__",
     "xr_bridge",
     "XrSession",
     "RobotModelAsset",

@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from pyoperator import BodyState, ControllerPair, HandPair, Joint, Pose, XrFrame
-from pyoperator.integrations.retargeting import GODOT_XR_BODY_TRACKER_JOINTS
+from operator_xr import BodyState, ControllerPair, HandPair, Joint, Pose, XrFrame
+from operator_xr.integrations.retargeting import GODOT_XR_BODY_TRACKER_JOINTS
 from wbc.controllers.scalebfm.tracking import (Calibration, FIVE_POINTS, FivePointFrame, ReferenceBuffer,
                       ROBOT_TO_XR, TrackingUnavailable, base_pose_to_xr,
                       extract_five_points, rotation_wxyz, wxyz)

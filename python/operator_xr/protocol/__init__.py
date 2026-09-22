@@ -1,9 +1,9 @@
 """Wire contracts Operator clients speak.
 
-pyoperator owns every protocol the Operator XR app talks, so the app depends on
+operator_xr owns every protocol the Operator XR app talks, so the app depends on
 one Python package rather than on each capability library. Compute libraries
 (e.g. `retargeting`) stay transport-free and are called by the services in
-:mod:`pyoperator.services`.
+:mod:`operator_xr.services`.
 """
 
 from .retargeting import (

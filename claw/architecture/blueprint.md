@@ -31,7 +31,7 @@ python3 scripts/generate_blueprint_spec.py
 
 The generator writes checked-in bindings for all three consumers:
 
-- `python/pyoperator/_blueprint_spec.py`
+- `python/operator_xr/_blueprint_spec.py`
 - `robot/crates/teleop-protocol/src/blueprint_spec.rs`
 - `xr/scripts/contracts/blueprint/blueprint_spec.gd`
 
@@ -324,7 +324,7 @@ node indices avoid ambiguity from imported/sanitized node names. Positions are
 in radians (metres for sliders). Hinge motion is applied about the transmitted
 pivot relative to the rest transform; the root receives the floating base pose.
 
-`pyoperator.mujoco_asset.from_mujoco` exports this model directly from the host's
+`operator_xr.mujoco_asset.from_mujoco` exports this model directly from the host's
 compiled MuJoCo model, including its real visual meshes, transforms, scalar
 joint axes/pivots, and reference offsets. It has no Inside Robot dependency.
 Current exporter support is one scalar joint per non-root body, one externally

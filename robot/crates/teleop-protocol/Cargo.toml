@@ -1,6 +1,6 @@
 [package]
 name = "teleop-protocol"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Shared wire types + bridge<->adapter boundary protocol + transport abstraction for Teleoperate-Anything"
 

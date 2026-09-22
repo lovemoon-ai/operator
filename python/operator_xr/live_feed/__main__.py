@@ -1,4 +1,4 @@
-"""Command-line entry point for ``python -m pyoperator.live_feed``."""
+"""Command-line entry point for ``python -m operator_xr.live_feed``."""
 
 from .cli import main
 

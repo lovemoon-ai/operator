@@ -440,7 +440,7 @@ python your_live_feed_server.py \
 如果只想先验证 OLCP v1 入站解析和真实 depth-fusion 回传，可以运行当前 prototype：
 
 ```bash
-PYTHONPATH=python python -m pyoperator.live_feed \
+PYTHONPATH=python python -m operator_xr.live_feed \
   --host 127.0.0.1 \
   --push-port 63910 \
   --pull-port 63912 \
@@ -463,7 +463,7 @@ server port: 63910
 result port: 63912
 ```
 
-`python/pyoperator/live_feed/server.py` 是 `pyoperator` 中的 reference server。它展示 OLCP v1 parse、queue、depth/head-pose 点云 worker、独立 result port 和与当前 `live-pull` 对齐的 110-116 result frame type。`examples/live-feed-demo/operator_live_feed_server.py` 只保留兼容入口。生产 VGGT-SLAM2 服务器可以复用这个边界，但应替换 worker、持久化策略和 result client 重连策略。
+`python/operator_xr/live_feed/server.py` 是 `operator_xr` 中的 reference server。它展示 OLCP v1 parse、queue、depth/head-pose 点云 worker、独立 result port 和与当前 `live-pull` 对齐的 110-116 result frame type。`examples/live-feed-demo/operator_live_feed_server.py` 只保留兼容入口。生产 VGGT-SLAM2 服务器可以复用这个边界，但应替换 worker、持久化策略和 result client 重连策略。
 
 ## 接入检查清单
 
@@ -485,7 +485,7 @@ result port: 63912
 - `xr/android_plugin/live_feed_server/src/main/java/com/spatialmp4/livefeed/LiveFeedServerPlugin.kt`
 - `xr/addons/live-pull/live_pull_client.gd`
 - `xr/addons/live-pull/live_pull_dense_map_view.gd`
-- `python/pyoperator/live_feed/server.py`
+- `python/operator_xr/live_feed/server.py`
 - `examples/live-feed-demo/operator_live_feed_server.py`（兼容入口）
 - `claw/architecture/live-feed-cloud.md`
 - `claw/architecture/wire-protocol.md`

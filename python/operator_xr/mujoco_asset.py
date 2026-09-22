@@ -28,7 +28,7 @@ def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> Ro
         raise ValueError("root_body must name a non-world body")
     basis = np.array([[0., -1., 0.], [0., 0., 1.], [-1., 0., 0.]])
     document = {
-        "asset": {"version": "2.0", "generator": "pyoperator.mujoco_asset"},
+        "asset": {"version": "2.0", "generator": "operator_xr.mujoco_asset"},
         "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [],
         "meshes": [], "materials": [], "bufferViews": [], "accessors": [],
     }

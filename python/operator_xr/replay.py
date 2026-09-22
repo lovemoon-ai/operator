@@ -35,7 +35,7 @@ def load(path: str | Path) -> tuple[XrFrame, ...]:
     with Path(path).open("r", encoding="utf-8") as source:
         header = json.loads(source.readline())
         if header.get("type") != "pyoperator_recording" or header.get("schema_version") != 1:
-            raise ValueError("not a pyoperator recording v1")
+            raise ValueError("not an operator_xr recording v1")
         return tuple(frame_from_dict(json.loads(line)) for line in source if line.strip())
 
 

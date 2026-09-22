@@ -137,7 +137,7 @@ class XrSession:
         factory = _native_factory or _NativeSession
         if factory is None:
             raise RuntimeError(
-                "pyoperator native extension is not installed; run "
+                "operator_xr native extension is not installed; run "
                 "`pip install -e ./python` from the Operator repository"
             ) from _native_import_error
         self._native = factory(

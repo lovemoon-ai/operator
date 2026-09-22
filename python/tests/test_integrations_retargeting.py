@@ -1,14 +1,14 @@
 """Adapter tests for the retargeting integration.
 
 They need the `retargeting` solver library, which ships from its own repository
-(`pip install ./python` there) and is an optional pyoperator extra.
+(`pip install ./python` there) and is an optional operator_xr extra.
 """
 
 import unittest
 
-from pyoperator.models import Pose, frame_from_dict
-from pyoperator.protocol.retargeting import ProtocolError, RetargetingRequest
-from pyoperator.robot import RobotState
+from operator_xr.models import Pose, frame_from_dict
+from operator_xr.protocol.retargeting import ProtocolError, RetargetingRequest
+from operator_xr.robot import RobotState
 
 from test_models import sample_frame
 
@@ -17,10 +17,10 @@ try:
 except ImportError:  # pragma: no cover - environment dependent
     retargeting = None
 
-from pyoperator.integrations.retargeting import (
+from operator_xr.integrations.retargeting import (
     GODOT_XR_BODY_TRACKER_JOINTS,
     GODOT_XR_BODY_TRACKER_V1,
-    PyOperatorRetargeter,
+    OperatorRetargeter,
     end_effector_input_from_pose,
     input_from_payload,
     result_to_wire,
@@ -35,7 +35,7 @@ requires_retargeting = unittest.skipIf(
 class TrackingRequirementTests(unittest.TestCase):
     def test_source_declares_streams_without_a_solver_or_profile_name_heuristic(self):
         # This tests only the input contract, not a solver or a robot runtime.
-        retargeter = PyOperatorRetargeter.__new__(PyOperatorRetargeter)
+        retargeter = OperatorRetargeter.__new__(OperatorRetargeter)
         retargeter.source = "body"
         self.assertEqual(retargeter.required_streams, ("body",))
         retargeter.source = "controller"
@@ -168,7 +168,7 @@ class XrFrameAdapterTests(unittest.TestCase):
 
 
 @requires_retargeting
-class PyOperatorRetargeterTests(unittest.TestCase):
+class OperatorRetargeterTests(unittest.TestCase):
     """The Outside Python path: XrFrame in, JointTarget out, same profile."""
 
     def _robot_state(self) -> RobotState:
@@ -190,7 +190,7 @@ class PyOperatorRetargeterTests(unittest.TestCase):
         )
 
     def setUp(self) -> None:
-        self.retargeter = PyOperatorRetargeter("so101", source="controller")
+        self.retargeter = OperatorRetargeter("so101", source="controller")
         self.addCleanup(self.retargeter.close)
 
     def test_controller_motion_produces_joint_positions(self) -> None:
@@ -223,7 +223,7 @@ class PyOperatorRetargeterTests(unittest.TestCase):
         self.assertIsNone(self.retargeter._last_target)
 
     def test_body_source_requires_body_tracking(self) -> None:
-        retargeter = PyOperatorRetargeter("so101", source="body")
+        retargeter = OperatorRetargeter("so101", source="body")
         self.addCleanup(retargeter.close)
         self.assertIsNone(
             retargeter.retarget(frame_from_dict(sample_frame()), self._robot_state())
@@ -231,4 +231,4 @@ class PyOperatorRetargeterTests(unittest.TestCase):
 
     def test_unknown_source_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            PyOperatorRetargeter("so101", source="telepathy")
+            OperatorRetargeter("so101", source="telepathy")

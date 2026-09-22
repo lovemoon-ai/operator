@@ -1,7 +1,7 @@
-"""Adapters between pyoperator's wire/XR types and external capability libraries.
+"""Adapters between operator_xr's wire/XR types and external capability libraries.
 
-Each integration is optional: importing :mod:`pyoperator` never requires the
-library it adapts, and the adapted library never learns about pyoperator.
+Each integration is optional: importing :mod:`operator_xr` never requires the
+library it adapts, and the adapted library never learns about operator_xr.
 """
 
 from .revo2 import (

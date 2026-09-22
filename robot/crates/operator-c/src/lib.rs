@@ -125,6 +125,12 @@ pub extern "C" fn operator_blueprint_spec_version() -> u32 {
     operator_core::SPEC_VERSION
 }
 
+/// Operator release version (the repo-wide `VERSION`) this library was built from.
+#[no_mangle]
+pub extern "C" fn operator_version() -> operator_string_view_t {
+    operator_string_view_t::from_static(env!("CARGO_PKG_VERSION"))
+}
+
 #[no_mangle]
 pub extern "C" fn operator_blueprint_publisher_new() -> *mut operator_blueprint_publisher_t {
     catch_unwind(|| {
@@ -357,6 +363,10 @@ mod tests {
             operator_blueprint_spec_version(),
             operator_core::SPEC_VERSION
         );
+        let version = operator_version();
+        let version =
+            unsafe { str::from_utf8_unchecked(slice::from_raw_parts(version.data, version.len)) };
+        assert_eq!(version, include_str!("../../../../VERSION").trim());
 
         let publisher = operator_blueprint_publisher_new();
         assert!(!publisher.is_null());

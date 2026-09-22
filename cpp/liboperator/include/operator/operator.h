@@ -14,6 +14,7 @@ typedef struct operator_string_view_t { const uint8_t* data; size_t len; } opera
 
 operator_string_view_t operator_blueprint_spec_sha256(void);
 uint32_t operator_blueprint_spec_version(void);
+operator_string_view_t operator_version(void);
 operator_blueprint_publisher_t* operator_blueprint_publisher_new(void);
 void operator_blueprint_publisher_free(operator_blueprint_publisher_t* value);
 void operator_bytes_free(operator_bytes_t value);

@@ -79,7 +79,7 @@ class _HostedBlueprintBackend:
     def __init__(self) -> None:
         if _NativeBlueprintPublisher is None:
             raise RuntimeError(
-                "pyoperator native extension is not installed; run "
+                "operator_xr native extension is not installed; run "
                 "`pip install -e ./python` from the Operator repository"
             ) from _native_import_error
         self._native = _NativeBlueprintPublisher()
@@ -464,7 +464,7 @@ async def _client(
             add_note = getattr(primary_error, "add_note", None)
             if add_note is not None:
                 for error in cleanup_errors:
-                    add_note(f"pyoperator hosted cleanup also failed: {error!r}")
+                    add_note(f"operator_xr hosted cleanup also failed: {error!r}")
 
 
 async def create_server(

@@ -1,13 +1,13 @@
 """Live Feed: receive OLCP capture streams from an XR headset and return results.
 
-The Live Feed transport is separate from :mod:`pyoperator.xr_bridge`: the bridge
+The Live Feed transport is separate from :mod:`operator_xr.xr_bridge`: the bridge
 exposes low-bandwidth pose/controller snapshots to a local Python process, while
 this package accepts high-bandwidth OLCP capture streams (RGB, depth, pose,
 hands) and streams algorithm results back to the headset.
 
 Typical one-way use::
 
-    from pyoperator.live_feed import LiveFeedReceiver, ReceiverConfig
+    from operator_xr.live_feed import LiveFeedReceiver, ReceiverConfig
 
     with LiveFeedReceiver(ReceiverConfig()) as receiver:
         for session in receiver.sessions():

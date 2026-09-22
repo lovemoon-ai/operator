@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from pyoperator.live_feed import (
+from operator_xr.live_feed import (
     CONTROLLER_BUTTON_BITS,
     ControllerInputSample,
     ControllerPoseSample,
@@ -39,7 +39,7 @@ from pyoperator.live_feed import (
     parse_sample,
     read_frame,
 )
-from pyoperator.live_feed.protocol import (
+from operator_xr.live_feed.protocol import (
     DENSE_POINT,
     FLAG_COMPRESSED_ZLIB,
     FLAG_COMPOSITE_JSON,
@@ -60,7 +60,7 @@ from pyoperator.live_feed.protocol import (
     parse_composite_payload,
     pack_composite_payload,
 )
-from pyoperator.live_feed.runtime import CRITICAL_KINDS, DroppingQueue, SessionStats
+from operator_xr.live_feed.runtime import CRITICAL_KINDS, DroppingQueue, SessionStats
 
 import fake_headset
 
@@ -1639,7 +1639,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
     """The settings page learns the stream set by merely connecting."""
 
     def test_result_channel_fires_the_on_connect_hook(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         fired = threading.Event()
         channel = ResultChannel(
@@ -1683,7 +1683,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
         self.assertEqual(json.loads(frame.payload), request)
 
     def test_a_failing_hook_does_not_kill_the_accept_loop(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         calls = []
 
@@ -1713,7 +1713,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
         self.assertEqual(channel.accepted_count, 2)
 
     def test_result_auth_rejects_bad_token_without_replacing_valid_client(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         channel = ResultChannel(
             "127.0.0.1",
@@ -1763,7 +1763,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
         self.assertEqual(frame.frame_type, TYPE_ALGORITHM_STATUS)
 
     def test_result_auth_rejects_non_handshake_frame(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         channel = ResultChannel(
             "127.0.0.1",
@@ -1785,7 +1785,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
         self.assertEqual(channel.accepted_count, 0)
 
     def test_result_auth_rejects_invalid_json_shapes_without_killing_listener(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         channel = ResultChannel(
             "127.0.0.1",
@@ -1828,7 +1828,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
         self.assertEqual(channel.accepted_count, 1)
 
     def test_idle_auth_peer_does_not_block_a_valid_client(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         channel = ResultChannel(
             "127.0.0.1",
@@ -1862,7 +1862,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
         self.assertEqual(channel.accepted_count, 1)
 
     def test_close_cancels_pending_auth_without_resurrection(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         channel = ResultChannel(
             "127.0.0.1",
@@ -1913,7 +1913,7 @@ class CaptureRequestAnnounceTests(unittest.TestCase):
         self.assertEqual(channel.accepted_count, 0)
 
     def test_reconnect_replays_a_complete_current_map_snapshot(self) -> None:
-        from pyoperator.live_feed.results import ResultChannel
+        from operator_xr.live_feed.results import ResultChannel
 
         channel = ResultChannel("127.0.0.1", 0, True, quiet=True)
         publisher = ResultPublisher(channel.send_frame, max_fragment_bytes=64 * 1024)

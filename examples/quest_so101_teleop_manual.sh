@@ -7,7 +7,7 @@
 # vertical slice, see cicd/07_so101_synthetic_teleop.sh.
 #
 # This script intentionally exercises the Rust robot-service / robot-adapter
-# compatibility stack. It does not own a pyoperator session and therefore does
+# compatibility stack. It does not own an operator_xr session and therefore does
 # not publish a Blueprint, so the native Operator work page intentionally
 # shows only its settings button. Use python/examples/custom_robot.py as the
 # reference for robot-authored Teleop UI and event handling.

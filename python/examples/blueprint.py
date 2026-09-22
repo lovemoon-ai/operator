@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from pyoperator import (
+from operator_xr import (
     BlueprintComponent,
     BlueprintTransform,
     Blueprint,

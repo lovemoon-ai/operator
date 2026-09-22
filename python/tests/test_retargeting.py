@@ -1,9 +1,9 @@
 import unittest
 from types import MappingProxyType
 
-from pyoperator.models import Pose, frame_from_dict
-from pyoperator.retargeting import PoseDeltaRetargeter
-from pyoperator.robot import RobotState
+from operator_xr.models import Pose, frame_from_dict
+from operator_xr.retargeting import PoseDeltaRetargeter
+from operator_xr.robot import RobotState
 
 from test_models import sample_frame
 

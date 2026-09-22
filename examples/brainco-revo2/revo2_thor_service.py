@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the complete Revo2 hand-only Operator service on one Thor host.
 
-This entry point combines the guarded serial runtime, the pyoperator hosted
+This entry point combines the guarded serial runtime, the operator_xr hosted
 adapter, and xr-bridge supervision. The headset connects directly to the Thor
 address on the normal Operator ports.
 """
@@ -38,13 +38,13 @@ for dependency_dir in (
     if dependency_dir.is_dir():
         sys.path.insert(0, str(dependency_dir))
 
-from pyoperator import BlueprintComponent, BlueprintTransform, Blueprint
-from pyoperator.hosted import HostedBlueprint, create_server
-from pyoperator.integrations.revo2 import (
+from operator_xr import BlueprintComponent, BlueprintTransform, Blueprint
+from operator_xr.hosted import HostedBlueprint, create_server
+from operator_xr.integrations.revo2 import (
     COMMAND_PACKET_VERSION as ADAPTER_COMMAND_PACKET_VERSION,
     Revo2TactileFeedback,
 )
-from pyoperator.integrations.revo2_udp import (
+from operator_xr.integrations.revo2_udp import (
     Revo2UdpHostedAdapter,
     make_revo2_descriptor,
 )
@@ -250,7 +250,7 @@ def validate_protocol_version(
     if adapter_version != VERSION:
         raise RuntimeError(
             "Revo2 protocol mismatch: runtime expects BCH2 v%d but bundled "
-            "pyoperator emits v%d; redeploy the complete operator-hand bundle"
+            "operator_xr emits v%d; redeploy the complete operator-hand bundle"
             % (VERSION, adapter_version)
         )
 

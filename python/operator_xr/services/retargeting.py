@@ -134,7 +134,7 @@ def create_app(runtime=None):
     except ImportError as exc:  # pragma: no cover - exercised by deployments
         raise RuntimeError(
             "the retargeting service requires its extra: "
-            "pip install 'pyoperator[retargeting]'"
+            "pip install 'operator-xr[retargeting]'"
         ) from exc
 
     # ``from __future__ import annotations`` stores the endpoint annotation as
@@ -142,7 +142,7 @@ def create_app(runtime=None):
     globals()["WebSocket"] = WebSocket
 
     solver_runtime = runtime if runtime is not None else default_runtime()
-    app = FastAPI(title="pyoperator-retargeting", version=str(PROTOCOL_VERSION))
+    app = FastAPI(title="operator-retargeting", version=str(PROTOCOL_VERSION))
 
     @app.get(HEALTH_PATH)
     async def healthz() -> dict[str, Any]:
@@ -349,7 +349,7 @@ def serve(host: str = "0.0.0.0", port: int = DEFAULT_PORT, log_level: str = "inf
     except ImportError as exc:
         raise SystemExit(
             "the retargeting service requires its extra: "
-            "pip install 'pyoperator[retargeting]'"
+            "pip install 'operator-xr[retargeting]'"
         ) from exc
     uvicorn.run(create_app(), host=host, port=port, log_level=log_level)
 
@@ -362,7 +362,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """`retargeting-service` entry point (kept for existing deployments)."""
+    """`operator-retargeting` entry point, an alias of `operator serve`."""
     parser = add_arguments(
         argparse.ArgumentParser(description="Serve Operator retargeting over WebSocket")
     )

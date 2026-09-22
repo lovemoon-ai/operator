@@ -3,7 +3,7 @@
 This module is the whole contract: message envelopes, the request/result DTOs
 the app sees, and the error vocabulary. It has no dependency on any solver —
 what a payload *means* is decided by the profile's ``input_type`` and resolved
-in :mod:`pyoperator.integrations.retargeting`.
+in :mod:`operator_xr.integrations.retargeting`.
 
 Message flow on one connection::
 

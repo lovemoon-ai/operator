@@ -11,6 +11,12 @@ namespace operator_sdk {
 
 class Error : public std::runtime_error { using std::runtime_error::runtime_error; };
 
+// Operator release version (the repo-wide VERSION) of the linked liboperator.
+inline std::string_view version() {
+  const operator_string_view_t value = operator_version();
+  return std::string_view(reinterpret_cast<const char*>(value.data), value.len);
+}
+
 class BlueprintPublisher {
  public:
   BlueprintPublisher() : handle_(operator_blueprint_publisher_new()) {

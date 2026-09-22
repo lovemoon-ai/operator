@@ -1,6 +1,6 @@
 [package]
 name = "xr-bridge"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "XR-facing bridge for adapter-backed control and Annex-B video relay"
 

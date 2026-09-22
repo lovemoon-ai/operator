@@ -1,9 +1,10 @@
-"""`pyoperator` command line: run the host-side services an app connects to."""
+"""`operator` command line: run the host-side services an app connects to."""
 
 from __future__ import annotations
 
 import argparse
 
+from . import __version__
 from .services import retargeting as retargeting_service
 
 SERVICES = {"retargeting": retargeting_service}
@@ -11,7 +12,10 @@ SERVICES = {"retargeting": retargeting_service}
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="pyoperator", description="Operator host-side services"
+        prog="operator", description="Operator host-side services"
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     serve = subparsers.add_parser("serve", help="serve one Operator service")
@@ -31,5 +35,5 @@ def main(argv: list[str] | None = None) -> None:
     service.serve(host=args.host, port=args.port, log_level=args.log_level)
 
 
-if __name__ == "__main__":  # `python -m pyoperator.cli`
+if __name__ == "__main__":  # `python -m operator_xr.cli`
     main()

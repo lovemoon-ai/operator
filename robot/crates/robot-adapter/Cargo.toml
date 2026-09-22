@@ -1,6 +1,6 @@
 [package]
 name = "robot-adapter"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Robot-side adapter: translates the bridge boundary protocol into a concrete robot form (dummy/sim/serial)"
 

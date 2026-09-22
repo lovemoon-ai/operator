@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(operator_g1d_client VERSION 0.1.0 LANGUAGES CXX)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../cpp/liboperator/cmake/OperatorVersion.cmake)
+project(operator_g1d_client VERSION ${OPERATOR_VERSION_CORE} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

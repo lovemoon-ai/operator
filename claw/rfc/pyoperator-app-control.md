@@ -1,4 +1,4 @@
-# RFC: pyoperator Application Control Plane
+# RFC: operator_xr Application Control Plane
 
 ## Status
 
@@ -14,7 +14,7 @@ TBD
 
 ## Summary
 
-Make `pyoperator` a first-class control surface for the Operator headset app,
+Make `operator_xr` a first-class control surface for the Operator headset app,
 at the same architectural level as the in-headset Godot UI. Python should be
 able to manage the Android app lifecycle and, after the app starts, enter the
 launcher or another mode, inspect state, update settings, and invoke supported
@@ -26,7 +26,7 @@ hosted Python, and standalone APK workflows remain supported.
 
 ## Context
 
-`pyoperator` currently provides a Python-first XR data and robot integration
+`operator_xr` currently provides a Python-first XR data and robot integration
 surface. `XrSession` receives immutable `XrFrame` snapshots, and `xr_bridge`
 provides its convenient singleton API. It does not control the headset
 application itself.
@@ -40,7 +40,7 @@ to automate the app.
 
 Starting an Android process and operating an already-running application are
 different concerns. The former requires an external device-management channel;
-the latter requires a persistent service inside Godot. `pyoperator` should
+the latter requires a persistent service inside Godot. `operator_xr` should
 compose both behind one understandable product surface.
 
 ## Goals
@@ -107,7 +107,7 @@ but app control needs a separate protocol and connection.
 
 ### D. Persistent Typed Application Control Service
 
-Add an app-global Godot service and a matching `pyoperator` client, with an
+Add an app-global Godot service and a matching `operator_xr` client, with an
 external device backend handling Android process lifecycle. This is the
 proposed direction.
 
@@ -118,7 +118,7 @@ proposed direction.
 ```text
 Python application / future CLI / future AI tools
                      |
-                 pyoperator
+                 operator_xr
              ________|____________________
             |                 |            |
    device lifecycle       app control    existing XR/robot APIs
@@ -143,7 +143,7 @@ The final public names are deliberately undecided. The intended experience is
 conceptually:
 
 ```python
-from pyoperator import Operator
+from operator_xr import Operator
 
 operator = Operator.connect()
 operator.device.start_app()
@@ -227,11 +227,11 @@ pairing. Without an endpoint, the app continues normally.
 ### Python API
 
 The persistent protocol client should have an asynchronous core for I/O,
-events, cancellation, and reconnect. `pyoperator` should also expose a simple
+events, cancellation, and reconnect. `operator_xr` should also expose a simple
 synchronous facade for common robotics and data-collection scripts. Both use
 the same typed models and explicit timeouts.
 
-The existing `pyoperator.xr_bridge` and `XrSession` APIs remain available. The
+The existing `operator_xr.xr_bridge` and `XrSession` APIs remain available. The
 new aggregate may compose them but cannot require existing programs to migrate.
 
 ### Safety and Ownership
@@ -253,7 +253,7 @@ the caller has explicit authority.
 - The normal APK and all headset UI flows work without Python.
 - Existing robot-service descriptors and `DeviceCommand` behavior are
   unchanged.
-- Existing `pyoperator.xr_bridge`, `XrSession`, and hosted Python integrations
+- Existing `operator_xr.xr_bridge`, `XrSession`, and hosted Python integrations
   remain supported.
 - The control channel is optional and version-negotiated.
 - An unavailable capability produces a structured result, never an implicit

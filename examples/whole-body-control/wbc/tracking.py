@@ -10,8 +10,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from pyoperator.integrations.retargeting import BODY_JOINT_SETS
-from pyoperator.models import XrFrame
+from operator_xr.integrations.retargeting import BODY_JOINT_SETS
+from operator_xr.models import XrFrame
 
 # Robot Z-up to the Blueprint model asset's XR Y-up coordinate convention.
 ROBOT_TO_XR = np.array([[0., -1., 0.], [0., 0., 1.], [-1., 0., 0.]])

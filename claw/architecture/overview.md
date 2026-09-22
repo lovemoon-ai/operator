@@ -34,10 +34,10 @@ cpp/
   liboperator/             C++17 headers and CMake target
 
 python/
-  pyoperator/              immutable frames, session, robot/control APIs
-  pyoperator/protocol/     wire contracts the XR app speaks
-  pyoperator/services/     host-side services the app connects to
-  pyoperator/integrations/ adapters onto external capability libraries
+  operator_xr/              immutable frames, session, robot/control APIs
+  operator_xr/protocol/     wire contracts the XR app speaks
+  operator_xr/services/     host-side services the app connects to
+  operator_xr/integrations/ adapters onto external capability libraries
   examples/                embedded and custom-robot examples
   tests/                   deterministic model/control/replay tests
 
@@ -71,7 +71,7 @@ target is hardware or a simulator.
 
 | Target | Robot embodiment | Robot metadata | Retargeting |
 | --- | --- | --- | --- |
-| Inside Robot | In the headset | Bundled XR profile | Native in XR, or remote solver via the pyoperator retargeting service |
+| Inside Robot | In the headset | Bundled XR profile | Native in XR, or remote solver via the operator_xr retargeting service |
 | Outside Robot | Behind `robot-service` | Dynamic device descriptor, or local compatibility descriptor | Owned by `robot-service` and its downstream stack |
 
 Remote retargeting for Inside Robot moves only the solver. Tracking originates
@@ -82,7 +82,7 @@ deployment may use such a service internally without exposing that topology.
 ```text
                          +-> Inside profile -> native solver ----------------+
 XR tracking/controllers |                                                   |
-                         +-> Inside profile -> pyoperator retargeting svc --+-> in-headset embodiment
+                         +-> Inside profile -> operator_xr retargeting svc --+-> in-headset embodiment
                          |
                          +-> Outside target -> Operator protocol -> robot-service -> robot/adapter or outside simulator
                          |
@@ -102,15 +102,15 @@ robot-service xr-bridge component
 
 ### Retargeting Ownership
 
-pyoperator is the single Python interface Operator talks to, so the XR app
+operator_xr is the single Python interface Operator talks to, so the XR app
 never has to speak a second package's protocol. Retargeting math lives in the
-separate `retargeting` library, which pyoperator calls.
+separate `retargeting` library, which operator_xr calls.
 
 ```text
 Operator XR app
-  | pyoperator wire protocol (hello/frame/result over WebSocket)
+  | operator_xr wire protocol (hello/frame/result over WebSocket)
   v
-pyoperator
+operator_xr
   protocol/      versioned envelopes and the RetargetingRequest/Result DTOs
   services/      connection lifetime, session, latest-only backpressure
   integrations/  XrFrame + payload <-> canonical solver types
@@ -123,26 +123,26 @@ retargeting (separate repository)
   eepose/...     the algorithms
 ```
 
-The dependency is one-way: `pyoperator[retargeting]` imports `retargeting`;
-`retargeting` never imports pyoperator, opens a socket, or learns about OpenXR.
+The dependency is one-way: `operator-xr[retargeting]` imports `retargeting`;
+`retargeting` never imports operator_xr, opens a socket, or learns about OpenXR.
 Anything Operator-shaped — wire payloads, quaternion order, body joint sets —
-is translated in `pyoperator/integrations/retargeting.py`.
+is translated in `operator_xr/integrations/retargeting.py`.
 
 Both Teleop paths therefore share one solver core:
 
 | Path | Caller | Result consumer |
 | --- | --- | --- |
-| Inside Robot + remote | `pyoperator.services.retargeting` | Returned to the headset, applied to the in-headset embodiment |
-| Outside Robot + Python | `PyOperatorRetargeter` in a host control loop | Written to the user's robot |
+| Inside Robot + remote | `operator_xr.services.retargeting` | Returned to the headset, applied to the in-headset embodiment |
+| Outside Robot + Python | `OperatorRetargeter` in a host control loop | Written to the user's robot |
 
-Run the service with `pyoperator serve --service retargeting` (the
-`retargeting-service` command remains as an alias for existing deployments).
+Run the service with `operator serve --service retargeting` (the
+`operator-retargeting` command is an alias of the same service).
 
 ### Python-embedded Teleop
 
 ```text
 Python application
-  -> pyoperator.xr_bridge.start()
+  -> operator_xr.xr_bridge.start()
   -> PyO3 in-process xr-bridge SDK mode
   <- one immutable XrStateFrame per headset render sample
   -> Blueprint + latest BlueprintState

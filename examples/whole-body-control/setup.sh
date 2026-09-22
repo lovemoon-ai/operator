@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-shot setup: create the shared venv at ../../python/.venv and install
-# pyoperator plus every controller dependency of this example.
+# operator_xr plus every controller dependency of this example.
 # GPU hosts get onnxruntime-gpu; CPU-only hosts get onnxruntime
 # (never both). Force CPU with: FORCE_CPU=1 ./setup.sh
 set -euo pipefail
@@ -26,7 +26,7 @@ fi
 "$VENV/bin/pip" install -r "$SONIC_REQ"
 
 "$VENV/bin/python" - <<'EOF'
-import mujoco, numpy, onnxruntime, pinocchio, pyoperator, scipy, torch
+import mujoco, numpy, onnxruntime, pinocchio, operator_xr, scipy, torch
 print("torch cuda:", torch.cuda.is_available())
 print("ort providers:", onnxruntime.get_available_providers())
 EOF

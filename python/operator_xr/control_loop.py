@@ -92,7 +92,7 @@ def run(
 
         if robot_connect_attempted:
             try:
-                robot.stop("pyoperator control loop ended")
+                robot.stop("operator_xr control loop ended")
             except BaseException as error:
                 cleanup_errors.append(error)
             try:
@@ -111,5 +111,5 @@ def run(
             add_note = getattr(primary_error, "add_note", None)
             if add_note is not None:
                 for error in cleanup_errors:
-                    add_note(f"pyoperator cleanup also failed: {error!r}")
+                    add_note(f"operator_xr cleanup also failed: {error!r}")
     return ControlLoopStats(frames, commands, watchdog_stops, started, time.monotonic())

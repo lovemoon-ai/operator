@@ -35,7 +35,7 @@ class AdbXrDevice:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    group = parser.getgroup("pyoperator device tests")
+    group = parser.getgroup("operator_xr device tests")
     group.addoption(
         "--run-device",
         action="store_true",

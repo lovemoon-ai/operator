@@ -6,7 +6,7 @@ import unittest
 from types import MappingProxyType
 from unittest.mock import patch
 
-from pyoperator.hosted import (
+from operator_xr.hosted import (
     HostedBlueprint,
     RobotHostedAdapter,
     _client,
@@ -17,9 +17,9 @@ from pyoperator.hosted import (
     serve,
     serve_async,
 )
-from pyoperator.blueprint import BlueprintComponent, Blueprint
-from pyoperator._blueprint_spec import SPEC_SHA256, WIRE
-from pyoperator.robot import JointTarget, RobotState
+from operator_xr.blueprint import BlueprintComponent, Blueprint
+from operator_xr._blueprint_spec import SPEC_SHA256, WIRE
+from operator_xr.robot import JointTarget, RobotState
 
 
 class FakeAdapter:
@@ -334,7 +334,7 @@ class HostedTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_framing_rejects_eof_oversize_and_non_object(self) -> None:
         self.assertIsNone(await _read_frame(reader_with(b"\x01\x00")))
-        with patch("pyoperator.hosted.MAX_FRAME_BYTES", 4):
+        with patch("operator_xr.hosted.MAX_FRAME_BYTES", 4):
             with self.assertRaisesRegex(ValueError, "exceeds"):
                 await _read_frame(reader_with(struct.pack("<I", 5) + b"12345"))
             with self.assertRaisesRegex(ValueError, "exceeds"):
@@ -457,7 +457,7 @@ class RobotHostedAdapterTests(unittest.TestCase):
     def test_sync_serve_delegates_to_async_entrypoint(self) -> None:
         adapter = FakeAdapter()
         descriptor = make_descriptor(name="Bot")
-        with patch("pyoperator.hosted.asyncio.run") as run_async:
+        with patch("operator_xr.hosted.asyncio.run") as run_async:
             serve(adapter, descriptor, port=1234)
         coroutine = run_async.call_args.args[0]
         self.assertEqual(coroutine.cr_frame.f_locals["port"], 1234)

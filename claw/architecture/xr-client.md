@@ -165,7 +165,7 @@ proof that a ray was actually displayed.
   robot-type selector for this target.
 - `InsideRobotTarget` owns the in-headset embodiment and exposes the robot
   profiles this build ships. Native mode runs the solver locally. Remote mode
-  sends canonical tracking frames to the pyoperator retargeting service; only
+  sends canonical tracking frames to the operator_xr retargeting service; only
   the solve is remote and the embodiment remains in XR.
 
 The settings page has one `Robot Control` group. Its first row picks the
@@ -274,7 +274,7 @@ The Outside target creates the v2 network stack at runtime:
   not a reset of the host's simulation or root pose.
 - `CommandSender` for controller/tracking command frames.
 - `XrStateSender` for one atomic raw tracking snapshot when `xr_stream` is
-  advertised by an embedded `pyoperator` session.
+  advertised by an embedded `operator_xr` session.
 - `RobotControlSink` as the mode-facing command output.
 - `TcpHandler` for command and TCP video streams.
 - `UdpVideoHandler` for UDP timed video packets.

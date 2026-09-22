@@ -1,4 +1,4 @@
-"""Command-line interface for the pyoperator Live Feed server."""
+"""Command-line interface for the operator_xr Live Feed server."""
 
 from __future__ import annotations
 
