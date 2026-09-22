@@ -17,12 +17,14 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.is_true(group_containers.has("display"), "Ego capture panel builds its display group")
 	t.is_false(group_containers.has("robot_constraint"), "Ego capture panel omits robot constraints")
 	t.is_false(group_buttons.has("robot_constraint"), "Ego capture sidebar omits robot constraints")
-	t.eq(group_containers.keys().back(), "build_info", "Ego capture sidebar ends with Build info")
+	t.eq(group_containers.keys().back(), "build_info", "Ego capture sidebar ends with Version info")
 	var build_texts := _label_texts(group_containers.get("build_info"))
 	t.ne(BuildInfo.version(), "", "the release version is baked into the project")
-	t.contains(build_texts, BuildInfo.version(), "Build info shows the release version")
+	t.contains(build_texts, BuildInfo.version(), "Version info shows the release version")
 	t.is_true(BuildInfo.commit().is_valid_hex_number(), "the exported APK carries its source commit")
-	t.contains(build_texts, BuildInfo.commit(), "Build info shows the source commit")
+	t.contains(build_texts, BuildInfo.commit(), "Version info shows the source commit")
+	t.eq(BuildInfo.build_time().length(), 16, "the exported APK carries its build time")
+	t.contains(build_texts, BuildInfo.build_time(), "Version info shows the build time")
 
 	panel.queue_free()
 

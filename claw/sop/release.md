@@ -15,8 +15,8 @@ APK. A release publishes the Pico and Quest APKs to GitHub Releases and
   `python3 scripts/version.py check [--tag v<version>]` fails on any drift.
 - The `operator-features` export plugin stamps every APK at export time:
   `versionName` is the version, `versionCode` is `git rev-list --count HEAD`,
-  and the short commit is shown on the Teleop and Ego **Build info** page. Do
-  not edit `version/*` in `xr/export_presets.cfg`.
+  and the short commit and build time are shown on the Teleop and Ego
+  **Version info** page. Do not edit `version/*` in `xr/export_presets.cfg`.
 - Pushing the `v<version>` tag runs `.github/workflows/python-release.yml`,
   which builds the `operator-xr` wheels (Linux x86_64/aarch64, macOS arm64) and
   sdist and publishes them to PyPI. PyPI accepts each version only once, so a
@@ -208,8 +208,8 @@ python3 scripts/version.py check --tag "v${VERSION}"
 
 6. Build Pico and Quest APKs from the tagged commit.
 
-The export plugin reads `versionCode` and the Build info commit from `HEAD`, so
-build only after step 5.
+The export plugin reads `versionCode` and the Version info commit from
+`HEAD`, so build only after step 5.
 
 ```bash
 make -C xr build-pico build-quest

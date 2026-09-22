@@ -80,13 +80,15 @@ class OperatorFeaturesExportPlugin:
 			overrides["version/code"] = commit_count.to_int()
 		return overrides
 
-	# Bakes the source commit into the PCK for the in-headset Build info page.
+	# Bakes the source commit and build time into the PCK for the in-headset
+	# Version info page.
 	func _export_begin(
 		_features: PackedStringArray, _is_debug: bool, _path: String, _flags: int
 	) -> void:
 		var commit := _git(["rev-parse", "--short", "HEAD"])
 		var build_info := ConfigFile.new()
 		build_info.set_value("build", "commit", commit if not commit.is_empty() else "unknown")
+		build_info.set_value("build", "time", int(Time.get_unix_time_from_system()))
 		add_file(BUILD_INFO_PATH, build_info.encode_to_text().to_utf8_buffer(), false)
 
 	func _git(args: PackedStringArray) -> String:

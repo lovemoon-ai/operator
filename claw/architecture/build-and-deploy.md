@@ -254,7 +254,8 @@ The root `VERSION` file holds the one release version (SemVer, e.g. `0.2.0` or
 - XR: `xr/project.godot` `application/config/version`. The `operator-features`
   export plugin sets the APK versionName to that value and versionCode to
   `git rev-list --count HEAD`, and writes the short commit into the PCK. Teleop
-  and Ego settings show both on their **Build info** page.
+  and Ego settings show the version, commit, and build time on their
+  **Version info** page.
 
 `scripts/version.py set X.Y.Z` updates every copy and `scripts/version.py check`
 fails if anything has drifted. Releases follow `claw/sop/release.md`. Pushing a

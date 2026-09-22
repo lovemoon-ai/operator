@@ -103,12 +103,13 @@ func register_group(key: String, title_key: String, icon_name: String = "") -> V
 	return container
 
 
-## Read-only "Build info" group (release version + source commit) shared by the
-## Teleop and Ego settings menus.
+## Read-only "Version info" group (release version, source commit, build time)
+## shared by the Teleop and Ego settings menus.
 func register_build_info_group() -> VBoxContainer:
 	var group := register_group("build_info", "UI_GROUP_BUILD_INFO", "info")
 	_add_build_info_row(group, "UI_BUILD_VERSION", BuildInfo.version())
 	_add_build_info_row(group, "UI_BUILD_COMMIT", BuildInfo.commit())
+	_add_build_info_row(group, "UI_BUILD_TIME", BuildInfo.build_time())
 	return group
 
 
