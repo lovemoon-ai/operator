@@ -34,9 +34,9 @@ environment instead:
 pip install -e ./python -r examples/whole-body-control/requirements.txt
 ```
 
-The SDK and both controllers share `numpy>=2,<3` (SciPy >=1.13). In particular,
-operator_xr's required rerun-sdk dependency needs NumPy 2; do not downgrade this
-environment to NumPy 1 or bypass dependency resolution with `--no-deps`.
+Both controllers share `numpy>=2,<3` (SciPy >=1.13), the combination they are
+tested with; do not downgrade this environment to NumPy 1 or bypass dependency
+resolution with `--no-deps`.
 
 For ScaleBFM, follow the [ScaleBFM guide](docs/scalebfm.md), including real weights,
 metadata, mode table and the pinned ScaleBridge robot model. Install a matching

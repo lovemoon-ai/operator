@@ -192,9 +192,10 @@ keep Blueprint state low-frequency and event-driven.
 the same `XrSession` API but does not declare robot UI because it has no robot
 application state to present.
 
-Install from the Operator checkout:
+Install from PyPI, or from the Operator checkout for development:
 
 ```bash
+pip install operator-xr
 python -m pip install -e ./python
 ```
 

@@ -15,8 +15,11 @@ from .robot_assets import RobotModelAsset, ROBOT_ASSET_SCHEMA
 
 
 def from_mujoco(model, *, root_body: str, joint_names, visual_groups=(1,)) -> RobotModelAsset:
-    import mujoco as mj
-    import numpy as np
+    try:
+        import mujoco as mj
+        import numpy as np
+    except ImportError as error:
+        raise RuntimeError("from_mujoco requires `pip install 'operator-xr[mujoco]'`") from error
 
     names = tuple(joint_names)
     if len(set(names)) != len(names) or any(

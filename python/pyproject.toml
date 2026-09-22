@@ -16,15 +16,14 @@ classifiers = [
   "Programming Language :: Rust",
   "Topic :: Scientific/Engineering",
 ]
-dependencies = [
-    "rerun-sdk>=0.26.2",
-]
 
 [project.urls]
 Repository = "https://github.com/lovemoon-ai/operator"
 
 [project.optional-dependencies]
 ik = ["numpy>=1.24"]
+# Exporting a host MuJoCo model as a robot asset (operator_xr.mujoco_asset).
+mujoco = ["mujoco>=3.3.6", "numpy>=1.24"]
 # Hosting the retargeting service. The solver library itself lives in the
 # retargeting repository (`pip install ./python` there) and is imported lazily,
 # so the rest of operator_xr works without it.

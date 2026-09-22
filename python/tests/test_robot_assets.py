@@ -1,6 +1,7 @@
 """Host format/server tests. Actual GLTF import is tested on the headset."""
 import json
 import struct
+import sys
 import urllib.error
 import urllib.request
 
@@ -85,3 +86,11 @@ def test_component_rejects_invalid_hash(digest):
     with pytest.raises(ValueError):
         BlueprintComponent.robot_model("robot", asset_sha256=digest, asset_size=100, asset_port=63904,
             joint_names=["joint"], joint_positions_binding="q", base_pose_binding="base", sample_binding="seq")
+
+
+def test_from_mujoco_names_its_optional_extra(monkeypatch):
+    from operator_xr.mujoco_asset import from_mujoco
+
+    monkeypatch.setitem(sys.modules, "mujoco", None)
+    with pytest.raises(RuntimeError, match=r"operator-xr\[mujoco\]"):
+        from_mujoco(None, root_body="base", joint_names=())
