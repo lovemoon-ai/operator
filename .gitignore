@@ -77,6 +77,7 @@ conductor-terminal.log
 conductor.log
 .conductor/state/
 .conductor/worktrees/
+.conductor/attachments
 
 # SO-101 mesh STLs (fetched by examples/mujuco-arm-so101/prepare.sh
 # from upstream mujoco_menagerie — kept out of the repo to save ~17 MB)

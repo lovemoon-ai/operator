@@ -7,5 +7,6 @@ worktree:
     - xr/.gradle
     - examples/mujuco-arm-so101/.venv
     - web/node_modules
+    - python/.venv
 
 icon: ../xr/icon.png
