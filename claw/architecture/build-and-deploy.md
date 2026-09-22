@@ -262,7 +262,8 @@ then run `bash scripts/release_and_tag.sh` from that checkout. It builds the
 Quest APK, pushes the `vX.Y.Z` tag, and attaches the APK to the GitHub Release.
 The tag triggers `.github/workflows/python-release.yml`, which builds `operator-xr`
 wheels (Linux x86_64/aarch64, macOS arm64) and an sdist, then publishes them
-through PyPI Trusted Publishing. Pre-release tags go to TestPyPI.
+through PyPI Trusted Publishing. Pre-release tags publish as PyPI
+pre-releases, which `pip` only installs with `--pre` or an exact version.
 
 ## Web App
 
