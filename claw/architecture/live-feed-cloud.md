@@ -21,9 +21,12 @@ backed by `LivePushWriter`, then reuses the capture session controller and
 platform capture providers.
 
 The launcher card for this mode is controlled by
-`operator_feature_mode_live_feed`, which is `false` in every shipped preset;
-Live Feed is entered through the `operator.mode` intent extra. See
-`claw/architecture/xr-client.md` for the launcher card contract.
+`operator_feature_mode_live_feed`, which is currently `true` in every
+export preset, so the card is shown. The Live Feed E2E enters through the
+`operator.mode` intent extra regardless of the flag. See
+`claw/architecture/xr-client.md` for the launcher card contract and
+`claw/todo/host-declared-composition.md` for the plan that removes this
+entry point.
 
 ## Ports
 
