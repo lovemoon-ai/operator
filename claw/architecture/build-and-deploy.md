@@ -257,12 +257,10 @@ The root `VERSION` file holds the one release version (SemVer, e.g. `0.2.0` or
   and Ego settings show both on their **Build info** page.
 
 `scripts/version.py set X.Y.Z` updates every copy and `scripts/version.py check`
-fails if anything has drifted. To release, merge the version bump to `main`,
-then run `bash scripts/release_and_tag.sh` from that checkout. It builds the
-Quest APK, pushes the `vX.Y.Z` tag, and attaches the APK to the GitHub Release.
-The tag triggers `.github/workflows/python-release.yml`, which builds `operator-xr`
-wheels (Linux x86_64/aarch64, macOS arm64) and an sdist, then publishes them
-through PyPI Trusted Publishing. Pre-release tags publish as PyPI
+fails if anything has drifted. Releases follow `claw/sop/release.md`. Pushing a
+`vX.Y.Z` tag triggers `.github/workflows/python-release.yml`, which builds
+`operator-xr` wheels (Linux x86_64/aarch64, macOS arm64) and an sdist, then
+publishes them through PyPI Trusted Publishing. Pre-release tags publish as PyPI
 pre-releases, which `pip` only installs with `--pre` or an exact version.
 
 ## Web App
