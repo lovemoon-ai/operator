@@ -1,0 +1,13 @@
+# One prompt per line; blank lines and # comments are ignored.
+# Pass with --prompts examples/light-o1/prompts.txt. Typed prompts are added
+# to the same list while the session runs.
+wave with the right hand
+walk forward and turn around
+do two squats
+punch the air with the left and right hand
+wipe a table with the right hand
+bow politely
+jump in place
+stretch both arms above the head
+kick with the right leg
+dance happily
