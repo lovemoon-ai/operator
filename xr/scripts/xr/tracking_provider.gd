@@ -268,6 +268,9 @@ func get_hand_joints(hand: int) -> Array[Dictionary]:
 
 		joints.append({
 			"tracked": true,
+			"orientation_valid": (
+				flags & XRHandTracker.HAND_JOINT_FLAG_ORIENTATION_VALID
+			) != 0,
 			"position": transform.origin,
 			"rotation": transform.basis.get_rotation_quaternion(),
 			"radius": radius,

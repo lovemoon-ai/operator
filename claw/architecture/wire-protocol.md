@@ -336,6 +336,20 @@ end-effector offset at 30 mm/s, horizontal by default and vertical while the
 stick click is held. They apply whether or not the deadman is held. This is a
 Cartesian offset, so it is only honoured in `pose_mapping.mode: ik`.
 
+Dual-arm descriptors that support both controller and bare-hand operation use
+`left_arm_pose` / `right_arm_pose` and `left_arm_grip` / `right_arm_grip`.
+Each pair selects a physical controller when its interaction profile is active;
+otherwise it selects the optically tracked wrist pose and derives the deadman
+value from finger flexion. Controller-inferred hand joints are not accepted as
+a second deadman source.
+
+The G1-D Revo-1 controller profile maps trigger to a side-specific fixed grasp
+action. Pressing past the hysteresis threshold drives all five supported motors
+to the configured grasp target; release drives them to open. Grip remains the
+arm IK deadman. A side-specific `*_controller_active` source keeps the hand
+stream enabled while that controller is tracked. Tracking loss holds the latest
+measured pose. Revo-1's unused ThumbAux DDS slot is held at measured position.
+
 ### Telemetry values
 
 Beyond `joint_angles` / `num_joints` / `connected`, the arm publishes the data

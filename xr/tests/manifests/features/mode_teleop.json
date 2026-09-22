@@ -36,6 +36,13 @@
       "script": "res://tests/unit/teleop/dual_arm_mapping_test.gd"
     },
     {
+      "id": "teleop.revo1_controller_mapping",
+      "level": "unit",
+      "suite": "teleop.mapping",
+      "module": "core/teleop",
+      "script": "res://tests/unit/teleop/revo1_controller_mapping_test.gd"
+    },
+    {
       "id": "teleop.pico_body_tracking_availability",
       "level": "unit",
       "suite": "teleop.targets",
