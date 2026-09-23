@@ -119,6 +119,14 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     @UsedByGodot
     fun getCaptureProviderName(): String = "pico"
 
+    // The native PICO RGB pipeline configures its rate at start; a rate
+    // change restarts the capture (see QuestCapturePlugin.setRgbRate).
+    @UsedByGodot
+    fun supportsLiveRgbRate(): Boolean = false
+
+    @UsedByGodot
+    fun setRgbRate(fps: Int, bitrateBps: Int): Boolean = false
+
     @UsedByGodot
     fun getCaptureProviderDeviceScore(): Int {
         val device = listOf(Build.MANUFACTURER, Build.BRAND, Build.MODEL, Build.DEVICE, Build.PRODUCT)

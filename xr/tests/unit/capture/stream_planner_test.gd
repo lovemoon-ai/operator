@@ -29,6 +29,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	_check_host_denied_and_revoked(t)
 	_check_host_control(t)
 	_check_host_without_rgb(t)
+	_check_rgb_capture_ceiling(t)
 
 
 func _check_ingest_request(t: OperatorTestAssertions) -> void:
@@ -150,3 +151,11 @@ static func _state(status: Dictionary, stream_name: String) -> String:
 
 static func _reason(status: Dictionary, stream_name: String) -> String:
 	return str(((status.get("streams", {}) as Dictionary).get(stream_name, {}) as Dictionary).get("reason", ""))
+
+
+func _check_rgb_capture_ceiling(t: OperatorTestAssertions) -> void:
+	var planner := StreamPlanner.new()
+	planner.plan_host(DECLARATION, ADVERTISED, {"camera": "allow", "xr_state": "allow"}, "controllers")
+	planner.apply_control({"streams": {"rgb.hevc": {"hz": 1, "bitrate_bps": 1000000}}})
+	t.eq(planner.rgb_capture_ceiling(), {"rgb_fps": 4, "rgb_bitrate": 2000000},
+		"the capture ceiling is the granted envelope, not the currently delivered rate")

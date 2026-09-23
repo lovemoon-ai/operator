@@ -4,6 +4,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Bundle
 import android.util.Log
 import com.spatialmp4.contract.Intrinsics
 import com.spatialmp4.contract.RgbStreamConfig
@@ -54,7 +55,11 @@ class StereoHevcEncoder(
     private val onMonoEncoded: () -> Unit = {},
     private val onPacketEmitted: () -> Unit = {}
 ) {
-    private val frameDurationUs = 1_000_000L / max(fps, 1)
+    // `fps` is the capture rate the camera and codec are configured for; the
+    // delivered rate can be lowered while running (setTargetRate).
+    private val rateGate = RgbRateGate(max(fps, 1))
+    private val frameDurationUs: Long
+        get() = rateGate.intervalUs
     private val normalizedCodec = RgbVideoCodec.normalize(rgbCodec)
     private val codecMimeType = mimeTypeForCodec(normalizedCodec)
     private val codecLabel = labelForCodec(normalizedCodec)
@@ -112,8 +117,12 @@ class StereoHevcEncoder(
 
         if (!stereo) {
             if (frame.eye == "left") {
-                encodePayload(buildMonoPayload(frame), frame.timestampNs, "left RGB frame")
-                onMonoEncoded()
+                if (!acceptFrame(frame.timestampNs)) {
+                    return
+                }
+                if (encodePayload(buildMonoPayload(frame), frame.timestampNs, "left RGB frame")) {
+                    onMonoEncoded()
+                }
             }
             return
         }
@@ -171,30 +180,68 @@ class StereoHevcEncoder(
     }
 
     private fun encodePair(left: CapturedYuvFrame, right: CapturedYuvFrame, timestampNs: Long) {
-        encodePayload(buildStereoPayload(left, right), timestampNs, "RGB pair")
-        onPairEncoded()
+        if (!acceptFrame(timestampNs)) {
+            return
+        }
+        if (encodePayload(buildStereoPayload(left, right), timestampNs, "RGB pair")) {
+            onPairEncoded()
+        }
     }
 
-    private fun encodePayload(payload: ByteArray, timestampNs: Long, label: String) {
-        val localCodec = codec ?: return
+    private fun encodePayload(payload: ByteArray, timestampNs: Long, label: String): Boolean {
+        val localCodec = codec ?: return false
         drainEncoder(false)
         val inputIndex = localCodec.dequeueInputBuffer(10_000)
         if (inputIndex < 0) {
             onError("$codecLabel encoder input buffer was not available; dropping $label")
-            return
+            return false
         }
         val inputBuffer = localCodec.getInputBuffer(inputIndex) ?: run {
             onError("$codecLabel encoder returned null input buffer")
-            return
+            return false
         }
         inputBuffer.clear()
         if (payload.size > inputBuffer.remaining()) {
             onError("$codecLabel input buffer too small: ${inputBuffer.remaining()} < ${payload.size}")
             localCodec.queueInputBuffer(inputIndex, 0, 0, timestampNs / 1000L, 0)
-            return
+            return false
         }
         inputBuffer.put(payload)
         localCodec.queueInputBuffer(inputIndex, 0, payload.size, timestampNs / 1000L, 0)
+        return true
+    }
+
+    /**
+     * Rate gate ahead of the (expensive) payload copy. Dropped frames still
+     * drain the codec so a low delivered rate never holds encoded packets back.
+     */
+    private fun acceptFrame(timestampNs: Long): Boolean {
+        if (codec != null) {
+            drainEncoder(false)
+        }
+        return rateGate.accept(timestampNs)
+    }
+
+    /**
+     * Changes the delivered rate and bitrate of the running capture without a
+     * restart. [fps] cannot exceed the capture rate the camera runs at; a
+     * non-positive [bitrateBps] keeps the current bitrate.
+     */
+    fun setTargetRate(fps: Int, bitrateBps: Int): Boolean {
+        if (!rateGate.setTargetFps(fps)) {
+            return false
+        }
+        if (bitrateBps > 0) {
+            try {
+                codec?.setParameters(Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrateBps)
+                })
+            } catch (error: IllegalStateException) {
+                Log.w(TAG, "could not change $codecLabel bitrate live: ${error.message}")
+            }
+        }
+        Log.i(TAG, "$codecLabel delivered rate $fps fps of capture ${this.fps} fps, bitrate $bitrateBps")
+        return true
     }
 
     private fun drainEncoder(endOfStream: Boolean) {

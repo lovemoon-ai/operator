@@ -23,6 +23,22 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.is_false(composition._record_running(),
 		"without a declared record task the session only pushes, never records locally")
 
+	# StreamsControl rate changes: a provider that delivers the rate in place
+	# captures at the granted ceiling, so the capture (and its signature) does
+	# not change and nothing restarts; otherwise the capture follows the rate.
+	var slow := {"rgb_fps": 1, "rgb_bitrate": 1000000}
+	var fast := {"rgb_fps": 4, "rgb_bitrate": 2000000}
+	var live_slow := composition._capture_options(slow, "ingest", true)
+	t.eq(int(live_slow.get("rgb_fps")), 4, "a live-rate provider captures at the granted ceiling")
+	t.eq(JSON.stringify(live_slow, "", true),
+		JSON.stringify(composition._capture_options(fast, "ingest", true), "", true),
+		"a rate-only change keeps the running capture")
+	var fixed_slow := composition._capture_options(slow, "ingest", false)
+	t.eq(int(fixed_slow.get("rgb_fps")), 1, "without live rate the capture runs at the planned rate")
+	t.ne(JSON.stringify(fixed_slow, "", true),
+		JSON.stringify(composition._capture_options(fast, "ingest", false), "", true),
+		"without live rate a rate change restarts the capture")
+
 	var with_record := DECLARATION.duplicate(true)
 	with_record["local_tasks"] = [{"kind": "record"}]
 	composition._config = with_record

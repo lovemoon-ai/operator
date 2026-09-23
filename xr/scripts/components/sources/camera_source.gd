@@ -103,6 +103,18 @@ func supports_depth() -> bool:
 	return plugin != null and CaptureProviderRegistryScript.supports_depth(plugin)
 
 
+## Whether the provider can change a running capture's delivered RGB rate and
+## bitrate in place (set_rgb_rate) instead of restarting camera and encoder.
+func supports_live_rgb_rate() -> bool:
+	return plugin != null and bool(plugin.call("supportsLiveRgbRate"))
+
+
+## Delivers `fps` frames per second (at most the capture rate) at `bitrate_bps`
+## without a restart. False when the provider cannot.
+func set_rgb_rate(fps: int, bitrate_bps: int) -> bool:
+	return plugin != null and bool(plugin.call("setRgbRate", fps, bitrate_bps))
+
+
 func supports_motion_trackers() -> bool:
 	return plugin != null and CaptureProviderRegistryScript.supports_motion_trackers(plugin)
 

@@ -300,6 +300,16 @@ func media_up_running() -> bool:
 	return str(effective(RGB_STREAM).get("state", "")) == STATE_ACTIVE
 
 
+## The rgb stream's granted upper limits. A provider that sets the delivered
+## rate in place captures at these, so StreamsControl never restarts it.
+func rgb_capture_ceiling() -> Dictionary:
+	var envelope: Dictionary = _envelope.get(RGB_STREAM, {})
+	return {
+		"rgb_fps": int(_clip_hz(RGB_STREAM, _default_hz(envelope), envelope).get("value", DEFAULT_RGB_FPS)),
+		"rgb_bitrate": int(_clip_bitrate(_default_bitrate(envelope), envelope).get("value", DEFAULT_RGB_BITRATE)),
+	}
+
+
 ## Capture-option updates for the current host plan. Streams OLCP cannot carry
 ## (audio, body, motion trackers) are always off in a host session.
 func host_capture_updates(interaction_mode: String) -> Dictionary:

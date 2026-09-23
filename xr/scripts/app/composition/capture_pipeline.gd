@@ -144,6 +144,14 @@ func is_recording() -> bool:
 	return controller != null and controller.is_session_active()
 
 
+func supports_live_rgb_rate() -> bool:
+	return ensure_bound() and camera.supports_live_rgb_rate()
+
+
+func set_rgb_rate(fps: int, bitrate_bps: int) -> bool:
+	return camera != null and camera.set_rgb_rate(fps, bitrate_bps)
+
+
 ## Options the writers and samplers see: runtime display keys removed and
 ## streams the bound provider cannot produce turned off.
 func effective_options(options: Dictionary) -> Dictionary:

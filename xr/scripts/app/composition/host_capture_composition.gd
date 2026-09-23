@@ -44,6 +44,13 @@ var _running_signature := ""
 ## RESTART_DELAY_SECONDS carries the epoch it was planned in, so a newer plan
 ## (or a stop) supersedes it instead of starting stale parameters.
 var _plan_epoch := 0
+## Latest planned rgb rate/bitrate. With a provider that changes them in place
+## the capture runs at the envelope ceiling and these are delivered live, so a
+## StreamsControl rate change never restarts camera and encoder.
+var _rate_updates: Dictionary = {}
+var _live_rate := false
+## What the provider was last told; re-plans that change nothing send nothing.
+var _applied_rate: Dictionary = {}
 ## local task kind -> {state, reason?}
 var _task_status: Dictionary = {}
 
@@ -224,9 +231,15 @@ func _apply(plan: Dictionary) -> void:
 		_stop_capture()
 		return
 	var output := OUTPUT_BOTH if _record_running() else OUTPUT_INGEST
-	var options := _capture_options(plan.get("updates", {}) as Dictionary, output)
+	var updates: Dictionary = plan.get("updates", {})
+	_live_rate = _pipeline.supports_live_rgb_rate()
+	_rate_updates = {"rgb_fps": updates.get("rgb_fps", 0), "rgb_bitrate": updates.get("rgb_bitrate", 0)}
+	var options := _capture_options(updates, output, _live_rate)
 	var signature := JSON.stringify([output, options], "", true)
 	if signature == _running_signature and (_pipeline.is_recording() or _starting):
+		# Same capture. A rate/bitrate-only change is delivered in place.
+		if _live_rate and _pipeline.is_recording():
+			_apply_live_rate()
 		return
 	if _pipeline.is_recording():
 		_stop_capture()
@@ -257,7 +270,11 @@ func _start_capture(output: String, options: Dictionary, signature: String, epoc
 	_running_signature = signature
 	if _uploader != null:
 		_uploader.call("pause")
-	if not _pipeline.start(_pipeline.effective_options(options)):
+	_applied_rate = {}
+	if _pipeline.start(_pipeline.effective_options(options)):
+		if _live_rate:
+			_apply_live_rate()
+	else:
 		_running_signature = ""
 		push_warning("[HostCapture] capture did not start")
 		# Report what actually runs: the host must not keep seeing `active`
@@ -275,7 +292,19 @@ func _stop_capture() -> void:
 		_pipeline.stop()
 
 
-func _capture_options(updates: Dictionary, output: String) -> Dictionary:
+## Delivers the planned rgb rate/bitrate out of a capture running at the
+## ceiling. The planned rate never exceeds the ceiling, so a refusal only means
+## the provider lost its encoder; the capture keeps running at the ceiling.
+func _apply_live_rate() -> void:
+	if _rate_updates == _applied_rate:
+		return
+	_applied_rate = _rate_updates.duplicate()
+	var fps := int(_rate_updates.get("rgb_fps", 0))
+	if fps > 0 and not _pipeline.set_rgb_rate(fps, int(_rate_updates.get("rgb_bitrate", 0))):
+		push_warning("[HostCapture] provider refused a live rgb rate of %d fps" % fps)
+
+
+func _capture_options(updates: Dictionary, output: String, live_rate := false) -> Dictionary:
 	var options := {
 		"capture_output": output,
 		"interaction_mode": _current_interaction_mode(),
@@ -303,6 +332,9 @@ func _capture_options(updates: Dictionary, output: String) -> Dictionary:
 	options["export_coordinate_space"] = export_space
 	options["export_coordinate_space_id"] = OpenXRExportSpace.coordinate_space_id(export_space)
 	options.merge(updates, true)
+	if live_rate:
+		# Capture at the granted ceiling; the delivered rate is set in place.
+		options.merge(_planner.rgb_capture_ceiling(), true)
 	return options
 
 

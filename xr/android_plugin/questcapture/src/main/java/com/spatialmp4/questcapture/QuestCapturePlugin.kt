@@ -70,6 +70,11 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     // nativeWriterHandle migrated to SpatialMp4MuxerPlugin in Stage 2b. The
     // provider now hands the muxer a SessionConfig and lets it own the handle.
     private var hevcEncoder: StereoHevcEncoder? = null
+    // Delivered rate/bitrate a host asked for while capturing at rgbFps
+    // (0 = deliver at the capture rate). Kept here because a request can
+    // arrive before the encoder exists; applied when it is created.
+    @Volatile private var liveRgbFps = 0
+    @Volatile private var liveRgbBitrate = 0
     // v3 spatial audio capture: nullable so a session that disabled audio
     // (recordAudio=false) keeps the camera path zero-cost.
     private var audioCapture: AudioCapture? = null
@@ -137,6 +142,26 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
 
     @UsedByGodot
     fun getCaptureProviderName(): String = "quest"
+
+    /** The delivered RGB rate and bitrate can change while capturing (setRgbRate). */
+    @UsedByGodot
+    fun supportsLiveRgbRate(): Boolean = true
+
+    /**
+     * Delivers [fps] frames per second out of the configured capture rate and
+     * switches the encoder bitrate, without restarting the camera or encoder.
+     * Returns false when [fps] exceeds the capture rate (a restart is needed).
+     */
+    @UsedByGodot
+    fun setRgbRate(fps: Int, bitrateBps: Int): Boolean {
+        if (fps <= 0 || fps > rgbFps) {
+            return false
+        }
+        liveRgbFps = fps
+        liveRgbBitrate = bitrateBps
+        hevcEncoder?.setTargetRate(fps, bitrateBps)
+        return true
+    }
 
     @UsedByGodot
     fun getCaptureProviderDeviceScore(): Int {
@@ -421,6 +446,8 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
         this.stereoRgb = stereoRgb
         this.rgbBitrate = if (rgbBitrate > 0) rgbBitrate else DEFAULT_RGB_BITRATE
         this.rgbFps = if (rgbFps > 0) rgbFps else DEFAULT_RGB_FPS
+        liveRgbFps = 0
+        liveRgbBitrate = 0
         this.rgbWidth = if (rgbWidth > 0) rgbWidth else 0
         this.rgbHeight = if (rgbHeight > 0) rgbHeight else 0
         this.rgbCodec = RgbVideoCodec.normalize(rgbCodec)
@@ -1007,6 +1034,9 @@ class QuestCapturePlugin(godot: Godot) : GodotPlugin(godot) {
             return false
         }
         hevcEncoder = encoder
+        if (liveRgbFps > 0) {
+            encoder.setTargetRate(liveRgbFps, liveRgbBitrate)
+        }
 
         // v3: stand up the audio path only if the session truly enabled it.
         // If audio cannot deliver AAC CSD, tell the muxer to clear its pending
