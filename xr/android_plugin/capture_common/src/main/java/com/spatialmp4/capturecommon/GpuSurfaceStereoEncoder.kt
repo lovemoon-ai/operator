@@ -61,6 +61,10 @@ class GpuSurfaceStereoEncoder(
     private val encodedWidth = if (stereo) eyeWidth * 2 else eyeWidth
     private val encodedHeight = eyeHeight
     private val bufferInfo = MediaCodec.BufferInfo()
+    // Set once the codec config (CSD) reached the sink. Some encoders
+    // (Qualcomm c2.qti.hevc) publish it only as a BUFFER_FLAG_CODEC_CONFIG
+    // output buffer, with no csd-* in the output format.
+    private var rgbConfigured = false
 
     private var codec: MediaCodec? = null
     private var inputSurface: Surface? = null
@@ -251,7 +255,17 @@ class GpuSurfaceStereoEncoder(
                     }
                     val outputBuffer = localCodec.getOutputBuffer(outputIndex)
                     if (outputBuffer != null && bufferInfo.size > 0) {
-                        if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                        val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                        if (isConfig && !rgbConfigured) {
+                            outputBuffer.position(bufferInfo.offset)
+                            outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                            emitRgbConfig(outputBuffer.toByteArray())
+                        } else if (!isConfig && !rgbConfigured) {
+                            onError("GPU Surface $codecLabel encoder produced frames before its codec config")
+                            localCodec.releaseOutputBuffer(outputIndex, false)
+                            return
+                        }
+                        if (!isConfig) {
                             outputBuffer.position(bufferInfo.offset)
                             outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
                             val isKey = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
@@ -274,11 +288,21 @@ class GpuSurfaceStereoEncoder(
     }
 
     private fun configureNativeRgb(format: MediaFormat) {
-        val csd = collectCodecConfig(format)
-        if (csd.isEmpty()) {
-            onError("GPU Surface $codecLabel encoder output format did not include codec config")
+        if (rgbConfigured) {
             return
         }
+        val csd = collectCodecConfig(format)
+        if (csd.isEmpty()) {
+            // Delivered as a BUFFER_FLAG_CODEC_CONFIG output buffer instead
+            // (drainEncoder); frames before it are an error there.
+            Log.i(TAG, "GPU Surface $codecLabel output format carries no codec config; waiting for a codec-config buffer")
+            return
+        }
+        emitRgbConfig(csd)
+    }
+
+    private fun emitRgbConfig(csd: ByteArray) {
+        rgbConfigured = true
         dataSink.onRgbCsd(
             RgbStreamConfig(
                 width = encodedWidth,

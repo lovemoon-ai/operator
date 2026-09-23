@@ -61,6 +61,10 @@ class StereoHevcEncoder(
     private val encodedWidth = if (stereo) eyeWidth * 2 else eyeWidth
     private val encodedHeight = eyeHeight
     private val bufferInfo = MediaCodec.BufferInfo()
+    // Set once the codec config (CSD) reached the sink. Some encoders
+    // (Qualcomm c2.qti.hevc) publish it only as a BUFFER_FLAG_CODEC_CONFIG
+    // output buffer, with no csd-* in the output format.
+    private var rgbConfigured = false
     private var codec: MediaCodec? = null
     private var pendingLeft: CapturedYuvFrame? = null
     private var pendingRight: CapturedYuvFrame? = null
@@ -214,7 +218,17 @@ class StereoHevcEncoder(
                     }
                     val outputBuffer = localCodec.getOutputBuffer(outputIndex)
                     if (outputBuffer != null && bufferInfo.size > 0) {
-                        if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                        val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                        if (isConfig && !rgbConfigured) {
+                            outputBuffer.position(bufferInfo.offset)
+                            outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                            emitRgbConfig(outputBuffer.toByteArray())
+                        } else if (!isConfig && !rgbConfigured) {
+                            onError("$codecLabel encoder produced frames before its codec config")
+                            localCodec.releaseOutputBuffer(outputIndex, false)
+                            return
+                        }
+                        if (!isConfig) {
                             // Forward the MediaCodec output buffer as-is to the
                             // sink: the SpatialDataSink contract documents
                             // data.remaining() as the packet bytes, valid only
@@ -245,11 +259,21 @@ class StereoHevcEncoder(
     }
 
     private fun configureNativeRgb(format: MediaFormat) {
-        val csd = collectCodecConfig(format)
-        if (csd.isEmpty()) {
-            onError("$codecLabel encoder output format did not include codec config")
+        if (rgbConfigured) {
             return
         }
+        val csd = collectCodecConfig(format)
+        if (csd.isEmpty()) {
+            // Delivered as a BUFFER_FLAG_CODEC_CONFIG output buffer instead
+            // (drainEncoder); frames before it are an error there.
+            Log.i(TAG, "$codecLabel output format carries no codec config; waiting for a codec-config buffer")
+            return
+        }
+        emitRgbConfig(csd)
+    }
+
+    private fun emitRgbConfig(csd: ByteArray) {
+        rgbConfigured = true
         // Hand the codec config through the SpatialDataSink contract. The
         // muxer is responsible for ICAM/ECAM/DSTR boxes -- it consumes the
         // per-camera intrinsics list we captured at construction time.
