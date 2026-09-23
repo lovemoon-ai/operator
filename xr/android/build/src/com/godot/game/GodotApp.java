@@ -64,6 +64,13 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_CAPTURE_SAVE_ROOT = "operator.capture.save_root";
 	private static final String EXTRA_CAPTURE_RGB_ONLY = "operator.capture.rgb_only";
 	private static final String EXTRA_CAPTURE_CAPABILITY_PROBE = "operator.capture.capability_probe";
+	// Ego capture Output (local | ingest | both) and the ingest endpoint; Live
+	// Feed is the "ingest" Output (cicd/04_live_feed_e2e.sh launches it so).
+	private static final String EXTRA_CAPTURE_OUTPUT = "operator.capture.output";
+	private static final String EXTRA_CAPTURE_SERVER_HOST = "operator.capture.server_host";
+	private static final String EXTRA_CAPTURE_SERVER_PORT = "operator.capture.server_port";
+	private static final String EXTRA_CAPTURE_SERVER_RESULT_PORT = "operator.capture.server_result_port";
+	private static final String EXTRA_CAPTURE_SERVER_AUTH_TOKEN = "operator.capture.server_auth_token";
 	private static final String EXTRA_BODY_POSE_DEBUG = "operator.body_pose_debug";
 	private static final String EXTRA_INTERACTION_DEBUG = "operator.interaction_debug";
 	private static final String EXTRA_OPERATOR_AUTO_START = "operator.auto_start";
@@ -151,6 +158,11 @@ public class GodotApp extends GodotActivity {
 		appendIntentExtraArg(args, EXTRA_CAPTURE_SAVE_ROOT, "--operator-capture-save-root");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_RGB_ONLY, "--operator-capture-rgb-only");
 		appendIntentExtraArg(args, EXTRA_CAPTURE_CAPABILITY_PROBE, "--operator-capture-capability-probe");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_OUTPUT, "--operator-capture-output");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_SERVER_HOST, "--operator-capture-server-host");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_SERVER_PORT, "--operator-capture-server-port");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_SERVER_RESULT_PORT, "--operator-capture-server-result-port");
+		appendIntentExtraArg(args, EXTRA_CAPTURE_SERVER_AUTH_TOKEN, "--operator-capture-server-auth-token");
 		appendIntentExtraArg(args, EXTRA_BODY_POSE_DEBUG, "--operator-body-pose-debug");
 		if (readBooleanExtra(EXTRA_INTERACTION_DEBUG)) {
 			ensureUserArgsDelimiter(args);
@@ -219,7 +231,8 @@ public class GodotApp extends GodotActivity {
 		ensureUserArgsDelimiter(args);
 		args.add(argName);
 		args.add(text);
-		Log.i("Operator", "Automation extra requested: " + extraName + "=" + text);
+		String shown = extraName.endsWith("auth_token") ? "<redacted>" : text;
+		Log.i("Operator", "Automation extra requested: " + extraName + "=" + shown);
 	}
 
 	@Override
