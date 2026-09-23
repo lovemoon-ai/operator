@@ -28,6 +28,14 @@ class RgbRateGateTest {
     }
 
     @Test
+    fun deliversATargetThatDoesNotDivideTheCaptureRate() {
+        val gate = RgbRateGate(captureFps = 30)
+        assertTrue(gate.setTargetFps(20))
+        // 90 camera frames at 30 fps span 3 s: 20 delivered per second.
+        assertEquals(60, accepted(gate, 1_000_000_000L / 30, 90))
+    }
+
+    @Test
     fun refusesRatesTheCameraCannotDeliver() {
         val gate = RgbRateGate(captureFps = 4)
         assertFalse(gate.setTargetFps(5))

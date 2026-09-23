@@ -45,4 +45,15 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.is_true(composition._record_running(), "a declared record task records alongside the push")
 	composition._record_wanted = false
 	t.is_false(composition._record_running(), "StreamsControl can stop the declared record task")
+
+	# Refusing Android shared storage denies only the record task; the push
+	# keeps running instead of the whole capture being marked failed.
+	composition._record_wanted = true
+	composition._storage_denied = true
+	t.is_false(composition._record_running(), "without shared storage the session only pushes")
+	composition._plan_local_tasks({"camera": "allow", "xr_state": "allow"})
+	t.eq(composition._task_status.get("record"),
+		{"state": "denied", "reason": StreamPlanner.REASON_PERMISSION_DENIED},
+		"a storage refusal reports the record task denied")
+	t.is_false(composition._capture_failed, "a storage refusal is not a capture failure")
 	composition.free()

@@ -100,8 +100,9 @@ const STREAMS_CONTROL_QUEUE: usize = 16;
 /// connection that owns the host session: the latest headset
 /// `StreamsStatus` (latest-wins) and an ordered `StreamsControl` queue.
 ///
-/// The most recent headset handshake owns the session. Status is `None`
-/// until that headset reports and again once its connection ends.
+/// The most recent headset handshake owns the session; when it ends, the
+/// previous headset still connected owns it again with its last status.
+/// Status is `None` while the owner has not reported.
 #[derive(Clone)]
 pub struct StreamsChannels {
     status_tx: watch::Sender<Option<Arc<StreamsStatus>>>,
@@ -113,9 +114,15 @@ pub struct StreamsChannels {
 #[derive(Default)]
 struct StreamsSession {
     generation: u64,
-    owner: Option<u64>,
-    /// Present only while the owner advertised `capture_streams_v1`.
+    /// Attached headset connections, oldest first; the last owns the session.
+    attached: Vec<AttachedHeadset>,
+}
+
+struct AttachedHeadset {
+    generation: u64,
+    /// Present only when the headset advertised `capture_streams_v1`.
     control_tx: Option<mpsc::Sender<StreamsControl>>,
+    status: Option<Arc<StreamsStatus>>,
 }
 
 /// Why a `StreamsControl` could not be queued for the headset.
@@ -186,7 +193,12 @@ impl StreamsChannels {
     pub fn headset_supported(&self) -> bool {
         self.session
             .lock()
-            .map(|session| session.control_tx.is_some())
+            .map(|session| {
+                session
+                    .attached
+                    .last()
+                    .is_some_and(|owner| owner.control_tx.is_some())
+            })
             .unwrap_or(false)
     }
 
@@ -197,10 +209,11 @@ impl StreamsChannels {
             .session
             .lock()
             .map_err(|_| StreamsControlError::NotConnected)?;
-        if session.owner.is_none() {
-            return Err(StreamsControlError::NotConnected);
-        }
-        let control_tx = session
+        let owner = session
+            .attached
+            .last()
+            .ok_or(StreamsControlError::NotConnected)?;
+        let control_tx = owner
             .control_tx
             .as_ref()
             .ok_or(StreamsControlError::Unsupported)?;
@@ -211,7 +224,8 @@ impl StreamsChannels {
     }
 
     /// Make a newly handshaken headset the session owner. The returned
-    /// guard releases ownership (and clears the status) when dropped.
+    /// guard detaches it when dropped, handing the session back to the
+    /// previous headset still attached.
     pub(crate) fn attach(
         &self,
         capture_streams_supported: bool,
@@ -225,9 +239,13 @@ impl StreamsChannels {
         let generation = match self.session.lock() {
             Ok(mut session) => {
                 session.generation += 1;
-                session.owner = Some(session.generation);
-                session.control_tx = control_tx;
-                session.generation
+                let generation = session.generation;
+                session.attached.push(AttachedHeadset {
+                    generation,
+                    control_tx,
+                    status: None,
+                });
+                generation
             }
             Err(_) => 0,
         };
@@ -249,19 +267,21 @@ pub(crate) struct StreamsAttachment {
 }
 
 impl StreamsAttachment {
-    fn owns(&self, session: &StreamsSession) -> bool {
-        session.owner == Some(self.generation)
-    }
-
     pub(crate) fn publish(&self, status: StreamsStatus) {
-        let owns = self
-            .channels
-            .session
-            .lock()
-            .map(|session| self.owns(&session))
-            .unwrap_or(false);
+        let Ok(mut session) = self.channels.session.lock() else {
+            return;
+        };
+        let status = Arc::new(status);
+        let owns = session.attached.last().map(|owner| owner.generation) == Some(self.generation);
+        if let Some(entry) = session
+            .attached
+            .iter_mut()
+            .find(|entry| entry.generation == self.generation)
+        {
+            entry.status = Some(status.clone());
+        }
         if owns {
-            self.channels.status_tx.send_replace(Some(Arc::new(status)));
+            self.channels.status_tx.send_replace(Some(status));
         }
     }
 }
@@ -271,11 +291,21 @@ impl Drop for StreamsAttachment {
         let Ok(mut session) = self.channels.session.lock() else {
             return;
         };
-        if self.owns(&session) {
-            session.owner = None;
-            session.control_tx = None;
+        let Some(index) = session
+            .attached
+            .iter()
+            .position(|entry| entry.generation == self.generation)
+        else {
+            return;
+        };
+        session.attached.remove(index);
+        if index == session.attached.len() {
+            let status = session
+                .attached
+                .last()
+                .and_then(|owner| owner.status.clone());
             drop(session);
-            self.channels.status_tx.send_replace(None);
+            self.channels.status_tx.send_replace(status);
         }
     }
 }
@@ -523,6 +553,37 @@ async fn run_sdk_mode_inner(
 mod tests {
     use super::*;
     use std::net::TcpListener as StdTcpListener;
+
+    fn status(schema: &str) -> StreamsStatus {
+        StreamsStatus {
+            schema: schema.to_string(),
+            streams: Default::default(),
+            local_tasks: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_previous_headset_owns_the_streams_again_when_the_newest_leaves() {
+        let streams = StreamsChannels::new();
+        let (first, first_rx) = streams.attach(true);
+        first.publish(status("first"));
+        let (second, _second_rx) = streams.attach(false);
+        assert!(streams.latest_status().is_none());
+        assert!(!streams.headset_supported());
+        drop(second);
+        assert_eq!(streams.latest_status().unwrap().schema, "first");
+        assert!(streams.headset_supported());
+        streams
+            .send_control(StreamsControl::default())
+            .expect("control reaches the previous headset");
+        assert!(first_rx.is_some());
+        drop(first);
+        assert!(streams.latest_status().is_none());
+        assert_eq!(
+            streams.send_control(StreamsControl::default()),
+            Err(StreamsControlError::NotConnected)
+        );
+    }
 
     #[tokio::test]
     async fn startup_rejects_ambiguous_streams_before_opening_network() {

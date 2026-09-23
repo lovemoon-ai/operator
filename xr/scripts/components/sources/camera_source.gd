@@ -192,6 +192,10 @@ func permission_ready() -> bool:
 	return false
 
 
+func has_storage_permission() -> bool:
+	return plugin != null and bool(plugin.call("hasStoragePermission"))
+
+
 ## Shared-storage permission for local recordings. Requests it (and logs
 ## `log_format % save_root`) while it is missing.
 func storage_permission_ready(save_root: String, log_format: String) -> bool:

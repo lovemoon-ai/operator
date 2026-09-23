@@ -1529,11 +1529,12 @@ func _show_quest_os_upgrade_warning() -> void:
 	_quest_os_upgrade_warning_pending = false
 	if _quest_os_upgrade_warning_shown or _pipeline.camera.provider_name != "quest":
 		return
+	# One attempt per run, even when the version cannot be read.
+	_quest_os_upgrade_warning_shown = true
 	var version := _pipeline.camera.platform_version()
 	if version <= 0:
 		push_warning("Unable to detect Horizon OS version; skipping the Quest upgrade prompt")
 		return
-	_quest_os_upgrade_warning_shown = true
 	if version >= MIN_QUEST_HORIZON_OS_VERSION:
 		return
 	var title := tr("UI_QUEST_OS_UPDATE_REQUIRED_TITLE")

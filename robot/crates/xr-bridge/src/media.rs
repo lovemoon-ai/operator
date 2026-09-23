@@ -19,7 +19,9 @@
 //!   while no headset is connected are not replayed.
 //!
 //! A token is valid only while its headset ctrl connection owns the session;
-//! when that connection ends or is replaced, both media connections close.
+//! when that connection ends or is replaced, both media connections close. A
+//! replaced headset that is still connected owns the session again once the
+//! newer one leaves.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -256,8 +258,10 @@ struct State {
     /// `(push_port, result_port)` once the relay listeners are bound.
     ports: Option<(u16, u16)>,
     next_id: u64,
-    /// Token of the headset ctrl connection that owns the session.
-    owner: Option<(u64, String)>,
+    /// Attached headset ctrl connections and their tokens, oldest first. The
+    /// newest owns the session; when it leaves, the previous one still
+    /// connected owns it again.
+    owners: Vec<(u64, String)>,
     up_conn: Option<u64>,
     down: Option<(u64, mpsc::Sender<MediaFrame>)>,
     queue: VecDeque<MediaFrame>,
@@ -274,7 +278,7 @@ impl State {
     }
 
     fn token_matches(&self, token: Option<&str>) -> bool {
-        match (&self.owner, token) {
+        match (self.owners.last(), token) {
             (Some((_, expected)), Some(token)) => tokens_match(expected, token),
             _ => false,
         }
@@ -358,13 +362,14 @@ impl MediaChannels {
 
     /// Make a newly handshaken headset ctrl connection the media owner with
     /// a fresh token. `None` while the relay is not serving. Dropping the
-    /// attachment revokes the token and closes its media connections.
+    /// attachment revokes the token, closes its media connections and hands
+    /// the session back to the previous headset still attached.
     pub(crate) fn attach(&self) -> Option<MediaAttachment> {
         let token = random_hex(TOKEN_BYTES)?;
         let mut state = self.lock();
         let (push_port, result_port) = state.ports.filter(|_| !state.closed)?;
         let owner = state.next_id();
-        state.owner = Some((owner, token.clone()));
+        state.owners.push((owner, token.clone()));
         state.up_conn = None;
         state.down = None;
         // The previous headset's backlog belongs to a session the host has
@@ -446,7 +451,7 @@ impl MediaChannels {
     pub fn close(&self) {
         let mut state = self.lock();
         state.closed = true;
-        state.owner = None;
+        state.owners.clear();
         state.up_conn = None;
         state.down = None;
         drop(state);
@@ -456,10 +461,13 @@ impl MediaChannels {
 
     fn revoke(&self, owner: u64) {
         let mut state = self.lock();
-        if state.owner.as_ref().map(|(id, _)| *id) != Some(owner) {
+        let Some(index) = state.owners.iter().position(|(id, _)| *id == owner) else {
             return;
+        };
+        state.owners.remove(index);
+        if index < state.owners.len() {
+            return; // A replaced headset left; the current owner is unchanged.
         }
-        state.owner = None;
         state.up_conn = None;
         state.down = None;
         drop(state);
@@ -581,8 +589,19 @@ where
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (socket, addr) = accepted?;
-                socket.set_nodelay(true)?;
+                // One bad connection must never end the host session's relay.
+                let (socket, addr) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::warn!("media accept failed: {error}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                if let Err(error) = socket.set_nodelay(true) {
+                    tracing::warn!("media connection from {addr} dropped: {error}");
+                    continue;
+                }
                 let connection = handle(socket, addr, channels.clone());
                 connections.spawn(async move {
                     if let Err(error) = connection.await {
@@ -881,7 +900,23 @@ mod tests {
             .is_some());
         drop(second);
         assert!(!channels.stats().up_connected);
-        assert!(channels.lock().owner.is_none());
+        assert!(channels.lock().owners.is_empty());
+    }
+
+    #[test]
+    fn the_previous_headset_owns_the_session_again_when_the_newest_leaves() {
+        let channels = MediaChannels::new();
+        channels.lock().ports = Some((63905, 63906));
+        let first = channels.attach().unwrap();
+        let second = channels.attach().unwrap();
+        let second_up = channels
+            .install_up(Some(second.transport().auth_token.as_str()))
+            .unwrap();
+        drop(second);
+        assert!(!channels.up_is_current(second_up));
+        assert!(channels
+            .install_up(Some(first.transport().auth_token.as_str()))
+            .is_some());
     }
 
     #[test]

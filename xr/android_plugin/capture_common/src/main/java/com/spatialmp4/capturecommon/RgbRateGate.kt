@@ -6,14 +6,16 @@ package com.spatialmp4.capturecommon
  * capture runs: lowering it drops frames here instead of restarting the camera
  * and the encoder. The target can never exceed the capture rate.
  *
- * Accepts a frame when it is at least 7/8 of an interval after the last
- * accepted one, so capture jitter does not drop frames when the target equals
- * the capture rate.
+ * Frames are due on a fixed grid of target intervals, so a target that does
+ * not divide the capture rate (20 of 30 fps) still averages to the target. A
+ * frame up to 1/8 of an interval early counts as due, so capture jitter does
+ * not drop frames when the target equals the capture rate.
  */
 class RgbRateGate(private val captureFps: Int) {
     @Volatile
     private var intervalNs: Long = intervalFor(captureFps)
-    private var lastAcceptedNs: Long = Long.MIN_VALUE
+    @Volatile
+    private var nextDueNs: Long = Long.MIN_VALUE
 
     /** Duration of one delivered frame, for packet timing. */
     val intervalUs: Long
@@ -25,15 +27,22 @@ class RgbRateGate(private val captureFps: Int) {
             return false
         }
         intervalNs = intervalFor(fps)
+        nextDueNs = Long.MIN_VALUE
         return true
     }
 
     fun accept(timestampNs: Long): Boolean {
         val interval = intervalNs
-        if (lastAcceptedNs != Long.MIN_VALUE && timestampNs - lastAcceptedNs < interval - interval / 8) {
+        val due = nextDueNs
+        if (due != Long.MIN_VALUE && timestampNs < due - interval / 8) {
             return false
         }
-        lastAcceptedNs = timestampNs
+        // Advance on the grid; resync after a gap longer than one interval.
+        nextDueNs = if (due == Long.MIN_VALUE || timestampNs - due > interval) {
+            timestampNs + interval
+        } else {
+            due + interval
+        }
         return true
     }
 

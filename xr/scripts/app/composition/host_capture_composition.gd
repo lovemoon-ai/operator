@@ -17,6 +17,7 @@ extends Node
 
 const HostCapturePromptScript := preload("res://scripts/ui/host_capture_prompt.gd")
 const RESTART_DELAY_SECONDS := 0.3
+const ADVERTISE_RETRY_SECONDS := 1.0
 const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const OUTPUT_INGEST := "ingest"
 const OUTPUT_BOTH := "both"
@@ -38,6 +39,14 @@ var _hash := ""
 var _host := ""
 var _record_wanted := true
 var _capture_failed := false
+## Android is asking for shared storage (its settings page is in front); the
+## start is retried when the app resumes, and a refusal only denies `record`.
+var _awaiting_storage := false
+var _storage_denied := false
+## Upload endpoint for the running local recording, resolved at start so the
+## finished file is still handed over after the host has gone.
+var _upload_target: Dictionary = {}
+var _advertise_retry_s := 0.0
 var _starting := false
 var _running_signature := ""
 ## Bumped by every plan that starts or stops capture. A restart waiting out
@@ -77,12 +86,45 @@ func setup(session: HostSession, origin: XROrigin3D, head: XRCamera3D, left: XRC
 	_indicator.head = head
 	_indicator.revoke_requested.connect(_on_revoke_requested)
 	origin.add_child(_indicator)
+	# Depth starts only inside a running OpenXR session.
+	var xr_interface := XRServer.find_interface("OpenXR")
+	if xr_interface != null:
+		xr_interface.session_begun.connect(_pipeline.on_xr_session_begun)
+		xr_interface.session_stopping.connect(_pipeline.on_xr_session_stopping)
+		if xr_interface.is_initialized():
+			_pipeline.on_xr_session_begun()
 	return _advertise()
 
 
 func _process(delta: float) -> void:
-	if _pipeline != null:
-		_pipeline.tick(delta)
+	if _pipeline == null:
+		return
+	_pipeline.tick(delta)
+	if _advertised_streams.is_empty():
+		_retry_advertise(delta)
+
+
+func _notification(what: int) -> void:
+	if what != NOTIFICATION_APPLICATION_RESUMED or not _awaiting_storage:
+		return
+	_awaiting_storage = false
+	_storage_denied = not _pipeline.camera.has_storage_permission()
+	if _storage_denied:
+		push_warning("[HostCapture] shared storage refused; the record task is denied")
+	if not _config.is_empty():
+		_replan()
+
+
+## A provider plugin can bind after setup; advertise it for the next Hello.
+func _retry_advertise(delta: float) -> void:
+	_advertise_retry_s -= delta
+	if _advertise_retry_s > 0.0:
+		return
+	_advertise_retry_s = ADVERTISE_RETRY_SECONDS
+	var capabilities := _advertise()
+	if not capabilities.is_empty():
+		_session.set_extra_capabilities(capabilities)
+		print("[HostCapture] capture provider bound late; advertising %s" % str(capabilities))
 
 
 func _advertise() -> Array:
@@ -116,6 +158,8 @@ func on_descriptor(descriptor: Dictionary) -> void:
 		_planner.clear()
 		_record_wanted = true
 		_capture_failed = false
+		_awaiting_storage = false
+		_storage_denied = false
 	_config = config
 	_media = StreamsContract.parse_media(descriptor.get("media", null))
 	_host = host
@@ -149,6 +193,7 @@ func _teardown() -> void:
 	_hash = ""
 	_host = ""
 	_task_status = {}
+	_awaiting_storage = false
 	_planner.clear()
 	_prompt.dismiss()
 	_indicator.dismiss()
@@ -195,6 +240,8 @@ func _plan_local_tasks(decisions: Dictionary) -> void:
 	_task_status = {}
 	if not _declared_task("record").is_empty():
 		_task_status["record"] = _task_state_for(camera, _record_running())
+		if _storage_denied and camera == PermissionTable.DECISION_ALLOW:
+			_task_status["record"] = {"state": "denied", "reason": StreamPlanner.REASON_PERMISSION_DENIED}
 	var upload := _declared_task("upload")
 	if not upload.is_empty():
 		var endpoint := EndpointRegistry.shared().resolve(str(upload.get("endpoint_ref", "")), EndpointRegistry.KIND_UPLOAD)
@@ -218,7 +265,7 @@ func _task_state_for(decision: String, running: bool) -> Dictionary:
 ## Recording is a local task the host must declare; without a `record` task the
 ## session only pushes media (no shared storage, no local file).
 func _record_running() -> bool:
-	return _record_wanted and not _declared_task("record").is_empty() and _planner.media_up_running()
+	return _record_wanted and not _storage_denied and not _declared_task("record").is_empty() and _planner.media_up_running()
 
 
 func _upload_pending() -> bool:
@@ -261,9 +308,16 @@ func _start_capture(output: String, options: Dictionary, signature: String, epoc
 	if epoch != _plan_epoch:
 		return # A newer plan or a stop superseded this restart.
 	_starting = false
-	if _config.is_empty() or _pipeline.is_recording():
+	if _config.is_empty() or _pipeline.is_recording() or _awaiting_storage:
 		return
 	_pipeline.set_output(output, Callable(self, "_storage_ready"))
+	if output == OUTPUT_BOTH and not _storage_ready():
+		# Android shows its shared-storage page. Not a capture failure: the
+		# start is re-planned when the app resumes.
+		_running_signature = ""
+		_awaiting_storage = true
+		_refresh_ui()
+		return
 	# media_up is the session's own channel: the connected peer's address and
 	# the session-issued token. Nothing about it is declared by the host app.
 	_pipeline.live_push_sink().set_target(_host, int(_media.get("push_port", 0)), str(_media.get("auth_token", "")))
@@ -271,6 +325,7 @@ func _start_capture(output: String, options: Dictionary, signature: String, epoc
 	if _uploader != null:
 		_uploader.call("pause")
 	_applied_rate = {}
+	_upload_target = _upload_endpoint() if output == OUTPUT_BOTH else {}
 	if _pipeline.start(_pipeline.effective_options(options)):
 		if _live_rate:
 			_apply_live_rate()
@@ -298,10 +353,11 @@ func _stop_capture() -> void:
 func _apply_live_rate() -> void:
 	if _rate_updates == _applied_rate:
 		return
-	_applied_rate = _rate_updates.duplicate()
 	var fps := int(_rate_updates.get("rgb_fps", 0))
 	if fps > 0 and not _pipeline.set_rgb_rate(fps, int(_rate_updates.get("rgb_bitrate", 0))):
 		push_warning("[HostCapture] provider refused a live rgb rate of %d fps" % fps)
+		return # Retried on the next plan.
+	_applied_rate = _rate_updates.duplicate()
 
 
 func _capture_options(updates: Dictionary, output: String, live_rate := false) -> Dictionary:
@@ -410,6 +466,7 @@ func _on_revoke_requested() -> void:
 		return
 	print("[HostCapture] user revoked capture for %s" % _host)
 	PermissionTable.revoke(_host, _hash)
+	_upload_target = {}
 	_replan()
 
 
@@ -425,6 +482,9 @@ func _on_capture_stopped(final_path: String) -> void:
 		_running_signature = ""
 	if _pipeline.records_locally() and not final_path.is_empty():
 		_enqueue_upload()
+	# Uploads pause while a capture runs; this one has ended.
+	if _uploader != null:
+		_uploader.call("resume")
 	if unexpected and not _config.is_empty():
 		call_deferred("_replan")
 
@@ -433,11 +493,22 @@ func _on_capture_error(message: String) -> void:
 	push_warning("[HostCapture] %s" % message)
 
 
-func _enqueue_upload() -> void:
+## The declared upload task's verified endpoint ({} when there is none).
+func _upload_endpoint() -> Dictionary:
 	var upload := _declared_task("upload")
 	if upload.is_empty() or str((_task_status.get("upload", {}) as Dictionary).get("state", "")) == "denied":
-		return
+		return {}
 	var endpoint := EndpointRegistry.shared().resolve(str(upload.get("endpoint_ref", "")), EndpointRegistry.KIND_UPLOAD)
+	if endpoint.is_empty():
+		return {}
+	endpoint = endpoint.duplicate()
+	endpoint["endpoint_ref"] = str(upload.get("endpoint_ref", ""))
+	return endpoint
+
+
+func _enqueue_upload() -> void:
+	var endpoint := _upload_target
+	_upload_target = {}
 	if endpoint.is_empty():
 		return
 	var writer: Object = _pipeline.writer()
@@ -457,5 +528,4 @@ func _enqueue_upload() -> void:
 			"keep_local_after_upload": true,
 		})
 	if queued:
-		_uploader.call("resume")
-		print("[HostCapture] recording queued for upload to %s" % str(upload.get("endpoint_ref", "")))
+		print("[HostCapture] recording queued for upload to %s" % str(endpoint.get("endpoint_ref", "")))

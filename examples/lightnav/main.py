@@ -197,6 +197,11 @@ def run(record: bool) -> None:
                 if line != reported:
                     reported = line
                     print("StreamsStatus:", line)
+                    # Track what the headset delivers: a reconnected headset
+                    # starts at the envelope again and must be asked again.
+                    rgb = status.stream("rgb.hevc")
+                    if rgb is not None and rgb.hz is not None:
+                        requested_hz = rgb.hz
                 if not status.is_active("rgb.hevc"):
                     continue
                 # Standing still needs no 4 Hz camera. Staying inside the
