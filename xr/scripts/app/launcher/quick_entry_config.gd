@@ -10,7 +10,6 @@ extends RefCounted
 const MODE_LAUNCHER := "launcher"
 const MODE_TELEOP := "teleop"
 const MODE_EGO_CAPTURE := "ego_capture"
-const MODE_LIVE_FEED := "live_feed"
 
 const TAG_PREFIX := "operator_quick_entry_"
 const PROCESS_CONSUMED_META := &"operator_quick_entry_consumed"
@@ -18,7 +17,6 @@ const MODES := [
 	MODE_LAUNCHER,
 	MODE_TELEOP,
 	MODE_EGO_CAPTURE,
-	MODE_LIVE_FEED,
 ]
 
 

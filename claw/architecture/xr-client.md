@@ -12,6 +12,8 @@ xr/
   scenes/                  .tscn scene resources and shaders
   scripts/
     app/                   launcher, modes, feature composition
+    components/            capability layer: sources, sinks, views, permissions
+    session/               host session (1:1) and ingest session (N:1)
     core/                  reusable capture/sensor/time/pipeline logic
     contracts/             typed data contracts
     sinks/                 output adapters
@@ -44,8 +46,7 @@ logic does not live in scenes anymore; scene resources attach scripts from
 | `scenes/main.tscn` | `scripts/app/launcher/mode_select.gd` | Mode launcher. |
 | `scenes/teleop_main.tscn` | `scripts/app/modes/teleop_mode.gd` | Thin mode entry point extending `teleop_controller.gd`. |
 | `scenes/robot_view/robot_view.tscn` | `scripts/ui/teleop_panel.gd` | Teleop video panel scene. |
-| `scenes/capture_app.tscn` | `scripts/app/modes/ego_capture_mode.gd` | Ego capture mode. |
-| `scenes/live_feed_app.tscn` | `scripts/app/modes/live_feed_mode.gd` | Capture mode pinned to live server sink. |
+| `scenes/capture_app.tscn` | `scripts/app/modes/ego_capture_mode.gd` | Ego capture mode; the Output (`local` / `ingest` / `both`) chooses the sinks. |
 | `scenes/vr_mode.tscn` | `scripts/app/modes/vr_mode.gd` | Minimal OpenXR VR mode. |
 | `scenes/mujoco/mujoco_device_test.tscn` | `scripts/app/modes/mujoco/mujoco_device_test.gd` | Device smoke scene. |
 | `scenes/test_runner.tscn` | `scripts/test_support/runner/test_runner_root.gd` | Module test harness. |
@@ -65,7 +66,8 @@ included; there is no separate launcher-card mechanism. A card is visible
 only when its flag is set in the preset that produced the APK, so the
 shipped card set is a build-time decision. Automation intent extras
 (`--es operator.mode <id>`) bypass the cards entirely and are not gated by
-these flags, which is how the Live Feed E2E enters a mode whose card is off.
+these flags, which is how the Live Feed E2E enters Ego capture with the
+`ingest` Output.
 
 `scripts/app/modes/` contains scene lifecycle entry points:
 
@@ -74,16 +76,35 @@ these flags, which is how the Live Feed E2E enters a mode whose card is off.
 - `vr_mode.gd` owns the standalone VR scene.
 - `mujoco/mujoco_device_test.gd` owns the MuJoCo device smoke flow.
 
-`live_feed_app.tscn` attaches `capture_app_base.gd` directly with
-`capture_sink = "server"`; `live_feed_mode.gd` is a thin wrapper that no
-scene currently references.
-
-`scripts/app/composition/` builds feature-specific dependency graphs:
+`scripts/app/composition/` is the composition root: given an effective
+composition it instantiates components and connects them. It holds no policy
+of its own.
 
 - `teleop_composition.gd` wires command output and robot control.
-- `ego_capture_composition.gd` wires SpatialMP4, manifest/upload artifacts, and
-  sensors.
-- `live_feed_composition.gd` wires live-push writers and live-stream sinks.
+- `ego_capture_composition.gd` maps an Output (`local` / `ingest` / `both`) to
+  the mounted sinks; `capture_pipeline.gd` interprets that wiring and owns the
+  capture lifecycle for both the Ego mode and a host session.
+- `host_capture_composition.gd` turns a host's `capture_streams` declaration
+  plus the user's grant into a running composition (loaded by path: the Teleop
+  presets ship no capture stack).
+
+## Components And Sessions
+
+The capability layer is one component per capability, with a single
+`source -> StreamBinding -> sink` dataflow. Every sink receives the same
+`SensorFrame` with its timestamp unchanged; views consume only ctrl messages
+and `media_down`, never `SensorFrame`s.
+
+| Directory | Contents |
+| --- | --- |
+| `components/sources/` (Node) | `camera_source.gd`, `depth_source.gd`, `audio_source.gd`, `hand_source.gd`, `xr_tracking_source.gd` |
+| `components/sinks/` (RefCounted) | `live_push_sink.gd` (OLCP `media_up`), `xr_state_sink.gd` (XrStateFrame encoder) alongside `sinks/spatialmp4`, `sinks/upload`, `sinks/robot_control` |
+| `components/views/` (Node3D) | `dense_map_view.gd`, mounted under a Blueprint `dense_map` external view or as the ingest minimap |
+| `components/permissions/` (RefCounted) | `permission_table.gd` (category to policy, grants remembered per host and declaration hash), `stream_planner.gd` (declaration x local limits x permission x advertised capability), `endpoint_registry.gd`, `endpoint_verifier.gd` |
+| `session/` | `host_session.gd` (1:1; the only place ctrl commands are sent and received), `host_discovery.gd`, `ingest_session.gd` (N:1) |
+
+Declarations and permissions only enter `StreamPlanner`; it only decides what
+to connect and never touches data.
 
 ## Core Modules
 
@@ -95,8 +116,8 @@ scene currently references.
 - `scripts/core/time/timebase.gd` - timestamp domains and conversion metadata.
 - `scripts/contracts/` - stable GDScript contracts used by modes, sinks, and
   tests.
-- `scripts/sinks/` - concrete outputs: SpatialMP4, upload queue, live stream,
-  robot control, and sink contract.
+- `scripts/sinks/` - concrete outputs: SpatialMP4, upload queue, robot
+  control, and the sink contract.
 - `native/hand_capture/` - GDExtension owning the hot joint-capture paths in
   C++: `NativeOpenXRHandCapture` owns Quest/PICO `XR_EXT_hand_tracking`
   trackers and writes MP4 HJNT on an independent 60 Hz worker clock;
@@ -273,8 +294,8 @@ The Outside target creates the v2 network stack at runtime:
   before confirmation haptics. Recenter is a persistent local display offset,
   not a reset of the host's simulation or root pose.
 - `CommandSender` for controller/tracking command frames.
-- `XrStateSender` for one atomic raw tracking snapshot when `xr_stream` is
-  advertised by an embedded `operator_xr` session.
+- `XrStateSender`, the `xr_state` channel: one atomic tracking snapshot per
+  tick when `xr_stream` is advertised by an embedded `operator_xr` session.
 - `RobotControlSink` as the mode-facing command output.
 - `TcpHandler` for command and TCP video streams.
 - `UdpVideoHandler` for UDP timed video packets.
@@ -316,12 +337,14 @@ video `Connect` action temporarily forces the shared preview visible while
 preserving the saved visibility preference for the normal Teleop view.
 
 `XrStateSender` samples in `_process` after Godot advances OpenXR for the render
-frame. Head/controllers/input/hands are collected without yielding; body and
-motion trackers retain their own lower-rate sample timestamp. It is disabled
+frame. `XrTrackingSource` emits the tick's head/controllers/input/hands as
+`SensorFrame`s on its `StreamBinding` without yielding, then calls
+`end_of_tick()`, on which `XrStateSink` assembles the snapshot. Body and motion
+trackers are re-delivered each tick with their own lower-rate sample timestamp. It is disabled
 for normal robot descriptors, so `CommandSender` behavior and bandwidth are
 unchanged outside Python SDK mode.
 
-`XrTrackingSampler` owns that atomic sampling independently of serialization.
+`XrTrackingSource` owns that atomic sampling; `XrStateSink` owns the encoding.
 On Pico, a request containing `body` takes priority over independent motion
 trackers: neither `request_motion_trackers` nor `sample_motion_trackers` is
 called in body mode, including during failed body startup. The latter can
@@ -348,7 +371,7 @@ initialization and remains until acknowledged; acknowledgement lasts across scen
 and headset re-don for the process. No updates are installed automatically, no
 mode is disabled, and other headset platforms do not receive this prompt.
 
-The normal `XrStateSender` filters its output back to the unchanged v1 schema;
+The normal `XrStateSender` sends `XrStateSink.frame_v1()`, the unchanged v1 schema;
 the optional `XrtSender` converts the same snapshot to XRoboToolkit Tracking
 JSON and frames it with the legacy byte-command envelope. Selecting
 `xrobot_toolkit_v1` creates a separate outside target with its own TCP client,
@@ -407,7 +430,7 @@ poses into a commanded rest pose. See `XrtTrackingEncoder.neutral()`.
 the only owner of Pico tracker startup, shutdown, mode requests, calibration
 launch and body/motion publication. Each consumer acquires a weak-owner lease
 for the capabilities it actually uses and releases only its own lease.
-Recorder preparation and body/motion writing, `XrTrackingSampler`, and
+Recorder preparation and body/motion writing, `XrTrackingSource`, and
 `BodyPoseProvider` all use this boundary. Inside derives demand from the
 profile's `requires_body_tracking` and optional body display; Outside derives
 it from negotiated streams or the XRoboToolkit protocol, never bundled robot

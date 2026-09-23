@@ -5,6 +5,8 @@ const RuntimeScript = preload(
 	"res://scripts/blueprint/blueprint_runtime.gd"
 )
 const RobotModelScript = preload("res://scripts/blueprint/robot_model_view.gd")
+const PathScript = preload("res://scripts/blueprint/path_view.gd")
+const MarkerScript = preload("res://scripts/blueprint/marker_view.gd")
 const TeleopControllerScript = preload(
 	"res://scripts/app/modes/teleop_controller.gd"
 )
@@ -30,6 +32,53 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"zero-joint rigid model accepts a base-pose sample",
 	)
 	rigid_view.free()
+	var path_view := PathScript.new()
+	path_view.configure(BlueprintContract.resolved_properties({"type": "path"}))
+	t.is_true(
+		path_view.update_path([0, 0, 0, 0, 0, 0, 1, 0, 0], Color.WHITE),
+		"path accepts finite points",
+	)
+	var path_mesh := path_view.mesh as ArrayMesh
+	t.eq(path_mesh.surface_get_array_len(0), 8, "path drops repeated points")
+	t.eq(path_mesh.surface_get_array_index_len(0), 36, "open path has one segment and two caps")
+	t.is_false(
+		path_view.update_path([0, 0, 0, NAN, 0, 0], Color.WHITE),
+		"path rejects non-finite points",
+	)
+	t.eq(path_mesh.surface_get_array_len(0), 8, "rejected points keep the previous path")
+	path_view.free()
+	var closed_path := PathScript.new()
+	closed_path.configure(
+		BlueprintContract.resolved_properties({"type": "path", "properties": {"closed": true}})
+	)
+	t.is_true(
+		closed_path.update_path([0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0], Color.WHITE),
+		"closed path accepts a loop that repeats its first point",
+	)
+	t.eq(
+		(closed_path.mesh as ArrayMesh).surface_get_array_index_len(0),
+		72,
+		"closed path joins its last point to the first without a duplicate",
+	)
+	closed_path.free()
+	var marker_warnings: Array[String] = []
+	var fallback_marker := MarkerScript.new()
+	fallback_marker.warning_raised.connect(
+		func(message: String) -> void: marker_warnings.append(message)
+	)
+	fallback_marker.configure(
+		BlueprintContract.resolved_properties({"type": "marker", "properties": {"shape": "cube"}})
+	)
+	t.eq(marker_warnings.size(), 1, "an unknown marker shape raises one warning")
+	var fallback_part := (
+		(fallback_marker.get_child(0) as Node3D).get_child(0) as Node3D
+	).get_child(0) as MeshInstance3D
+	t.is_true(fallback_part.mesh is SphereMesh, "an unknown marker shape falls back to a sphere")
+	t.is_false(
+		fallback_marker.update_marker([0, 0], Color.WHITE, ""),
+		"marker rejects a malformed position",
+	)
+	fallback_marker.free()
 	t.is_true(
 		SessionScript.descriptor_supports_blueprint({
 			"capabilities": {
@@ -327,6 +376,18 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			{"id": "ground", "type": "ground_grid", "properties": {"placement_target": "robot_model"}},
 			{"id": "lighting", "type": "model_lighting", "bindings": {"key_energy": "lighting.key"}},
 			{"id": "item", "type": "menu_item", "properties": {"title": "Item", "action": "toggle"}, "bindings": {"value": "hand.unlocked"}},
+			{
+				"id": "route", "type": "path", "properties": {"points": [0, 0, 0, 1, 0, 0], "width": 0.04},
+				"bindings": {"points": "nav.path", "color": "nav.path_color"},
+			},
+			{
+				"id": "goal", "type": "marker", "properties": {"shape": "ring", "text": "Goal"},
+				"bindings": {"position": "nav.goal", "text": "nav.goal_text"},
+			},
+			{
+				"id": "map", "type": "dense_map", "properties": {"display": "minimap"},
+				"bindings": {"display": "map.display"},
+			},
 		],
 	}
 	var wire_blueprint_v: Variant = JSON.parse_string(JSON.stringify(blueprint))
@@ -355,13 +416,13 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"left_palm",
 		"palm menu anchor default comes from the generated spec",
 	)
-	t.eq(runtime.component_count(), 14, "blueprint registers rendered and XR-owned components")
+	t.eq(runtime.component_count(), 17, "blueprint registers rendered and XR-owned components")
 	t.is_true(runtime.has_blueprint(), "runtime records the active blueprint")
-	t.eq(builtin_changes.size(), 4, "XR-owned views emit one initial gate update each")
+	t.eq(builtin_changes.size(), 5, "XR-owned views emit one initial gate update each")
 	t.is_true(runtime.component_visible("fpv"), "declared video view is initially visible")
 	t.eq(runtime.component_node("fpv"), null, "XR-owned views reuse existing scene nodes")
 	var visibility_options := runtime.user_visibility_options()
-	t.eq(visibility_options.size(), 12, "all overridable components reach user settings")
+	t.eq(visibility_options.size(), 15, "all overridable components reach user settings")
 	t.eq(visibility_options[0].get("id"), "message", "visibility options preserve blueprint order")
 	t.eq(visibility_options[1].get("id"), "hand_control", "non-overridable UI is omitted")
 	t.eq(visibility_options[2].get("id"), "touch", "tactile visibility is user-overridable")
@@ -401,6 +462,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	current["values"]["g1.base"] = [0.2, 0.8, -2.0, 0.0, 0.0, 0.0, 1.0]
 	current["values"]["g1.sample"] = 1
 	current["values"]["lighting.key"] = 2.0
+	current["values"]["nav.path"] = [0, 0, 0, 1, 0, 0, 1, 0, 1, 2, 0]
+	current["values"]["nav.goal"] = [1.0, 0.0, -2.0]
 	var wire_state_v: Variant = JSON.parse_string(JSON.stringify(current))
 	t.is_true(wire_state_v is Dictionary, "wire BlueprintState JSON decodes to an object")
 	SessionScript._normalize_json_wire_integers(
@@ -424,7 +487,27 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		t.is_false(robot_node.is_asset_ready(), "no APK bundle is substituted for the robot-owned asset")
 		var base: Transform3D = robot_node.get("_target_base")
 		t.is_true(base.origin.is_equal_approx(Vector3(0.2, 0.8, -2.0)), "latest base state is retained while the asset loads")
-	t.eq(builtin_changes.size(), 5, "only the changed built-in view emits another gate update")
+	var route := runtime.component_node("route") as MeshInstance3D
+	t.eq(
+		(route.mesh as ArrayMesh).surface_get_array_len(0),
+		12,
+		"path draws its bound points and ignores a trailing partial point",
+	)
+	t.is_true(
+		runtime_warnings.any(
+			func(message: Variant) -> bool: return str(message).contains("partial point")
+		),
+		"a trailing partial path point raises a warning",
+	)
+	var goal_content := runtime.component_node("goal").get_child(0) as Node3D
+	t.is_true(
+		goal_content.position.is_equal_approx(Vector3(1.0, 0.0, -2.0)),
+		"marker position follows its bound offset",
+	)
+	var goal_part := (goal_content.get_child(0) as Node3D).get_child(0) as MeshInstance3D
+	t.is_true(goal_part.mesh is TorusMesh, "ring marker uses a torus")
+	t.eq((goal_content.get_child(1) as Label3D).text, "Goal", "marker text falls back to its property")
+	t.eq(builtin_changes.size(), 6, "only the changed built-in view emits another gate update")
 	var video_change := builtin_changes.back() as Dictionary
 	t.eq(video_change.get("type"), "video_panel", "video gate identifies its built-in view")
 	t.is_false(
@@ -555,6 +638,26 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		bool(runtime.menu_entries()[0]["value"]),
 		"remote-driven palm menu updates after authoritative BlueprintState",
 	)
+	t.is_true(
+		runtime.apply_state(_state(blueprint_id, 2, 6, {"map.display": "world"})),
+		"dense map display accepts a bound string",
+	)
+	var map_change := builtin_changes.back() as Dictionary
+	t.eq(map_change.get("type"), "dense_map", "dense map display changes reach its host view")
+	t.eq(
+		(map_change.get("properties", {}) as Dictionary).get("display"),
+		"world",
+		"dense map display follows its state binding",
+	)
+	var long_path: Array = []
+	long_path.resize(int(
+		(BlueprintContract.primitive("path")["bindings"] as Dictionary)["points"]["max_length"]
+	) + 3)
+	long_path.fill(0.0)
+	t.is_false(
+		runtime.apply_state(_state(blueprint_id, 2, 7, {"nav.path": long_path})),
+		"path points beyond the generated max_length are rejected",
+	)
 
 	var duplicate_builtin := blueprint.duplicate(true)
 	duplicate_builtin["blueprint_id"] = "%s.invalid" % blueprint_id
@@ -572,7 +675,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		runtime.apply_blueprint(duplicate_builtin),
 		"a Blueprint cannot ambiguously declare the same XR-owned view twice",
 	)
-	t.eq(runtime.component_count(), 14, "invalid replacement leaves the active Blueprint intact")
+	t.eq(runtime.component_count(), 17, "invalid replacement leaves the active Blueprint intact")
 
 	runtime.clear()
 	t.is_false(bool((builtin_changes.back() as Dictionary).get("visible", true)),

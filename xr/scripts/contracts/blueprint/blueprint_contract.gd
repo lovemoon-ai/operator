@@ -262,6 +262,9 @@ static func _field_value_error(value: Variant, field_spec: Dictionary) -> String
 	if field_spec.has("length"):
 		if not value is Array or (value as Array).size() != int(field_spec["length"]):
 			return "invalid length"
+	if field_spec.has("max_length"):
+		if not value is Array or (value as Array).size() > int(field_spec["max_length"]):
+			return "too many items"
 	return ""
 
 

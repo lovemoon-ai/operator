@@ -8,7 +8,7 @@ const CASE_ID := "device.quest.capability_snapshot"
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var registry := PlatformRegistry.create()
-	var infos := registry.capabilities()
+	var infos: Array = registry.capabilities()
 	t.is_true(infos.size() > 0, "platform registry must report capabilities")
 
 	var snapshot: Array = []
@@ -31,6 +31,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 
 	# Every probed capability id answers a query without crashing.
 	for cap_id in SensorCapability.all_ids():
-		var info := registry.capability_info(cap_id)
+		var info: Object = registry.capability_info(cap_id)
 		t.is_true(info != null, "capability_info must answer for %s"
 			% SensorCapability.id_to_string(cap_id))

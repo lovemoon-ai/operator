@@ -29,7 +29,9 @@ After installing `operator_xr`, the equivalent command is
 `examples/live-feed-demo/operator_live_feed_server.py` path remains a thin
 compatibility entry point.
 
-Then start the XR app's Live Feed mode on the Quest.
+Then start Ego capture on the Quest with the `ingest` Output (Live Feed is an
+Output of Ego capture, not a separate mode; see
+`claw/architecture/live-feed-cloud.md`).
 
 The current XR APK sends OLCP v1 frames immediately after connecting, so this
 prototype uses a static Quest capability profile. The target OLCP v2 flow is:

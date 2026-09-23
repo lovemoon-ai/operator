@@ -13,7 +13,7 @@ import dataclasses
 import json
 import math
 import struct
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Sequence, TypeVar
 
 from .protocol import (
     FLAG_COMPOSITE_JSON,
@@ -479,6 +479,25 @@ class SessionStartSample(Sample):
             as_finite_int(self.info.get("rgb_width")) or 0,
             as_finite_int(self.info.get("rgb_height")) or 0,
         )
+
+    @property
+    def session_start_godot_ticks_us(self) -> int | None:
+        """Session start in the headset ``godot_ticks`` timebase (µs), if announced."""
+        return as_finite_int(self.info.get("session_start_godot_ticks_us"))
+
+    @property
+    def session_start_unix_us(self) -> int | None:
+        """Wall-clock (Unix µs) captured at the same instant, if announced."""
+        return as_finite_int(self.info.get("session_start_unix_us"))
+
+    def godot_ticks_ns_to_unix_ns(self, ticks_ns: int) -> int | None:
+        """Map a ``godot_ticks_ns`` timestamp (``pts_ns``, ``XrFrame.timestamp_ns``)
+        to Unix ns via this session's anchors; ``None`` without both anchors."""
+        ticks_us = self.session_start_godot_ticks_us
+        unix_us = self.session_start_unix_us
+        if ticks_us is None or unix_us is None or unix_us <= 0:
+            return None
+        return unix_us * 1000 + int(ticks_ns) - ticks_us * 1000
 
     def expected_streams(self) -> tuple[str, ...]:
         """Streams the headset announced it will send, from the ``*_expected`` flags."""
@@ -1006,3 +1025,48 @@ def sample_kinds() -> tuple[str, ...]:
 
 def sequence_to_vec3(values: Sequence[float]) -> Vec3:
     return (float(values[0]), float(values[1]), float(values[2]))
+
+
+_S = TypeVar("_S")
+_F = TypeVar("_F")
+
+#: Default pairing window: a bit over one 72 Hz XR frame period.
+DEFAULT_ALIGN_MAX_DELTA_NS = 20_000_000
+
+
+def align_by_timestamp(
+    samples: Iterable[_S],
+    frames: Iterable[_F],
+    *,
+    max_delta_ns: int = DEFAULT_ALIGN_MAX_DELTA_NS,
+) -> list[tuple[_S, _F | None]]:
+    """Pair each OLCP sample with the nearest-in-time XR frame.
+
+    ``sample.pts_ns`` and ``frame.timestamp_ns`` (:class:`operator_xr.XrFrame`)
+    are both headset ``godot_ticks_ns`` values, so they are compared directly;
+    no session-relative conversion is applied. A sample whose nearest frame is
+    more than ``max_delta_ns`` away is paired with ``None``; ties pick the
+    earlier frame. Returns pairs in ``pts_ns`` order (stable for equal
+    timestamps) using one sorted merge, O(n + m) for already-sorted inputs.
+    """
+    if max_delta_ns < 0:
+        raise ValueError("max_delta_ns must be non-negative")
+    ordered_samples = sorted(samples, key=lambda sample: sample.pts_ns)  # type: ignore[attr-defined]
+    ordered_frames = sorted(frames, key=lambda frame: frame.timestamp_ns)  # type: ignore[attr-defined]
+    pairs: list[tuple[_S, _F | None]] = []
+    index = 0
+    for sample in ordered_samples:
+        pts_ns = sample.pts_ns  # type: ignore[attr-defined]
+        while (
+            index + 1 < len(ordered_frames)
+            and ordered_frames[index + 1].timestamp_ns <= pts_ns  # type: ignore[attr-defined]
+        ):
+            index += 1
+        best: _F | None = None
+        best_delta = max_delta_ns + 1
+        for frame in ordered_frames[index : index + 2]:
+            delta = abs(frame.timestamp_ns - pts_ns)  # type: ignore[attr-defined]
+            if delta < best_delta:
+                best, best_delta = frame, delta
+        pairs.append((sample, best))
+    return pairs

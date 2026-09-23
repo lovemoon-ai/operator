@@ -501,9 +501,8 @@ func _test_focus_loss_sends_one_neutral(t: OperatorTestAssertions) -> void:
 
 ## XrStateFrame v1 consumers index a fixed 24-entry PICO body array. Dropping
 ## untracked joints in the sender shortens that array and mis-indexes every
-## joint after the gap; per-source filtering belongs in XrTrackingSampler.
+## joint after the gap; per-source filtering belongs in XrTrackingSource.
 func _test_v1_body_schema_keeps_a_fixed_joint_array(t: OperatorTestAssertions) -> void:
-	var sender = XrStateSenderScript.new()
 	var joints: Array = []
 	for index in range(24):
 		joints.append({
@@ -514,7 +513,7 @@ func _test_v1_body_schema_keeps_a_fixed_joint_array(t: OperatorTestAssertions) -
 			"pose": {"valid": index != 7, "position": [0.0, 0.0, 0.0]},
 			"posture": "not part of the v1 schema",
 		})
-	var frame: Dictionary = sender._frame_v1({
+	var frame := XrStateSink.frame_v1({
 		"schema_version": 1,
 		"frame_id": 3,
 		"timestamp_ns": 111,
@@ -547,8 +546,6 @@ func _test_v1_body_schema_keeps_a_fixed_joint_array(t: OperatorTestAssertions) -
 		"every joint pose carries the body sample timestamp")
 	t.is_false(body.has("source_timestamp_ns"),
 		"v1 body still hides the internal source timestamp")
-
-	sender.free()
 
 
 func _test_reconnect_handshake_drops_stale_body(t: OperatorTestAssertions) -> void:

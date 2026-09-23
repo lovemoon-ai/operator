@@ -15,8 +15,71 @@ The project supports two primary workflows:
 2. Egocentric data collection: the headset records SpatialMP4 sessions and
    uploads them to the web ingest stack.
 
-Live Feed is the streaming variant of ego capture: XR pushes RGB/depth/pose
-samples to a server and receives algorithm results for in-headset rendering.
+Streaming to an ingest server (formerly the Live Feed mode) is an Output of
+ego capture, not a mode: XR pushes RGB/depth/pose samples to a server and
+receives algorithm results for in-headset rendering.
+
+## Host-declared Composition
+
+The APK is a general runtime. Apart from fully offline features (Ego local
+recording, upload management, Ego streaming to an ingest endpoint), every
+behavior that depends on a remote peer is defined by what the connected host
+declares, not by a mode baked into the APK. A new robot, algorithm, or scene
+does not require an APK rebuild.
+
+### Terms
+
+| Term | Meaning |
+| --- | --- |
+| headset | The HMD running the Operator APK (Quest / Pico). |
+| host | The machine the headset connects to and its program: the robot computer (`xr-bridge` / adapter) for teleop, a GPU server (`operator_xr` program) for navigation or algorithm services. A host publishes declarations and receives headset data. The headset does not distinguish real robots, simulators, or model services. "Source" is reserved for data-source components. |
+| host declaration | Everything a host sends to describe a session: the **descriptor** (`DeviceDescriptor`, exchanged once after every `Hello`: `xr_stream`, `capture_streams`, `video_feeds`, `capabilities`) plus the **Blueprint** (rendering and interaction, replaceable by revision during a session). |
+| capability | An APK built-in implementation: camera capture, encoders, renderers, permission flows, platform differences. Capabilities grow only with APK versions, never arrive from the network, and are advertised in `Hello.capabilities`. A capability always belongs to the headset; a host only obtains permission to use it. |
+| component | A headset-local implementation unit that any host can mount (source / sink / view, plus pure-logic permission units). Components are not part of any wire contract. |
+| stream | A named headset→host data stream using OLCP vocabulary: `rgb.hevc`, `depth.u16`, `head_pose.json`, `controller_pose.json`, `controller_input.json`, `hand_joints.json`, `audio.*`. |
+| composition | The component wiring in effect for one session, decided by three parties: preset/local defaults, the host declaration, and user-granted permissions and overrides. |
+| permission | Unqualified, a **host permission**: the user's grant, made on the headset, allowing one host to use a headset capability or send data to a destination. **System permissions** (Android runtime permissions such as `CAMERA` / `RECORD_AUDIO`, granted by the OS to the APK) are handled inside source components and never appear in the permission layer. |
+| ingest endpoint / ingest session | A passive receiver configured (QR) and verified locally on the headset: an upload server or a live push server. N:1, started by the headset/user, never sends declarations (its `capture_request` may only narrow the stream set). Contrast with the 1:1 host session, where the host declares. |
+| `godot_ticks_ns` | The single sampling timebase on the headset. See `wire-protocol.md`, "Headset timebase". |
+
+### Principles
+
+These are hard rules:
+
+1. The APK provides capabilities, the host provides declarations, the user
+   decides permissions.
+2. A declaration states *what* is wanted, never *how*. Hosts declare which
+   capabilities to enable, parameter envelopes, and wiring; implementations
+   live in the APK. No code, scenes, shaders, or arbitrary resource paths are
+   ever transferred.
+3. Data flows only to the host that declared it, or to an ingest endpoint
+   configured and verified on the headset.
+4. Declarations and low-rate state use the latest-wins structured channel;
+   high-rate streams (HEVC, depth, point clouds, video) use dedicated binary
+   channels. The declaration layer never carries a stream.
+5. The headset always owns safety interlocks and control arbitration, system
+   permission flows, platform selection, boundary policy, and tracking
+   calibration. A host can at most request them.
+6. The timestamp chain is a frozen contract: no refactor changes how samplers,
+   encoders, or writers timestamp a sample.
+
+### Layers
+
+```text
+permission    permission table, memory and revocation, endpoint registry,
+              limits, indicators                            (headset-local, data driven)
+declaration   host declaration = descriptor (xr_stream / capture_streams /
+              video_feeds) + Blueprint (components / assets)
+capability    components: source / sink / view              (APK built-in, mountable by any host)
+session       host session (1:1: ctrl / xr_state / media_up / media_down)
+              ingest session (N:1: media_up + receipts)
+```
+
+The descriptor carries what must be negotiated when a connection is
+established and what needs permission; Blueprint carries rendering and
+interaction. Components never enter the wire contract: the headset-side
+component model lives under `xr/scripts/components/` and is described in
+`xr-client.md`.
 
 ## Repository Boundaries
 
@@ -206,31 +269,43 @@ embodiments are Teleop responsibilities and must not be attached to Ego mode.
 
 ### Ego Capture
 
+One capture pipeline with a chosen Output: `local`, `ingest`, or `both`
+(`scripts/app/composition/ego_capture_composition.gd`). The sources, the
+StreamBinding and the timestamps are identical for all three; only the mounted
+sinks differ.
+
 ```text
-Quest/Pico capture provider
-  -> scripts/core/capture/capture_session_controller.gd
-  -> scripts/sinks/spatialmp4/spatialmp4_sink.gd
-  -> scripts/sinks/upload/ego_uploader.gd
-  -> web/modules/ego-ingest TUS receiver
+CameraSource / DepthSource / AudioSource / PoseSource / HandSource / BodySource
+  -> scripts/core/pipeline/stream_binding.gd  (one SensorFrame, every sink)
+  -> local:  SpatialMp4Sink -> UploadQueueSink -> web/modules/ego-ingest TUS receiver
+  -> ingest: LivePushSink -> OLCP v1 -> live feed server
+             -> addons/live-pull results -> DenseMapView
 ```
 
-### Live Feed
+Ingest is the former Live Feed mode: same OLCP wire, same server, chosen as an
+Output instead of a separate mode and scene.
+
+### Host capture
+
+A host session may declare the streams it wants (`capture_streams`, see
+`wire-protocol.md`). The same pipeline serves it; the session injects the
+destination.
 
 ```text
-XR live-feed mode
-  -> scripts/app/composition/live_feed_composition.gd
-  -> addons/live-push OLCP v1 stream
-  -> live feed server
-  -> addons/live-pull result stream
-  -> dense map / status rendering
+DeviceDescriptor.capture_streams + session `media` block
+  -> scripts/components/permissions/permission_table.gd   (user grant)
+  -> scripts/components/permissions/stream_planner.gd     (envelope x limits x capability)
+  -> scripts/app/composition/host_capture_composition.gd
+  -> CameraSource -> StreamBinding -> LivePushSink -> host session media_up
+  -> StreamsStatus (headset -> host) / StreamsControl (host -> headset)
 ```
 
 ## Current XR Modes
 
 `xr/project.godot` boots `res://scenes/main.tscn`, which attaches
 `res://scripts/app/launcher/mode_select.gd`. By default it shows the launcher;
-an Android export preset can set `operator_quick_entry` to `teleop`,
-`ego_capture`, or `live_feed` to route the process's first launcher visit
+an Android export preset can set `operator_quick_entry` to `teleop` or
+`ego_capture` to route the process's first launcher visit
 directly into that mode. Explicit `operator.mode` launch arguments take
 priority. Returning from a mode still shows the launcher instead of reopening
 the configured quick entry.
@@ -246,7 +321,7 @@ Build-time specialization is a choice of preset, not a rewrite of one.
 `OPERATOR_BUILD_PROFILE=teleop` makes Make export the `Meta Quest Teleop` /
 `Pico Teleop` preset instead of `Meta Quest` / `Pico`, and build only the native
 dependencies those presets keep. The Teleop presets enable Teleop and Exit,
-set `operator_quick_entry` to `teleop`, and drop the capture, live-feed and VR
+set `operator_quick_entry` to `teleop`, and drop the capture and VR
 resources plus the Android capture, QR, SpatialMP4/FFmpeg, Live Push and
 hand-capture dependencies. Nothing mutates `export_presets.cfg`, so exporting a
 Teleop preset from the Godot editor produces the same APK as the make target.
@@ -263,7 +338,6 @@ The launcher opens one of these mode scenes:
 | Launcher | `xr/scenes/main.tscn` | `xr/scripts/app/launcher/mode_select.gd` |
 | Teleop | `xr/scenes/teleop_main.tscn` | `xr/scripts/app/modes/teleop_mode.gd` |
 | Ego capture | `xr/scenes/capture_app.tscn` | `xr/scripts/app/modes/ego_capture_mode.gd` |
-| Live Feed | `xr/scenes/live_feed_app.tscn` | `xr/scripts/app/modes/live_feed_mode.gd` |
 | VR | `xr/scenes/vr_mode.tscn` | `xr/scripts/app/modes/vr_mode.gd` |
 | MuJoCo smoke | `xr/scenes/mujoco/mujoco_device_test.tscn` | `xr/scripts/app/modes/mujoco/mujoco_device_test.gd` |
 | Module tests | `xr/scenes/test_runner.tscn` | `xr/scripts/test_support/runner/test_runner_root.gd` |
@@ -280,3 +354,4 @@ is all that is needed to bring it back.
 - Build and device procedures: `build-and-deploy.md`
 - Wire contracts: `wire-protocol.md`
 - Live Feed server integration: `live-feed-cloud.md`
+- Worked host-declared composition example: `examples/lightnav/README.md`

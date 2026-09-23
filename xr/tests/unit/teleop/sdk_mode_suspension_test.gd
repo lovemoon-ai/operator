@@ -66,13 +66,13 @@ class FakeCommandSender:
 class FakeOutsideTarget:
 	extends Node
 	var starts: Array = []
-	var ready := false
+	var target_ready := false
 
 	func start(options: Dictionary) -> void:
 		starts.append(options.duplicate(true))
 
 	func is_ready() -> bool:
-		return ready
+		return target_ready
 
 
 class FakeXrtTarget:
@@ -221,10 +221,10 @@ func _test_protocol_aware_outside_start(t: OperatorTestAssertions) -> void:
 	t.eq((outside_target.starts[0] as Dictionary).get("host"), "192.168.1.30",
 		"Operator target receives the configured host")
 	t.is_false(controller._link_active, "starting a target does not report a connected link")
-	outside_target.ready = true
+	outside_target.target_ready = true
 	controller._on_target_state_changed(2, "ready", outside_target)
 	t.is_true(controller._link_active, "a ready target changes the link action to Disconnect")
-	outside_target.ready = false
+	outside_target.target_ready = false
 	controller._on_target_state_changed(0, "disconnected", outside_target)
 	t.is_false(controller._link_active, "a stopped target changes the link action back to Connect")
 
@@ -252,12 +252,14 @@ func _test_protocol_aware_discovery_identity(t: OperatorTestAssertions) -> void:
 		"pose_port": 63901,
 		"protocol": "xrobot_toolkit_v1",
 	}
-	controller._known_robots = {
-		TeleopControllerScript._operator_discovery_key(shared_ip, 63901): operator_info,
-		TeleopControllerScript._xrt_discovery_key(shared_ip, 63901): xrt_info,
+	var host_discovery := HostDiscovery.new()
+	host_discovery.known = {
+		HostDiscovery.operator_key(shared_ip, 63901): operator_info,
+		HostDiscovery.xrt_key(shared_ip, 63901): xrt_info,
 	}
+	controller._host_discovery = host_discovery
 
-	t.eq(controller._known_robots.size(), 2,
+	t.eq(host_discovery.count(), 2,
 		"Operator and XRoboToolkit services on one IP remain separate choices")
 	t.eq(controller._find_known_robot(shared_ip, "operator", 63901), operator_info,
 		"Operator lookup selects the native service")
@@ -270,8 +272,8 @@ func _test_protocol_aware_discovery_identity(t: OperatorTestAssertions) -> void:
 		"video_port": 12445,
 		"protocol": "operator",
 	}
-	controller._known_robots[
-		TeleopControllerScript._operator_discovery_key(shared_ip, 64001)
+	host_discovery.known[
+		HostDiscovery.operator_key(shared_ip, 64001)
 	] = alternate_operator_info
 	t.eq(controller._find_known_robot(shared_ip, "operator", 64001), alternate_operator_info,
 		"Operator lookup keeps same-IP services separated by command port")
@@ -279,24 +281,26 @@ func _test_protocol_aware_discovery_identity(t: OperatorTestAssertions) -> void:
 	active_transport.connected = true
 	active_transport.host = shared_ip
 	active_transport.port = 63901
-	controller._tcp_handler = active_transport
-	controller._active_telemetry_port = 63903
-	controller._on_robot_found(
+	var host_session := HostSession.new()
+	host_session.tcp_handler = active_transport
+	host_session.active_telemetry_port = 63903
+	host_discovery.endpoint_found.connect(host_session.on_endpoint_discovered)
+	host_discovery._on_robot_found(
 		"g1d-debug-alt", shared_ip, 64001, 12445, 64003, "unitree_g1d", ""
 	)
-	t.eq(controller._active_telemetry_port, 63903,
+	t.eq(host_session.active_telemetry_port, 63903,
 		"a same-IP announcement on another command port cannot retarget active media")
-	t.is_false(TeleopControllerScript._discovery_matches_options(xrt_info, {
+	t.is_false(HostDiscovery.matches_options(xrt_info, {
 		"ip": shared_ip,
 		"port": 63901,
 		"protocol": "operator",
 	}), "auto-connect requires the saved protocol as well as IP and port")
-	t.is_true(TeleopControllerScript._discovery_matches_options(xrt_info, {
+	t.is_true(HostDiscovery.matches_options(xrt_info, {
 		"ip": shared_ip,
 		"port": 63901,
 		"protocol": "xrobot_toolkit_v1",
 	}), "the exact saved XRoboToolkit endpoint remains eligible for auto-connect")
-	t.is_false(TeleopControllerScript._can_auto_connect_discovered(xrt_info, {
+	t.is_false(HostDiscovery.can_auto_connect(xrt_info, {
 		"loaded": false,
 		"ip": shared_ip,
 		"port": 63901,
@@ -304,20 +308,20 @@ func _test_protocol_aware_discovery_identity(t: OperatorTestAssertions) -> void:
 	}), "fresh defaults never auto-connect to the only discovered service")
 
 	var second_ip := "192.168.1.41"
-	controller._known_robots = {
-		TeleopControllerScript._operator_discovery_key(shared_ip, 63901): operator_info,
-		TeleopControllerScript._operator_discovery_key(second_ip, 63901): {
+	host_discovery.known = {
+		HostDiscovery.operator_key(shared_ip, 63901): operator_info,
+		HostDiscovery.operator_key(second_ip, 63901): {
 			"name": "g1d-debug",
 			"ip": second_ip,
 			"pose_port": 63901,
 			"protocol": "operator",
 		},
 	}
-	t.eq(controller._known_robots.size(), 2,
+	t.eq(host_discovery.count(), 2,
 		"same-name Operator services retain separate endpoint identities")
 	t.eq(controller._find_known_robot(second_ip, "operator", 63901).get("name"), "g1d-debug",
 		"same-name Operator lookup resolves the requested endpoint")
-	t.is_true(TeleopControllerScript._can_auto_connect_discovered(xrt_info, {
+	t.is_true(HostDiscovery.can_auto_connect(xrt_info, {
 		"loaded": true,
 		"ip": shared_ip,
 		"port": 63901,
@@ -325,4 +329,6 @@ func _test_protocol_aware_discovery_identity(t: OperatorTestAssertions) -> void:
 	}), "an explicitly saved exact endpoint may still auto-connect")
 
 	active_transport.free()
+	host_session.free()
+	host_discovery.free()
 	controller.free()

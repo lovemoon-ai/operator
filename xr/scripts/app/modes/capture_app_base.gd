@@ -1,16 +1,17 @@
 extends Node3D
+## Ego capture mode (the offline feature side of the launcher): UI, QR, local
+## settings, play space, calibration, automation and metrics. What a capture
+## mounts is interpreted by CapturePipeline from the Output selection
+## (`capture_output`: local | ingest | both); the provider, its plugins and
+## system permissions live in components/sources, push/pull transports in
+## components/sinks + components/views, and the user-configured ingest server
+## in session/ingest_session.gd. Nothing here talks to a plugin or a socket.
 
-const LivePullDenseMapViewScript := preload("res://addons/live-pull/live_pull_dense_map_view.gd")
-const POSE_SAMPLER_PATH := "res://scripts/core/sensors/pose_sampler.gd"
-const DepthSamplerScript := preload("res://scripts/core/sensors/depth_sampler.gd")
-const BodyMotionSamplerScript := preload("res://scripts/core/sensors/body_motion_sampler.gd")
 const ViewLockedCapturePanelScript := preload("res://scripts/ui/view_locked_capture_panel.gd")
 const ViewLockedRecordControlScript := preload("res://scripts/ui/view_locked_record_control.gd")
 const ViewLockedStatusPopupScript := preload("res://scripts/ui/view_locked_status_popup.gd")
 const SettingsLauncherButtonScript := preload("res://scripts/ui/settings_launcher_button.gd")
-const EgoUploaderScript := preload("res://scripts/sinks/upload/ego_uploader.gd")
 const EgoQRScannerScript := preload("res://scripts/ui/ego_qr_scanner.gd")
-const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
 const HandSkeletonOverlayScript := preload("res://scripts/xr/hand_skeleton_overlay.gd")
 const QR_SCANNER_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const QR_TARGET_UPLOAD_URL := "upload_url"
@@ -21,19 +22,11 @@ const DEFAULT_SAVE_ROOT := "/sdcard/DCIM/SpatialMP4"
 const DEFAULT_RGB_BITRATE := 24000000
 const DEFAULT_RGB_FPS := 30
 const DEFAULT_RGB_CODEC := "hevc"
-const LIVE_FEED_MIN_RGB_BITRATE := 500000
-const LIVE_FEED_MAX_RGB_BITRATE := DEFAULT_RGB_BITRATE
-const LIVE_FEED_MIN_RGB_FPS := 1
-const LIVE_FEED_MAX_RGB_FPS := 60
-const OPENXR_HAND_CAPTURE_SINGLETON := &"NativeOpenXRHandCapture"
-const OPERATOR_INPUT_PLUGIN_SINGLETON := &"OperatorInputPlugin"
 const SETTINGS_PANEL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.04, -0.92))
 const SETTINGS_BUTTON_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.5))
 const RECORD_CONTROL_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, -0.18, -0.86))
 const STATUS_POPUP_OFFSET := Transform3D(Basis.IDENTITY, Vector3(0.0, 0.18, -0.92))
 const CUE_SAMPLE_RATE := 32000
-const UPLOAD_ACK_TIMEOUT_SECONDS := 8.0
-const AUDIO_PERMISSION_GRACE_US := 3000000
 const TRACKER_STATUS_REFRESH_SECONDS := 0.5
 const TRACKER_SETUP_OPENING_SECONDS := 4.0
 const DEFAULT_PICO_BODY_TRACKERS := 2
@@ -43,13 +36,14 @@ const XR_TRACKING_POLL_SECONDS := 0.1
 const EXPORT_SPACE_APPLY_TIMEOUT_SECONDS := 2.0
 const MIN_QUEST_HORIZON_OS_VERSION := 76
 const QUEST_OS_UPGRADE_WARNING_SECONDS := 10.0
-const RUNTIME_DISPLAY_OPTION_KEYS := [
-	"show_hand_skeleton_overlay",
-]
+const OPERATOR_INPUT_PLUGIN_SINGLETON := &"OperatorInputPlugin"
+## Launch-argument keys (`operator.capture.<key>=` / `--operator-capture-<key>`)
+## that select the Output and its ingest endpoint for automation.
+const AUTOMATION_STRING_ARGS := ["output", "server_host", "server_auth_token"]
+const AUTOMATION_PORT_ARGS := ["server_port", "server_result_port"]
 @export var auto_start := false
 @export var pose_sample_hz := 90.0
 @export var keep_passthrough_visible := true
-@export_enum("spatialmp4", "server") var capture_sink := "spatialmp4"
 @export var default_live_server_host := "127.0.0.1"
 @export var default_live_server_port := 63910
 @export var default_live_result_port := 63912
@@ -75,24 +69,15 @@ var settings_panel
 var settings_button
 var record_control
 var status_popup
-var writer: Object
-# WP5: shared canonical-frame fanout (StreamBinding over the sinks below)
-# injected into the samplers so all sensor writes flow through SensorFrames.
-var _frame_sink: Object
-# WP5 sinks. Spool mode: SpatialMp4Sink (SessionSpoolWriter engine).
-# Live mode: LiveStreamSink (LivePushWriter engine).
-var _spatialmp4_sink: SpatialMp4Sink = null
-var _live_stream_sink: LiveStreamSink = null
-var _upload_sink: UploadQueueSink = null
-var pose_sampler: Node
-var _pose_sampler_script: Script
 var _hand_skeleton_overlay: Node3D = null
-var depth_sampler: Node
-var body_motion_sampler: Node
+## Capture composition interpreter: sources, sinks, lifecycle.
+var _pipeline: CapturePipeline
+## The user-configured ingest server; null unless the Output includes ingest.
+var _ingest: IngestSession = null
+var live_pull_view: DenseMapView
 var ego_uploader: Node
 var qr_scanner: Object
-var upload_ack_request: HTTPRequest
-var _pending_upload_ack_payload := ""
+var _endpoint_verifier: EndpointVerifier
 var _qr_scan_target := ""
 var _active_upload_session_id := ""
 var _upload_popup_hold_until_msec := 0
@@ -104,21 +89,16 @@ var _stop_cue: AudioStreamWAV
 # WP2: platform capability registry — the only sanctioned route to vendor
 # plugin singletons (see xr/scripts/platform/).
 var _platform: PlatformRegistry
-var camera_plugin: Object
-var muxer_plugin: Object
 var pico_openxr_bridge: Object
 var _tracking_sessions: TrackingSessionService
 var _pico_calibration_report: Dictionary = {}
-var live_server_plugin: Object
-var live_pull_view: Node3D
-## Streams the Live Feed server last asked for (OLCP stream names). Empty
-## until the settings page connects and the server answers.
-var _server_requested_streams: Array = []
 ## Currently displayed input-source mismatch text ("" when there is none).
 ## Kept so the notice is only re-emitted when it actually changes.
 var _input_source_notice := ""
 var capture_options := {
 	"interaction_mode": "controllers",
+	# Where a capture goes: local recording, the ingest server, or both.
+	"capture_output": EgoCaptureComposition.OUTPUT_LOCAL,
 	"stereo_rgb": true,
 	"export_coordinate_space": OpenXRExportSpace.DEFAULT,
 	"record_depth": true,
@@ -131,14 +111,11 @@ var capture_options := {
 	# Runtime-only VST overlay. This is deliberately stripped from the
 	# effective recording options before writer/samplers see them.
 	"show_hand_skeleton_overlay": true,
-	# v3 spatial audio: now on by default ("Audio" toggle in the settings
-	# panel). The pipeline still gates on the Android RECORD_AUDIO runtime
-	# permission downstream -- if the user denies the prompt, the session
-	# degrades to a video-only capture instead of failing outright.
+	# v3 spatial audio: on by default ("Audio" toggle in the settings panel).
+	# The pipeline still gates on the Android RECORD_AUDIO runtime permission;
+	# a denied prompt degrades the session to video-only.
 	"record_audio": true,
-	# Encoder shape. Mirrors AudioCapture.DEFAULT_* on the Kotlin side; the
-	# host can override either here in code or via capture_options at runtime
-	# (e.g. for an FOA-capable build that swaps "stereo" -> "foa_acn_sn3d").
+	# Encoder shape. Mirrors AudioCapture.DEFAULT_* on the Kotlin side.
 	"audio_channel_layout": "stereo",
 	"audio_sample_rate_hz": 48000,
 	"audio_bitrate_bps": 128000,
@@ -154,62 +131,15 @@ var capture_options := {
 	"save_root": DEFAULT_SAVE_ROOT
 }
 
-# WP3: the recording lifecycle is owned by CaptureSessionController; the
-# legacy `_recording` boolean is now a read-only view over its state machine
-# so the dozens of existing call sites keep their exact semantics.
-var _capture_controller: CaptureSessionController = null
+# The recording lifecycle is owned by the pipeline's CaptureSessionController;
+# `_recording` is a read-only view over its state machine.
 var _recording: bool:
 	get:
-		return _capture_controller != null and _capture_controller.is_session_active()
-var _pose_accum := 0.0
+		return _pipeline != null and _pipeline.is_recording()
 var _capture_started_ticks_us := 0
 var _xr_session_begun := false
-var _camera_configured := false
-var _camera_start_attempted := false
-var _camera_bind_warned := false
-var _capture_provider_name := ""
-var _camera_permission_wait_logged := false
-var _last_capture_error := ""
-var _audio_permission_wait_logged := false
-var _audio_permission_degraded_logged := false
-var _audio_permission_wait_started_ticks_us := 0
-var _active_capture_options := {}
 var _export_space_start_pending := false
 var _capture_start_cancel_requested := false
-var _pico_camera_image_started := false
-var _pico_native_pipeline_started := false
-var _pico_native_metrics_accum: Dictionary = {}
-var _native_openxr_hand_capture: Object = null
-var _native_openxr_hand_recording_started := false
-# Kotlin-direct RGB pump state: the pico_openxr bridge holds the capture
-# plugin and submits frames in C++ (see _pump_pico_openxr_camera_frames).
-var _pico_camera_sink_bound := false
-var _pico_camera_pump_warned := false
-# How often the pump polls the native bridge for new camera frames. Each call
-# moves at most one eye, so stereo capture polls at twice the configured fps:
-# one left + one right transfer per camera-frame interval without bunching both
-# large RGBA copies into the same render tick.
-var _pico_camera_poll_interval_s := 0.5 / DEFAULT_RGB_FPS
-var _pico_camera_frame_accum_s := 0.0
-# Per-metrics-window pump counters (reset by _emit_metrics via
-# _pop_pico_pump_metrics) plus a session-lifetime failure total used to
-# rate-limit the submit-failure warning below.
-var _pico_camera_submit_ok_left := 0
-var _pico_camera_submit_ok_right := 0
-var _pico_camera_submit_fail_left := 0
-var _pico_camera_submit_fail_right := 0
-var _pico_camera_frames_skipped := 0
-var _pico_camera_acquire_us := 0
-var _pico_camera_submit_us := 0
-var _pico_camera_submit_fail_session := 0
-var _pico_camera_fail_count_at_last_warn := 0
-var _pico_camera_fail_warn_ticks_us := 0
-# Warn on the first submit failure, then again at most every
-# PICO_CAMERA_FAIL_WARN_EVERY failures or PICO_CAMERA_FAIL_WARN_INTERVAL_US,
-# whichever comes first -- enough to stay visible in logcat without spamming
-# one line per dropped frame.
-const PICO_CAMERA_FAIL_WARN_EVERY := 100
-const PICO_CAMERA_FAIL_WARN_INTERVAL_US := 5_000_000
 var _passthrough_active := false
 var _scene_transition_target := ""
 var _previous_transparent_bg := false
@@ -217,18 +147,11 @@ var _previous_environment_blend_mode := XRInterface.XR_ENV_BLEND_MODE_OPAQUE
 var _previous_background_mode := Environment.BG_CLEAR_COLOR
 var _previous_background_color := Color.BLACK
 
-# 1Hz metrics ticker: tracks how many _process invocations and which phases
-# (pose loop iterations, plugin probes) ran in the last second, then emits a
-# single log line tagged "QcMetrics" so logcat can be grepped without
-# combing through dozens of unrelated prints.
+# 1Hz metrics ticker: emits a single "QcMetrics" log line per second.
 const METRICS_INTERVAL_S := 1.0
 var _metrics_accum_s := 0.0
 var _metrics_process_ticks := 0
-# Ad-hoc head-pose source probe (see _emit_pico_view_pose_probe).
-var _pico_view_pose_log_accum_s := 0.0
-var _pico_view_pose_log_count := 0
-var _metrics_pose_loop_iters := 0
-var _metrics_started_ticks_us := 0
+var _view_pose_log_accum_s := 0.0
 var _tracker_status_refresh_accum := TRACKER_STATUS_REFRESH_SECONDS
 var _tracker_setup_opened_ticks_us := 0
 var _last_capture_interaction_mode := ""
@@ -240,28 +163,17 @@ var _rgb_recording_provider_pushed := ""
 var _rgb_camera_capabilities_pushed := false
 var _rgb_camera_capability_next_probe_us := 0
 var _quit_after_rgb_capability_probe := false
-# Tracks whether we've already fired an up-front requestAudioPermission()
-# prompt for this app session. Audio defaults to ON now, so we surface the
-# system prompt as soon as the capture provider binds -- otherwise the
-# operator wouldn't see it until they tapped Start, by which point a denied
-# prompt would silently produce a video-only recording with no warning.
-var _audio_permission_prompt_fired := false
 var _quest_os_upgrade_warning_shown := false
 var _quest_os_upgrade_warning_pending := false
-# Per-stage main-thread budgets so we can attribute the engine_fps drop to a
-# specific subsystem (panel update vs pointer raycast vs pose loop vs metrics
-# overhead). Microsecond accumulators; pop_metrics-style reset each second.
+# Per-stage main-thread budgets (microseconds, reset every metrics window).
 var _stage_us_panel := 0
 var _stage_us_pointer := 0
 var _stage_us_record_ctl := 0
-var _stage_us_camera_pump := 0
-var _stage_us_pose_loop := 0
-var _stage_us_depth_pump := 0
 var _stage_us_emit_metrics := 0
 
 
 func _ready() -> void:
-	_set_volume_buttons_captured(not _is_live_feed_mode())
+	_set_volume_buttons_captured(true)
 	_setup_xr_scene()
 	_setup_pico_openxr_bridge()
 	_bind_operator_interaction()
@@ -276,82 +188,22 @@ func _ready() -> void:
 	_sync_operator_interaction_override()
 	_apply_capture_interaction_mode(_current_ui_interaction_mode())
 	_initialize_openxr()
-	_bind_android_plugin()
 	_setup_audio_cues()
 
-	# WP6: the v2 capture stack (writer engine + sinks + StreamBinding
-	# fanout + upload sink + CaptureSessionController) is built by the
-	# mode's composition root. This scene keeps node lifecycle, intent
-	# parsing, and UI glue only.
-	var io: Dictionary
-	if _is_live_feed_mode():
-		io = LiveFeedComposition.build_io(default_live_server_host, default_live_server_port, default_live_server_auth_token)
-	else:
-		io = EgoCaptureComposition.build_io()
-	writer = io.get("writer")
-	_frame_sink = io.get("frame_sink")
-	_spatialmp4_sink = io.get("spatialmp4_sink")
-	_live_stream_sink = io.get("live_stream_sink")
-	_upload_sink = io.get("upload_sink")
-	# _bind_android_plugin ran above when `writer` was still null, so its own
-	# writer.set_*_plugin attempts were skipped; we re-wire both singletons
-	# here against the freshly-created spool writer. Stage 2b's split moved
-	# every write* RPC to the muxer plugin, so missing the second hand-off
-	# silently no-ops every pose / depth / hand / input frame.
-	if camera_plugin != null and writer.has_method("set_android_plugin"):
-		writer.set_android_plugin(camera_plugin)
-	if muxer_plugin != null and writer.has_method("set_muxer_plugin"):
-		writer.set_muxer_plugin(muxer_plugin)
-	if live_server_plugin != null and writer.has_method("set_live_server_plugin"):
-		writer.set_live_server_plugin(live_server_plugin)
-	_pose_sampler_script = load(POSE_SAMPLER_PATH) as Script
-	if _pose_sampler_script == null:
-		push_error("Failed to load PoseSampler script: %s" % POSE_SAMPLER_PATH)
-		return
-	pose_sampler = _pose_sampler_script.new()
-	depth_sampler = DepthSamplerScript.new()
-	body_motion_sampler = BodyMotionSamplerScript.new()
-
-	add_child(pose_sampler)
-	add_child(depth_sampler)
-	add_child(body_motion_sampler)
-	depth_sampler.start_failed.connect(_on_depth_sampler_start_failed)
-	pose_sampler.configure(writer, hmd_camera, left_controller, right_controller, camera_plugin)
-	depth_sampler.configure(writer, camera_plugin)
-	body_motion_sampler.configure(writer, pose_sampler, pico_openxr_bridge)
-	# WP5: samplers emit canonical SensorFrames through a single shared
-	# StreamBinding fanout over the mode's sinks. The sinks call the legacy
-	# writer surfaces with identical args, so output formats are unchanged.
-	pose_sampler.set_frame_sink(_frame_sink)
-	depth_sampler.set_frame_sink(_frame_sink)
-	_try_enable_native_hand_capture()
-	_setup_capture_controller(io)
-
-	if not _is_live_feed_mode():
-		# EgoUploader drains user://ego_upload_queue.json for ego capture only.
-		# Live Feed is a push-only session and must not resume old local upload
-		# jobs or surface upload progress/errors. WP5: the uploader node is
-		# owned by UploadQueueSink (same queue file / TUS behavior / signals);
-		# this scene keeps the node's tree lifecycle + UI signal glue.
-		ego_uploader = _upload_sink.uploader()
-		ego_uploader.name = "EgoUploader"
-		add_child(ego_uploader)
-		ego_uploader.upload_started.connect(_on_upload_started)
-		ego_uploader.upload_progress.connect(_on_upload_progress)
-		ego_uploader.upload_finished.connect(_on_upload_finished)
-		ego_uploader.upload_failed.connect(_on_upload_failed)
-		ego_uploader.upload_cancelled.connect(_on_upload_cancelled)
-		ego_uploader.session_uploaded.connect(_on_session_uploaded)
-		ego_uploader.queue_changed.connect(_on_upload_queue_changed)
-
-		upload_ack_request = HTTPRequest.new()
-		upload_ack_request.name = "UploadAckRequest"
-		upload_ack_request.timeout = UPLOAD_ACK_TIMEOUT_SECONDS
-		upload_ack_request.request_completed.connect(_on_upload_ack_completed)
-		add_child(upload_ack_request)
+	_pipeline = CapturePipeline.new()
+	_pipeline.name = "CapturePipeline"
+	_pipeline.pose_sample_hz = pose_sample_hz
+	add_child(_pipeline)
+	_pipeline.setup(hmd_camera, left_controller, right_controller, pico_openxr_bridge, _platform_registry())
+	_pipeline.session_opened.connect(_on_capture_session_opened)
+	_pipeline.session_started.connect(_on_capture_session_started)
+	_pipeline.session_stopped.connect(_on_capture_session_stopped)
+	_note_provider_bound()
+	_setup_uploader()
 
 	var automation := _capture_automation_options_from_args()
 	_apply_capture_automation_options(automation)
+	_apply_output(str(capture_options.get("capture_output", EgoCaptureComposition.OUTPUT_LOCAL)))
 
 	if bool(automation.get("auto_start", false)):
 		call_deferred(
@@ -367,8 +219,63 @@ func _ready() -> void:
 		_schedule_auto_stop_for_device_test(AUTO_STOP_AFTER_SECONDS)
 	elif auto_start:
 		call_deferred("_start_capture_when_xr_tracking_ready", "auto_start", 0.0)
-	elif _is_live_feed_mode():
-		call_deferred("_open_live_feed_settings")
+
+
+## EgoUploader drains user://ego_upload_queue.json. The UploadQueueSink owns
+## the uploader (queue file / TUS behavior / signals); this scene keeps the
+## node's tree lifecycle and the UI signal glue.
+func _setup_uploader() -> void:
+	ego_uploader = _pipeline.upload_sink().uploader()
+	ego_uploader.name = "EgoUploader"
+	add_child(ego_uploader)
+	ego_uploader.upload_started.connect(_on_upload_started)
+	ego_uploader.upload_progress.connect(_on_upload_progress)
+	ego_uploader.upload_finished.connect(_on_upload_finished)
+	ego_uploader.upload_failed.connect(_on_upload_failed)
+	ego_uploader.upload_cancelled.connect(_on_upload_cancelled)
+	ego_uploader.session_uploaded.connect(_on_session_uploaded)
+	ego_uploader.queue_changed.connect(_on_upload_queue_changed)
+
+	_endpoint_verifier = EndpointVerifier.new()
+	_endpoint_verifier.name = "EndpointVerifier"
+	_endpoint_verifier.checking.connect(_on_upload_ack_checking)
+	_endpoint_verifier.resolved.connect(_apply_scanned_upload_endpoint)
+	_endpoint_verifier.failed.connect(_on_upload_ack_failed)
+	add_child(_endpoint_verifier)
+
+
+## Mounts the sinks for an Output selection and mounts / drops the ingest
+## session with it. Ignored while recording.
+func _apply_output(output: String) -> void:
+	if _recording:
+		return
+	var normalized := EgoCaptureComposition.normalize_output(output)
+	capture_options["capture_output"] = normalized
+	_pipeline.set_output(normalized, Callable(self, "_ensure_capture_start_ready"))
+	var wants_ingest := _pipeline.streams_to_ingest()
+	if wants_ingest and _ingest == null:
+		if enable_live_pull:
+			live_pull_view = DenseMapView.new()
+			live_pull_view.name = "DenseMapView"
+			# Head-lock the dense-map minimap to the HMD so the scaled-down
+			# cloud stays pinned in front of the user instead of riding XROrigin.
+			live_pull_view.configure(hmd_camera, DenseMapView.DISPLAY_MINIMAP)
+			origin.add_child(live_pull_view)
+		_ingest = IngestSession.new(_pipeline.live_push_sink(), live_pull_view)
+		_ingest.connectivity_changed.connect(_set_live_server_connectivity_status)
+		_ingest.capture_request_received.connect(_on_capture_request_received)
+	elif not wants_ingest and _ingest != null:
+		_ingest.disconnect_results()
+		_ingest = null
+		if live_pull_view != null:
+			live_pull_view.queue_free()
+			live_pull_view = null
+		_pipeline.live_push_sink().clear_target()
+		_update_input_source_mismatch_notice()
+	if _ingest != null:
+		_ingest.configure(capture_options)
+	if record_control != null:
+		record_control.set_streaming_only(not _pipeline.records_locally())
 
 
 func _apply_automation_args() -> void:
@@ -451,11 +358,7 @@ func _wait_for_xr_head_pose_tracking_stable(reason: String) -> bool:
 func _should_wait_for_xr_tracking() -> bool:
 	if OS.has_feature("quest"):
 		return true
-	if camera_plugin == null:
-		_bind_android_plugin()
-	if camera_plugin == null:
-		return false
-	return CaptureProviderRegistryScript.provider_name(camera_plugin) == "quest"
+	return _pipeline != null and _pipeline.ensure_bound() and _pipeline.camera.provider_name == "quest"
 
 
 func _xr_head_pose_confident() -> bool:
@@ -516,7 +419,7 @@ func _apply_capture_automation_options(automation: Dictionary) -> void:
 		if resolution != Vector2i.ZERO:
 			capture_options["rgb_width"] = resolution.x
 			capture_options["rgb_height"] = resolution.y
-			capture_options["rgb_resolution"] = _rgb_resolution_text(resolution)
+			capture_options["rgb_resolution"] = CameraSource.rgb_resolution_text(resolution)
 			changed = true
 
 	if automation.has("export_coordinate_space"):
@@ -530,6 +433,15 @@ func _apply_capture_automation_options(automation: Dictionary) -> void:
 			capture_options["save_root"] = save_root
 			changed = true
 
+	# Output and ingest endpoint overrides (cicd/04 drives ingest through Ego).
+	for key_v in AUTOMATION_STRING_ARGS + AUTOMATION_PORT_ARGS:
+		var key := str(key_v)
+		if not automation.has(key):
+			continue
+		var option_key := "capture_output" if key == "output" else key
+		capture_options[option_key] = automation[key]
+		changed = true
+
 	if not changed:
 		return
 	# Keep the panel snapshot aligned so the later provider capability refresh
@@ -540,22 +452,28 @@ func _apply_capture_automation_options(automation: Dictionary) -> void:
 		# Pico, applying 2048x1536 before selecting the detected provider would
 		# clamp it to Quest's 1280x960 list. Bind the provider first so automation
 		# is normalized against the correct platform-specific choices.
-		if camera_plugin != null and settings_panel.has_method("set_capture_provider_name"):
-			var provider := CaptureProviderRegistryScript.provider_name(camera_plugin)
+		if _pipeline != null and _pipeline.ensure_bound() and settings_panel.has_method("set_capture_provider_name"):
+			var provider := _pipeline.camera.provider_name
 			if not provider.is_empty():
 				settings_panel.call("set_capture_provider_name", provider)
 				_rgb_recording_provider_pushed = provider
 		settings_panel.set_options(capture_options)
 		if settings_panel.has_method("get_options"):
 			_merge_capture_options(settings_panel.get_options())
+			# Automation overrides win over the panel's persisted snapshot.
+			for key_v in AUTOMATION_STRING_ARGS + AUTOMATION_PORT_ARGS:
+				var key := str(key_v)
+				if automation.has(key):
+					capture_options["capture_output" if key == "output" else key] = automation[key]
 	print(
-		"Capture automation applied: interaction_mode=%s rgb_resolution=%s export_space=%s save_root=%s rgb_only=%s"
+		"Capture automation applied: interaction_mode=%s rgb_resolution=%s export_space=%s save_root=%s rgb_only=%s output=%s"
 		% [
 			str(capture_options.get("interaction_mode", "")),
 			str(capture_options.get("rgb_resolution", "")),
 			str(capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT)),
 			str(capture_options.get("save_root", "")),
 			str(bool(automation.get("rgb_only", false))),
+			str(capture_options.get("capture_output", "")),
 		]
 	)
 
@@ -652,7 +570,38 @@ func _collect_capture_automation_args(options: Dictionary, args: PackedStringArr
 					options["capability_probe"] = _parse_capture_bool(arg.substr("--capture-capability-probe=".length()))
 				elif arg.begins_with("operator.capture.capability_probe="):
 					options["capability_probe"] = _parse_capture_bool(arg.substr("operator.capture.capability_probe=".length()))
+				else:
+					i += _collect_endpoint_automation_arg(options, args, i)
 		i += 1
+
+
+## Output / ingest-endpoint arguments in the `operator.capture.<key>=value`,
+## `--operator-capture-<key>=value` and `--operator-capture-<key> value` forms.
+## Returns how many extra tokens were consumed.
+func _collect_endpoint_automation_arg(options: Dictionary, args: PackedStringArray, index: int) -> int:
+	var arg := String(args[index]).strip_edges()
+	for key_v in AUTOMATION_STRING_ARGS + AUTOMATION_PORT_ARGS:
+		var key := str(key_v)
+		var flag := "--operator-capture-%s" % key.replace("_", "-")
+		var raw := ""
+		var consumed := 0
+		if arg.begins_with("operator.capture.%s=" % key):
+			raw = arg.substr(("operator.capture.%s=" % key).length())
+		elif arg.begins_with(flag + "="):
+			raw = arg.substr((flag + "=").length())
+		elif arg == flag and index + 1 < args.size():
+			raw = String(args[index + 1])
+			consumed = 1
+		else:
+			continue
+		raw = raw.strip_edges()
+		if AUTOMATION_PORT_ARGS.has(key):
+			if raw.is_valid_int() and int(raw) > 0 and int(raw) <= 65535:
+				options[key] = int(raw)
+		else:
+			options[key] = EgoCaptureComposition.normalize_output(raw) if key == "output" else raw
+		return consumed
+	return 0
 
 
 func _normalize_capture_interaction_mode(raw_mode: String) -> String:
@@ -705,19 +654,11 @@ func _process(delta: float) -> void:
 		_metrics_accum_s = 0.0
 		_stage_us_emit_metrics += Time.get_ticks_usec() - t_metrics
 
-	# Ad-hoc head-pose source probe (1 Hz). Logs three things side by side:
-	#   1) Godot XRCamera3D.global_transform — what pose_sampler.gd records as
-	#      "head pose" into the MP4.
-	#   2) xrLocateSpace(VIEW, play) via the Pico OpenXR extension — what the
-	#      runtime authoritatively considers the OpenXR VIEW space pose.
-	#   3) The Pico RGB lens_pose (constant per session) we store as T_I_S.
-	# If (1) and (2) match, then "hmd_camera" == OpenXR VIEW, and any residual
-	# 2D-projection error must come from the T_I_S side. If they differ, the
-	# delta IS the head→view rigid offset that the visualizer currently lacks.
-	_pico_view_pose_log_accum_s += delta
-	if _pico_view_pose_log_accum_s >= 1.0:
-		_pico_view_pose_log_accum_s = 0.0
-		_emit_pico_view_pose_probe()
+	# 1 Hz head-pose source probe (see CameraSource.log_view_pose_probe).
+	_view_pose_log_accum_s += delta
+	if _view_pose_log_accum_s >= 1.0:
+		_view_pose_log_accum_s = 0.0
+		_pipeline.camera.log_view_pose_probe(hmd_camera)
 
 	var t_panel := Time.get_ticks_usec()
 	_update_view_locked_panel()
@@ -728,158 +669,27 @@ func _process(delta: float) -> void:
 	_update_hand_skeleton_overlay_state()
 	_stage_us_pointer += Time.get_ticks_usec() - t_pointer
 	_update_pico_tracker_setup_status(delta)
-	_update_motion_tracker_support_flag()
-	_update_depth_support_flag()
-	_update_rgb_recording_provider()
-	_ensure_audio_permission_prompted()
+	if _note_provider_bound():
+		_update_motion_tracker_support_flag()
+		_update_depth_support_flag()
+		_update_rgb_recording_provider()
+		_pipeline.audio.prompt_up_front(bool(capture_options.get("record_audio", false)))
 
 	if _recording and record_control:
 		var t_record := Time.get_ticks_usec()
 		var elapsed_seconds := float(Time.get_ticks_usec() - _capture_started_ticks_us) / 1000000.0
 		record_control.update_elapsed_seconds(elapsed_seconds)
 		_stage_us_record_ctl += Time.get_ticks_usec() - t_record
-	if not _recording:
-		return
-	if _native_openxr_hand_recording_started \
-			and not bool(_native_openxr_hand_capture.call("is_recording")):
-		var hand_error := str(_native_openxr_hand_capture.call("get_last_error"))
-		_stop_native_openxr_hand_recording()
-		_abort_capture_start("Native 60 Hz hand recorder stopped unexpectedly: %s" % hand_error)
-		return
-	if _pico_native_pipeline_started \
-			and not bool(pico_openxr_bridge.call("is_native_recording_pipeline_running")):
-		var camera_error := "native PICO camera pipeline stopped unexpectedly"
-		if pico_openxr_bridge.has_method("get_native_recording_pipeline_error"):
-			camera_error += ": %s" % str(pico_openxr_bridge.call("get_native_recording_pipeline_error"))
-		_pico_native_pipeline_started = false
-		_abort_capture_start(camera_error)
-		return
-
-	if camera_plugin == null:
-		_bind_android_plugin()
-		if camera_plugin != null and not _camera_configured:
-			_start_camera_plugin()
-	_try_start_camera_plugin()
-	var t_camera_pump := Time.get_ticks_usec()
-	_pump_pico_openxr_camera_frames(delta)
-	_stage_us_camera_pump += Time.get_ticks_usec() - t_camera_pump
-	if _stream_enabled("record_depth"):
-		var t_depth := Time.get_ticks_usec()
-		depth_sampler.pump(delta)
-		_stage_us_depth_pump += Time.get_ticks_usec() - t_depth
-
-	var t_pose_loop := Time.get_ticks_usec()
-	_pose_accum += delta
-	var interval: float = 1.0 / max(pose_sample_hz, 1.0)
-	while _pose_accum >= interval:
-		_pose_accum -= interval
-		_metrics_pose_loop_iters += 1
-		if _has_pose_streams_enabled():
-			pose_sampler.sample(Time.get_ticks_usec() * 1000)
-		if _has_body_motion_streams_enabled():
-			body_motion_sampler.sample(Time.get_ticks_usec() * 1000)
-	_stage_us_pose_loop += Time.get_ticks_usec() - t_pose_loop
-
-
-func _emit_pico_view_pose_probe() -> void:
-	# Compare three head-pose sources on the same tick, in the same play-space
-	# coordinate frame, so the user can read the delta from `make log`.
-	if hmd_camera == null:
-		return
-	var godot_t: Transform3D = hmd_camera.global_transform
-	var godot_pos := godot_t.origin
-	var godot_quat := godot_t.basis.get_rotation_quaternion()
-	_pico_view_pose_log_count += 1
-
-	# 1) Godot's XRCamera3D.global_transform — what we record into the MP4.
-	print("[PROBE %d] godot.hmd_camera.global_transform pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)" % [
-		_pico_view_pose_log_count,
-		godot_pos.x, godot_pos.y, godot_pos.z,
-		godot_quat.x, godot_quat.y, godot_quat.z, godot_quat.w,
-	])
-
-	# 2) Authoritative OpenXR VIEW space pose in play space, via xrLocateSpace.
-	if pico_openxr_bridge != null and pico_openxr_bridge.has_method("probe_view_space_pose"):
-		var probe: Dictionary = pico_openxr_bridge.call("probe_view_space_pose")
-		var available: bool = bool(probe.get("available", false))
-		if available:
-			var t: Transform3D = probe.get("transform", Transform3D())
-			var p := t.origin
-			var q := t.basis.get_rotation_quaternion()
-			var dp := godot_pos - p
-			print("[PROBE %d] xrLocateSpace(VIEW, play)    pos=(%.4f, %.4f, %.4f) quat_xyzw=(%.4f, %.4f, %.4f, %.4f)  delta_pos_from_godot=(%.4f, %.4f, %.4f) |delta|=%.4f" % [
-				_pico_view_pose_log_count,
-				p.x, p.y, p.z,
-				q.x, q.y, q.z, q.w,
-				dp.x, dp.y, dp.z, dp.length(),
-			])
-		else:
-			print("[PROBE %d] xrLocateSpace probe unavailable: %s flags=%s xr_result=%s" % [
-				_pico_view_pose_log_count,
-				probe.get("reason", "?"),
-				probe.get("location_flags", "?"),
-				probe.get("xr_result", "?"),
-			])
-	else:
-		print("[PROBE %d] pico_openxr_bridge missing probe_view_space_pose() — APK not rebuilt with native probe" % _pico_view_pose_log_count)
-
-	# 3) The Pico RGB lens_pose we currently store as T_I_S (constant per session).
-	# Comes from the same native extension we just probed; .get_camera_image_info()
-	# returns the per-eye metadata dictionaries that get_rgb_extrinsics later reads.
-	if pico_openxr_bridge != null and pico_openxr_bridge.has_method("get_camera_image_info"):
-		var info: Dictionary = pico_openxr_bridge.call("get_camera_image_info")
-		var left_meta: Dictionary = info.get("left", {})
-		var trans: Array = left_meta.get("lens_pose_translation", []) as Array
-		var rot: Array = left_meta.get("lens_pose_rotation", []) as Array
-		if trans.size() == 3 and rot.size() == 4:
-			print("[PROBE %d] T_I_S (XR_PICO_camera_image left lens_pose) translation=(%.4f, %.4f, %.4f) rotation_xyzw=(%.4f, %.4f, %.4f, %.4f)" % [
-				_pico_view_pose_log_count,
-				float(trans[0]), float(trans[1]), float(trans[2]),
-				float(rot[0]), float(rot[1]), float(rot[2]), float(rot[3]),
-			])
+	_pipeline.tick(delta)
 
 
 func _emit_metrics(window_s: float) -> void:
 	var process_fps: float = _metrics_process_ticks / window_s
 	var engine_fps: float = float(Engine.get_frames_per_second())
-	var pose_metrics: Dictionary = {}
-	if pose_sampler != null:
-		pose_metrics = pose_sampler.pop_metrics()
-	var depth_metrics: Dictionary = {}
-	if depth_sampler != null:
-		depth_metrics = depth_sampler.pop_metrics()
-	var body_motion_metrics: Dictionary = {}
-	if body_motion_sampler != null:
-		body_motion_metrics = body_motion_sampler.pop_metrics()
-	var plugin_metrics: Dictionary = {}
-	if camera_plugin != null:
-		var raw: Variant = camera_plugin.call("popMetricsJson")
-		var parsed: Variant = null
-		if typeof(raw) == TYPE_STRING and not String(raw).is_empty():
-			parsed = JSON.parse_string(String(raw))
-		if typeof(parsed) == TYPE_DICTIONARY:
-			plugin_metrics = parsed
-	var muxer_metrics: Dictionary = {}
-	if muxer_plugin != null:
-		var raw_muxer: Variant = muxer_plugin.call("popMuxerMetricsJson")
-		if typeof(raw_muxer) == TYPE_STRING and not String(raw_muxer).is_empty():
-			var parsed_muxer: Variant = JSON.parse_string(String(raw_muxer))
-			if typeof(parsed_muxer) == TYPE_DICTIONARY:
-				muxer_metrics = parsed_muxer
-	if _native_openxr_hand_capture != null:
-		var hand_metrics: Variant = _native_openxr_hand_capture.call("pop_metrics")
-		if typeof(hand_metrics) == TYPE_DICTIONARY:
-			for key in (hand_metrics as Dictionary).keys():
-				plugin_metrics[key] = (hand_metrics as Dictionary)[key]
-	if writer != null and writer.has_method("pop_metrics"):
-		var writer_metrics: Dictionary = writer.pop_metrics()
-		for key in writer_metrics.keys():
-			plugin_metrics["sink_%s" % key] = writer_metrics[key]
-	# GDScript-side Pico camera pump counters (submit ok/fail per eye plus
-	# skipped invalid frames). Empty unless the Pico OpenXR pump ran.
-	var pump_metrics := _pop_pico_pump_metrics()
-	for key in pump_metrics.keys():
-		plugin_metrics["pump_%s" % key] = pump_metrics[key]
+	var metrics := _pipeline.pop_metrics()
+	var plugin_metrics: Dictionary = metrics.get("plugin", {})
+	var pump_metrics: Dictionary = metrics.get("pump", {})
+	var stages: Dictionary = metrics.get("stages_us", {})
 	if not pump_metrics.is_empty():
 		# Keep camera attribution on its own short line. The full QcMetrics
 		# record can exceed Android logcat's per-line limit once OpenXR status
@@ -897,28 +707,24 @@ func _emit_metrics(window_s: float) -> void:
 		str(_recording),
 		engine_fps,
 		process_fps,
-		_metrics_pose_loop_iters,
+		int(metrics.get("pose_loop_iters", 0)),
 		_stage_us_panel / 1000.0,
 		_stage_us_pointer / 1000.0,
 		_stage_us_record_ctl / 1000.0,
-		_stage_us_camera_pump / 1000.0,
-		_stage_us_pose_loop / 1000.0,
-		_stage_us_depth_pump / 1000.0,
+		int(stages.get("camera", 0)) / 1000.0,
+		int(stages.get("pose", 0)) / 1000.0,
+		int(stages.get("depth", 0)) / 1000.0,
 		_stage_us_emit_metrics / 1000.0,
-		_compact_dict(pose_metrics),
-		_compact_dict(depth_metrics),
-		_compact_dict(body_motion_metrics),
+		_compact_dict(metrics.get("pose", {})),
+		_compact_dict(metrics.get("depth", {})),
+		_compact_dict(metrics.get("body_motion", {})),
 		_compact_dict(plugin_metrics),
-		_compact_dict(muxer_metrics)
+		_compact_dict(metrics.get("muxer", {}))
 	])
 	_metrics_process_ticks = 0
-	_metrics_pose_loop_iters = 0
 	_stage_us_panel = 0
 	_stage_us_pointer = 0
 	_stage_us_record_ctl = 0
-	_stage_us_camera_pump = 0
-	_stage_us_pose_loop = 0
-	_stage_us_depth_pump = 0
 	_stage_us_emit_metrics = 0
 
 
@@ -937,7 +743,8 @@ func _exit_tree() -> void:
 	stop_capture()
 	if _tracking_sessions != null:
 		_tracking_sessions.release(self)
-	_stop_live_pull()
+	if _ingest != null:
+		_ingest.disconnect_results()
 	var interaction := _operator_interaction()
 	if interaction != null:
 		if interaction.has_method("set_busy"):
@@ -956,15 +763,14 @@ func _exit_tree() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_RESUMED:
 		_reset_ui_input_state()
-		# WP3: track transient pause/resume in the capture state machine
+		# Track transient pause/resume in the capture state machine
 		# (Running <-> Recovering). Bookkeeping only — `_recording` stays true
-		# across Recovering so the legacy pipeline behavior is unchanged, and
-		# request_stop() auto-resumes from Recovering before stopping.
-		if _capture_controller != null:
+		# across Recovering, and request_stop() auto-resumes before stopping.
+		if _pipeline != null:
 			if what == NOTIFICATION_APPLICATION_PAUSED:
-				_capture_controller.notify_pause()
+				_pipeline.notify_pause()
 			else:
-				_capture_controller.notify_resume()
+				_pipeline.notify_resume()
 
 	# Device-test only: when the VR shell pauses the app (e.g. the headset is
 	# doffed during a host-driven adb smoke run), the auto-stop Timer freezes and
@@ -984,55 +790,10 @@ func _reset_ui_input_state() -> void:
 	_release_ui_pointer()
 
 
-## Hand joints, body joints and motion trackers are captured/written by the
-## hand_capture GDExtension (C++): ego capture writes the MP4 metadata tracks
-## through the muxer plugin; live modes push hands via
-## writeHandJointsJson on the live server plugin (rate-limited in C++ to the
-## legacy 30 Hz wire cadence; body/motion never had live network streams).
-## Idempotent — safe to call again when a plugin singleton binds late.
-func _try_enable_native_hand_capture() -> void:
-	if pose_sampler == null:
-		return
-	if _native_openxr_hand_capture == null and Engine.has_singleton(OPENXR_HAND_CAPTURE_SINGLETON):
-		_native_openxr_hand_capture = Engine.get_singleton(OPENXR_HAND_CAPTURE_SINGLETON)
-	var live_target: Object = live_server_plugin if _is_live_feed_mode() else null
-	var muxer_target: Object = null if _is_live_feed_mode() else muxer_plugin
-	if muxer_target == null and live_target == null:
-		return
-	if not pose_sampler.has_native_hand_capture() \
-			and pose_sampler.enable_native_hand_capture(muxer_target, live_target):
-		print("Native hand capture enabled (hand_capture GDExtension, full XR frame rate)")
-	if muxer_target != null and body_motion_sampler != null \
-			and not body_motion_sampler.has_native_writer() \
-			and body_motion_sampler.enable_native_writer(muxer_target):
-		print("Native body/motion capture writer enabled (hand_capture GDExtension)")
-
-
-## WP3/WP6: builds the CaptureSessionController via the mode's composition
-## root. The stop chain preserves the legacy stop order exactly:
-## body_motion.stop -> live-pull disconnect (non-live-feed only) ->
-## depth.stop -> writer.close.
-func _setup_capture_controller(io: Dictionary) -> void:
-	var deps := {
-		"pose_sampler": pose_sampler,
-		"depth_sampler": depth_sampler,
-		"body_motion_sampler": body_motion_sampler,
-		"permission_check": Callable(self, "_ensure_capture_start_ready"),
-	}
-	if _is_live_feed_mode():
-		_capture_controller = LiveFeedComposition.build_controller(io, deps)
-	else:
-		deps["stop_live_pull"] = Callable(self, "_stop_live_pull")
-		_capture_controller = EgoCaptureComposition.build_controller(io, deps)
-	_capture_controller.session_started.connect(_on_capture_session_started)
-	_capture_controller.session_stopped.connect(_on_capture_session_stopped)
-	_capture_controller.session_error.connect(_on_capture_session_error)
-
-
 func start_capture() -> void:
 	if _recording:
 		return
-	if _capture_controller == null:
+	if _pipeline == null:
 		return
 	if _export_space_start_pending:
 		return
@@ -1058,131 +819,52 @@ func start_capture() -> void:
 	# obtain the selected-space camera pose with
 	# T_export_camera = T_export_head * T_head_camera.
 	capture_options["rgb_extrinsics_space"] = "head"
-
-	# Normalize save_root before the options snapshot (the storage check —
-	# now run inside the controller's permission phase — used to do this
-	# before _effective_capture_options was computed).
-	if not _is_live_feed_mode():
+	# Normalize save_root before the options snapshot (the storage check runs
+	# inside the controller's permission phase).
+	if _pipeline.records_locally():
 		capture_options["save_root"] = _configured_save_root()
-	_active_capture_options = _effective_capture_options(capture_options)
-	# Late plugin binds can land between _configure and the first capture start.
-	_try_enable_native_hand_capture()
-	if not _capture_controller.request_start(_active_capture_options):
-		# Storage/permission failures log on their own; a writer failure was
-		# surfaced via session_error. Mirrors the legacy silent return.
-		_active_capture_options = {}
-		return
-	# request_start succeeded; _on_capture_session_started already ran
-	# synchronously via the controller signal.
+	if _ingest != null:
+		_ingest.configure(capture_options)
+	# Storage / permission / writer failures log on their own; the session
+	# callbacks below run synchronously when the start succeeds.
+	_pipeline.start(_pipeline.effective_options(capture_options))
 
 
-func _on_capture_session_error(message: String) -> void:
-	push_error(message)
-
-
-func _on_capture_session_started(_session_dir: String) -> void:
-	if pose_sampler != null and pose_sampler.has_method("on_session_started"):
-		pose_sampler.on_session_started(
-			_session_dir,
-			not _is_live_feed_mode() and _stream_enabled("record_hand_data")
-		)
-	if body_motion_sampler != null and body_motion_sampler.has_method("on_session_started"):
-		body_motion_sampler.on_session_started(_session_dir)
-	_start_live_pull()
+## Writer session opened; sources start right after this returns.
+func _on_capture_session_opened(_session_dir: String) -> void:
+	if _ingest != null:
+		_ingest.connect_results()
 	_update_operator_interaction_state()
-	_pose_accum = 0.0
 	_capture_started_ticks_us = Time.get_ticks_usec()
-	_camera_configured = false
-	_camera_start_attempted = false
-	_camera_permission_wait_logged = false
-	_last_capture_error = ""
-	_audio_permission_wait_logged = false
-	_audio_permission_degraded_logged = false
-	_audio_permission_wait_started_ticks_us = 0
-	_pico_camera_image_started = false
-	_pico_native_pipeline_started = false
-	_pico_native_metrics_accum.clear()
-	_native_openxr_hand_recording_started = false
-	_pico_camera_sink_bound = false
-	_pico_camera_frame_accum_s = 0.0
-	_pico_camera_submit_ok_left = 0
-	_pico_camera_submit_ok_right = 0
-	_pico_camera_submit_fail_left = 0
-	_pico_camera_submit_fail_right = 0
-	_pico_camera_frames_skipped = 0
-	_pico_camera_acquire_us = 0
-	_pico_camera_submit_us = 0
-	_pico_camera_submit_fail_session = 0
-	_pico_camera_fail_count_at_last_warn = 0
-	_pico_camera_fail_warn_ticks_us = 0
 	# Recording on Pico owns the XR_PICO_camera_image stream. Kick the QR
-	# scanner off it before our own pump starts — the stream's poll queue
-	# has a single drain point, so two consumers would steal each other's
-	# frames. Reachable with the scanner open via the volume-key shortcut.
+	# scanner off it before the camera starts — the stream's poll queue has a
+	# single drain point, so two consumers would steal each other's frames.
+	# Reachable with the scanner open via the volume-key shortcut.
 	if qr_scanner != null and qr_scanner.has_method("set_external_capture_busy"):
-		qr_scanner.set_external_capture_busy(CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name))
+		qr_scanner.set_external_capture_busy(_pipeline.camera.uses_pico_bridge())
 	if record_control:
 		record_control.set_recording(true)
 	_update_hand_skeleton_overlay_state()
-	# Park any in-flight upload while we record — see
+	# Park any in-flight upload while we capture — see
 	# claw/issues/010-ego-data-upload.md "Trip-wires".
-	if ego_uploader and not _is_live_feed_mode():
+	if ego_uploader:
 		ego_uploader.pause()
-	_start_camera_plugin()
-	if not _recording:
-		return
+
+
+func _on_capture_session_started(_session_dir: String) -> void:
 	_play_cue(_start_cue)
-	print("Capture session started: %s" % writer.get_session_dir())
+	print("Capture session started: %s" % _pipeline.writer().get_session_dir())
 
 
 func stop_capture() -> void:
 	if not _recording:
 		return
-	if _capture_controller == null:
-		return
-
-	_stop_camera_plugin()
-	# Snapshot the body-tracking runtime BEFORE stop()/close() so the
-	# manifest rewrite at close() time can record which extension actually
-	# fed the samples (PICO BD vs Meta XR_FB / full_body). The sampler keeps
-	# its observed_body_runtime across stop(), but reading it pre-close keeps
-	# the data flow obvious — sample → record → manifest.
-	if body_motion_sampler and body_motion_sampler.has_method("get_runtime_info") and writer and writer.has_method("set_body_tracking_runtime_info"):
-		writer.set_body_tracking_runtime_info(body_motion_sampler.get_runtime_info())
-	# Controller runs the stop chain (body_motion.stop -> live-pull
-	# disconnect -> depth.stop) then writer.close(), then emits
-	# session_stopped which drives the UI / upload tail below.
-	_capture_controller.request_stop()
+	_pipeline.stop()
 
 
 func _on_capture_session_stopped(final_path: String) -> void:
-	if pose_sampler != null and pose_sampler.has_method("on_session_stopped"):
-		pose_sampler.on_session_stopped()
-	if body_motion_sampler != null and body_motion_sampler.has_method("on_session_stopped"):
-		body_motion_sampler.on_session_stopped()
-	var is_live_feed := _is_live_feed_mode()
 	var saved_session_dir := final_path
 	_update_operator_interaction_state()
-	_active_capture_options = {}
-	_camera_configured = false
-	_camera_start_attempted = false
-	_camera_permission_wait_logged = false
-	_audio_permission_wait_logged = false
-	_audio_permission_degraded_logged = false
-	_audio_permission_wait_started_ticks_us = 0
-	_pico_camera_image_started = false
-	_pico_camera_sink_bound = false
-	_pico_camera_frame_accum_s = 0.0
-	_pico_camera_submit_ok_left = 0
-	_pico_camera_submit_ok_right = 0
-	_pico_camera_submit_fail_left = 0
-	_pico_camera_submit_fail_right = 0
-	_pico_camera_frames_skipped = 0
-	_pico_camera_acquire_us = 0
-	_pico_camera_submit_us = 0
-	_pico_camera_submit_fail_session = 0
-	_pico_camera_fail_count_at_last_warn = 0
-	_pico_camera_fail_warn_ticks_us = 0
 	# Recording released the camera stream; let the QR scanner use it again.
 	if qr_scanner != null and qr_scanner.has_method("set_external_capture_busy"):
 		qr_scanner.set_external_capture_busy(false)
@@ -1190,13 +872,16 @@ func _on_capture_session_stopped(final_path: String) -> void:
 		record_control.set_recording(false)
 	_update_hand_skeleton_overlay_state()
 	_play_cue(_stop_cue)
-	if is_live_feed:
+	if _pipeline.streams_to_ingest():
 		print("Live feed push stopped; live-pull remains connected for algorithm results")
+	if not _pipeline.records_locally():
+		if ego_uploader:
+			ego_uploader.resume()
 		return
 	var upload_expected := _upload_config_available()
 	if status_popup:
 		if saved_session_dir.is_empty():
-			var detail := _last_capture_error if not _last_capture_error.is_empty() else tr("UI_RECORDING_SAVE_FAILED_DETAIL")
+			var detail := _pipeline.last_error if not _pipeline.last_error.is_empty() else tr("UI_RECORDING_SAVE_FAILED_DETAIL")
 			status_popup.show_error(detail)
 			_upload_popup_hold_until_msec = 0
 		else:
@@ -1207,18 +892,15 @@ func _on_capture_session_stopped(final_path: String) -> void:
 
 	# Hand the freshly-finalized session to the uploader. enqueue() is a
 	# no-op when upload_url is empty or upload_on_finalize is off, so we
-	# can always call it. Then resume the worker we paused at
-	# start_capture so the new job (and anything queued from a prior
-	# session) starts draining.
+	# can always call it. Then resume the worker we paused at start so the
+	# new job (and anything queued from a prior session) starts draining.
+	var writer: Object = _pipeline.writer()
 	if ego_uploader and writer:
-		# session_spool_writer.gd exposes get_session_dir_absolute() (an
-		# OS-absolute path on Android, e.g. /sdcard/DCIM/SpatialMP4/<id>/)
-		# and get_output_mp4_path_absolute() (the finalized mp4 inside that
-		# directory). Both are stable once writer.close() has returned.
+		# The spool writer exposes OS-absolute paths once close() returned.
 		var session_dir_for_upload: String = writer.get_session_dir_absolute() if writer.has_method("get_session_dir_absolute") else writer.get_session_dir()
 		var mp4_for_upload: String = writer.get_output_mp4_path_absolute() if writer.has_method("get_output_mp4_path_absolute") else (saved_session_dir if saved_session_dir.ends_with(".mp4") else "")
 		var session_id_for_upload := mp4_for_upload.get_file().get_basename()
-		var queued := _upload_sink.enqueue_session(session_dir_for_upload, mp4_for_upload, capture_options) if _upload_sink != null else bool(ego_uploader.enqueue(session_dir_for_upload, mp4_for_upload, capture_options))
+		var queued := _pipeline.upload_sink().enqueue_session(session_dir_for_upload, mp4_for_upload, capture_options)
 		if queued:
 			_active_upload_session_id = session_id_for_upload
 			if ego_uploader.has_method("prioritize"):
@@ -1227,6 +909,8 @@ func _on_capture_session_stopped(final_path: String) -> void:
 		elif upload_expected:
 			_active_upload_session_id = ""
 			_queue_upload_ui(tr("UI_UPLOAD_NOT_QUEUED"), "", -1.0, "warning", 3.0)
+		else:
+			ego_uploader.resume()
 
 
 func _setup_xr_scene() -> void:
@@ -1276,24 +960,7 @@ func _setup_xr_scene() -> void:
 		_hand_skeleton_overlay.call("set_xr_origin", origin)
 	origin.add_child(_hand_skeleton_overlay)
 
-	if _is_live_feed_mode() and enable_live_pull:
-		live_pull_view = LivePullDenseMapViewScript.new()
-		live_pull_view.name = "LivePullDenseMapView"
-		# Head-lock the dense-map minimap to the HMD so the scaled-down cloud
-		# stays pinned in front of the user's view instead of riding XROrigin.
-		if "head_lock_target" in live_pull_view:
-			live_pull_view.head_lock_target = hmd_camera
-		if live_pull_view.has_signal("connected_to_server"):
-			live_pull_view.connected_to_server.connect(_on_live_pull_connected)
-		if live_pull_view.has_signal("disconnected_from_server"):
-			live_pull_view.disconnected_from_server.connect(_on_live_pull_disconnected)
-		if live_pull_view.has_signal("connection_failed"):
-			live_pull_view.connection_failed.connect(_on_live_pull_connection_failed)
-		if live_pull_view.has_signal("capture_request_received"):
-			live_pull_view.capture_request_received.connect(_on_capture_request_received)
-		origin.add_child(live_pull_view)
-
-	settings_panel = ViewLockedCapturePanelScript.new(_is_live_feed_mode())
+	settings_panel = ViewLockedCapturePanelScript.new()
 	settings_panel.name = "ViewLockedSettingsPanel"
 	if settings_panel.has_method("set_live_server_defaults"):
 		settings_panel.set_live_server_defaults(
@@ -1330,18 +997,16 @@ func _setup_xr_scene() -> void:
 	# every settings surface reads and writes through the same persistence
 	# path.
 	var persisted := ViewLockedCapturePanelScript.load_settings()
-	if _is_live_feed_mode():
-		persisted["server_host"] = str(persisted.get("server_host", default_live_server_host))
-		persisted["server_port"] = int(persisted.get("server_port", default_live_server_port))
-		persisted["server_result_port"] = int(persisted.get("server_result_port", default_live_result_port))
-		persisted["server_auth_token"] = str(persisted.get("server_auth_token", default_live_server_auth_token))
+	persisted["server_host"] = str(persisted.get("server_host", default_live_server_host))
+	persisted["server_port"] = int(persisted.get("server_port", default_live_server_port))
+	persisted["server_result_port"] = int(persisted.get("server_result_port", default_live_result_port))
+	persisted["server_auth_token"] = str(persisted.get("server_auth_token", default_live_server_auth_token))
 	if settings_panel.has_method("set_options"):
 		settings_panel.set_options(persisted)
 	_merge_capture_options(settings_panel.get_options())
 
 	record_control = ViewLockedRecordControlScript.new()
 	record_control.name = "ViewLockedRecordControl"
-	record_control.set_live_feed_mode(_is_live_feed_mode())
 	record_control.start_requested.connect(start_capture)
 	record_control.stop_requested.connect(stop_capture)
 	record_control.settings_requested.connect(_on_settings_requested)
@@ -1451,294 +1116,19 @@ func _set_passthrough_visible(enable: bool) -> void:
 		print("OpenXR passthrough view disabled")
 
 
-func _bind_android_plugin() -> void:
-	if camera_plugin != null and _active_sink_plugin() != null:
-		return
-	# Stage 2b split the camera provider from the muxer. Quest and PICO now
-	# both export providers; select the one with the best runtime device score
-	# so a PICO APK does not accidentally bind QuestCapturePlugin first.
-	var provider_was_bound := camera_plugin != null
-	if camera_plugin == null:
-		camera_plugin = CaptureProviderRegistryScript.bind()
-	if camera_plugin != null and not provider_was_bound:
-		_capture_provider_name = CaptureProviderRegistryScript.provider_name(camera_plugin)
-		camera_plugin.connect("camera_ready", Callable(self, "_on_camera_ready"))
-		camera_plugin.connect("camera_frame_saved", Callable(self, "_on_camera_frame_saved"))
-		camera_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
-		_camera_bind_warned = false
-		print("Capture provider singleton bound: %s" % _provider_label())
-		if not _is_live_feed_mode() and _capture_provider_name == "quest" and not _quest_os_upgrade_warning_pending:
+## Binds late-loading provider/sink plugins and runs the one-shot reaction to
+## the provider appearing. Returns true once the provider is bound.
+func _note_provider_bound() -> bool:
+	if _pipeline == null:
+		return false
+	var was_bound := _pipeline.camera.is_bound()
+	if not _pipeline.ensure_bound():
+		return false
+	if not was_bound or not _quest_os_upgrade_warning_pending:
+		if _pipeline.camera.provider_name == "quest" and not _quest_os_upgrade_warning_pending and not _quest_os_upgrade_warning_shown:
 			_quest_os_upgrade_warning_pending = true
 			call_deferred("_show_quest_os_upgrade_warning")
-
-	if _is_live_feed_mode():
-		if live_server_plugin == null:
-			live_server_plugin = _platform_registry().live_server_plugin()
-		if live_server_plugin != null:
-			if live_server_plugin.has_signal("live_feed_error"):
-				live_server_plugin.connect("live_feed_error", Callable(self, "_on_camera_error"))
-			elif live_server_plugin.has_signal("live_capture_error"):
-				live_server_plugin.connect("live_capture_error", Callable(self, "_on_camera_error"))
-			if live_server_plugin.has_signal("live_feed_connected"):
-				live_server_plugin.connect("live_feed_connected", Callable(self, "_on_live_feed_connected"))
-			elif live_server_plugin.has_signal("live_capture_connected"):
-				live_server_plugin.connect("live_capture_connected", Callable(self, "_on_live_feed_connected"))
-			if live_server_plugin.has_signal("live_feed_disconnected"):
-				live_server_plugin.connect("live_feed_disconnected", Callable(self, "_on_live_feed_disconnected"))
-			elif live_server_plugin.has_signal("live_capture_disconnected"):
-				live_server_plugin.connect("live_capture_disconnected", Callable(self, "_on_live_feed_disconnected"))
-			print("LivePushPlugin singleton bound")
-	else:
-		if muxer_plugin == null:
-			muxer_plugin = _platform_registry().muxer_plugin()
-			if muxer_plugin != null:
-				muxer_plugin.connect("camera_error", Callable(self, "_on_camera_error"))
-				print("SpatialMp4MuxerPlugin singleton bound (contract v%d)" % int(muxer_plugin.call("getMuxerContractVersion")))
-
-	var sink_plugin := _active_sink_plugin()
-	if camera_plugin != null and sink_plugin != null:
-		# Kotlin-direct sink binding: RGB CSD + packets bypass GDScript on the
-		# per-frame path. Depth / pose / hand / input still flow through the
-		# selected writer adapter -- see writer wiring.
-		if _is_live_feed_mode():
-			camera_plugin.call("bindMuxer", null)
-		var bound: Variant = camera_plugin.call("bindMuxer", sink_plugin)
-		if not bool(bound):
-			push_warning("%s.bindMuxer(%s) returned false; registry fallback will be used if available" % [_provider_label(), sink_plugin])
-		if writer != null and writer.has_method("set_android_plugin"):
-			writer.set_android_plugin(camera_plugin)
-		if writer != null and writer.has_method("set_muxer_plugin"):
-			writer.set_muxer_plugin(muxer_plugin)
-		if writer != null and writer.has_method("set_live_server_plugin"):
-			writer.set_live_server_plugin(live_server_plugin)
-		# The muxer singleton can bind after _configure the samplers ran (plugin
-		# installs late) — retry the native hand-capture hookup here.
-		_try_enable_native_hand_capture()
-		return
-	if camera_plugin == null and not _camera_bind_warned:
-		_camera_bind_warned = true
-		print("Capture provider singleton is not installed yet; RGB capture is waiting.")
-		push_warning("Capture provider singleton is not installed; RGB capture is disabled.")
-	if _is_live_feed_mode() and live_server_plugin == null:
-		push_warning("LivePushPlugin singleton is not installed; live feed streaming is disabled.")
-
-
-func _start_camera_plugin() -> void:
-	if camera_plugin == null:
-		print("Capture provider start skipped: singleton is not bound")
-		return
-
-	var session_dir_absolute: String = writer.get_session_dir_absolute()
-	var output_mp4_absolute: String = writer.get_output_mp4_path_absolute()
-	var partial_mp4_absolute: String = writer.get_partial_mp4_path_absolute()
-	print("%s configure begin: %s" % [_provider_label(), output_mp4_absolute])
-	# Android Godot plugin singletons do not reliably report @UsedByGodot
-	# methods through has_method(), so call the compact JSON RPC directly.
-	var want_audio: bool = bool(_capture_option("record_audio", false))
-	var layout_code: int = _audio_layout_code_for_label(
-		str(_capture_option("audio_channel_layout", "stereo"))
-	)
-	var configured_result: Variant
-	var export_space_id := OpenXRExportSpace.coordinate_space_id(
-		_capture_option("export_coordinate_space", OpenXRExportSpace.DEFAULT))
-	# Both providers embed this declaration in operator_static. RGB
-	# extrinsics stay head-relative; only the head trajectory's base changes.
-	camera_plugin.call("setExportCoordinateSpace", export_space_id)
-	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
-		camera_plugin.call("setRgbVideoCodec", str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)))
-		configured_result = camera_plugin.call(
-			"configureSpatialMp4SessionWithTime",
-			output_mp4_absolute,
-			partial_mp4_absolute,
-			session_dir_absolute,
-			writer.get_session_start_unix_us(),
-			writer.get_session_start_ticks_us(),
-			Time.get_ticks_usec(),
-			_stream_enabled("record_depth"),
-			_stream_enabled("record_head_pose"),
-			_stream_enabled("record_controller_pose"),
-			_stream_enabled("record_hand_data"),
-			_stream_enabled("record_controller_pose"),
-			bool(_capture_option("stereo_rgb", true)),
-			int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
-			int(_capture_option("rgb_fps", DEFAULT_RGB_FPS))
-		)
-	else:
-		var session_config := {
-			"final_path": output_mp4_absolute,
-			"partial_path": partial_mp4_absolute,
-			"session_dir": session_dir_absolute,
-			"session_start_unix_us": writer.get_session_start_unix_us(),
-			"session_start_godot_ticks_us": writer.get_session_start_ticks_us(),
-			"configure_godot_ticks_us": Time.get_ticks_usec(),
-			"record_depth": _stream_enabled("record_depth"),
-			"record_head_pose": _stream_enabled("record_head_pose"),
-			"record_controller_pose": _stream_enabled("record_controller_pose"),
-			"record_hand_data": _stream_enabled("record_hand_data"),
-			"record_controller_input": _stream_enabled("record_controller_pose"),
-			"stereo_rgb": bool(_capture_option("stereo_rgb", true)),
-			"rgb_bitrate": int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
-			"rgb_fps": int(_capture_option("rgb_fps", DEFAULT_RGB_FPS)),
-			"rgb_width": int(_capture_option("rgb_width", 0)),
-			"rgb_height": int(_capture_option("rgb_height", 0)),
-			"rgb_resolution": str(_capture_option("rgb_resolution", "")),
-			"rgb_codec": str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)),
-			"record_audio": want_audio,
-			"audio_channel_layout_code": layout_code,
-			"audio_sample_rate_hz": int(_capture_option("audio_sample_rate_hz", 48000)),
-			"audio_bitrate_bps": int(_capture_option("audio_bitrate_bps", 128000))
-		}
-		configured_result = camera_plugin.call(
-			"configureSpatialMp4SessionFromJson",
-			JSON.stringify(session_config)
-		)
-	# Body-motion options are configured the same way on every provider so the
-	# settings panel's "Body tracking" toggle reaches the active provider. PICO
-	# wires it to XR_BD_body_tracking + motion-tracker pucks; Quest wires it to
-	# Meta XR body tracking (XR_FB_body_tracking / XR_META_body_tracking_full_body).
-	# Pre-fix the call only fired in the PICO branch, so Quest's recordBodyTracking
-	# stayed at its compile-time default and SessionConfig.bodyJointsExpected
-	# never actually reflected the host's choice — the mp4 mett body track was
-	# never allocated and the manifest's body_tracking source stayed empty.
-	#
-	# Both Pico and Quest implement setBodyMotionCaptureOptions, so we always
-	# call it unconditionally. has_method() is unreliable for Godot Android
-	# plugin singletons: @UsedByGodot reflection does not always surface via
-	# Object.has_method() (see _resolve_device_identity in session_spool_writer
-	# for the same caveat), and a false negative here silently disables body
-	# tracking for the whole session. Any future provider that does not
-	# implement the call will see a plain "method not found" GDScript error
-	# at startup, which is the loud failure mode we want.
-	camera_plugin.call(
-			"setBodyMotionCaptureOptions",
-			_stream_enabled("record_body_tracking"),
-			_stream_enabled("record_motion_trackers"),
-			int(_capture_option("max_motion_trackers", DEFAULT_PICO_BODY_TRACKERS))
-		)
-	_camera_configured = bool(configured_result)
-	print("%s configureSession returned: %s (audio=%s)" % [_provider_label(), configured_result, want_audio])
-	if not _camera_configured:
-		_abort_capture_start("%s configure failed" % _provider_label())
-		return
-
-	camera_plugin.call("requestCameraPermission")
-	# RECORD_AUDIO is a runtime permission too. Request it up front; if the
-	# user denies or ignores it, _try_start_camera_plugin degrades to a
-	# video-only capture instead of blocking the whole session.
-	if want_audio:
-		camera_plugin.call("requestAudioPermission")
-	print("%s requested camera permissions" % _provider_label())
-	_try_start_camera_plugin()
-
-
-# Mirrors com.spatialmp4.contract.AudioChannelLayout.code on the Kotlin side.
-# Centralised here so the capture panel / settings UI can swap "stereo" for
-# "foa_acn_sn3d" without re-deriving the enum mapping in three places.
-func _audio_layout_code_for_label(label: String) -> int:
-	match label:
-		"mono":
-			return 0
-		"stereo":
-			return 1
-		"foa_acn_sn3d":
-			return 2
-		"raw_4ch":
-			return 3
-		_:
-			return 1
-
-
-func _try_start_camera_plugin() -> void:
-	if camera_plugin == null or not _camera_configured or _camera_start_attempted:
-		return
-	var has_permission: bool = bool(camera_plugin.call("hasCameraPermission"))
-	if not has_permission:
-		if not _camera_permission_wait_logged:
-			_camera_permission_wait_logged = true
-			print("%s waiting for camera permission" % _provider_label())
-		camera_plugin.call("requestCameraPermission")
-		return
-	var wants_audio: bool = bool(_capture_option("record_audio", false))
-	if wants_audio:
-		var has_audio_permission: bool = bool(camera_plugin.call("hasAudioPermission"))
-		if not has_audio_permission:
-			var now_us := Time.get_ticks_usec()
-			if not _audio_permission_wait_logged:
-				_audio_permission_wait_logged = true
-				_audio_permission_wait_started_ticks_us = now_us
-				print("%s waiting for audio permission" % _provider_label())
-			camera_plugin.call("requestAudioPermission")
-			if now_us - _audio_permission_wait_started_ticks_us < AUDIO_PERMISSION_GRACE_US:
-				return
-			if not _audio_permission_degraded_logged:
-				_audio_permission_degraded_logged = true
-				print("%s audio permission missing; starting without audio" % _provider_label())
-	# Environment depth may have its own Android runtime permission. Start the
-	# OpenXR provider only after the capture provider confirms all permissions
-	# required by this session, otherwise the runtime can reject the provider
-	# and foreground its permission/setup UI while recording is already active.
-	if _xr_session_begun and _stream_enabled("record_depth"):
-		depth_sampler.start()
-		if not _recording:
-			return
-	_camera_start_attempted = true
-	var started := false
-	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name):
-		started = _start_pico_openxr_camera_image_capture()
-	else:
-		print("%s invoking startCameras" % _provider_label())
-		started = bool(camera_plugin.call("startCameras"))
-		print("%s startCameras returned: %s" % [_provider_label(), started])
-	if not started:
-		_abort_capture_start("%s camera start failed" % _provider_label())
-		return
-	if not _start_native_openxr_hand_recording():
-		_abort_capture_start("Native 60 Hz hand recorder failed to start")
-
-
-func _stop_camera_plugin() -> void:
-	# Native camera/hand workers hold OpenXR sessions and feed the
-	# active native writer. Join them before the provider finalizes that writer.
-	_stop_native_openxr_hand_recording()
-	if CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name) and pico_openxr_bridge != null and pico_openxr_bridge.has_method("stop_camera_image_capture"):
-		pico_openxr_bridge.call("stop_camera_image_capture")
-	if pose_sampler != null and pose_sampler.has_method("set_native_hand_muxer_writes_enabled"):
-		pose_sampler.set_native_hand_muxer_writes_enabled(true)
-	if camera_plugin != null:
-		camera_plugin.call("stopCameras")
-	_pico_camera_image_started = false
-	_pico_native_pipeline_started = false
-	_pico_camera_sink_bound = false
-
-
-func _start_native_openxr_hand_recording() -> bool:
-	if _is_live_feed_mode() or not _stream_enabled("record_hand_data"):
-		return true
-	_try_enable_native_hand_capture()
-	if _native_openxr_hand_capture == null:
-		push_error("NativeOpenXRHandCapture singleton is unavailable")
-		return false
-	var time_offset_ns := int(camera_plugin.call("getXrTimeToGodotTicksOffsetNs"))
-	_native_openxr_hand_recording_started = bool(
-		_native_openxr_hand_capture.call(
-			"start_recording", time_offset_ns)
-	)
-	if not _native_openxr_hand_recording_started:
-		push_error("Native OpenXR hand recorder start failed: %s" % str(
-			_native_openxr_hand_capture.call("get_last_error")
-		))
-		return false
-	if pose_sampler != null and pose_sampler.has_method("set_native_hand_muxer_writes_enabled"):
-		pose_sampler.set_native_hand_muxer_writes_enabled(false)
-	print("Native OpenXR hand recorder started at an independent 60 Hz (Quest/PICO)")
 	return true
-
-
-func _stop_native_openxr_hand_recording() -> void:
-	var was_started := _native_openxr_hand_recording_started
-	_native_openxr_hand_recording_started = false
-	if was_started and _native_openxr_hand_capture != null:
-		_native_openxr_hand_capture.call("stop_recording")
 
 
 func _on_openxr_session_begun() -> void:
@@ -1754,49 +1144,24 @@ func _on_openxr_session_begun() -> void:
 		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
 	if keep_passthrough_visible:
 		_set_passthrough_visible(true)
-	if _recording and _stream_enabled("record_depth"):
-		depth_sampler.start()
+	if _pipeline != null:
+		_pipeline.on_xr_session_begun()
 
 
 func _on_openxr_session_stopping() -> void:
 	_xr_session_begun = false
-	if _recording:
-		depth_sampler.stop()
+	if _pipeline != null:
+		_pipeline.on_xr_session_stopping()
 	_set_passthrough_visible(false)
 
 
-func _on_camera_ready(eye: String, camera_id: String) -> void:
-	print("%s camera ready: %s=%s" % [_provider_label(), eye, camera_id])
-
-
-func _on_camera_frame_saved(eye: String, _path: String, timestamp_ns: int) -> void:
-	if timestamp_ns > 0 and eye == "left":
-		print_verbose("%s frames are being recorded" % _provider_label())
-
-
-func _on_camera_error(message: String) -> void:
-	_last_capture_error = message
-	push_error("%s: %s" % [_provider_label(), message])
-
-
-func _on_live_feed_connected(endpoint: String) -> void:
-	print("Live feed push connected: %s" % endpoint)
-
-
-func _on_live_feed_disconnected(endpoint: String) -> void:
-	print("Live feed push disconnected: %s" % endpoint)
-
-
 func _unhandled_key_input(event: InputEvent) -> void:
-	var action := capture_action_for_key_event(
-		event, _recording, _is_live_feed_mode(), _export_space_start_pending)
+	var action := capture_action_for_key_event(event, _recording, _export_space_start_pending)
 	if action.is_empty():
 		return
 
-	# Volume keys are an ego-capture hardware shortcut regardless of whether
-	# the active XR interaction source is controllers or hands. Restricting
-	# them to the legacy "head" override made the shortcut unreachable during
-	# normal auto-detected interaction.
+	# Volume keys are an Ego hardware shortcut regardless of whether the active
+	# XR interaction source is controllers or hands.
 	print("Volume key requested ego capture %s" % action)
 	var viewport := get_viewport()
 	if viewport != null:
@@ -1815,7 +1180,6 @@ func _unhandled_key_input(event: InputEvent) -> void:
 static func capture_action_for_key_event(
 		event: InputEvent,
 		recording: bool,
-		live_feed_mode: bool,
 		start_pending: bool = false) -> StringName:
 	if not (event is InputEventKey):
 		return &""
@@ -1825,16 +1189,13 @@ static func capture_action_for_key_event(
 	var code := key_event.keycode
 	if code == KEY_NONE:
 		code = key_event.physical_keycode
-	return capture_action_for_volume_key(code, recording, live_feed_mode, start_pending)
+	return capture_action_for_volume_key(code, recording, start_pending)
 
 
 static func capture_action_for_volume_key(
 		code: Key,
 		recording: bool,
-		live_feed_mode: bool,
 		start_pending: bool = false) -> StringName:
-	if live_feed_mode:
-		return &""
 	if code == KEY_VOLUMEDOWN and start_pending:
 		return &"cancel_start"
 	if code == KEY_VOLUMEUP and not recording and not start_pending:
@@ -1864,225 +1225,82 @@ func _on_capture_settings_saved(options: Dictionary) -> void:
 		capture_options.get("export_coordinate_space", OpenXRExportSpace.DEFAULT))
 	_request_export_coordinate_space(capture_options["export_coordinate_space"])
 	capture_options["save_root"] = _configured_save_root()
+	_apply_output(str(capture_options.get("capture_output", EgoCaptureComposition.OUTPUT_LOCAL)))
+	_register_saved_endpoints()
 	_sync_operator_interaction_override()
 	_update_hand_skeleton_overlay_state()
 	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_release_ui_pointer()
 	record_control.show_for_mode(_current_ui_interaction_mode())
-	_prepare_output_storage()
-	# If the operator just flipped Audio on, drop the once-per-session latch
-	# so the next idle tick fires the system permission prompt. Without this
-	# they'd only see the prompt the first time they tapped Start, which is
-	# too late if the dialog gets dismissed during capture.
+	_pipeline.prepare_storage(_configured_save_root())
+	# If the operator just flipped Audio on, drop the once-per-session latch so
+	# the next idle tick fires the system permission prompt.
 	if not prev_record_audio and bool(capture_options.get("record_audio", false)):
-		_audio_permission_prompt_fired = false
+		_pipeline.audio.rearm_prompt()
 	# The settings panel already persisted this snapshot through
-	# BaseSettingsPanel before emitting `saved`.
-	# Redact the token in the log so it does not land in adb logcat /
-	# crash.log uploads.
+	# BaseSettingsPanel before emitting `saved`. Redact tokens in the log so
+	# they do not land in adb logcat / crash.log uploads.
 	var log_view := capture_options.duplicate(true)
-	if str(log_view.get("upload_token", "")) != "":
-		log_view["upload_token"] = "<redacted>"
+	for secret_key in ["upload_token", "server_auth_token"]:
+		if str(log_view.get(secret_key, "")) != "":
+			log_view[secret_key] = "<redacted>"
 	print("Capture options updated: %s" % JSON.stringify(log_view))
 
 
+## Saved, working endpoints become referenceable by name for host-orchestrated
+## local tasks (EndpointRegistry). Only what the user confirmed here counts.
+func _register_saved_endpoints() -> void:
+	var registry := EndpointRegistry.shared()
+	var upload_url := str(capture_options.get("upload_url", "")).strip_edges()
+	if not upload_url.is_empty() and bool(capture_options.get("upload_on_finalize", false)):
+		registry.register_upload(upload_url, str(capture_options.get("upload_token", "")), true)
+	if _ingest != null and settings_panel != null and bool(settings_panel.get("_live_server_connected")):
+		registry.register_live(_ingest.host, _ingest.push_port, _ingest.result_port, _ingest.auth_token, true)
+
+
 func _on_connect_live_server_requested(options: Dictionary) -> void:
-	if not _is_live_feed_mode():
-		return
+	# Connecting before Save previews the endpoint: mount ingest if the panel's
+	# Output selection asks for it, then open the result channel.
 	_merge_capture_options(options)
-	var host := str(capture_options.get("server_host", default_live_server_host))
-	var port := int(capture_options.get("server_result_port", default_live_result_port))
-	_set_live_server_connectivity_status(
-		tr("UI_LIVE_SERVER_CONNECTING") % [host, port],
-		"normal"
-	)
-	_start_live_pull()
-
-
-func _start_live_pull() -> void:
-	if not _is_live_feed_mode() or live_pull_view == null:
+	_apply_output(str(capture_options.get("capture_output", EgoCaptureComposition.OUTPUT_LOCAL)))
+	if _ingest == null:
 		return
-	if not live_pull_view.has_method("connect_to_server"):
-		return
-	var host := str(capture_options.get("server_host", default_live_server_host))
-	var port := int(capture_options.get("server_result_port", default_live_result_port))
-	var token := str(capture_options.get("server_auth_token", default_live_server_auth_token))
-	print("Live feed pull connecting: %s:%d" % [host, port])
-	live_pull_view.call("connect_to_server", host, port, token)
+	_ingest.configure(capture_options)
+	_ingest.connect_results()
 
 
-func _stop_live_pull() -> void:
-	if live_pull_view != null and live_pull_view.has_method("disconnect_from_server"):
-		print("Live feed pull disconnecting")
-		live_pull_view.call("disconnect_from_server")
-
-
-## OLCP stream name -> the capture_options flag that produces it.
-## Note controller_input has no independent flag: it is derived from
-## record_controller_pose (see the provider config below), so both OLCP
-## streams map onto the same switch.
-const SERVER_STREAM_TO_OPTION := {
-	"depth.u16": "record_depth",
-	"head_pose.json": "record_head_pose",
-	"controller_pose.json": "record_controller_pose",
-	"controller_input.json": "record_controller_pose",
-	"hand_joints.json": "record_hand_data",
-}
-
-## Streams the server can ask for that this client cannot switch off per-stream
-## (RGB is produced by the camera provider itself). Listed so the read-out in
-## settings does not claim we send something we do not, and vice versa.
-const SERVER_STREAM_UNMAPPED := ["rgb.hevc", "session.json"]
-
-
-## The server owns the stream selection in Live Feed mode: it tells us what its
-## algorithm needs and we capture exactly that, instead of the operator picking
-## streams the algorithm will silently ignore. Arrives on the live-pull channel
-## when the settings page connects, i.e. before any capture has started.
-func _positive_live_feed_limit(limits: Dictionary, key: String) -> int:
-	if not limits.has(key):
-		return -1
-	var raw_value: Variant = limits.get(key)
-	var parsed_value := -1
-	if raw_value is int or raw_value is float:
-		parsed_value = int(raw_value)
-	elif raw_value is String and str(raw_value).is_valid_int():
-		parsed_value = str(raw_value).to_int()
-	if parsed_value <= 0:
-		push_warning("Ignoring invalid capture limit %s=%s" % [key, raw_value])
-		return -1
-	return parsed_value
-
-
+## The ingest server owns the stream selection: it tells us what its algorithm
+## needs and we capture exactly that (StreamPlanner). Arrives on the result
+## channel when the settings page connects, i.e. before any capture starts.
 func _on_capture_request_received(request: Dictionary) -> void:
-	if not _is_live_feed_mode():
+	if _ingest == null:
 		return
-	var selected: Array = []
-	var raw_selected: Variant = request.get("selected_streams", [])
-	if raw_selected is Array:
-		selected = raw_selected
-
-	_server_requested_streams = selected.duplicate()
-
-	# Enable exactly what was asked for, nothing more.
-	var requested := _server_requested_options()
-	var updates: Dictionary = {}
-	for option_v in SERVER_STREAM_TO_OPTION.values():
-		var option := str(option_v)
-		updates[option] = bool(requested.get(option, false))
-	# RGB is a single OLCP stream, but the camera provider can encode either
-	# left-only mono or side-by-side stereo. The server selects that shape via
-	# limits.rgb_eye; absent/unknown values preserve the protocol's stereo
-	# default for existing algorithms.
-	var limits: Dictionary = {}
-	var raw_limits: Variant = request.get("limits", {})
-	if raw_limits is Dictionary:
-		limits = raw_limits
-	var rgb_eye := str(limits.get("rgb_eye", "stereo")).strip_edges().to_lower()
-	updates["stereo_rgb"] = rgb_eye != "left" and rgb_eye != "mono"
-	# Recording-quality defaults are intentionally high. Live algorithms can
-	# cap their HEVC budget independently without reducing Ego Record quality.
-	# Reset on every request so limits from a previous server do not leak into
-	# a reconnect or a later algorithm that omits them.
-	updates["rgb_fps"] = DEFAULT_RGB_FPS
-	updates["rgb_bitrate"] = DEFAULT_RGB_BITRATE
-	if limits.has("rgb_max_hz"):
-		var requested_rgb_fps := _positive_live_feed_limit(limits, "rgb_max_hz")
-		if requested_rgb_fps > 0:
-			updates["rgb_fps"] = clampi(
-				requested_rgb_fps,
-				LIVE_FEED_MIN_RGB_FPS,
-				LIVE_FEED_MAX_RGB_FPS,
-			)
-	if limits.has("rgb_bitrate_bps"):
-		var requested_rgb_bitrate := _positive_live_feed_limit(limits, "rgb_bitrate_bps")
-		if requested_rgb_bitrate > 0:
-			updates["rgb_bitrate"] = clampi(
-				requested_rgb_bitrate,
-				LIVE_FEED_MIN_RGB_BITRATE,
-				LIVE_FEED_MAX_RGB_BITRATE,
-			)
-
-	# These capture paths have no OLCP stream in Live Feed. Disable their
-	# producers so a narrow server request does not spend device CPU on audio,
-	# body, or motion data that can never be transmitted.
-	updates["record_audio"] = false
-	updates["record_body_tracking"] = false
-	updates["record_motion_trackers"] = false
-	# Hands and controllers are mutually exclusive and the live one is a
-	# physical fact, so the request cannot switch it on by itself. Drop the
-	# source that is not in use; _update_input_source_mismatch_notice() then
-	# asks the operator to switch if the algorithm needed the other one.
-	if _last_capture_interaction_mode == "hands":
-		updates["record_controller_pose"] = false
-	elif _last_capture_interaction_mode == "controllers":
-		updates["record_hand_data"] = false
-	_merge_capture_options(updates)
-
-	print("[Operator] Capture streams set by server: %s" % JSON.stringify(selected))
+	_merge_capture_options(_ingest.planner.apply_ingest_request(request, _last_capture_interaction_mode))
 	if settings_panel != null and settings_panel.has_method("set_server_requested_streams"):
 		settings_panel.set_server_requested_streams(
-			selected, str(request.get("algorithm", ""))
+			_ingest.planner.requested_streams(), _ingest.planner.algorithm()
 		)
 	_update_input_source_mismatch_notice()
 
 
-## capture_options keys the server's current request maps to.
-func _server_requested_options() -> Dictionary:
-	var requested: Dictionary = {}
-	for stream_v in _server_requested_streams:
-		var option := str(SERVER_STREAM_TO_OPTION.get(str(stream_v), ""))
-		if not option.is_empty():
-			requested[option] = true
-	return requested
-
-
-## In Live Feed the server owns the stream selection, but the runtime input
-## mode (hands vs controllers) writes the same flags. Re-applying the server's
-## choice afterwards lets auto-detection *narrow* the set — there genuinely is
-## no controller data while the user is bare-handed — without ever widening it
-## past what the algorithm asked for.
-func _enforce_server_stream_selection() -> void:
-	if not _is_live_feed_mode() or _server_requested_streams.is_empty():
-		return
-	var requested := _server_requested_options()
-	for option_v in SERVER_STREAM_TO_OPTION.values():
-		var option := str(option_v)
-		if not bool(requested.get(option, false)):
-			capture_options[option] = false
-	_update_input_source_mismatch_notice()
-
-
-## Hand tracking and controller tracking are mutually exclusive at the
-## provider level, and which one is live is a physical fact we cannot change
-## from software. So when the algorithm wants the source the operator is not
-## currently holding, ask them to switch rather than silently sending nothing.
+## Hand tracking and controller tracking are mutually exclusive, and which one
+## is live is a physical fact. When the ingest algorithm wants the source the
+## operator is not holding, ask them to switch rather than sending nothing.
 func _update_input_source_mismatch_notice() -> void:
-	if not _is_live_feed_mode() or _server_requested_streams.is_empty():
-		_clear_input_source_mismatch_notice()
-		return
-	var requested := _server_requested_options()
-	var wants_hands := bool(requested.get("record_hand_data", false))
-	var wants_controllers := bool(requested.get("record_controller_pose", false))
-	var mode := _last_capture_interaction_mode
-
-	var message := ""
-	if wants_hands and not wants_controllers and mode == "controllers":
-		message = tr("UI_SERVER_WANTS_HANDS")
-	elif wants_controllers and not wants_hands and mode == "hands":
-		message = tr("UI_SERVER_WANTS_CONTROLLERS")
-
+	var key := _ingest.planner.input_source_notice_key(_last_capture_interaction_mode) if _ingest != null else ""
+	var message := tr(key) if not key.is_empty() else ""
 	# De-duplicate so a flapping input-mode detector does not replay the
 	# fade-in on every frame. _resync_capture_notice() clears this cache when
-	# the panel reopens, because the panel's callout auto-hides on a timer and
-	# would otherwise never come back while the mismatch persists.
+	# the panel reopens, because the panel's callout auto-hides on a timer.
 	if message == _input_source_notice:
 		return
 	_input_source_notice = message
 	if message.is_empty():
-		_clear_input_source_mismatch_notice()
+		if record_control != null and record_control.has_method("clear_status_notice"):
+			record_control.call("clear_status_notice")
+		if settings_panel != null and settings_panel.has_method("hide_capture_notice"):
+			settings_panel.call("hide_capture_notice")
 		return
-
 	print("[Operator] Input source mismatch: %s" % message)
 	# Surface in both places: the settings panel may be open (before capture)
 	# or closed (during capture), and the operator needs to see it either way.
@@ -2093,42 +1311,10 @@ func _update_input_source_mismatch_notice() -> void:
 
 
 ## Re-show the mismatch notice after the panel was reopened: its callout hides
-## itself on a timer (and on host edits / successful connect), so the cached
-## "already shown" state has to be dropped or the warning is lost for good.
+## itself on a timer, so the cached "already shown" state has to be dropped.
 func _resync_capture_notice() -> void:
-	if not _is_live_feed_mode():
-		return
 	_input_source_notice = ""
 	_update_input_source_mismatch_notice()
-
-
-func _clear_input_source_mismatch_notice() -> void:
-	_input_source_notice = ""
-	if record_control != null and record_control.has_method("clear_status_notice"):
-		record_control.call("clear_status_notice")
-	if settings_panel != null and settings_panel.has_method("hide_capture_notice"):
-		settings_panel.call("hide_capture_notice")
-
-
-func _on_live_pull_connected(host: String, port: int) -> void:
-	_set_live_server_connectivity_status(
-		tr("UI_LIVE_SERVER_CONNECTED") % [host, port],
-		"success"
-	)
-
-
-func _on_live_pull_disconnected(host: String, port: int) -> void:
-	_set_live_server_connectivity_status(
-		tr("UI_LIVE_SERVER_DISCONNECTED") % [host, port],
-		"warning"
-	)
-
-
-func _on_live_pull_connection_failed(_host: String, _port: int, reason: String) -> void:
-	_set_live_server_connectivity_status(
-		tr("UI_LIVE_SERVER_CONNECTION_FAILED") % reason,
-		"error"
-	)
 
 
 func _set_live_server_connectivity_status(text: String, level: String) -> void:
@@ -2137,11 +1323,10 @@ func _set_live_server_connectivity_status(text: String, level: String) -> void:
 
 
 func _on_exit_requested() -> void:
-	# Exit from the in-mode settings panel returns to the launcher / mode
-	# select page so the user can pick a different mode without restarting
-	# the app. The launcher's own Exit card is what actually quits the
-	# process (see scripts/app/launcher/mode_select.gd). Any active capture / live pull
-	# is stopped first so we don't leak an MP4 muxer or a network reader.
+	# Exit from the in-mode settings panel returns to the launcher so the user
+	# can pick a different mode without restarting the app. The launcher's own
+	# Exit card is what actually quits the process. Any active capture / result
+	# channel is stopped first so we don't leak an MP4 muxer or a network reader.
 	if not _scene_transition_target.is_empty():
 		return
 	print("[Operator] Capture exit requested — returning to mode select")
@@ -2149,7 +1334,8 @@ func _on_exit_requested() -> void:
 	_release_ui_pointer()
 	if _recording:
 		stop_capture()
-	_stop_live_pull()
+	if _ingest != null:
+		_ingest.disconnect_results()
 	# EgoUploader owns a worker thread. Ask it to leave any HTTP poll before
 	# change_scene tears down this node and waits for that thread in _exit_tree().
 	# Pending upload state is durable and resumes next time Ego is opened.
@@ -2199,7 +1385,7 @@ func _update_operator_interaction_state() -> void:
 func _update_hand_skeleton_overlay_state() -> void:
 	if _hand_skeleton_overlay == null:
 		return
-	var show_overlay := not _is_live_feed_mode() \
+	var show_overlay := _pipeline != null and _pipeline.records_locally() \
 			and _recording \
 			and bool(capture_options.get("show_hand_skeleton_overlay", true)) \
 			and _current_ui_interaction_mode() == "hands"
@@ -2269,8 +1455,8 @@ func _apply_capture_interaction_mode(mode: String) -> void:
 	elif mode == "controllers":
 		capture_options["record_controller_pose"] = true
 		capture_options["record_hand_data"] = false
-	# Live Feed: the algorithm's request wins over auto-detection.
-	_enforce_server_stream_selection()
+	# An ingest request wins over auto-detection.
+	_narrow_to_ingest_request()
 	if settings_panel != null and settings_panel.has_method("set_interaction_mode"):
 		settings_panel.call("set_interaction_mode", mode)
 	if record_control != null and record_control.visible and not _recording:
@@ -2290,36 +1476,6 @@ func _on_settings_requested() -> void:
 	_resync_capture_notice()
 	_tracker_status_refresh_accum = TRACKER_STATUS_REFRESH_SECONDS
 	_update_pico_tracker_setup_status(0.0)
-
-
-func _open_live_feed_settings() -> void:
-	if not _is_live_feed_mode() or settings_panel == null:
-		return
-	_release_ui_pointer()
-	if record_control != null:
-		record_control.hide_control()
-	if settings_panel.has_method("show_live_server_settings"):
-		settings_panel.show_live_server_settings()
-	else:
-		settings_panel.open()
-	_resync_capture_notice()
-
-
-func _is_live_feed_mode() -> bool:
-	return capture_sink == "server"
-
-
-func _active_sink_plugin() -> Object:
-	return live_server_plugin if _is_live_feed_mode() else muxer_plugin
-
-
-func _stream_enabled(option: String) -> bool:
-	return bool(_capture_option(option, true))
-
-
-func _capture_option(option: String, fallback: Variant = null) -> Variant:
-	var source: Dictionary = _active_capture_options if _recording and not _active_capture_options.is_empty() else capture_options
-	return source.get(option, fallback)
 
 
 ## Requests one of the three user-visible OpenXR reference-space types.
@@ -2369,32 +1525,17 @@ func _ensure_export_coordinate_space_ready(space: Variant) -> bool:
 	return false
 
 
-func _effective_capture_options(options: Dictionary) -> Dictionary:
-	if camera_plugin == null:
-		_bind_android_plugin()
-	var recording_options := options.duplicate(true)
-	for key in RUNTIME_DISPLAY_OPTION_KEYS:
-		recording_options.erase(key)
-	# WP6: the provider-capability gating moved verbatim to the composition
-	# root so the WP7 harness can exercise it with fake providers.
-	return EgoCaptureComposition.effective_capture_options(recording_options, camera_plugin)
-
-
-func _provider_label() -> String:
-	return "%sCapturePlugin" % _capture_provider_name.capitalize() if not _capture_provider_name.is_empty() else "CaptureProvider"
-
-
 func _show_quest_os_upgrade_warning() -> void:
 	_quest_os_upgrade_warning_pending = false
-	if _quest_os_upgrade_warning_shown or _is_live_feed_mode() or camera_plugin == null or _capture_provider_name != "quest":
+	if _quest_os_upgrade_warning_shown or _pipeline.camera.provider_name != "quest":
 		return
-	var version := int(camera_plugin.call("getCapturePlatformVersion"))
+	var version := _pipeline.camera.platform_version()
 	if version <= 0:
 		push_warning("Unable to detect Horizon OS version; skipping the Quest upgrade prompt")
 		return
+	_quest_os_upgrade_warning_shown = true
 	if version >= MIN_QUEST_HORIZON_OS_VERSION:
 		return
-	_quest_os_upgrade_warning_shown = true
 	var title := tr("UI_QUEST_OS_UPDATE_REQUIRED_TITLE")
 	var detail := tr("UI_QUEST_OS_UPDATE_REQUIRED_DETAIL") % [version, MIN_QUEST_HORIZON_OS_VERSION]
 	push_warning("%s: %s" % [title, detail])
@@ -2409,233 +1550,20 @@ func _show_quest_os_upgrade_warning() -> void:
 		)
 
 
-func _start_pico_openxr_camera_image_capture() -> bool:
-	if pico_openxr_bridge == null:
-		push_error("PicoOpenXRExtension is not available; cannot start XR_PICO_camera_image")
-		return false
-	if not pico_openxr_bridge.has_method("start_camera_image_capture"):
-		push_error("PicoOpenXRExtension does not expose start_camera_image_capture")
-		return false
-	var stereo := bool(_capture_option("stereo_rgb", true))
-	var fps := int(_capture_option("rgb_fps", DEFAULT_RGB_FPS))
-	var resolution := _rgb_resolution_from_capture_options(Vector2i.ZERO)
-	var info: Variant = pico_openxr_bridge.call(
-		"start_camera_image_capture",
-		stereo,
-		resolution.x,
-		resolution.y,
-		fps
-	)
-	if typeof(info) != TYPE_DICTIONARY:
-		push_error("XR_PICO_camera_image start returned invalid info")
-		return false
-	var info_dict := info as Dictionary
-	print("XR_PICO_camera_image start info: %s" % JSON.stringify(info_dict))
-	if not bool(info_dict.get("active", false)):
-		push_error("XR_PICO_camera_image did not become active: %s" % JSON.stringify(info_dict))
-		return false
-	var negotiated_resolution := Vector2i(
-		int(info_dict.get("width", 0)), int(info_dict.get("height", 0)))
-	if resolution != Vector2i.ZERO and negotiated_resolution != resolution:
-		pico_openxr_bridge.call("stop_camera_image_capture")
-		push_error(
-			"XR_PICO_camera_image negotiated %s instead of explicitly requested %s"
-			% [_rgb_resolution_text(negotiated_resolution), _rgb_resolution_text(resolution)])
-		return false
-	# Poll at 2x the negotiated camera fps (see _pico_camera_poll_interval_s).
-	_pico_camera_poll_interval_s = 0.5 / max(float(info_dict.get("fps", DEFAULT_RGB_FPS)), 1.0)
-	if camera_plugin.has_method("setOpenXrCameraImageInfoJson"):
-		camera_plugin.call("setOpenXrCameraImageInfoJson", JSON.stringify(info_dict))
-	var started: bool = bool(camera_plugin.call("startOpenXrCameraImageCapture", JSON.stringify(info_dict)))
-	print("%s startOpenXrCameraImageCapture returned: %s" % [_provider_label(), started])
-	if not started:
-		_pico_camera_image_started = false
-		return false
-	if not pico_openxr_bridge.has_method("start_native_recording_pipeline"):
-		push_error("pico_openxr bridge lacks the native camera/hand recording pipeline; rebuild the APK")
-		return false
-	# Android @UsedByGodot methods are callable even though has_method() may
-	# report false.  This PICO-specific branch always binds PicoCapturePlugin,
-	# whose anchor maps OpenXR CLOCK_MONOTONIC timestamps to Godot process ticks.
-	var time_offset_ns := int(camera_plugin.call("getXrTimeToGodotTicksOffsetNs"))
-	var exact_head_samples := _stream_enabled("record_head_pose")
-	var exact_hand_samples := _stream_enabled("record_hand_data")
-	var tracking_coordinate_space := str(capture_options.get(
-		"export_coordinate_space_id",
-		OpenXRExportSpace.coordinate_space_id(
-			_capture_option("export_coordinate_space", OpenXRExportSpace.DEFAULT))))
-	var native_started := bool(pico_openxr_bridge.call(
-		"start_native_recording_pipeline",
-		str(_capture_option("rgb_codec", DEFAULT_RGB_CODEC)),
-		int(_capture_option("rgb_bitrate", DEFAULT_RGB_BITRATE)),
-		time_offset_ns,
-		exact_head_samples or exact_hand_samples,
-		exact_head_samples,
-		exact_hand_samples,
-		tracking_coordinate_space
-	))
-	if not native_started:
-		var native_error := ""
-		if pico_openxr_bridge.has_method("get_native_recording_pipeline_error"):
-			native_error = str(pico_openxr_bridge.call("get_native_recording_pipeline_error"))
-		push_error("Failed to start native PICO RGB encoder: %s" % native_error)
-		return false
-	_pico_camera_image_started = true
-	_pico_native_pipeline_started = true
-	print("PICO native recording pipeline started: OpenXR RGBA -> GLES -> NDK MediaCodec")
-	return true
-
-
-func _rgb_resolution_from_capture_options(fallback: Vector2i) -> Vector2i:
-	var width := int(_capture_option("rgb_width", fallback.x))
-	var height := int(_capture_option("rgb_height", fallback.y))
-	if width > 0 and height > 0:
-		return Vector2i(width, height)
-	var resolution := str(_capture_option("rgb_resolution", "")).strip_edges().to_lower()
-	var parts := resolution.split("x", false, 2)
-	if parts.size() == 2:
-		width = int(parts[0])
-		height = int(parts[1])
-		if width > 0 and height > 0:
-			return Vector2i(width, height)
-	return fallback
-
-
-func _rgb_resolution_text(resolution: Vector2i) -> String:
-	return "%dx%d" % [resolution.x, resolution.y]
-
-
-func _pump_pico_openxr_camera_frames(delta: float) -> void:
-	if not CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name) or not _pico_camera_image_started:
-		return
-	var bridge := pico_openxr_bridge
-	var plugin := camera_plugin
-	if bridge == null or plugin == null:
-		return
-	_pico_camera_frame_accum_s += delta
-	if _pico_camera_frame_accum_s < _pico_camera_poll_interval_s:
-		return
-	# Carry the remainder forward (instead of zeroing) so the effective poll
-	# rate tracks wall time, but clamp to one interval so a long frame hitch
-	# doesn't queue up a burst of catch-up polls.
-	_pico_camera_frame_accum_s = minf(
-		_pico_camera_frame_accum_s - _pico_camera_poll_interval_s,
-		_pico_camera_poll_interval_s
-	)
-	# Native mode is independently clocked. This main-thread call only drains
-	# tiny counters for QcCamera; it never acquires, copies, or submits RGB.
-	if _pico_native_pipeline_started:
-		if bridge.has_method("pop_native_recording_metrics"):
-			var native_metrics: Variant = bridge.call("pop_native_recording_metrics")
-			if typeof(native_metrics) == TYPE_DICTIONARY:
-				for key in (native_metrics as Dictionary).keys():
-					_pico_native_metrics_accum[key] = int(_pico_native_metrics_accum.get(key, 0)) + int((native_metrics as Dictionary)[key])
-		return
-	# Kotlin-direct pump: the bridge submits frames to the capture plugin
-	# (submitOpenXrRgbaFrame) entirely in C++ — the large per-eye RGBA
-	# PackedByteArrays never round-trip through GDScript Dictionaries. This
-	# GDScript tick is one call + a compact counter array at ~60 Hz. The native
-	# pump moves at most one eye per call and alternates eyes.
-	if not _pico_camera_sink_bound:
-		if not bridge.has_method("bind_camera_frame_sink"):
-			# Bridge .so predates the direct pump; RGB capture requires the
-			# matching pico_openxr build (same APK ships both, so this only
-			# fires on a stale sideload).
-			if not _pico_camera_pump_warned:
-				_pico_camera_pump_warned = true
-				push_error("pico_openxr bridge lacks bind_camera_frame_sink — rebuild the APK (make build-pico); Pico RGB frames will not be recorded.")
-			return
-		bridge.call("bind_camera_frame_sink", plugin)
-		_pico_camera_sink_bound = true
-	var counters: Variant = bridge.call("pump_camera_frames_to_sink")
-	if counters is PackedInt32Array and (counters as PackedInt32Array).size() >= 5:
-		var c := counters as PackedInt32Array
-		_pico_camera_submit_ok_left += c[0]
-		_pico_camera_submit_ok_right += c[1]
-		_pico_camera_submit_fail_left += c[2]
-		_pico_camera_submit_fail_right += c[3]
-		_pico_camera_frames_skipped += c[4]
-		if c.size() >= 7:
-			_pico_camera_acquire_us += c[5]
-			_pico_camera_submit_us += c[6]
-		var failed := c[2] + c[3]
-		if failed > 0:
-			_pico_camera_submit_fail_session += failed
-			_maybe_warn_pico_submit_failures()
-
-
-func _maybe_warn_pico_submit_failures() -> void:
-	var now_us := Time.get_ticks_usec()
-	if _pico_camera_fail_count_at_last_warn > 0 \
-			and _pico_camera_submit_fail_session - _pico_camera_fail_count_at_last_warn < PICO_CAMERA_FAIL_WARN_EVERY \
-			and now_us - _pico_camera_fail_warn_ticks_us < PICO_CAMERA_FAIL_WARN_INTERVAL_US:
-		return
-	_pico_camera_fail_count_at_last_warn = _pico_camera_submit_fail_session
-	_pico_camera_fail_warn_ticks_us = now_us
-	push_warning("Pico OpenXR camera frame submission failed %d time(s) this session; frames are being dropped (see QcMetrics pump_fail_l/pump_fail_r and plugin oxr_rej_* counters)." % _pico_camera_submit_fail_session)
-
-
-func _pop_pico_pump_metrics() -> Dictionary:
-	if not _pico_native_metrics_accum.is_empty():
-		var native_metrics := _pico_native_metrics_accum.duplicate()
-		_pico_native_metrics_accum.clear()
-		return native_metrics
-	if _pico_camera_submit_ok_left == 0 and _pico_camera_submit_ok_right == 0 \
-			and _pico_camera_submit_fail_left == 0 and _pico_camera_submit_fail_right == 0 \
-			and _pico_camera_frames_skipped == 0 and _pico_camera_acquire_us == 0 \
-			and _pico_camera_submit_us == 0:
-		return {}
-	var metrics := {
-		"ok_l": _pico_camera_submit_ok_left,
-		"ok_r": _pico_camera_submit_ok_right,
-		"fail_l": _pico_camera_submit_fail_left,
-		"fail_r": _pico_camera_submit_fail_right,
-		"skip": _pico_camera_frames_skipped,
-		"acquire_ms": _pico_camera_acquire_us / 1000.0,
-		"submit_ms": _pico_camera_submit_us / 1000.0,
-	}
-	_pico_camera_submit_ok_left = 0
-	_pico_camera_submit_ok_right = 0
-	_pico_camera_submit_fail_left = 0
-	_pico_camera_submit_fail_right = 0
-	_pico_camera_frames_skipped = 0
-	_pico_camera_acquire_us = 0
-	_pico_camera_submit_us = 0
-	return metrics
-
-
-func _push_pico_external_camera_info_if_available() -> void:
-	if not CaptureProviderRegistryScript.provider_uses_pico_bridge(_capture_provider_name) or pico_openxr_bridge == null:
-		return
-	if not pico_openxr_bridge.has_method("get_external_camera_info"):
-		return
-	var info: Variant = pico_openxr_bridge.call("get_external_camera_info")
-	if typeof(info) != TYPE_DICTIONARY:
-		return
-	var ok: Variant = camera_plugin.call("setOpenXrExternalCameraInfoJson", JSON.stringify(info))
-	print("Pico external camera info forwarded: %s %s" % [ok, JSON.stringify(info)])
-
-
-func _abort_capture_start(message: String) -> void:
-	_last_capture_error = message
-	push_error(message)
-	if _recording:
-		stop_capture()
-
-
-func _on_depth_sampler_start_failed(reason: String) -> void:
-	if _recording and _stream_enabled("record_depth"):
-		_abort_capture_start("Environment depth start failed: %s" % reason)
-
-
 func _merge_capture_options(options: Dictionary) -> void:
 	for key in options.keys():
 		capture_options[key] = options[key]
-	# In Live Feed the server owns the stream selection, but panel Save,
-	# scene setup and the RGB-provider probe all merge panel options in here.
-	# Re-assert the server's choice at the single point they converge on,
-	# rather than trusting every caller to remember.
-	_enforce_server_stream_selection()
+	# An ingest request owns the stream selection, but panel Save, scene setup
+	# and the RGB-provider probe all merge panel options in here. Re-assert the
+	# request at the single point they converge on.
+	_narrow_to_ingest_request()
+
+
+func _narrow_to_ingest_request() -> void:
+	if _ingest == null or not _ingest.planner.has_request():
+		return
+	_ingest.planner.narrow(capture_options)
+	_update_input_source_mismatch_notice()
 
 
 func _upload_config_available() -> bool:
@@ -2647,54 +1575,7 @@ func _configured_save_root() -> String:
 	return DEFAULT_SAVE_ROOT if configured.is_empty() else configured
 
 
-func _prepare_output_storage() -> void:
-	if _is_live_feed_mode():
-		return
-	if OS.get_name() != "Android" or camera_plugin == null:
-		return
-	if not bool(camera_plugin.call("hasStoragePermission")):
-		camera_plugin.call("requestStoragePermission")
-		print("Waiting for shared-storage permission for: %s" % _configured_save_root())
-		return
-	camera_plugin.call("ensureOutputDirectory", _configured_save_root())
-
-
-func _ensure_output_storage_ready() -> bool:
-	if _is_live_feed_mode():
-		return true
-	capture_options["save_root"] = _configured_save_root()
-	var capture_root := _configured_save_root()
-	if OS.get_name() == "Android":
-		if camera_plugin == null:
-			_bind_android_plugin()
-		if camera_plugin == null:
-			push_error("Storage setup requires an Android capture provider.")
-			return false
-		if not bool(camera_plugin.call("hasStoragePermission")):
-			camera_plugin.call("requestStoragePermission")
-			print("Capture waiting for shared-storage permission: %s" % capture_root)
-			return false
-		if not bool(camera_plugin.call("ensureOutputDirectory", capture_root)):
-			push_error("Capture output directory is not writable: %s" % capture_root)
-			return false
-		return true
-	var result := DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(capture_root))
-	if result != OK:
-		push_error("Capture output directory could not be created: %s" % capture_root)
-	return result == OK
-
-
-func _has_pose_streams_enabled() -> bool:
-	return _stream_enabled("record_head_pose") or _stream_enabled("record_controller_pose") or _stream_enabled("record_hand_data")
-
-
-func _has_body_motion_streams_enabled() -> bool:
-	return _stream_enabled("record_body_tracking") or _stream_enabled("record_motion_trackers")
-
-
 func _update_pico_tracker_setup_status(delta: float) -> void:
-	if _is_live_feed_mode():
-		return
 	_tracker_status_refresh_accum += delta
 	if _tracker_status_refresh_accum < TRACKER_STATUS_REFRESH_SECONDS:
 		return
@@ -2720,7 +1601,7 @@ func _update_pico_tracker_setup_status(delta: float) -> void:
 
 func _pico_selected_capture_options() -> Dictionary:
 	if _recording:
-		return _active_capture_options
+		return _pipeline.active_options()
 	if settings_panel != null and bool(settings_panel.get("visible")):
 		return settings_panel.get_options()
 	return capture_options
@@ -2742,11 +1623,12 @@ func _refresh_pico_capture_calibration(options: Dictionary) -> Dictionary:
 func _ensure_capture_start_ready() -> bool:
 	# Recheck AFTER the asynchronous export-space wait and before the writer
 	# allocates any tracks. All start inputs share this gate.
-	return _ensure_pico_capture_calibrated(_active_capture_options) and _ensure_output_storage_ready()
+	return _ensure_pico_capture_calibrated(_pipeline.active_options()) \
+			and _pipeline.ensure_storage_ready(_configured_save_root())
 
 
 func _ensure_pico_capture_calibrated(options: Dictionary) -> bool:
-	if _is_live_feed_mode() or not _pico_tracker_setup_required(options):
+	if not _pico_tracker_setup_required(options):
 		return true
 	var report := _refresh_pico_capture_calibration(options)
 	if _tracking_sessions != null:
@@ -2805,64 +1687,47 @@ func _on_tracker_calibration_confirm_requested() -> void:
 	_update_pico_tracker_setup_status(0.0)
 
 
+## Body and motion trackers are recorded only locally (no OLCP stream), so
+## only a capture that records locally needs the PICO tracker calibration.
 func _pico_tracker_setup_required(options: Dictionary) -> bool:
-	return PicoPlatformAdapter.is_pico_build() and (bool(options.get("record_body_tracking", false)) or bool(options.get("record_motion_trackers", false)))
+	return PicoPlatformAdapter.is_pico_build() \
+			and _pipeline != null and _pipeline.records_locally() \
+			and (bool(options.get("record_body_tracking", false)) or bool(options.get("record_motion_trackers", false)))
 
 
-## Push the "external motion-tracker capture is available on this device?"
-## flag into the settings panel once we know the provider. Motion trackers
-## (waist / feet pucks via XR_PICO_motion_tracking) are PICO-only — Quest
-## body tracking goes through XR_FB_body_tracking / XR_META_body_tracking_full_body
-## instead and has no external tracker concept — so anywhere else we hide
-## the toggle entirely.
+## Push the "external motion-tracker capture is available?" flag into the
+## settings panel once the provider is known. Motion trackers (waist / feet
+## pucks via XR_PICO_motion_tracking) are PICO-only, so elsewhere the toggle
+## is hidden entirely. This is supports_motion_trackers, NOT body motion:
+## Quest has body tracking but no external tracker hardware.
 func _update_motion_tracker_support_flag() -> void:
 	if settings_panel == null or not settings_panel.has_method("set_motion_tracker_supported"):
 		return
-	if camera_plugin == null:
-		_bind_android_plugin()
-	if camera_plugin == null:
-		# Provider not yet bound — try again next frame; we don't want to
-		# tell the panel "tracker capture is gone" while the singleton is
-		# still loading on cold boot.
-		return
-	# IMPORTANT: this is supports_motion_trackers, NOT supports_body_motion.
-	# Quest reports supports_body_motion=true (via Meta XR body tracking)
-	# but has no external tracker hardware — using the body-motion flag
-	# here would surface a non-functional PICO tracker UI on Quest.
-	var supported := CaptureProviderRegistryScript.supports_motion_trackers(camera_plugin)
+	var supported := _pipeline.camera.supports_motion_trackers()
 	if _motion_tracker_provider_known and supported == _motion_tracker_supported_pushed:
 		return
 	_motion_tracker_provider_known = true
 	_motion_tracker_supported_pushed = supported
 	settings_panel.call("set_motion_tracker_supported", supported)
 	if not supported:
-		# Force the in-memory option off so the configure path doesn't
-		# claim to record trackers that aren't there.
+		# Force the in-memory option off so the configure path doesn't claim
+		# to record trackers that aren't there.
 		capture_options["record_motion_trackers"] = false
 
 
-## Same gating as _update_motion_tracker_support_flag(), but for the standard
-## OpenXR environment-depth stream. The active runtime capability determines
-## visibility; provider name and physical device identity are not consulted.
+## Same gating for the OpenXR environment-depth stream. The active runtime
+## capability determines visibility; device identity is not consulted.
 func _update_depth_support_flag() -> void:
 	if settings_panel == null or not settings_panel.has_method("set_depth_supported"):
 		return
-	if camera_plugin == null:
-		_bind_android_plugin()
-	if camera_plugin == null:
-		# Provider not yet bound — try again next frame; we don't want to
-		# tell the panel "depth capture is gone" while the singleton is
-		# still loading on cold boot.
-		return
-	var supported := CaptureProviderRegistryScript.supports_depth(camera_plugin)
+	var supported := _pipeline.camera.supports_depth()
 	if _depth_provider_known and supported == _depth_supported_pushed:
 		return
 	_depth_provider_known = true
 	_depth_supported_pushed = supported
 	settings_panel.call("set_depth_supported", supported)
 	if not supported:
-		# Force the in-memory option off so the configure path / manifest
-		# never claims a depth stream the device cannot produce.
+		# Never claim a depth stream the device cannot produce.
 		capture_options["record_depth"] = false
 
 
@@ -2873,11 +1738,7 @@ func _update_depth_support_flag() -> void:
 func _update_rgb_recording_provider() -> void:
 	if settings_panel == null or not settings_panel.has_method("set_capture_provider_name"):
 		return
-	if camera_plugin == null:
-		_bind_android_plugin()
-	if camera_plugin == null:
-		return
-	var provider := CaptureProviderRegistryScript.provider_name(camera_plugin)
+	var provider := _pipeline.camera.provider_name
 	if provider.is_empty():
 		return
 	if provider != _rgb_recording_provider_pushed:
@@ -2893,21 +1754,15 @@ func _update_rgb_recording_provider() -> void:
 	if now_us < _rgb_camera_capability_next_probe_us:
 		return
 	_rgb_camera_capability_next_probe_us = now_us + 1_000_000
-	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("get_camera_image_capabilities"):
-		return
-	var raw_capabilities: Variant = pico_openxr_bridge.call("get_camera_image_capabilities")
-	if not (raw_capabilities is Dictionary):
-		return
-	var capabilities := raw_capabilities as Dictionary
-	if not bool(capabilities.get("available", false)):
+	var capabilities := _pipeline.camera.rgb_runtime_capabilities()
+	if capabilities.is_empty():
 		return
 	if settings_panel.has_method("set_rgb_capabilities"):
 		settings_panel.call("set_rgb_capabilities", capabilities)
 	_rgb_camera_capabilities_pushed = true
-	# Keep the log payload below Android's per-line logcat limit. Some runtimes
-	# advertise enough per-camera entries that serializing the full dictionary
-	# truncates the JSON. The UI still receives the complete dictionary above;
-	# this compact projection is the stable automation/debug contract.
+	# Keep the log payload below Android's per-line logcat limit. The UI still
+	# receives the complete dictionary; this projection is the stable
+	# automation/debug contract.
 	var capability_log_summary := {
 		"available": bool(capabilities.get("available", false)),
 		"extension": str(capabilities.get("extension", "")),
@@ -2927,55 +1782,6 @@ func _finish_rgb_capability_probe() -> void:
 	await get_tree().create_timer(0.25).timeout
 	print("PICO RGB capability probe complete; quitting")
 	get_tree().quit()
-
-
-## Audio defaults to ON, so we proactively request the RECORD_AUDIO runtime
-## permission as soon as the capture provider is bound -- before the user
-## ever taps Start. Without this the system prompt would only appear mid-
-## capture inside _start_camera_plugin(), and a denied/ignored prompt would
-## silently produce a video-only recording with no chance for the operator
-## to react.
-##
-## Idempotent: a single up-front prompt per app session. Re-prompting on
-## every frame would spam the Android permission dialog and is what
-## _try_start_camera_plugin's grace-window logic guards against further
-## downstream.
-func _ensure_audio_permission_prompted() -> void:
-	if _audio_permission_prompt_fired:
-		return
-	if not bool(capture_options.get("record_audio", false)):
-		return
-	if camera_plugin == null:
-		_bind_android_plugin()
-	if camera_plugin == null:
-		return
-	# Pico capture today disables the audio track regardless (see
-	# _effective_capture_options) -- skip the prompt so the operator isn't
-	# asked for a permission the session won't end up using.
-	if not CaptureProviderRegistryScript.provider_supports_audio_capture(CaptureProviderRegistryScript.provider_name(camera_plugin)):
-		_audio_permission_prompt_fired = true
-		return
-	# Android plugin singletons sometimes do not reflect @UsedByGodot methods
-	# through has_method() (mirrors the camera-permission call elsewhere in
-	# this file), so call directly. hasAudioPermission() is part of the same
-	# Kotlin contract as hasCameraPermission().
-	var granted: bool = bool(camera_plugin.call("hasAudioPermission"))
-	if granted:
-		_audio_permission_prompt_fired = true
-		print("%s audio permission already granted" % _provider_label())
-		return
-	camera_plugin.call("requestAudioPermission")
-	_audio_permission_prompt_fired = true
-	print("%s requested audio permission up front (record_audio=on)" % _provider_label())
-
-
-func _pico_openxr_status() -> Dictionary:
-	if pico_openxr_bridge == null or not pico_openxr_bridge.has_method("get_status"):
-		return {}
-	var raw: Variant = pico_openxr_bridge.call("get_status")
-	if typeof(raw) == TYPE_DICTIONARY:
-		return raw
-	return {}
 
 
 func _setup_audio_cues() -> void:
@@ -3058,7 +1864,7 @@ func _on_qr_payload_accepted(payload: String) -> void:
 		if settings_panel and settings_panel.has_method("set_live_server_host_from_scan"):
 			settings_panel.set_live_server_host_from_scan(payload)
 		return
-	_start_upload_ack(payload)
+	_endpoint_verifier.verify(payload)
 
 
 func _on_qr_cancelled() -> void:
@@ -3076,80 +1882,9 @@ func _restore_settings_after_qr(target: String) -> void:
 		settings_panel.open()
 
 
-func _start_upload_ack(payload: String) -> void:
-	var trimmed := payload.strip_edges()
-	if trimmed.is_empty():
-		return
-	# A QR carrying a plain ingest URL (no signed-ack challenge) — common
-	# for self-hosted setups where the operator just wants to paste the
-	# endpoint into the field. Skip the ack handshake and apply directly,
-	# so the URL persists into the panel + config the same way a successful
-	# ack would. The signed-ack path stays the secure default for cloud
-	# ingest servers that hand out per-session credentials.
-	if not _is_signed_ack_payload(trimmed):
-		if _looks_like_http_url(trimmed):
-			print("[UploadAck] applying plain URL from QR %s" % trimmed)
-			_apply_scanned_upload_endpoint(trimmed, "", false)
-			return
-		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_INVALID_QR"))
-		return
-	_pending_upload_ack_payload = trimmed
+func _on_upload_ack_checking() -> void:
 	if settings_panel and settings_panel.has_method("set_upload_connectivity_status"):
 		settings_panel.set_upload_connectivity_status(tr("UI_UPLOAD_ACK_CHECKING"), "normal")
-	print("[UploadAck] checking ack %s" % trimmed)
-	if upload_ack_request == null:
-		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_UNAVAILABLE"))
-		return
-	if upload_ack_request.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
-		upload_ack_request.cancel_request()
-	var headers := PackedStringArray([
-		"User-Agent: ego-uploader/1.0 (godot)",
-	])
-	var err := upload_ack_request.request(trimmed, headers, HTTPClient.METHOD_GET)
-	if err != OK:
-		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_REQUEST_FAILED") % err)
-
-
-func _is_signed_ack_payload(payload: String) -> bool:
-	return payload.find("/ack") >= 0 and payload.find("exp=") >= 0 and payload.find("sig=") >= 0
-
-
-# Loose URL check used by the plain-URL fallback in _start_upload_ack.
-# We accept http/https only — the ingest endpoint must be reachable as a
-# normal HTTP request, and any other scheme (mailto:, geo:, ftp:, …) is
-# almost certainly the wrong QR.
-func _looks_like_http_url(payload: String) -> bool:
-	var lower := payload.to_lower()
-	if not (lower.begins_with("http://") or lower.begins_with("https://")):
-		return false
-	# Strip the scheme and confirm there's actually a host. Avoids accepting
-	# "https://" or "http:// trailing junk" as valid endpoints.
-	var after_scheme := payload.substr(payload.find("://") + 3).strip_edges()
-	return not after_scheme.is_empty()
-
-
-func _on_upload_ack_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
-	if result != HTTPRequest.RESULT_SUCCESS:
-		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_NETWORK_FAILED") % result)
-		return
-	var text := body.get_string_from_utf8()
-	if response_code < 200 or response_code >= 300:
-		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_HTTP_FAILED") % [response_code, text.substr(0, 80)])
-		return
-	var parsed: Variant = JSON.parse_string(text)
-	if typeof(parsed) != TYPE_DICTIONARY:
-		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_BAD_RESPONSE"))
-		return
-	if not bool(parsed.get("ok", false)):
-		_on_upload_ack_failed(str(parsed.get("error", tr("UI_UPLOAD_ACK_BAD_RESPONSE"))))
-		return
-	var upload_url := str(parsed.get("uploadUrl", parsed.get("upload_url", ""))).strip_edges()
-	if upload_url.is_empty():
-		_on_upload_ack_failed(tr("UI_UPLOAD_ACK_BAD_RESPONSE"))
-		return
-	var upload_token := str(parsed.get("uploadToken", parsed.get("upload_token", "")))
-	_apply_scanned_upload_endpoint(upload_url, upload_token, true)
-	print("[UploadAck] ready upload_url=%s auth=%s" % [upload_url, "yes" if not upload_token.is_empty() else "no"])
 
 
 func _apply_scanned_upload_endpoint(upload_url: String, upload_token: String, verified: bool = true) -> void:

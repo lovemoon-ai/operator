@@ -22,7 +22,7 @@ class OperatorFeaturesExportPlugin:
 	const TEST_HARNESS_OPTION := "operator_feature_test_harness"
 	const QUICK_ENTRY_OPTION := "operator_quick_entry"
 	const QUICK_ENTRY_DEFAULT := "launcher"
-	const QUICK_ENTRY_MODES := ["launcher", "teleop", "ego_capture", "live_feed"]
+	const QUICK_ENTRY_MODES := ["launcher", "teleop", "ego_capture"]
 	const QUICK_ENTRY_TAG_PREFIX := "operator_quick_entry_"
 	# Single-build override for the preset's startup route, so a developer can
 	# build the Teleop preset but still land on the launcher. It deliberately
@@ -35,7 +35,6 @@ class OperatorFeaturesExportPlugin:
 	const QUICK_ENTRY_REQUIRED_FEATURE := {
 		"teleop": "operator_feature_mode_teleop",
 		"ego_capture": "operator_feature_mode_ego_capture",
-		"live_feed": "operator_feature_mode_live_feed",
 	}
 	# Test-only resources excluded from the PCK whenever the test-harness
 	# feature is disabled (all production presets). Test APKs (preset
@@ -90,6 +89,43 @@ class OperatorFeaturesExportPlugin:
 		build_info.set_value("build", "commit", commit if not commit.is_empty() else "unknown")
 		build_info.set_value("build", "time", int(Time.get_unix_time_from_system()))
 		add_file(BUILD_INFO_PATH, build_info.encode_to_text().to_utf8_buffer(), false)
+		_analyze_project_scripts()
+
+	# Godot exports scene scripts as tokenized .gdc without running the GDScript
+	# analyzer, so a type error in a script outside the autoload / editor-plugin
+	# graph otherwise surfaces only on the headset (claw/lessons/008). Loading
+	# every project script here analyzes it during export; errors print as
+	# "SCRIPT ERROR: Parse Error", which the Makefile export targets reject.
+	func _analyze_project_scripts() -> void:
+		var roots := ["res://scripts"]
+		if _feature_enabled(TEST_HARNESS_OPTION):
+			roots.append("res://tests")
+		var checked := 0
+		for root in roots:
+			for path in _gdscript_files(String(root)):
+				var script: Script = ResourceLoader.load(path, "Script") as Script
+				if script == null:
+					push_error("Failed to load script %s during export analysis" % path)
+				checked += 1
+		print("[operator-features] analyzed %d project scripts" % checked)
+
+	func _gdscript_files(root: String) -> PackedStringArray:
+		var files := PackedStringArray()
+		var dir := DirAccess.open(root)
+		if dir == null:
+			return files
+		dir.list_dir_begin()
+		var entry := dir.get_next()
+		while not entry.is_empty():
+			var path := root.path_join(entry)
+			if dir.current_is_dir():
+				if not entry.begins_with("."):
+					files.append_array(_gdscript_files(path))
+			elif entry.ends_with(".gd"):
+				files.append(path)
+			entry = dir.get_next()
+		dir.list_dir_end()
+		return files
 
 	func _git(args: PackedStringArray) -> String:
 		var command := PackedStringArray(["-C", ProjectSettings.globalize_path("res://")])
@@ -120,7 +156,7 @@ class OperatorFeaturesExportPlugin:
 				"name": QUICK_ENTRY_OPTION,
 				"type": TYPE_STRING,
 				"hint": PROPERTY_HINT_ENUM,
-				"hint_string": "launcher,teleop,ego_capture,live_feed",
+				"hint_string": "launcher,teleop,ego_capture",
 			},
 			"default_value": QUICK_ENTRY_DEFAULT,
 		})

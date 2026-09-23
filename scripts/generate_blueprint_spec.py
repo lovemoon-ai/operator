@@ -61,6 +61,7 @@ FIELD_SPEC_KEYS = {
     "minimum",
     "maximum",
     "length",
+    "max_length",
     "semantics",
 }
 BINDING_SEMANTICS = {"refresh_token"}
@@ -157,6 +158,14 @@ def _validate_field_spec(context: str, field_spec: object) -> None:
             raise ValueError(f"{context} length requires an array type")
         if not isinstance(length, int) or isinstance(length, bool) or length < 0:
             raise ValueError(f"{context} length must be a non-negative integer")
+    max_length = field_spec.get("max_length")
+    if max_length is not None:
+        if value_type not in ("number_array", "integer_array", "string_array"):
+            raise ValueError(f"{context} max_length requires an array type")
+        if not isinstance(max_length, int) or isinstance(max_length, bool) or max_length < 0:
+            raise ValueError(f"{context} max_length must be a non-negative integer")
+        if length is not None:
+            raise ValueError(f"{context} cannot declare both length and max_length")
     if "default" in field_spec:
         default = field_spec["default"]
         if not _matches_type(default, value_type):
@@ -167,6 +176,8 @@ def _validate_field_spec(context: str, field_spec: object) -> None:
             raise ValueError(f"{context} default is above maximum")
         if length is not None and len(default) != length:
             raise ValueError(f"{context} default has an invalid length")
+        if max_length is not None and len(default) > max_length:
+            raise ValueError(f"{context} default exceeds max_length")
 
 
 def load_spec() -> dict:

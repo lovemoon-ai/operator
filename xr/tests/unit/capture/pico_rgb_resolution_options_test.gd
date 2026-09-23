@@ -39,7 +39,7 @@ const SQUARE_CAPABILITIES := {
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
-	var panel: Object = CapturePanelScript.new(false)
+	var panel: Object = CapturePanelScript.new()
 	panel.set_capture_provider_name("pico")
 	var pending_options: Dictionary = CapturePanelScript._default_options()
 	pending_options["rgb_width"] = 1280

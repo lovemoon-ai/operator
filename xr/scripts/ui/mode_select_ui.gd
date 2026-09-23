@@ -14,7 +14,6 @@ signal selected
 enum Kind {
 	TELEOP,
 	EGO_CAPTURE,
-	LIVE_FEED,
 	VR,
 	EXIT,
 }

@@ -277,7 +277,7 @@ func _setup_retargeter() -> void:
 	var config_path := _extract_to_user(IK_CONFIG)
 	if robot_path.is_empty() or config_path.is_empty():
 		return
-	var retargeter := ClassDB.instantiate("GMRRetargeter")
+	var retargeter: Object = ClassDB.instantiate("GMRRetargeter")
 	if retargeter == null:
 		return
 	var configured := bool(

@@ -108,6 +108,13 @@ fn validate_field(name: &str, value: &Value, field_spec: &Value) -> Result<(), S
             ));
         }
     }
+    if let Some(max_length) = field_spec.get("max_length").and_then(Value::as_u64) {
+        if value.as_array().map_or(0, Vec::len) as u64 > max_length {
+            return Err(format!(
+                "Blueprint field {name:?} must contain at most {max_length} items"
+            ));
+        }
+    }
     Ok(())
 }
 

@@ -22,6 +22,21 @@ from .models import (
     XrFrame,
 )
 from .session import BridgeConfig, VideoFeedConfig, XrSession
+from .capture import (
+    CAPTURE_STREAM_NAMES,
+    CAPTURE_STREAMS_CAPABILITY,
+    CaptureStream,
+    CaptureStreamsConfig,
+    LocalTask,
+    LocalTaskControl,
+    LocalTaskStatus,
+    StreamControl,
+    StreamStatus,
+    StreamsControl,
+    StreamsStatus,
+    XrCapture,
+    stream_capability,
+)
 from .robot_assets import RobotModelAsset, RobotAssetServer
 from .robot import EndEffectorTarget, JointTarget, Robot, RobotState
 from .retargeting import PoseDeltaRetargeter, Retargeter
@@ -44,6 +59,19 @@ __all__ = [
     "RobotAssetServer",
     "BridgeConfig",
     "VideoFeedConfig",
+    "CAPTURE_STREAM_NAMES",
+    "CAPTURE_STREAMS_CAPABILITY",
+    "CaptureStream",
+    "CaptureStreamsConfig",
+    "LocalTask",
+    "LocalTaskControl",
+    "LocalTaskStatus",
+    "StreamControl",
+    "StreamStatus",
+    "StreamsControl",
+    "StreamsStatus",
+    "XrCapture",
+    "stream_capability",
     "XrFrame",
     "Pose",
     "ControllerInput",

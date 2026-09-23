@@ -63,7 +63,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		QuickEntryConfigScript.MODE_LAUNCHER,
 		QuickEntryConfigScript.MODE_TELEOP,
 		QuickEntryConfigScript.MODE_EGO_CAPTURE,
-		QuickEntryConfigScript.MODE_LIVE_FEED,
 	]
 	for mode in quick_entry_modes:
 		var tag := QuickEntryConfigScript.tag_for_mode(mode)
@@ -97,8 +96,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	t.eq(
 		QuickEntryConfigScript.consume_for_process(
-			launcher_root, QuickEntryConfigScript.MODE_LIVE_FEED),
-		QuickEntryConfigScript.MODE_LIVE_FEED,
+			launcher_root, QuickEntryConfigScript.MODE_EGO_CAPTURE),
+		QuickEntryConfigScript.MODE_EGO_CAPTURE,
 		"showing the launcher must not consume a future direct route"
 	)
 	launcher_root.free()
@@ -117,7 +116,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	for disabled_mode in [
 		ModeSelectScript.MODE_EGO_CAPTURE,
-		ModeSelectScript.MODE_LIVE_FEED,
 		ModeSelectScript.MODE_VR,
 	]:
 		t.is_false(
@@ -128,7 +126,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	var full_build := FeatureSet.from_enabled_ids([
 		OperatorFeature.MODE_TELEOP,
 		OperatorFeature.MODE_EGO_CAPTURE,
-		OperatorFeature.MODE_LIVE_FEED,
 		OperatorFeature.MODE_EXIT,
 	])
 	t.is_true(
@@ -172,7 +169,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	)
 	t.eq(
 		ModeSelectScript.resolve_startup_route(
-			"", ModeSelectScript.MODE_LIVE_FEED, teleop_only, false),
+			"", ModeSelectScript.MODE_EGO_CAPTURE, teleop_only, false),
 		"",
 		"a quick entry whose mode was stripped must show the launcher"
 	)

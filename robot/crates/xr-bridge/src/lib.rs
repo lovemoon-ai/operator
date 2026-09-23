@@ -22,6 +22,8 @@
 //!   telemetry out, clock sync).
 //! * [`pose_udp_server`] — UDP high-frequency pose data plane (drop-old by seq).
 //! * [`telemetry_server`] — dedicated TCP telemetry push.
+//! * [`media`] — SDK-mode session media relay (OLCP `media_up` /
+//!   `media_down`) behind the bridge-injected `DeviceDescriptor.media`.
 //! * [`wire_runtime`] — bridge-internal `TimedCommand` envelope +
 //!   `build_descriptor_frame` handshake helper.
 //! * [`forward`] — the control loop: owns the `AdapterClient`, sanitizes the
@@ -33,6 +35,7 @@ pub mod config;
 pub mod discovery;
 pub mod forward;
 pub mod latency;
+pub mod media;
 pub mod pose_server;
 pub mod pose_udp_server;
 pub mod protocol;

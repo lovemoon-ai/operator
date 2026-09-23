@@ -81,6 +81,46 @@ class BlueprintTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             BlueprintComponent(id="grid", type="ground_grid", anchor="head")
 
+    def test_path_marker_and_dense_map_contract(self) -> None:
+        route = BlueprintComponent.path("route", points=[0, 0, 0, 1, 0, 0],
+            points_binding="nav.path", color_binding="nav.color", properties={"width": 0.04})
+        goal = BlueprintComponent.marker("goal", shape="pin", anchor="world",
+            position_binding="nav.goal", color_binding="nav.color", text_binding="nav.goal_text")
+        dense_map = BlueprintComponent.dense_map(display="minimap", display_binding="map.display")
+        blueprint = Blueprint(blueprint_id="nav", components=(route, goal, dense_map))
+        self.assertEqual(route.anchor, "world")
+        self.assertEqual(route.properties["points"], [0, 0, 0, 1, 0, 0])
+        self.assertEqual(goal.properties["shape"], "pin")
+        self.assertEqual(dense_map.properties["display"], "minimap")
+        max_points = SPEC["primitives"]["path"]["bindings"]["points"]["max_length"]
+        valid = {"nav.path": [0.0] * max_points, "nav.color": "#00ff00",
+                 "nav.goal": [1, 0, -2], "nav.goal_text": "Goal", "map.display": "world"}
+        blueprint.validate_state_values(valid)
+        for patch in ({"nav.path": [0.0] * (max_points + 3)}, {"nav.path": [0, float("nan"), 0]},
+                      {"nav.goal": [1, 0]}, {"nav.goal": [1, 0, 0, 0]}, {"nav.color": "green"},
+                      {"map.display": True}):
+            with self.subTest(patch=patch), self.assertRaises(ValueError):
+                blueprint.validate_state_values({**valid, **patch})
+        for factory in (
+            lambda: BlueprintComponent.path("bad", points=[0, 0]),
+            lambda: BlueprintComponent.path("bad", properties={"width": 0.6}),
+            lambda: BlueprintComponent.path("bad", properties={"points": [0.0] * (max_points + 3)}),
+            lambda: BlueprintComponent(id="bad", type="path", anchor="head"),
+            lambda: BlueprintComponent.marker("bad", shape="cube"),
+            lambda: BlueprintComponent.marker("bad", properties={"size": 0}),
+            lambda: BlueprintComponent.dense_map(display="globe"),
+            lambda: BlueprintComponent.dense_map(properties={"scale": 1.5}),
+        ):
+            with self.assertRaises(ValueError):
+                factory()
+        with self.assertRaises(ValueError):
+            Blueprint(blueprint_id="maps", components=(dense_map, BlueprintComponent.dense_map("other")))
+        robot = BlueprintComponent.robot_model("robot", asset_sha256="a" * 64, asset_size=100,
+            asset_port=63904, joint_names=["j"], joint_positions_binding="nav.path",
+            base_pose_binding="base", sample_binding="sample")
+        with self.assertRaisesRegex(ValueError, "conflicting contracts"):
+            Blueprint(blueprint_id="conflict", components=(route, robot))
+
     def test_input_binding_ack_contract_and_secondary_menu_action(self) -> None:
         binding = BlueprintComponent.input_binding("reset", action="reset", available_binding="available",
             required_binding="required", acknowledged_request_binding="ack", success_binding="ok")
@@ -212,6 +252,9 @@ class BlueprintTests(unittest.TestCase):
                 },
             ),
             BlueprintComponent.video_panel(),
+            BlueprintComponent.path("route"),
+            BlueprintComponent.marker("goal"),
+            BlueprintComponent.dense_map(),
         )
         for component in helpers:
             with self.subTest(component=component.type):

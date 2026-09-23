@@ -13,6 +13,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from ._blueprint_spec import WIRE
 from .blueprint import BlueprintClient
+from .capture import CaptureStreamsConfig, StreamsControl, StreamsStatus
 from .robot import Robot, RobotCommand
 
 try:
@@ -251,6 +252,86 @@ class HostedBlueprint(BlueprintClient):
         return self._hosted_backend.descriptor_message(descriptor)
 
 
+class HostedStreams:
+    """Capture-stream ctrl for a Python adapter behind standalone xr-bridge.
+
+    Declare the streams with ``make_descriptor(capture_streams=...)`` and pass
+    this object to :func:`create_server`. xr-bridge forwards the headset's
+    ``StreamsStatus`` here (:meth:`status`, ``on_status``) and :meth:`control`
+    to the headset when it advertises ``capture_streams_v1``. The standalone
+    bridge serves no media, so the headset reports declared streams
+    ``unsupported``; capture media requires the embedded ``XrSession``.
+    """
+
+    #: ``on_status`` fires for each report; a cleared status (the reporting
+    #: headset disconnected) only resets :meth:`status` to ``None``.
+    def __init__(self, on_status: Callable[[StreamsStatus], None] | None = None) -> None:
+        self._on_status = on_status
+        self._lock = threading.Lock()
+        self._status: StreamsStatus | None = None
+        self._next_subscriber = 1
+        self._subscribers: dict[
+            int, tuple[asyncio.AbstractEventLoop, asyncio.Queue[dict[str, Any]]]
+        ] = {}
+
+    def status(self) -> StreamsStatus | None:
+        """Latest headset status; ``None`` until reported, after the reporting
+        headset disconnected, or once no xr-bridge is connected."""
+        with self._lock:
+            return self._status
+
+    def control(
+        self,
+        streams: StreamsControl | Mapping[str, Any] | None = None,
+        *,
+        local_tasks: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Queue a ``StreamsControl`` for every connected xr-bridge, in order."""
+        control = (
+            streams
+            if isinstance(streams, StreamsControl)
+            else StreamsControl(streams=streams or {}, local_tasks=local_tasks or {})
+        )
+        message = {"type": "StreamsControl", "control": control.to_dict()}
+        with self._lock:
+            subscribers = list(self._subscribers.values())
+        if not subscribers:
+            raise RuntimeError("no xr-bridge is connected")
+        for loop, queue in subscribers:
+            loop.call_soon_threadsafe(queue.put_nowait, message)
+
+    def _subscribe(self) -> tuple[int, asyncio.Queue[dict[str, Any]]]:
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        with self._lock:
+            token = self._next_subscriber
+            self._next_subscriber += 1
+            self._subscribers[token] = (loop, queue)
+        return token, queue
+
+    def _unsubscribe(self, token: int) -> None:
+        with self._lock:
+            self._subscribers.pop(token, None)
+            if not self._subscribers:
+                self._status = None
+
+    def _push_status(self, value: Any) -> None:
+        if value is None:
+            # The reporting headset disconnected: drop the stale report
+            # instead of leaving the adapter believing capture still runs.
+            with self._lock:
+                self._status = None
+            return
+        try:
+            status = StreamsStatus.from_dict(value)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            self._status = status
+        if self._on_status is not None:
+            self._on_status(status)
+
+
 def make_descriptor(
     *,
     name: str,
@@ -260,8 +341,10 @@ def make_descriptor(
     poses: list[Mapping[str, Any]] | None = None,
     telemetry: list[Mapping[str, Any]] | None = None,
     command_timeout_ms: int = 500,
+    capture_streams: CaptureStreamsConfig | None = None,
 ) -> dict[str, Any]:
-    return {
+    """Build an adapter descriptor, optionally declaring ``capture_streams``."""
+    descriptor: dict[str, Any] = {
         "device": {"type": device_type, "name": name, "icon": "robot_arm"},
         "control_schema": {
             "axes": list(axes or ()),
@@ -274,6 +357,9 @@ def make_descriptor(
         "safety": {"disconnect_action": "stop", "command_timeout_ms": command_timeout_ms},
         "capabilities": {},
     }
+    if capture_streams is not None:
+        descriptor["capture_streams"] = capture_streams.to_descriptor_dict()
+    return descriptor
 
 
 def _descriptor_without_blueprint(descriptor: Mapping[str, Any]) -> dict[str, Any]:
@@ -353,6 +439,15 @@ async def _blueprint_loop(
         publisher._unsubscribe(token)
 
 
+async def _streams_control_loop(
+    writer: asyncio.StreamWriter,
+    lock: asyncio.Lock,
+    controls: asyncio.Queue[dict[str, Any]],
+) -> None:
+    while True:
+        await _write_frame(writer, lock, await controls.get())
+
+
 async def _client(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -360,11 +455,14 @@ async def _client(
     descriptor: Mapping[str, Any],
     telemetry_hz: float,
     blueprint: HostedBlueprint | None = None,
+    streams: HostedStreams | None = None,
 ) -> None:
     lock = asyncio.Lock()
     telemetry_task: asyncio.Task[None] | None = None
     inbound_task: asyncio.Task[None] | None = None
     blueprint_task: asyncio.Task[None] | None = None
+    streams_task: asyncio.Task[None] | None = None
+    streams_token: int | None = None
     connect_attempted = False
     try:
         connect_attempted = True
@@ -384,6 +482,12 @@ async def _client(
             blueprint_task = asyncio.create_task(
                 _blueprint_loop(writer, lock, blueprint),
                 name="hosted-blueprint",
+            )
+        if streams is not None:
+            streams_token, controls = streams._subscribe()
+            streams_task = asyncio.create_task(
+                _streams_control_loop(writer, lock, controls),
+                name="hosted-streams-control",
             )
 
         async def telemetry_loop() -> None:
@@ -409,6 +513,8 @@ async def _client(
                     event = message.get("event")
                     if isinstance(event, Mapping):
                         blueprint._push_event(event)
+                elif kind == "StreamsStatus" and streams is not None:
+                    streams._push_status(message.get("status"))
                 elif kind == "Shutdown":
                     adapter.stop("xr-bridge shutdown")
                     break
@@ -416,8 +522,7 @@ async def _client(
         telemetry_task = asyncio.create_task(telemetry_loop())
         inbound_task = asyncio.create_task(inbound_loop())
         tasks = [telemetry_task, inbound_task]
-        if blueprint_task is not None:
-            tasks.append(blueprint_task)
+        tasks.extend(task for task in (blueprint_task, streams_task) if task is not None)
         done, _pending = await asyncio.wait(
             tasks,
             return_when=asyncio.FIRST_COMPLETED,
@@ -434,13 +539,15 @@ async def _client(
         cleanup_errors: list[BaseException] = []
         tasks = [
             task
-            for task in (telemetry_task, inbound_task, blueprint_task)
+            for task in (telemetry_task, inbound_task, blueprint_task, streams_task)
             if task is not None
         ]
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if streams is not None and streams_token is not None:
+            streams._unsubscribe(streams_token)
         if connect_attempted:
             try:
                 adapter.stop("xr-bridge disconnected")
@@ -475,12 +582,13 @@ async def create_server(
     port: int = 63910,
     telemetry_hz: float = 10.0,
     blueprint: HostedBlueprint | None = None,
+    streams: HostedStreams | None = None,
 ) -> asyncio.AbstractServer:
     if telemetry_hz <= 0:
         raise ValueError("telemetry_hz must be positive")
     return await asyncio.start_server(
         lambda reader, writer: _client(
-            reader, writer, adapter, descriptor, telemetry_hz, blueprint
+            reader, writer, adapter, descriptor, telemetry_hz, blueprint, streams
         ),
         host,
         port,
@@ -495,6 +603,7 @@ async def serve_async(
     port: int = 63910,
     telemetry_hz: float = 10.0,
     blueprint: HostedBlueprint | None = None,
+    streams: HostedStreams | None = None,
 ) -> None:
     server = await create_server(
         adapter,
@@ -503,6 +612,7 @@ async def serve_async(
         port=port,
         telemetry_hz=telemetry_hz,
         blueprint=blueprint,
+        streams=streams,
     )
     async with server:
         await server.serve_forever()

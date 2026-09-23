@@ -33,8 +33,12 @@ use tokio_util::codec::Framed;
 use teleop_protocol::{
     connect, AdapterToBridge, Blueprint, BlueprintEvent, BlueprintState, BridgeCodec,
     BridgeToAdapter, Conn, DeviceCommand, DeviceDescriptor, DeviceTelemetry, Endpoint,
-    BLUEPRINT_CAPABILITY, BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256,
+    StreamsControl, StreamsStatus, BLUEPRINT_CAPABILITY, BLUEPRINT_SPEC_HASH_CAPABILITY,
+    SPEC_SHA256,
 };
+
+/// Ordered adapter `StreamsControl` backlog before newer requests are dropped.
+const STREAMS_CONTROL_QUEUE: usize = 16;
 
 /// The framed sink/stream over the boundary connection.
 type FramedConn = Framed<Conn, BridgeCodec>;
@@ -61,6 +65,9 @@ pub struct AdapterClient {
     events_tx: mpsc::Sender<AdapterToBridge>,
     /// The receiving end, handed out once via [`take_events`].
     events_rx: Option<mpsc::Receiver<AdapterToBridge>>,
+    /// Validated adapter `StreamsControl` requests, in order.
+    streams_control_tx: mpsc::Sender<StreamsControl>,
+    streams_control_rx: Option<mpsc::Receiver<StreamsControl>>,
     /// Reader task handle, present after handshake.
     reader: Option<tokio::task::JoinHandle<()>>,
     blueprint_compatible: bool,
@@ -88,6 +95,7 @@ impl AdapterClient {
         let (blueprint_tx, blueprint_rx) = watch::channel(None);
         let (blueprint_state_tx, blueprint_state_rx) = watch::channel(None);
         let (events_tx, events_rx) = mpsc::channel(256);
+        let (streams_control_tx, streams_control_rx) = mpsc::channel(STREAMS_CONTROL_QUEUE);
         Ok(AdapterClient {
             state: ConnState::PreHandshake(framed),
             telemetry_tx,
@@ -98,6 +106,8 @@ impl AdapterClient {
             blueprint_state_rx,
             events_tx,
             events_rx: Some(events_rx),
+            streams_control_tx,
+            streams_control_rx: Some(streams_control_rx),
             reader: None,
             blueprint_compatible: false,
         })
@@ -135,6 +145,9 @@ impl AdapterClient {
                 }
                 Some(Ok(AdapterToBridge::BlueprintState { .. })) => {
                     tracing::debug!("BlueprintState received before descriptor; ignoring");
+                }
+                Some(Ok(AdapterToBridge::StreamsControl { .. })) => {
+                    tracing::debug!("StreamsControl received before descriptor; ignoring");
                 }
                 Some(Ok(AdapterToBridge::Event { kind, msg })) => {
                     tracing::debug!("Adapter event before descriptor: {kind}: {msg}");
@@ -206,6 +219,17 @@ impl AdapterClient {
             .context("sending BlueprintEvent")
     }
 
+    /// Forward the headset's latest capture-stream status to the adapter.
+    /// `None` clears the adapter's view: the headset that reported is gone.
+    pub async fn send_streams_status(&mut self, status: Option<StreamsStatus>) -> Result<()> {
+        self.sink_mut()?
+            .send(BridgeToAdapter::StreamsStatus {
+                status: status.map(Box::new),
+            })
+            .await
+            .context("sending StreamsStatus")
+    }
+
     /// Tell the adapter to shut down cleanly.
     pub async fn shutdown(&mut self) -> Result<()> {
         self.sink_mut()?
@@ -232,6 +256,12 @@ impl AdapterClient {
 
     pub fn blueprint_compatible(&self) -> bool {
         self.blueprint_compatible
+    }
+
+    /// Take the ordered receiver of validated adapter `StreamsControl`
+    /// requests. Returns `None` if already taken.
+    pub fn take_streams_control(&mut self) -> Option<mpsc::Receiver<StreamsControl>> {
+        self.streams_control_rx.take()
     }
 
     /// Take the best-effort inbound-message receiver. Returns `None` if already
@@ -261,6 +291,7 @@ impl AdapterClient {
         let blueprint_tx = self.blueprint_tx.clone();
         let blueprint_state_tx = self.blueprint_state_tx.clone();
         let events_tx = self.events_tx.clone();
+        let streams_control_tx = self.streams_control_tx.clone();
         let handle = tokio::spawn(async move {
             let mut active_blueprint: Option<Arc<Blueprint>> = None;
             while let Some(item) = stream.next().await {
@@ -326,6 +357,23 @@ impl AdapterClient {
                                 }
                                 let _ =
                                     blueprint_state_tx.send(Some(Arc::new(state.as_ref().clone())));
+                            }
+                            AdapterToBridge::StreamsControl { control } => {
+                                if let Err(error) = control.validate() {
+                                    tracing::warn!(
+                                        "Dropping invalid StreamsControl from adapter: {error}"
+                                    );
+                                    continue;
+                                }
+                                // Never backpressure the reader (it also feeds
+                                // telemetry); a full queue drops the request.
+                                if let Err(mpsc::error::TrySendError::Full(_)) =
+                                    streams_control_tx.try_send(control.as_ref().clone())
+                                {
+                                    tracing::warn!(
+                                        "Dropping StreamsControl from adapter: queue full"
+                                    );
+                                }
                             }
                             AdapterToBridge::Descriptor(_) | AdapterToBridge::Event { .. } => {}
                         }

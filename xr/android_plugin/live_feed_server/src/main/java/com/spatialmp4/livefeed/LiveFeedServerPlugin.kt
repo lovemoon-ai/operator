@@ -3,6 +3,7 @@ package com.spatialmp4.livefeed
 import android.util.Base64
 import android.util.Log
 import com.spatialmp4.contract.CONTRACT_VERSION
+import com.spatialmp4.contract.FanoutSpatialDataSink
 import com.spatialmp4.contract.Intrinsics
 import com.spatialmp4.contract.RgbStreamConfig
 import com.spatialmp4.contract.RgbVideoCodec
@@ -51,6 +52,11 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
     @Volatile private var output: DataOutputStream? = null
     @Volatile private var senderThread: Thread? = null
     @Volatile private var lastEndpoint: String = ""
+    // When true, configureServer registers a fanout that feeds the local
+    // recorder AND this push sink from one provider session.
+    @Volatile private var recorderTee: Boolean = false
+    // What configureServer put into the sink registry (this, or the fanout).
+    @Volatile private var registeredSink: SpatialDataSink? = null
     private val running = AtomicBoolean(false)
 
     private val metricFramesSent = AtomicLong(0L)
@@ -90,9 +96,40 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         connectTimeoutMs = timeoutMs.coerceAtLeast(250)
         val capacity = maxQueueFrames.coerceIn(MIN_QUEUE_FRAMES, MAX_QUEUE_FRAMES)
         queue = ArrayBlockingQueue(capacity)
-        SpatialDataSinkRegistry.register(this)
+        registerActiveSink()
         Log.i(TAG, "Configured live-push server $serverHost:$serverPort queue=$capacity")
         return true
+    }
+
+    /**
+     * Tee the local recorder: the next configureServer makes the provider feed
+     * both the most recently registered other sink (the SpatialMP4 muxer) and
+     * this push sink, with the recorder primary. Rejected while streaming.
+     */
+    @UsedByGodot
+    fun setRecorderTee(enabled: Boolean): Boolean {
+        if (running.get()) {
+            emitError("Cannot change the recorder tee while streaming")
+            return false
+        }
+        recorderTee = enabled
+        return true
+    }
+
+    private fun registerActiveSink() {
+        unregisterActiveSink()
+        val recorder = if (recorderTee) SpatialDataSinkRegistry.findOtherSink(this) else null
+        val sink: SpatialDataSink = if (recorder != null) FanoutSpatialDataSink(listOf(recorder, this)) else this
+        if (recorderTee && recorder == null) {
+            Log.w(TAG, "Recorder tee requested but no recorder sink is registered; streaming only")
+        }
+        SpatialDataSinkRegistry.register(sink)
+        registeredSink = sink
+    }
+
+    private fun unregisterActiveSink() {
+        SpatialDataSinkRegistry.unregister(registeredSink ?: this)
+        registeredSink = null
     }
 
     @UsedByGodot
@@ -156,7 +193,7 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
     override fun finishSession(): String {
         val endpoint = lastEndpoint
         if (!running.get() && socket == null) {
-            SpatialDataSinkRegistry.unregister(this)
+            unregisterActiveSink()
             return endpoint
         }
         val endPayload = JSONObject()
@@ -168,7 +205,7 @@ open class LivePushPlugin(godot: Godot) : GodotPlugin(godot), SpatialDataSink {
         running.set(false)
         senderThread?.joinQuietly(FINISH_JOIN_MS)
         closeSocket()
-        SpatialDataSinkRegistry.unregister(this)
+        unregisterActiveSink()
         emitDisconnected(endpoint)
         Log.i(TAG, "Live-push disconnected from $endpoint")
         return if (endpoint.isEmpty()) "" else "tcp://$endpoint/$streamName"

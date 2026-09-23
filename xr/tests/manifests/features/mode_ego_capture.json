@@ -78,6 +78,34 @@
       "script": "res://tests/integration/capture/capture_start_stop_with_fakes_test.gd"
     },
     {
+      "id": "capture.ingest_result_channel",
+      "level": "unit",
+      "suite": "capture.ingest",
+      "module": "app/modes",
+      "script": "res://tests/unit/live_feed/live_pull_reconnect_test.gd"
+    },
+    {
+      "id": "capture.timestamps",
+      "level": "unit",
+      "suite": "capture.timestamps",
+      "module": "core/capture",
+      "script": "res://tests/unit/capture/capture_timestamps_test.gd"
+    },
+    {
+      "id": "capture.stream_planner",
+      "level": "unit",
+      "suite": "capture.pipeline",
+      "module": "core/capture",
+      "script": "res://tests/unit/capture/stream_planner_test.gd"
+    },
+    {
+      "id": "capture.endpoint_registry",
+      "level": "unit",
+      "suite": "capture.pipeline",
+      "module": "core/capture",
+      "script": "res://tests/unit/capture/endpoint_registry_test.gd"
+    },
+    {
       "id": "contracts.sensor_frame_validation",
       "level": "contract",
       "suite": "contracts.sensor",

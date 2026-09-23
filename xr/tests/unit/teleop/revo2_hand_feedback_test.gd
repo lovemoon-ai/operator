@@ -512,7 +512,10 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"frame", "mirror")
 	t.is_true(not bool(controller._control_frame_valid[0]),
 		"zero-length telemetry quaternions never reach the control-frame gizmo")
-	controller._known_robots = {
+	# Discovery and the host session are session-layer nodes; wire them the way
+	# _create_v2_nodes does, without a scene tree.
+	var host_discovery := HostDiscovery.new()
+	host_discovery.known = {
 		RobotDiscoveryScript._endpoint_key("192.0.2.10", 64001): {
 			"name": "test-bridge",
 			"ip": "192.0.2.10",
@@ -520,6 +523,11 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 			"telemetry_port": 64009,
 		}
 	}
+	var host_session := HostSession.new()
+	host_session.endpoint_lookup = func(ip: String, pose_port: int) -> Dictionary:
+		return host_discovery.find(ip, "operator", pose_port)
+	controller._host_discovery = host_discovery
+	controller._host_session = host_session
 	t.eq(controller._telemetry_port_for("192.0.2.10", 64001), 64009,
 		"teleop uses the discovered telemetry port")
 	t.eq(controller._telemetry_port_for("192.0.2.11", 63901), 63903,
@@ -591,6 +599,8 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	outside_target.free()
 	tcp_handler.free()
 	discovery.free()
+	host_session.free()
+	host_discovery.free()
 
 
 func _full_size_panel_count(root: Node, viewport_size: Vector2) -> int:

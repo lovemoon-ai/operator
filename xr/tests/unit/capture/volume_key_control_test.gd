@@ -35,22 +35,12 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"ordinary keys do not control ego recording"
 	)
 	t.eq(
-		CaptureAppBaseScript.capture_action_for_key_event(volume_up, false, true),
-		&"",
-		"ego volume shortcuts do not start Live Feed"
-	)
-	t.eq(
-		CaptureAppBaseScript.capture_action_for_key_event(volume_down, true, true),
-		&"",
-		"ego volume shortcuts do not stop Live Feed"
-	)
-	t.eq(
-		CaptureAppBaseScript.capture_action_for_key_event(volume_down, false, false, true),
+		CaptureAppBaseScript.capture_action_for_key_event(volume_down, false, true),
 		&"cancel_start",
 		"volume-down cancels an ego recording that is waiting to start"
 	)
 	t.eq(
-		CaptureAppBaseScript.capture_action_for_key_event(volume_up, false, false, true),
+		CaptureAppBaseScript.capture_action_for_key_event(volume_up, false, true),
 		&"",
 		"volume-up does not queue another start while one is pending"
 	)
@@ -91,18 +81,23 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		)
 		start_spy.free()
 
+	# The recording view reads the pipeline's lifecycle controller; a bare
+	# pipeline with a started controller is enough to be "recording".
 	var stop_spy := CaptureSpyScript.new()
-	stop_spy._capture_controller = CaptureSessionController.new()
-	stop_spy._capture_controller.configure({
+	var pipeline := CapturePipeline.new()
+	pipeline.controller = CaptureSessionController.new()
+	pipeline.controller.configure({
 		"writer_adapter": FakeCaptureWriterAdapter.new(),
 	})
+	stop_spy._pipeline = pipeline
 	t.is_true(
-		stop_spy._capture_controller.request_start({}),
+		pipeline.controller.request_start({}),
 		"stop callback fixture enters the recording state"
 	)
 	stop_spy._unhandled_key_input(volume_down)
 	t.eq(stop_spy.stop_requests, 1, "the input callback stops an active ego recording")
 	stop_spy.free()
+	pipeline.free()
 
 	var pending_spy := CaptureSpyScript.new()
 	pending_spy._export_space_start_pending = true
@@ -112,12 +107,6 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"the input callback cancels a pending ego recording start"
 	)
 	pending_spy.free()
-
-	var live_spy := CaptureSpyScript.new()
-	live_spy.live_feed_mode_for_test = true
-	live_spy._unhandled_key_input(volume_up)
-	t.eq(live_spy.start_requests, 0, "the input callback leaves Live Feed unchanged")
-	live_spy.free()
 
 
 func _key_event(code: Key) -> InputEventKey:

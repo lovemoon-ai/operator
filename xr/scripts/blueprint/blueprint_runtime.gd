@@ -14,6 +14,8 @@ signal external_view_changed(
 const RobotModelScript := preload("res://scripts/blueprint/robot_model_view.gd")
 const GroundGridScript := preload("res://scripts/blueprint/ground_grid.gd")
 const ModelLightingScript := preload("res://scripts/blueprint/model_lighting.gd")
+const PathScript := preload("res://scripts/blueprint/path_view.gd")
+const MarkerScript := preload("res://scripts/blueprint/marker_view.gd")
 const MenuDeclarations := preload("res://scripts/contracts/blueprint/menu_declarations.gd")
 const InputBindingScript := preload("res://scripts/blueprint/controller_input_binding.gd")
 const FingertipTactileScript := preload(
@@ -60,6 +62,16 @@ const NODE_IMPLEMENTATIONS := {
 			"visible", "settings_label", "text", "font_size", "pixel_size", "radius", "colors", "pulse_states", "pulse_hz",
 		],
 		"bindings": ["visible", "state", "text"],
+		"events": [],
+	},
+	"path": {
+		"properties": ["visible", "settings_label", "points", "color", "width", "closed", "no_depth_test"],
+		"bindings": ["visible", "points", "color"],
+		"events": [],
+	},
+	"marker": {
+		"properties": ["visible", "settings_label", "shape", "color", "size", "text", "pulse"],
+		"bindings": ["visible", "position", "color", "text"],
 		"events": [],
 	},
 	"input_binding": {
@@ -444,6 +456,16 @@ func _create_component(spec: Dictionary) -> Dictionary:
 				return {}
 		"label":
 			node = _create_label(spec)
+		"path":
+			node = PathScript.new()
+			node.name = "BlueprintPath_%s" % str(spec.get("id", ""))
+			node.connect("warning_raised", func(message: String) -> void: warning_raised.emit(message))
+			node.call("configure", properties)
+		"marker":
+			node = MarkerScript.new()
+			node.name = "BlueprintMarker_%s" % str(spec.get("id", ""))
+			node.connect("warning_raised", func(message: String) -> void: warning_raised.emit(message))
+			node.call("configure", properties)
 		"status_lamp":
 			node = _create_status_lamp(spec, entry)
 		"fingertip_tactile":
@@ -595,6 +617,19 @@ func _refresh_component(entry: Dictionary) -> void:
 			label.modulate = _parse_color(
 				_bound_value(spec, "color", properties["color"]),
 				Color.WHITE,
+			)
+		"path":
+			node.call(
+				"update_path",
+				_bound_value(spec, "points", properties["points"]),
+				_parse_color(_bound_value(spec, "color", properties["color"]), Color.WHITE),
+			)
+		"marker":
+			node.call(
+				"update_marker",
+				_bound_value(spec, "position", null),
+				_parse_color(_bound_value(spec, "color", properties["color"]), Color.WHITE),
+				str(_bound_value(spec, "text", properties["text"])),
 			)
 		"status_lamp":
 			var label := entry.get("label") as Label3D

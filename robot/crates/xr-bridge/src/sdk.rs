@@ -9,12 +9,13 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use teleop_protocol::{
     Blueprint, BlueprintEvent, BlueprintState, ControlSchema, DeviceDescriptor, DeviceInfo,
-    DeviceTelemetry, XrStateFrame, XrStreamConfig, BLUEPRINT_CAPABILITY,
-    BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256, XR_STATE_SCHEMA_VERSION,
+    DeviceTelemetry, StreamsControl, StreamsStatus, XrStateFrame, XrStreamConfig,
+    BLUEPRINT_CAPABILITY, BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256, XR_STATE_SCHEMA_VERSION,
 };
 
 use crate::config::BridgeConfig;
 use crate::latency::LatencyRecorder;
+use crate::media::{MediaChannels, MediaListeners};
 use crate::pose_udp_server::UdpDropStats;
 use crate::service::{append_video_feed_infos, log_video_feeds, video_feed_relays};
 use crate::wire_runtime::TimedCommand;
@@ -92,6 +93,193 @@ pub struct BlueprintStreams {
     pub event_tx: mpsc::Sender<BlueprintEvent>,
 }
 
+/// Ordered host→headset `StreamsControl` queue depth per headset connection.
+const STREAMS_CONTROL_QUEUE: usize = 16;
+
+/// Capture-stream ctrl plumbing between the host side and the headset
+/// connection that owns the host session: the latest headset
+/// `StreamsStatus` (latest-wins) and an ordered `StreamsControl` queue.
+///
+/// The most recent headset handshake owns the session. Status is `None`
+/// until that headset reports and again once its connection ends.
+#[derive(Clone)]
+pub struct StreamsChannels {
+    status_tx: watch::Sender<Option<Arc<StreamsStatus>>>,
+    session: Arc<Mutex<StreamsSession>>,
+    /// Session media relay; only the embedded SDK path serves media.
+    media: Option<MediaChannels>,
+}
+
+#[derive(Default)]
+struct StreamsSession {
+    generation: u64,
+    owner: Option<u64>,
+    /// Present only while the owner advertised `capture_streams_v1`.
+    control_tx: Option<mpsc::Sender<StreamsControl>>,
+}
+
+/// Why a `StreamsControl` could not be queued for the headset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamsControlError {
+    Invalid(String),
+    NotConnected,
+    /// The connected headset did not advertise `capture_streams_v1`.
+    Unsupported,
+    QueueFull,
+}
+
+impl std::fmt::Display for StreamsControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(error) => write!(f, "invalid StreamsControl: {error}"),
+            Self::NotConnected => f.write_str("no headset is connected"),
+            Self::Unsupported => f.write_str(
+                "connected headset does not advertise capture_streams_v1; update the Operator XR app",
+            ),
+            Self::QueueFull => f.write_str("StreamsControl queue is full"),
+        }
+    }
+}
+
+impl std::error::Error for StreamsControlError {}
+
+impl Default for StreamsChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamsChannels {
+    pub fn new() -> Self {
+        let (status_tx, _) = watch::channel(None);
+        Self {
+            status_tx,
+            session: Arc::new(Mutex::new(StreamsSession::default())),
+            media: None,
+        }
+    }
+
+    /// Channels that also carry granted media through `media`: the SDK
+    /// service serves it when `capture_streams` is declared and injects the
+    /// session-owned `DeviceDescriptor.media` block for capable headsets.
+    pub fn with_media(media: MediaChannels) -> Self {
+        Self {
+            media: Some(media),
+            ..Self::new()
+        }
+    }
+
+    pub fn media(&self) -> Option<&MediaChannels> {
+        self.media.as_ref()
+    }
+
+    /// Latest-wins headset `StreamsStatus`; `None` while no report is known.
+    pub fn status(&self) -> watch::Receiver<Option<Arc<StreamsStatus>>> {
+        self.status_tx.subscribe()
+    }
+
+    pub fn latest_status(&self) -> Option<Arc<StreamsStatus>> {
+        self.status_tx.borrow().clone()
+    }
+
+    /// Whether the headset owning the session advertised `capture_streams_v1`.
+    pub fn headset_supported(&self) -> bool {
+        self.session
+            .lock()
+            .map(|session| session.control_tx.is_some())
+            .unwrap_or(false)
+    }
+
+    /// Queue `control` for the owning headset, preserving order.
+    pub fn send_control(&self, control: StreamsControl) -> Result<(), StreamsControlError> {
+        control.validate().map_err(StreamsControlError::Invalid)?;
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| StreamsControlError::NotConnected)?;
+        if session.owner.is_none() {
+            return Err(StreamsControlError::NotConnected);
+        }
+        let control_tx = session
+            .control_tx
+            .as_ref()
+            .ok_or(StreamsControlError::Unsupported)?;
+        control_tx.try_send(control).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => StreamsControlError::QueueFull,
+            mpsc::error::TrySendError::Closed(_) => StreamsControlError::NotConnected,
+        })
+    }
+
+    /// Make a newly handshaken headset the session owner. The returned
+    /// guard releases ownership (and clears the status) when dropped.
+    pub(crate) fn attach(
+        &self,
+        capture_streams_supported: bool,
+    ) -> (StreamsAttachment, Option<mpsc::Receiver<StreamsControl>>) {
+        let (control_tx, control_rx) = if capture_streams_supported {
+            let (tx, rx) = mpsc::channel(STREAMS_CONTROL_QUEUE);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let generation = match self.session.lock() {
+            Ok(mut session) => {
+                session.generation += 1;
+                session.owner = Some(session.generation);
+                session.control_tx = control_tx;
+                session.generation
+            }
+            Err(_) => 0,
+        };
+        self.status_tx.send_replace(None);
+        (
+            StreamsAttachment {
+                channels: self.clone(),
+                generation,
+            },
+            control_rx,
+        )
+    }
+}
+
+/// One headset connection's claim on [`StreamsChannels`].
+pub(crate) struct StreamsAttachment {
+    channels: StreamsChannels,
+    generation: u64,
+}
+
+impl StreamsAttachment {
+    fn owns(&self, session: &StreamsSession) -> bool {
+        session.owner == Some(self.generation)
+    }
+
+    pub(crate) fn publish(&self, status: StreamsStatus) {
+        let owns = self
+            .channels
+            .session
+            .lock()
+            .map(|session| self.owns(&session))
+            .unwrap_or(false);
+        if owns {
+            self.channels.status_tx.send_replace(Some(Arc::new(status)));
+        }
+    }
+}
+
+impl Drop for StreamsAttachment {
+    fn drop(&mut self) {
+        let Ok(mut session) = self.channels.session.lock() else {
+            return;
+        };
+        if self.owns(&session) {
+            session.owner = None;
+            session.control_tx = None;
+            drop(session);
+            self.channels.status_tx.send_replace(None);
+        }
+    }
+}
+
 /// Latest-wins publication: slow consumers lose complete frames and never
 /// block the headset socket or observe a field-by-field update.
 pub fn state_channel() -> (XrStateSink, watch::Receiver<Option<Arc<XrStateFrame>>>) {
@@ -111,7 +299,7 @@ pub async fn run_sdk_mode(
     sink: XrStateSink,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    run_sdk_mode_inner(config, sink, shutdown, None, None).await
+    run_sdk_mode_inner(config, sink, shutdown, None, None, None).await
 }
 
 /// SDK service variant that reports whether all startup resources were
@@ -123,7 +311,7 @@ pub async fn run_sdk_mode_with_startup(
     shutdown: watch::Receiver<bool>,
     startup: oneshot::Sender<std::result::Result<(), String>>,
 ) -> Result<()> {
-    run_sdk_mode_inner(config, sink, shutdown, Some(startup), None).await
+    run_sdk_mode_inner(config, sink, shutdown, Some(startup), None, None).await
 }
 
 pub async fn run_sdk_mode_with_startup_and_blueprint(
@@ -133,7 +321,30 @@ pub async fn run_sdk_mode_with_startup_and_blueprint(
     startup: oneshot::Sender<std::result::Result<(), String>>,
     blueprint: BlueprintStreams,
 ) -> Result<()> {
-    run_sdk_mode_inner(config, sink, shutdown, Some(startup), Some(blueprint)).await
+    run_sdk_mode_inner(config, sink, shutdown, Some(startup), Some(blueprint), None).await
+}
+
+/// SDK service variant that also routes capture-stream `StreamsStatus` /
+/// `StreamsControl` between `streams` and the headset, and serves session
+/// media when `streams` carries [`MediaChannels`] and `capture_streams` is
+/// declared (media ports bound with the other listeners).
+pub async fn run_sdk_mode_with_startup_blueprint_and_streams(
+    config: BridgeConfig,
+    sink: XrStateSink,
+    shutdown: watch::Receiver<bool>,
+    startup: oneshot::Sender<std::result::Result<(), String>>,
+    blueprint: BlueprintStreams,
+    streams: StreamsChannels,
+) -> Result<()> {
+    run_sdk_mode_inner(
+        config,
+        sink,
+        shutdown,
+        Some(startup),
+        Some(blueprint),
+        Some(streams),
+    )
+    .await
 }
 
 async fn run_sdk_mode_inner(
@@ -142,8 +353,16 @@ async fn run_sdk_mode_inner(
     mut shutdown: watch::Receiver<bool>,
     startup: Option<oneshot::Sender<std::result::Result<(), String>>>,
     blueprint: Option<BlueprintStreams>,
+    streams: Option<StreamsChannels>,
 ) -> Result<()> {
-    if let Err(error) = crate::config::validate_xr_streams(&config.xr_streams) {
+    let validated = crate::config::validate_xr_streams(&config.xr_streams).and_then(|()| {
+        config.capture_streams.as_ref().map_or(Ok(()), |capture| {
+            capture
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid capture_streams: {error}"))
+        })
+    });
+    if let Err(error) = validated {
         if let Some(startup) = startup {
             let _ = startup.send(Err(error.to_string()));
         }
@@ -166,6 +385,7 @@ async fn run_sdk_mode_inner(
             rate_hz: 72,
             streams: config.xr_streams.clone(),
         }),
+        capture_streams: config.capture_streams.clone(),
         ..DeviceDescriptor::default()
     };
     if blueprint.is_some() {
@@ -181,6 +401,12 @@ async fn run_sdk_mode_inner(
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
     let video_feeds = video_feed_relays(&config.video.feeds)?;
     log_video_feeds(&video_feeds);
+    // Media exists only to carry declared capture streams.
+    let media = streams
+        .as_ref()
+        .and_then(StreamsChannels::media)
+        .filter(|_| config.capture_streams.is_some())
+        .cloned();
 
     let device_type = descriptor.device.device_type.clone();
     let device_name = descriptor.device.name.clone();
@@ -205,17 +431,25 @@ async fn run_sdk_mode_inner(
             .await
             .context("starting XR discovery")?;
         let video_feeds = video::prepare(video_feeds).await?;
+        let media_relay = match &media {
+            Some(media) => MediaListeners::bind(config.media_up_port, config.media_down_port)
+                .await?
+                .map(|listeners| media.serve(listeners))
+                .transpose()?,
+            None => None,
+        };
         Ok::<_, anyhow::Error>((
             pose_listener,
             pose_udp_socket,
             telemetry_listener,
             discovery,
             video_feeds,
+            media_relay,
         ))
     }
     .await;
 
-    let (pose_listener, pose_udp_socket, telemetry_listener, discovery, video_feeds) =
+    let (pose_listener, pose_udp_socket, telemetry_listener, discovery, video_feeds, media_relay) =
         match prepared {
             Ok(prepared) => {
                 if let Some(startup) = startup {
@@ -232,15 +466,20 @@ async fn run_sdk_mode_inner(
         };
 
     tracing::info!(
-        "pyoperator network up: pose={} discovery={}",
+        "pyoperator network up: pose={} discovery={} media={}",
         config.pose_port,
-        config.discovery_port
+        config.discovery_port,
+        if media_relay.is_some() {
+            format!("{}/{}", config.media_up_port, config.media_down_port)
+        } else {
+            "off".to_string()
+        }
     );
 
     let stack = async {
         tokio::try_join!(
             discovery::run_prepared(discovery),
-            pose_server::run_on_with_xr_state_and_blueprint(
+            pose_server::run_on_with_xr_state_blueprint_and_streams(
                 pose_listener,
                 descriptor,
                 device_cmd_tx.clone(),
@@ -248,6 +487,7 @@ async fn run_sdk_mode_inner(
                 latency.clone(),
                 sink,
                 blueprint,
+                streams,
             ),
             pose_udp_server::run_on(
                 pose_udp_socket,
@@ -259,6 +499,12 @@ async fn run_sdk_mode_inner(
             telemetry_server::run_on(telemetry_listener, telemetry_rx),
             latency::run_aggregator(latency),
             video::run_prepared(video_feeds),
+            async {
+                match media_relay {
+                    Some(relay) => relay.await,
+                    None => Ok(()),
+                }
+            },
         )?;
         Ok::<(), anyhow::Error>(())
     };
@@ -293,6 +539,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_rejects_invalid_capture_streams_before_opening_network() {
+        let config = BridgeConfig {
+            capture_streams: Some(
+                serde_json::from_str(r#"{"streams":[{"name":"rgb.hevc","eye":"right"}]}"#).unwrap(),
+            ),
+            ..BridgeConfig::default()
+        };
+        let (sink, _frames) = state_channel();
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let (startup_tx, startup_rx) = oneshot::channel();
+        let (blueprint_event_tx, _events) = mpsc::channel(1);
+        let (_blueprint_tx, blueprint_rx) = watch::channel(None);
+        let (_state_tx, state_rx) = watch::channel(None);
+        let service = run_sdk_mode_with_startup_blueprint_and_streams(
+            config,
+            sink,
+            shutdown,
+            startup_tx,
+            BlueprintStreams {
+                blueprint_rx,
+                state_rx,
+                event_tx: blueprint_event_tx,
+            },
+            StreamsChannels::new(),
+        )
+        .await;
+        assert!(service.unwrap_err().to_string().contains("capture_streams"));
+        assert!(startup_rx.await.unwrap().unwrap_err().contains("eye"));
+    }
+
+    #[tokio::test]
     async fn startup_reports_pose_bind_failure() {
         let occupied = StdTcpListener::bind(("0.0.0.0", 0)).unwrap();
         let occupied_port = occupied.local_addr().unwrap().port();
@@ -319,6 +596,61 @@ mod tests {
             .expect_err("service must stop after startup failure")
             .to_string()
             .contains(&format!("pose TCP port {occupied_port}")));
+    }
+
+    #[tokio::test]
+    async fn startup_reports_media_bind_failure_when_capture_streams_are_declared() {
+        let occupied = StdTcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let occupied_port = occupied.local_addr().unwrap().port();
+        let config = BridgeConfig {
+            pose_port: 0,
+            discovery_port: 0,
+            pose_udp_port: 0,
+            telemetry_port: 0,
+            media_up_port: occupied_port,
+            media_down_port: 0,
+            capture_streams: Some(
+                serde_json::from_str(r#"{"streams":[{"name":"rgb.hevc"}]}"#).unwrap(),
+            ),
+            ..BridgeConfig::default()
+        };
+        let run = |config: BridgeConfig| async move {
+            let (sink, _frames) = state_channel();
+            let (shutdown_tx, shutdown) = watch::channel(false);
+            let (startup_tx, startup_rx) = oneshot::channel();
+            let (event_tx, _events) = mpsc::channel(1);
+            let (_blueprint_tx, blueprint_rx) = watch::channel(None);
+            let (_state_tx, state_rx) = watch::channel(None);
+            let service = tokio::spawn(run_sdk_mode_with_startup_blueprint_and_streams(
+                config,
+                sink,
+                shutdown,
+                startup_tx,
+                BlueprintStreams {
+                    blueprint_rx,
+                    state_rx,
+                    event_tx,
+                },
+                StreamsChannels::with_media(crate::media::MediaChannels::new()),
+            ));
+            let startup = startup_rx.await.unwrap();
+            let _ = shutdown_tx.send(true);
+            let _ = service.await;
+            startup
+        };
+
+        // `0` on either media port disables media: startup succeeds.
+        run(config.clone()).await.unwrap();
+        let error = run(BridgeConfig {
+            media_down_port: 1,
+            ..config
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains(&format!("media_up TCP port {occupied_port}")),
+            "{error}"
+        );
     }
 
     #[tokio::test]

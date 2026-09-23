@@ -2,13 +2,13 @@ class_name BlueprintPrimitiveSpec
 extends RefCounted
 
 ## Generated from specs/blueprint/v1.json. Do not edit.
-const SPEC_SHA256 := "85fc4ff0499ed3dbc3949778f9d5ba57806c2ab5632693be909108af1e4395b2"
+const SPEC_SHA256 := "0ce60d8ad3b736adb55b98b56a7be0bc30ca901d5a03996d4e254f007077bc09"
 const SPEC_VERSION := 1
 const BLUEPRINT_SCHEMA := "operator.blueprint.v1"
 const STATE_SCHEMA := "operator.blueprint_state.v1"
 const EVENT_SCHEMA := "operator.blueprint_event.v1"
 const CAPABILITY := "blueprint_v1"
-const SPEC_CAPABILITY := "blueprint_v1@sha256:85fc4ff0499ed3dbc3949778f9d5ba57806c2ab5632693be909108af1e4395b2"
+const SPEC_CAPABILITY := "blueprint_v1@sha256:0ce60d8ad3b736adb55b98b56a7be0bc30ca901d5a03996d4e254f007077bc09"
 const SPEC_HASH_CAPABILITY := "blueprint_spec_sha256"
 const BLUEPRINT_COMMAND := "Blueprint"
 const STATE_COMMAND := "BlueprintState"
@@ -595,6 +595,132 @@ const PRIMITIVES := {
 		},
 		"events": {},
 	},
+	"path": {
+		"host": "node3d",
+		"implementation": "path",
+		"singleton": false,
+		"default_anchor": "world",
+		"anchors": [
+			"world",
+		],
+		"user_visibility_override": true,
+		"properties": {
+			"visible": {
+				"type": "boolean",
+				"default": true,
+			},
+			"settings_label": {
+				"type": "string",
+				"default": "",
+			},
+			"points": {
+				"type": "number_array",
+				"default": [],
+				"max_length": 6144,
+			},
+			"color": {
+				"type": "color",
+				"default": "#33ccff",
+			},
+			"width": {
+				"type": "number",
+				"default": 0.05,
+				"minimum": 0.005,
+				"maximum": 0.5,
+			},
+			"closed": {
+				"type": "boolean",
+				"default": false,
+			},
+			"no_depth_test": {
+				"type": "boolean",
+				"default": false,
+			},
+		},
+		"bindings": {
+			"visible": {
+				"type": "boolean",
+				"required": false,
+			},
+			"points": {
+				"type": "number_array",
+				"max_length": 6144,
+				"required": false,
+			},
+			"color": {
+				"type": "color",
+				"required": false,
+			},
+		},
+		"events": {},
+	},
+	"marker": {
+		"host": "node3d",
+		"implementation": "marker",
+		"singleton": false,
+		"default_anchor": "world",
+		"anchors": [
+			"world",
+			"head",
+			"left_controller",
+			"right_controller",
+			"left_palm",
+			"right_palm",
+		],
+		"user_visibility_override": true,
+		"properties": {
+			"visible": {
+				"type": "boolean",
+				"default": true,
+			},
+			"settings_label": {
+				"type": "string",
+				"default": "",
+			},
+			"shape": {
+				"type": "string",
+				"default": "sphere",
+			},
+			"color": {
+				"type": "color",
+				"default": "#ffc233",
+			},
+			"size": {
+				"type": "number",
+				"default": 0.15,
+				"minimum": 0.01,
+				"maximum": 2,
+			},
+			"text": {
+				"type": "string",
+				"default": "",
+			},
+			"pulse": {
+				"type": "boolean",
+				"default": false,
+			},
+		},
+		"bindings": {
+			"visible": {
+				"type": "boolean",
+				"required": false,
+			},
+			"position": {
+				"type": "number_array",
+				"length": 3,
+				"required": false,
+			},
+			"color": {
+				"type": "color",
+				"required": false,
+			},
+			"text": {
+				"type": "string",
+				"required": false,
+			},
+		},
+		"events": {},
+	},
 	"menu_item": {
 		"host": "system_menu",
 		"implementation": "menu_item",
@@ -1119,6 +1245,59 @@ const PRIMITIVES := {
 		"bindings": {
 			"visible": {
 				"type": "boolean",
+				"required": false,
+			},
+		},
+		"events": {},
+	},
+	"dense_map": {
+		"host": "external_view",
+		"implementation": "dense_map",
+		"singleton": true,
+		"default_anchor": "world",
+		"anchors": [
+			"world",
+		],
+		"user_visibility_override": true,
+		"properties": {
+			"visible": {
+				"type": "boolean",
+				"default": true,
+			},
+			"settings_label": {
+				"type": "string",
+				"default": "",
+			},
+			"display": {
+				"type": "string",
+				"default": "world",
+			},
+			"scale": {
+				"type": "number",
+				"default": 0.2,
+				"minimum": 0.01,
+				"maximum": 1,
+			},
+			"distance": {
+				"type": "number",
+				"default": 1.0,
+				"minimum": 0.2,
+				"maximum": 5,
+			},
+			"height_below_head": {
+				"type": "number",
+				"default": 0.3,
+				"minimum": -1,
+				"maximum": 2,
+			},
+		},
+		"bindings": {
+			"visible": {
+				"type": "boolean",
+				"required": false,
+			},
+			"display": {
+				"type": "string",
 				"required": false,
 			},
 		},

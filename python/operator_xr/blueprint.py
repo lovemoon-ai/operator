@@ -54,6 +54,14 @@ _FINGERTIP_TACTILE_REFRESH_BINDING = next(
 _VIDEO_PANEL_FOLLOW_CAMERA = bool(
     _primitive_property_default("video_panel", "follow_camera")
 )
+_MARKER_DEFAULT_ANCHOR = _primitive_default_anchor("marker")
+_MARKER_DEFAULT_SHAPE = str(_primitive_property_default("marker", "shape"))
+_MARKER_DEFAULT_TEXT = str(_primitive_property_default("marker", "text"))
+_DENSE_MAP_DEFAULT_DISPLAY = str(_primitive_property_default("dense_map", "display"))
+# The contract language has no enums. The headset falls back to the default
+# for unknown values; authoring helpers reject them early.
+_MARKER_SHAPES = ("sphere", "ring", "arrow", "pin")
+_DENSE_MAP_DISPLAYS = ("world", "minimap")
 
 
 def _default_position() -> tuple[float, float, float]:
@@ -149,6 +157,9 @@ def _validate_value(name: str, value: Any, field_spec: Mapping[str, Any]) -> Non
     length = field_spec.get("length")
     if length is not None and len(value) != int(length):
         raise ValueError(f"Blueprint field {name!r} must contain {length} items")
+    max_length = field_spec.get("max_length")
+    if max_length is not None and len(value) > int(max_length):
+        raise ValueError(f"Blueprint field {name!r} must contain at most {max_length} items")
 
 
 def _binding_value_contract(field_spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -462,6 +473,71 @@ class BlueprintComponent:
         )
 
     @classmethod
+    def path(
+        cls,
+        id: str,
+        *,
+        points: tuple[float, ...] | list[float] = (),
+        points_binding: str | None = None,
+        color_binding: str | None = None,
+        visible_binding: str | None = None,
+        transform: BlueprintTransform | None = None,
+        properties: Mapping[str, Any] | None = None,
+        user_overridable: bool | None = None,
+    ) -> "BlueprintComponent":
+        """Polyline such as a planned route drawn on the ground.
+
+        ``points`` and the bound ``points`` state value are flat
+        ``[x0, y0, z0, x1, y1, z1, ...]`` lists of at most 2048 points in the
+        component's local XR frame (metres, Y up). ``width`` is in metres.
+        """
+        component_properties = dict(properties or {})
+        component_properties.setdefault("points", list(points))
+        bindings = {key: value for key, value in dict(visible=visible_binding,
+                    points=points_binding, color=color_binding).items() if value}
+        component = cls(id=id, type="path", transform=transform or BlueprintTransform(),
+                        properties=component_properties, bindings=bindings,
+                        user_overridable=user_overridable)
+        if len(component.properties["points"]) % 3:
+            raise ValueError("path points must be a flat list of x, y, z triples")
+        return component
+
+    @classmethod
+    def marker(
+        cls,
+        id: str,
+        *,
+        shape: str = _MARKER_DEFAULT_SHAPE,
+        text: str = _MARKER_DEFAULT_TEXT,
+        anchor: str = _MARKER_DEFAULT_ANCHOR,
+        transform: BlueprintTransform | None = None,
+        position_binding: str | None = None,
+        color_binding: str | None = None,
+        text_binding: str | None = None,
+        visible_binding: str | None = None,
+        properties: Mapping[str, Any] | None = None,
+        user_overridable: bool | None = None,
+    ) -> "BlueprintComponent":
+        """Goal or waypoint marker: ``sphere``, ``ring``, ``arrow`` or ``pin``.
+
+        ``size`` is the marker extent in metres. The bound ``position`` is an
+        ``[x, y, z]`` offset in the component's local frame. An ``arrow``
+        starts at that point and points along the component's local -Z.
+        """
+        component_properties = dict(properties or {})
+        component_properties.setdefault("shape", shape)
+        component_properties.setdefault("text", text)
+        if component_properties["shape"] not in _MARKER_SHAPES:
+            raise ValueError(f"marker shape must be one of {', '.join(_MARKER_SHAPES)}")
+        bindings = {key: value for key, value in dict(visible=visible_binding,
+                    position=position_binding, color=color_binding,
+                    text=text_binding).items() if value}
+        return cls(id=id, type="marker", anchor=anchor,
+                   transform=transform or BlueprintTransform(),
+                   properties=component_properties, bindings=bindings,
+                   user_overridable=user_overridable)
+
+    @classmethod
     def menu_item(
         cls, id: str, *, title: str, action: str, value_binding: str,
         available_binding: str | None = None, visible_binding: str | None = None,
@@ -714,6 +790,33 @@ class BlueprintComponent:
             properties=properties,
             user_overridable=user_overridable,
         )
+
+    @classmethod
+    def dense_map(
+        cls,
+        id: str = "dense_map",
+        *,
+        display: str = _DENSE_MAP_DEFAULT_DISPLAY,
+        display_binding: str | None = None,
+        visible_binding: str | None = None,
+        properties: Mapping[str, Any] | None = None,
+        user_overridable: bool | None = None,
+    ) -> "BlueprintComponent":
+        """Headset view of the host's dense map point cloud.
+
+        Map content arrives on the host's media_down result stream, never in
+        Blueprint state. ``display`` is ``world`` (1:1 at the host-supplied
+        map transform) or ``minimap`` (scaled by ``scale``, ``distance``
+        metres ahead of and ``height_below_head`` metres below the viewer).
+        """
+        component_properties = dict(properties or {})
+        component_properties.setdefault("display", display)
+        if component_properties["display"] not in _DENSE_MAP_DISPLAYS:
+            raise ValueError(f"dense_map display must be one of {', '.join(_DENSE_MAP_DISPLAYS)}")
+        bindings = {key: value for key, value in dict(visible=visible_binding,
+                    display=display_binding).items() if value}
+        return cls(id=id, type="dense_map", properties=component_properties,
+                   bindings=bindings, user_overridable=user_overridable)
 
     @classmethod
     def _builtin_view(

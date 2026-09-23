@@ -31,11 +31,11 @@ const XROBOT_TOOLKIT_TARGET_PATH := "res://scripts/teleop/targets/xrobot_toolkit
 const XROBOT_TOOLKIT_VIDEO_SESSION_PATH := (
 	"res://scripts/compat/xrobot_toolkit/xrt_video_session.gd"
 )
-const XROBOT_TOOLKIT_DISCOVERY_PATH := (
-	"res://scripts/compat/xrobot_toolkit/xrt_discovery.gd"
-)
-const XROBOT_TOOLKIT_DEVICE_TYPE := "xrobot_toolkit"
 const INSIDE_ROBOT_TARGET_PATH := "res://scripts/teleop/targets/inside_robot_target.gd"
+## Host capture streams (camera/depth media_up, local tasks). Present only in
+## presets that ship the capture stack; loaded by path so Teleop-only presets
+## can drop it (they then never advertise capture_streams_v1).
+const HOST_CAPTURE_COMPOSITION_PATH := "res://scripts/app/composition/host_capture_composition.gd"
 
 const VIDEO_PROTOCOL_OPERATOR := "operator_timed_h264"
 const VIDEO_PROTOCOL_XROBOT_TOOLKIT := "xrobot_toolkit_fpv"
@@ -48,11 +48,10 @@ const VIDEO_PREVIEW_CLOSE_Z_OFFSET := 0.04
 const TELEOP_CONTROLLER_OVERLAY_OFFSET := Transform3D.IDENTITY
 const DEFAULT_TELEMETRY_PORT := 63903
 const TELEMETRY_PORT_OFFSET := 2
-const TELEMETRY_RETRY_DELAY_SEC := 1.0
 const REVO2_DEVICE_TYPE := "revo2_dual_hand"
 const PASSTHROUGH_BACKGROUND_MODE := Environment.BG_COLOR
 const BLUEPRINT_EXTERNAL_VIEW_IMPLEMENTATIONS := [
-	"video_panel", "controller_help", "control_frame", "operation_trajectory"
+	"video_panel", "controller_help", "control_frame", "operation_trajectory", "dense_map"
 ]
 const BLUEPRINT_EXTERNAL_VIEW_CONTRACTS := {
 	"video_panel": {
@@ -79,6 +78,11 @@ const BLUEPRINT_EXTERNAL_VIEW_CONTRACTS := {
 	"operation_trajectory": {
 		"properties": ["visible", "settings_label"],
 		"bindings": ["visible"],
+		"events": [],
+	},
+	"dense_map": {
+		"properties": ["visible", "settings_label", "display", "scale", "distance", "height_below_head"],
+		"bindings": ["visible", "display"],
 		"events": [],
 	},
 }
@@ -131,7 +135,15 @@ var _revo2_hand_control_unlocked := false
 @onready var _robot_view: Node = $XROrigin3D/RobotView
 
 ## v2 nodes (created programmatically)
-var _session: Session
+## The 1:1 session with the connected host: ctrl commands, telemetry and video.
+var _host_session: HostSession
+## Host capture streams composition (null in Teleop-only presets).
+var _host_capture: Node = null
+## Renders the host's dense map (media_down) under the Blueprint `dense_map`
+## external view; null while no Blueprint declares it visible.
+var _dense_map_view: DenseMapView = null
+## Latest descriptor of the connected host ({} while disconnected).
+var _descriptor: Dictionary = {}
 var _blueprint_runtime: BlueprintRuntime
 ## WP5: teleop command emission goes through RobotControlSink (sinks/
 ## robot_control). The sink wraps the scene-owned CommandSender by
@@ -141,31 +153,9 @@ var _command_sender: CommandSender
 ## Raw atomic state publisher, enabled only when the descriptor advertises
 ## `xr_stream` (the embedded operator_xr SDK mode).
 var _xr_state_sender: XrStateSender
-## Dedicated telemetry connection. xr-bridge intentionally separates the
-## command and telemetry sockets so slow UI consumers cannot delay commands.
-var _telemetry_tcp_handler: TcpHandler
-## TCP video handler — used when the descriptor selects "tcp" or as the
-## fallback for "auto"-mode descriptors that didn't supply a UDP port.
-var _video_tcp_handler: TcpHandler
-## [issue 005 / item 1] UDP video handler. Created lazily in
-## `_create_v2_nodes`; only `connect_to_video_stream` when the
-## descriptor advertises `transport=udp` (or `transport=auto` plus a
-## non-zero `udp_port`).
-var _video_udp_handler: UdpVideoHandler
 var _xrt_video_session: Node
-var _active_video_transport: String = "tcp"  # "tcp" or "udp"
-var _last_video_feed: Dictionary = {}
-var _video_retry_remaining := -1.0
-var _active_telemetry_port := DEFAULT_TELEMETRY_PORT
-var _telemetry_retry_remaining := 0.0
-var _clock_sync: RobotClockSync
-## Discovery identity -> endpoint metadata. Identity includes the protocol so an
-## Operator service and an XRoboToolkit RoboticsService may coexist on one host.
-var _known_robots: Dictionary = {}
-## Node listening for XRoboToolkit's own 1 Hz robot beacon. Separate port and
-## separate wire format from `_discovery`, so it is a separate listener that
-## merges into the same protocol-aware `_known_robots` map.
-var _xrt_discovery: Node = null
+## Operator + XRoboToolkit beacons merged into one protocol-aware map.
+var _host_discovery: HostDiscovery
 var _outside_target: Node
 var _xrt_target: Node
 var _inside_target: Node
@@ -198,6 +188,8 @@ var _send_rate_elapsed := 0.0
 var _last_network_received_bytes := 0
 var _last_network_sent_bytes := 0
 var _manual_video_protocol := ""
+## Video endpoint pinned from settings ("Connect video"); while non-empty it
+## wins over the descriptor-advertised feed (see HostSession.video_override).
 var _manual_video_options: Dictionary = {}
 var _video_test_active := false
 var _video_test_generation := 0
@@ -299,45 +291,29 @@ func _ready() -> void:
 		if _start_xr.has_signal("xr_failed"):
 			_start_xr.xr_failed.connect(_on_xr_failed)
 
-	# Wire up subsystem connections
-	_tcp_handler.connected_to_server.connect(_on_connected)
-	_tcp_handler.disconnected_from_server.connect(_on_disconnected)
-	_tcp_handler.connection_failed.connect(_on_connection_failed)
-	_tcp_handler.command_received.connect(_on_command_received)
-
-	_telemetry_tcp_handler.connected_to_server.connect(_on_telemetry_connected)
-	_telemetry_tcp_handler.disconnected_from_server.connect(_on_telemetry_disconnected)
-	_telemetry_tcp_handler.connection_failed.connect(_on_telemetry_connection_failed)
-	_telemetry_tcp_handler.command_received.connect(_on_telemetry_command_received)
-
-	_video_tcp_handler.connected_to_server.connect(_on_video_connected)
-	_video_tcp_handler.disconnected_from_server.connect(_on_video_disconnected)
-	_video_tcp_handler.connection_failed.connect(_on_video_connection_failed)
-	_video_tcp_handler.video_frame_received.connect(_on_video_frame_received)
-
-	# [issue 005 / item 1] UDP signal wiring. The handler is dormant until
-	# `_connect_video_stream` actually calls connect_to_video_stream on it.
-	_video_udp_handler.connected_to_server.connect(_on_video_connected)
-	_video_udp_handler.disconnected_from_server.connect(_on_video_disconnected)
-	_video_udp_handler.connection_failed.connect(_on_video_connection_failed)
-	_video_udp_handler.video_frame_received.connect(_on_video_frame_received)
+	# The host session owns ctrl, telemetry and video; this mode reacts.
+	_host_session.connected.connect(_on_connected)
+	_host_session.disconnected.connect(_on_disconnected)
+	_host_session.connection_failed.connect(_on_connection_failed)
+	_host_session.descriptor_received.connect(_on_device_connected)
+	_host_session.descriptor_cleared.connect(_on_device_disconnected)
+	_host_session.telemetry_received.connect(_on_telemetry_received)
+	_host_session.telemetry_link_lost.connect(_on_telemetry_link_lost)
+	_host_session.blueprint_received.connect(_on_blueprint_received)
+	_host_session.blueprint_cleared.connect(_clear_blueprint_runtime)
+	_host_session.blueprint_state_received.connect(_on_blueprint_runtime_state_received)
+	_host_session.streams_control_received.connect(_on_streams_control_received)
+	_host_session.video_packet_received.connect(_on_video_frame_received)
+	_host_session.video_connected.connect(_on_video_connected)
+	_host_session.video_disconnected.connect(_on_video_disconnected)
+	_host_session.video_connection_failed.connect(_on_video_connection_failed)
 	for controller in [_left_controller, _right_controller]:
 		if controller != null:
 			controller.button_pressed.connect(_on_video_test_exit_button_pressed)
 
-	_discovery.robot_found.connect(_on_robot_found)
-	_discovery.robot_lost.connect(_on_robot_lost)
-	_start_xrt_discovery()
-
-	# Wire up Session signals
-	_session.device_connected.connect(_on_device_connected)
-	_session.device_disconnected.connect(_on_device_disconnected)
-	_session.telemetry_received.connect(_on_telemetry_received)
-	_session.blueprint_received.connect(_on_blueprint_received)
-	_session.blueprint_cleared.connect(_clear_blueprint_runtime)
-	_session.blueprint_state_received.connect(
-		_on_blueprint_runtime_state_received
-	)
+	_host_discovery.changed.connect(_on_discovery_changed)
+	_host_discovery.endpoint_found.connect(_host_session.on_endpoint_discovered)
+	_host_discovery.endpoint_lost.connect(_host_session.on_endpoint_lost)
 
 	# Configure command sender references
 	_command_sender.tracking_provider = _tracking_provider
@@ -348,7 +324,7 @@ func _ready() -> void:
 
 	# Start discovery scanning in the background; the Settings panel opens
 	# as soon as XR is ready and shows discovery progress while this runs.
-	_discovery.start_scan()
+	_host_discovery.start_scan()
 
 	# Initial UI state: hide both until XR is ready enough to place
 	# composition layers. `_begin_launch_window` opens the panel immediately
@@ -383,8 +359,10 @@ func _process(_delta: float) -> void:
 	_apply_settings_input_indicator(_current_interaction_mode())
 	_update_teleop_controller_panel()
 	_update_controller_shell()
-	_tick_telemetry_reconnect(_delta)
-	_tick_video_reconnect(_delta)
+	# Telemetry/video reconnection runs only while the Operator outside target
+	# owns the host session.
+	if _host_session != null:
+		_host_session.active = _active_target != null and _active_target == _outside_target
 	# Position refreshes every frame so the gizmo tracks the controller smoothly;
 	# its orientation only changes when telemetry reports a new captured frame.
 	_update_control_frame_gizmo()
@@ -504,10 +482,22 @@ func _create_v2_nodes() -> void:
 		add_child(_inside_target)
 	_active_target = _outside_target
 
-	_session = Session.new()
-	_session.name = "Session"
-	_session.tcp_handler = _tcp_handler
-	add_child(_session)
+	_host_discovery = HostDiscovery.new()
+	_host_discovery.name = "HostDiscovery"
+	add_child(_host_discovery)
+	_host_discovery.setup(_discovery)
+	_host_session = HostSession.new()
+	_host_session.name = "HostSession"
+	_host_session.video_view = _robot_view
+	_host_session.endpoint_lookup = func(ip: String, pose_port: int) -> Dictionary:
+		return _find_known_robot(ip, "operator", pose_port)
+	_host_session.video_override = func() -> bool:
+		if _manual_video_options.is_empty():
+			return false
+		_connect_configured_video(_manual_video_options, false)
+		return true
+	add_child(_host_session)
+	_host_session.setup(_tcp_handler)
 	_blueprint_runtime = BlueprintRuntimeScript.new()
 	_blueprint_runtime.name = "BlueprintRuntime"
 	var blueprint_external_views: Array[String] = []
@@ -556,25 +546,6 @@ func _create_v2_nodes() -> void:
 	_xr_state_sender.tracking_blocked.connect(_on_tracking_blocked)
 	add_child(_xr_state_sender)
 
-	_telemetry_tcp_handler = TcpHandler.new()
-	_telemetry_tcp_handler.name = "TelemetryTcpHandler"
-	add_child(_telemetry_tcp_handler)
-
-	# Dedicated video stream handler. [issue 005 / item 6] Bumped to
-	# 32 MiB so a freshly connected client surviving a brief WiFi
-	# stall doesn't trip the overflow-disconnect cycle on the next IDR.
-	_video_tcp_handler = TcpHandler.new()
-	_video_tcp_handler.name = "VideoTcpHandler"
-	_video_tcp_handler.set_max_recv_buffer(32 * 1024 * 1024)
-	add_child(_video_tcp_handler)
-
-	# [issue 005 / item 1] UDP video handler — same API surface as the
-	# TCP one (connect_to_video_stream / video_frame_received signal)
-	# so swap-in is mechanical. Stays idle until the descriptor asks for it.
-	_video_udp_handler = UdpVideoHandler.new()
-	_video_udp_handler.name = "VideoUdpHandler"
-	add_child(_video_udp_handler)
-
 	# Same Pico-only gate as the XRT target above: no FPV session object at
 	# all on other platforms.
 	if PicoPlatformAdapter.is_pico_build():
@@ -597,13 +568,29 @@ func _create_v2_nodes() -> void:
 			)
 			add_child(_xrt_video_session)
 
-	# [opt 5] Clock-sync helper. Sends ClockPing on the command channel
-	# every second; the offset it learns is read by VideoLatencyTracker
-	# to make `tx=` honest.
-	_clock_sync = RobotClockSync.new()
-	_clock_sync.name = "ClockSync"
-	_clock_sync.tcp_handler = _tcp_handler
-	add_child(_clock_sync)
+	_create_host_capture()
+
+
+## Mounts the host capture-streams composition when this preset ships the
+## capture stack, and advertises what it can honor in Hello.
+func _create_host_capture() -> void:
+	if not ResourceLoader.exists(HOST_CAPTURE_COMPOSITION_PATH):
+		return
+	var script: Variant = load(HOST_CAPTURE_COMPOSITION_PATH)
+	if not (script is Script):
+		return
+	var instance: Variant = (script as Script).new()
+	if not (instance is Node):
+		return
+	_host_capture = instance
+	_host_capture.name = "HostCapture"
+	add_child(_host_capture)
+	var capabilities: Variant = _host_capture.call(
+		"setup", _host_session, _origin, _camera, _left_controller, _right_controller,
+		_pico_body_bridge(), Callable(self, "_current_interaction_mode"))
+	if capabilities is Array:
+		_host_session.set_extra_capabilities(capabilities as Array)
+		print("[Operator] Host capture streams available: %s" % str(capabilities))
 
 
 # --- Settings UI wiring -------------------------------------------------------
@@ -846,7 +833,7 @@ func _on_settings_applied(options: Dictionary) -> void:
 	_set_link_active(false)
 
 	# A manual video override is only meaningful for the endpoint it was
-	# configured against. `_connect_video_stream()` short-circuits to it
+	# configured against. HostSession.video_override short-circuits to it
 	# whenever it is non-empty, so without this re-seed one "Connect video"
 	# press would pin every later auto-connect to that host -- even after the
 	# operator confirmed a different robot, whose descriptor-advertised video
@@ -1032,47 +1019,9 @@ func _refresh_revo2_visualization_ownership() -> void:
 	_sync_revo2_hand_command_gate()
 
 
-static func _operator_discovery_key(ip: String, pose_port: int) -> String:
-	return "operator|%s|%d" % [ip, pose_port]
-
-
-static func _xrt_discovery_key(ip: String, port: int) -> String:
-	return "xrobot_toolkit_v1|%s|%d" % [ip, port]
-
-
-static func _known_robot_ip(key: Variant, info: Dictionary) -> String:
-	var endpoint_ip := str(info.get("ip", "")).strip_edges()
-	if endpoint_ip.is_empty() and str(key).is_valid_ip_address():
-		endpoint_ip = str(key)
-	return endpoint_ip
-
-
+## Discovery info for an endpoint ({} when unknown).
 func _find_known_robot(ip: String, protocol := "", pose_port := 0) -> Dictionary:
-	for key in _known_robots:
-		var info_v: Variant = _known_robots[key]
-		if not info_v is Dictionary:
-			continue
-		var info := info_v as Dictionary
-		if _known_robot_ip(key, info) != ip:
-			continue
-		if not protocol.is_empty() and str(info.get("protocol", "operator")) != protocol:
-			continue
-		if pose_port > 0 and int(info.get("pose_port", 0)) != pose_port:
-			continue
-		return info
-	return {}
-
-
-static func _discovery_matches_options(info: Dictionary, options: Dictionary) -> bool:
-	return (
-		str(info.get("ip", "")).strip_edges() == str(options.get("ip", "")).strip_edges()
-		and int(info.get("pose_port", 0)) == int(options.get("port", 0))
-		and str(info.get("protocol", "operator")) == str(options.get("protocol", "operator"))
-	)
-
-
-static func _can_auto_connect_discovered(info: Dictionary, options: Dictionary) -> bool:
-	return bool(options.get("loaded", false)) and _discovery_matches_options(info, options)
+	return _host_discovery.find(ip, protocol, pose_port) if _host_discovery != null else {}
 
 
 func _prepare_outside_runtime_features(ip: String, pose_port: int) -> void:
@@ -1208,17 +1157,7 @@ func _tick_send_rate(delta: float) -> void:
 
 
 func _network_byte_total(method_name: String) -> int:
-	var total := 0
-	for handler_value: Variant in [
-		_tcp_handler,
-		_telemetry_tcp_handler,
-		_video_tcp_handler,
-		_video_udp_handler,
-	]:
-		var handler := handler_value as Node
-		if handler != null and handler.has_method(method_name):
-			total += int(handler.call(method_name))
-	return total
+	return _host_session.network_byte_total(method_name) if _host_session != null else 0
 
 
 func _on_xr_state_frame_sent(_frame_id: int, _timestamp_ns: int) -> void:
@@ -1284,8 +1223,6 @@ func _on_settings_disconnect_requested() -> void:
 	_set_revo2_hand_control_unlocked(false)
 	_stop_active_target()
 	_disconnect_outside_media()
-	if _clock_sync:
-		_clock_sync.stop()
 	if _command_sender:
 		_command_sender.transport = null
 	_active_target = null
@@ -1374,18 +1311,10 @@ func _on_settings_exit_requested() -> void:
 		_robot_control_sink.set_sending(false)
 	if _active_target:
 		_active_target.stop()
-	if _clock_sync:
-		_clock_sync.stop()
-	if _discovery and _discovery.has_method("stop_scan"):
-		_discovery.stop_scan()
-	if _xrt_discovery != null and _xrt_discovery.has_method("stop_scan"):
-		_xrt_discovery.call("stop_scan")
-	if _tcp_handler:
-		_tcp_handler.disconnect_from_robot()
-	if _video_tcp_handler:
-		_video_tcp_handler.disconnect_from_robot()
-	if _video_udp_handler:
-		_video_udp_handler.disconnect_from_robot()
+	if _host_discovery:
+		_host_discovery.stop_scan()
+	if _host_session:
+		_host_session.disconnect_all()
 	if _xrt_video_session:
 		_xrt_video_session.call("stop")
 	get_tree().change_scene_to_file("res://scenes/main.tscn")
@@ -1571,7 +1500,7 @@ func _begin_launch_window() -> void:
 	):
 		var saved_host := str(persisted.get("ip", "")).strip_edges()
 		var show_on_launch := bool(persisted.get("show_on_launch", false))
-		if show_on_launch or _is_loopback_host(saved_host):
+		if show_on_launch or HostDiscovery.is_loopback_host(saved_host):
 			_show_settings_panel_with_status(
 				"XRoboToolkit mode uses the configured RoboticsService endpoint"
 			)
@@ -1604,75 +1533,20 @@ func _finalize_launch(token: int) -> void:
 	if token != _launch_window_token or not _launch_window_active:
 		return
 	_launch_window_active = false
-	var persisted: Dictionary = SettingsUI.load_settings()
-	var show_on_launch: bool = bool(persisted.get("show_on_launch", false))
-	var last_ip: String = String(persisted.get("ip", ""))
-	var n_robots: int = _known_robots.size()
-
-	print(
-		(
-			"[Operator] Launch decision: known=%d show_on_launch=%s last_ip=%s"
-			% [
-				n_robots,
-				show_on_launch,
-				last_ip,
-			]
-		)
-	)
-
-	if show_on_launch:
-		_show_settings_panel_with_status(tr("UI_SHOW_ON_LAUNCH_ENABLED"))
-		return
-
-	if n_robots == 0:
-		_show_settings_panel_with_status(tr("UI_NO_ROBOTS_DISCOVERED"))
-		return
-
-	# Silent auto-connect is allowed only for an endpoint the operator previously
-	# confirmed. A fresh install's loopback default must never grant ownership to
-	# whichever unrelated debug service happens to be the sole broadcaster.
-	if n_robots == 1:
-		var only_key: Variant = _known_robots.keys()[0]
-		var only_info: Dictionary = _known_robots[only_key]
-		var only_ip := _known_robot_ip(only_key, only_info)
-		if _can_auto_connect_discovered(only_info, persisted):
-			_auto_connect_to_discovered(only_ip, int(only_info.get("pose_port", 63901)), only_info)
-			return
-		# Single robot but it's not the one we used before — surface it for confirmation.
-		_show_settings_panel_with_status(tr("UI_FOUND_ROBOT_CONFIRM") % only_ip)
-		return
-
-	# Multiple robots. If one matches last_ip, the panel will pre-select it
-	# (set_discovery_state honors `prefer_ip`).
-	_show_settings_panel_with_status(tr("UI_ROBOTS_FOUND_PICK") % n_robots)
+	var decision := _host_discovery.launch_decision(SettingsUI.load_settings())
+	if str(decision.get("action", "")) == "auto_connect":
+		_auto_connect_to_discovered(decision.get("options", {}) as Dictionary)
+	else:
+		_show_settings_panel_with_status(str(decision.get("status", "")))
 
 
-func _is_loopback_host(host: String) -> bool:
-	var trimmed := host.strip_edges().to_lower()
-	return (
-		trimmed == ""
-		or trimmed == "localhost"
-		or trimmed == "::1"
-		or trimmed == "0:0:0:0:0:0:0:1"
-		or trimmed.begins_with("127.")
-	)
-
-
-func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> void:
-	# Mirror what _on_settings_applied does for the connection bits, minus
-	# the panel-hide step (panel was never shown). Also apply persisted
-	# video mode so the auto-path matches what OK would do.
-	var persisted: Dictionary = SettingsUI.load_settings()
-	var options := persisted.duplicate(true)
-	options["target_scope"] = "outside"
-	options["protocol"] = str(info.get("protocol", "operator"))
-	options["ip"] = ip
-	options["port"] = port
+## Mirrors what _on_settings_applied does for the connection bits, minus the
+## panel-hide step (the panel was never confirmed), with the persisted options.
+func _auto_connect_to_discovered(options: Dictionary) -> void:
 	_applied_options = options.duplicate(true)
 	_apply_runtime_settings(options)
 	if _settings_ui and _settings_ui.has_method("set_discovering"):
 		_settings_ui.set_discovering(false)
-
 	if _settings_panel and _settings_panel.has_method("close"):
 		_settings_panel.close()
 	else:
@@ -1680,7 +1554,7 @@ func _auto_connect_to_discovered(ip: String, port: int, info: Dictionary) -> voi
 	_set_menu_guards(false)
 	print(
 		"[Operator] Auto-connecting to discovered %s endpoint @ %s:%d"
-		% [str(options.get("protocol", "operator")), ip, port]
+		% [str(options.get("protocol", "operator")), str(options.get("ip", "")), int(options.get("port", 0))]
 	)
 	_set_link_active(false)
 	_start_outside_with_options(options)
@@ -1718,21 +1592,7 @@ func _show_settings_panel_discovering() -> void:
 func _push_discovery_to_settings_ui() -> void:
 	if not _settings_ui or not _settings_ui.has_method("set_discovery_state"):
 		return
-	var by_endpoint: Dictionary = {}
-	for key in _known_robots:
-		var raw: Dictionary = _known_robots[key]
-		var ip := _known_robot_ip(key, raw)
-		var info: Dictionary = {
-			"name": raw.get("name", ip),
-			"ip": ip,
-			"pose_port": raw.get("pose_port", 63901),
-			"video_port": raw.get("video_port", 0),
-			"telemetry_port": raw.get("telemetry_port", DEFAULT_TELEMETRY_PORT),
-			"device_type": raw.get("device_type", ""),
-			"device_name": raw.get("device_name", ""),
-		}
-		info["protocol"] = raw.get("protocol", "operator")
-		by_endpoint[str(key)] = info
+	var by_endpoint := _host_discovery.settings_state()
 	var persisted: Dictionary = SettingsUI.load_settings()
 	if bool(persisted.get("loaded", false)):
 		_settings_ui.set_discovery_state(
@@ -1789,7 +1649,7 @@ func _connect_to_robot(ip: String, port: int) -> void:
 		_teleop_controller_panel.call("set_bridge_connected", false)
 	_active_target = _outside_target
 	_command_sender.transport = _outside_target
-	_active_telemetry_port = _telemetry_port_for(ip, port)
+	_host_session.prepare_endpoint(ip, port)
 	_outside_target.start({"host": ip, "port": port})
 
 
@@ -1828,13 +1688,8 @@ func _on_connected() -> void:
 	_set_status(tr("UI_CONNECTED_HANDSHAKE"))
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", true)
-	_session.on_connected()
 	if _outside_target:
 		_outside_target.mark_transport_connected()
-	_connect_telemetry_stream(_tcp_handler.get_host())
-	_connect_video_stream(_tcp_handler.get_host(), _tcp_handler.get_port())
-	if _clock_sync:
-		_clock_sync.start()
 
 
 func _on_disconnected() -> void:
@@ -1851,16 +1706,8 @@ func _on_disconnected() -> void:
 		_hand_tactile_overlay.clear()
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
-	_video_tcp_handler.disconnect_from_robot()
-	_video_udp_handler.disconnect_from_robot()
-	_telemetry_tcp_handler.disconnect_from_robot()
-	if _robot_view and _robot_view.has_method("clear_video_stream"):
-		_robot_view.clear_video_stream()
-	_session.on_disconnected()
 	if _outside_target:
 		_outside_target.mark_transport_disconnected()
-	if _clock_sync:
-		_clock_sync.stop()
 
 
 func _on_connection_failed(reason: String) -> void:
@@ -1868,24 +1715,11 @@ func _on_connection_failed(reason: String) -> void:
 		_controller_shell.call("set_error", reason)
 	_set_revo2_hand_control_unlocked(false)
 	_clear_blueprint_runtime()
-	_telemetry_tcp_handler.disconnect_from_robot()
 	_set_status(tr("UI_CONNECTION_FAILED") % reason)
 	if _outside_target:
 		_outside_target.mark_connection_failed(reason)
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("set_bridge_connected"):
 		_teleop_controller_panel.call("set_bridge_connected", false)
-
-
-func _on_command_received(command: String, data: PackedByteArray) -> void:
-	if _clock_sync and _clock_sync.handle_command(command, data):
-		return
-	if _session.handle_command(command, data):
-		return
-	match command:
-		"VideoFrame":
-			pass
-		_:
-			print("[Operator] Unknown command: %s" % command)
 
 
 func _on_blueprint_received(blueprint: Dictionary) -> void:
@@ -1921,10 +1755,10 @@ func _on_blueprint_runtime_event(event: Dictionary) -> void:
 	if (
 		_active_target != _outside_target
 		or _teleop_suspended
-		or _session == null
+		or _host_session == null
 	):
 		return
-	var error := _session.send_blueprint_event(event)
+	var error := _host_session.send_blueprint_event(event)
 	if error != OK:
 		push_warning("[Operator] Could not send BlueprintEvent: %s" % error_string(error))
 
@@ -1960,6 +1794,8 @@ func _on_blueprint_external_view_changed(
 		"operation_trajectory":
 			if _ee_pose_trajectory:
 				_ee_pose_trajectory.set_enabled(visible)
+		"dense_map":
+			_apply_blueprint_dense_map(visible, properties)
 		_:
 			push_warning(
 				"[Operator] Ignoring unknown external Blueprint implementation %s for %s (%s)"
@@ -1990,6 +1826,42 @@ func _apply_blueprint_video_panel(visible: bool, properties: Dictionary) -> void
 		_robot_view.call("set_show_video_panel", visible)
 
 
+## The host's dense map arrives on the session's media_down (OLCP results on
+## the connected peer, per the descriptor's session-owned `media` block), not
+## in Blueprint state. The external view only mounts, places and shows it.
+func _apply_blueprint_dense_map(visible: bool, properties: Dictionary) -> void:
+	var media := StreamsContract.parse_media(_descriptor.get("media", null))
+	var result_port := int(media.get("result_port", 0))
+	if not visible or media.is_empty() or _host_session == null or not _host_session.is_connected_to_host():
+		if visible and media.is_empty():
+			push_warning("[Operator] dense_map needs the session media transport (descriptor media block)")
+		_teardown_dense_map()
+		return
+	var display := str(properties.get("display", DenseMapView.DISPLAY_WORLD))
+	if DenseMapView.normalize_display(display) != display.strip_edges().to_lower():
+		push_warning("[Operator] Unknown dense_map display %s; using world" % display)
+		display = DenseMapView.DISPLAY_WORLD
+	if _dense_map_view == null:
+		_dense_map_view = DenseMapView.new()
+		_dense_map_view.name = "BlueprintDenseMapView"
+		_origin.add_child(_dense_map_view)
+	_dense_map_view.configure(_camera, display)
+	_dense_map_view.set_minimap_layout(
+		float(properties.get("scale", NAN)),
+		float(properties.get("distance", NAN)),
+		float(properties.get("height_below_head", NAN)))
+	_dense_map_view.visible = true
+	_dense_map_view.connect_to_server(_host_session.host(), result_port, str(media.get("auth_token", "")))
+
+
+func _teardown_dense_map() -> void:
+	if _dense_map_view == null:
+		return
+	_dense_map_view.disconnect_from_server()
+	_dense_map_view.queue_free()
+	_dense_map_view = null
+
+
 func _on_blueprint_visibility_override_requested(
 	component_id: String,
 	visible: Variant,
@@ -2010,6 +1882,7 @@ func _sync_blueprint_visibility_options() -> void:
 
 
 func _clear_blueprint_runtime() -> void:
+	_teardown_dense_map()
 	if _blueprint_runtime != null:
 		_blueprint_runtime.clear()
 	_blueprint_external_view_visibility.clear()
@@ -2017,129 +1890,32 @@ func _clear_blueprint_runtime() -> void:
 	_sync_blueprint_visibility_options()
 
 
-func _connect_telemetry_stream(ip: String) -> void:
-	if ip.is_empty() or _active_telemetry_port <= 0 or _active_telemetry_port > 65535:
-		return
-	if (
-		_telemetry_tcp_handler.is_connected_to_robot()
-		and _telemetry_tcp_handler.get_host() == ip
-		and _telemetry_tcp_handler.get_port() == _active_telemetry_port
-	):
-		return
-	_telemetry_tcp_handler.disconnect_from_robot()
-	_telemetry_retry_remaining = TELEMETRY_RETRY_DELAY_SEC
-	print("[Operator] Connecting telemetry stream to %s:%d" % [ip, _active_telemetry_port])
-	_telemetry_tcp_handler.connect_to_robot(ip, _active_telemetry_port)
-
-
-func _on_telemetry_connected() -> void:
-	_telemetry_retry_remaining = 0.0
-	print("[Operator] Telemetry stream connected")
-
-
-func _on_telemetry_disconnected() -> void:
-	_telemetry_retry_remaining = TELEMETRY_RETRY_DELAY_SEC
-	print("[Operator] Telemetry stream disconnected")
+func _on_telemetry_link_lost() -> void:
 	if _hand_feedback_overlay:
 		_hand_feedback_overlay.clear()
 	if _hand_tactile_overlay:
 		_hand_tactile_overlay.clear()
 
 
-func _on_telemetry_connection_failed(reason: String) -> void:
-	_telemetry_retry_remaining = TELEMETRY_RETRY_DELAY_SEC
-	print("[Operator] Telemetry connection failed: %s" % reason)
-
-
-func _tick_telemetry_reconnect(delta: float) -> void:
-	if _telemetry_tcp_handler == null or _tcp_handler == null:
-		return
-	if _active_target != _outside_target or not _tcp_handler.is_connected_to_robot():
-		return
-	if _telemetry_tcp_handler.get_state() != TcpHandler.State.DISCONNECTED:
-		return
-	_telemetry_retry_remaining = maxf(_telemetry_retry_remaining - maxf(delta, 0.0), 0.0)
-	if _telemetry_retry_remaining > 0.0:
-		return
-	_connect_telemetry_stream(_tcp_handler.get_host())
-
-
-func _on_telemetry_command_received(command: String, data: PackedByteArray) -> void:
-	if _session.handle_command(command, data):
-		return
-	print("[Operator] Unknown telemetry command: %s" % command)
-
-
 func _telemetry_port_for(ip: String, pose_port: int) -> int:
-	var info := _find_known_robot(ip, "operator", pose_port)
-	var discovered_port := int(info.get("telemetry_port", 0))
-	if discovered_port > 0 and discovered_port <= 65535:
-		return discovered_port
-	var derived := pose_port + TELEMETRY_PORT_OFFSET
-	return derived if derived > 0 and derived <= 65535 else DEFAULT_TELEMETRY_PORT
+	return _host_session.telemetry_port_for(ip, pose_port)
 
 
 func _on_video_connected() -> void:
-	_video_retry_remaining = -1.0
-	print("[Operator] Video stream connected")
 	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
 		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_CONNECTED"))
 
 
-func _on_video_disconnected() -> void:
-	print("[Operator] Video stream disconnected")
+func _on_video_disconnected(_retrying: bool = false) -> void:
 	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
 		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_DISCONNECTED"))
 		_return_from_failed_video_test()
-	var retrying := _schedule_operator_video_reconnect()
-	# Keep the last decoded texture and decoder alive across a transient video
-	# reconnect. Clearing here hides the Blueprint-owned panel and makes every
-	# brief Wi-Fi stall rebuild MediaCodec on the render thread.
-	if not retrying and _robot_view and _robot_view.has_method("clear_video_stream"):
-		_robot_view.clear_video_stream()
 
 
 func _on_video_connection_failed(reason: String) -> void:
-	print("[Operator] Video connection failed: %s" % reason)
 	if _manual_video_protocol == VIDEO_PROTOCOL_OPERATOR:
 		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_FAILED") % reason)
 		_return_from_failed_video_test()
-	_schedule_operator_video_reconnect()
-
-
-func _schedule_operator_video_reconnect() -> bool:
-	if (
-		_active_video_transport == "tcp"
-		and _active_target == _outside_target
-		and _tcp_handler != null
-		and _tcp_handler.is_connected_to_robot()
-	):
-		_video_retry_remaining = VIDEO_RECONNECT_DELAY_SEC
-		return true
-	return false
-
-
-func _tick_video_reconnect(delta: float) -> void:
-	if _video_retry_remaining < 0.0:
-		return
-	if (
-		_active_video_transport != "tcp"
-		or _active_target != _outside_target
-		or _tcp_handler == null
-		or not _tcp_handler.is_connected_to_robot()
-		or _video_tcp_handler == null
-	):
-		_video_retry_remaining = -1.0
-		return
-	if _video_tcp_handler.get_state() != TcpHandler.State.DISCONNECTED:
-		_video_retry_remaining = -1.0
-		return
-	_video_retry_remaining -= maxf(delta, 0.0)
-	if _video_retry_remaining > 0.0:
-		return
-	_video_retry_remaining = -1.0
-	print("[Operator] Reconnecting latest-frame video stream")
-	_connect_video_stream(_tcp_handler.get_host(), _tcp_handler.get_port())
 
 
 func _on_video_frame_received(packet: Dictionary) -> void:
@@ -2203,12 +1979,10 @@ func _connect_configured_video(options: Dictionary, show_test: bool) -> void:
 		if _xrt_video_session == null:
 			_set_video_status(tr("UI_VIDEO_STATUS_XROBOT_TOOLKIT_UNAVAILABLE"))
 			return
-		_video_tcp_handler.disconnect_from_robot()
-		_video_udp_handler.disconnect_from_robot()
+		_host_session.release_video()
 		if _robot_view and _robot_view.has_method("configure_video_stream"):
 			_robot_view.configure_video_stream(feed)
 		_manual_video_protocol = VIDEO_PROTOCOL_XROBOT_TOOLKIT
-		_active_video_transport = "xrobot_toolkit"
 		if _robot_view and _robot_view.has_method("set_packet_source"):
 			_robot_view.set_packet_source(_xrt_video_session)
 		_xrt_video_session.call("start", {
@@ -2224,22 +1998,8 @@ func _connect_configured_video(options: Dictionary, show_test: bool) -> void:
 	else:
 		if _xrt_video_session:
 			_xrt_video_session.call("stop")
-		_video_udp_handler.disconnect_from_robot()
-		# Disconnect before configuring, exactly as the XRobotToolkit branch
-		# above does. disconnect_from_robot() emits disconnected_from_server
-		# synchronously and _on_video_disconnected() unconditionally calls
-		# clear_video_stream(), so configuring first would stop the decoder we
-		# just started and no frame would ever decode. Leaving the socket
-		# already DISCONNECTED also stops connect_to_video_stream() from
-		# re-entering disconnect_from_robot() and re-emitting the signal.
-		_video_tcp_handler.disconnect_from_robot()
-		if _robot_view and _robot_view.has_method("configure_video_stream"):
-			_robot_view.configure_video_stream(feed)
+		_host_session.connect_manual_video(options)
 		_manual_video_protocol = VIDEO_PROTOCOL_OPERATOR
-		_active_video_transport = "tcp"
-		if _robot_view and _robot_view.has_method("set_packet_source"):
-			_robot_view.set_packet_source(_video_tcp_handler)
-		_video_tcp_handler.connect_to_video_stream(host, port)
 		_set_video_status(tr("UI_VIDEO_STATUS_OPERATOR_CONNECTING") % [host, port])
 
 	if show_test:
@@ -2410,15 +2170,27 @@ func _on_device_connected(descriptor: Dictionary) -> void:
 	if _teleop_controller_panel and _teleop_controller_panel.has_method("configure_for_device"):
 		_teleop_controller_panel.call("configure_for_device", descriptor)
 		_update_teleop_controller_panel()
-	_configure_robot_video_stream(descriptor)
-	# [issue 005 / item 1] After the descriptor arrives we now know
-	# whether the robot is offering UDP. Re-call `_connect_video_stream`
-	# so we can upgrade to UDP if the descriptor advertises it.
-	if _tcp_handler.is_connected_to_robot():
-		_connect_video_stream(_tcp_handler.get_host(), _tcp_handler.get_port())
+	_descriptor = descriptor
+	if _host_session != null:
+		_host_session.configure_video_from_descriptor(descriptor)
+		# [issue 005 / item 1] After the descriptor arrives we know whether the
+		# host offers UDP video; reconnect so the stream can upgrade to it.
+		if _host_session.is_connected_to_host():
+			_host_session.connect_video(_host_session.host(), _host_session.port())
+	# The host's capture-streams declaration (camera media_up, local tasks).
+	if _host_capture != null:
+		_host_capture.call("on_descriptor", descriptor)
+
+
+func _on_streams_control_received(control: Dictionary) -> void:
+	if _host_capture != null:
+		_host_capture.call("on_streams_control", control)
 
 
 func _on_device_disconnected() -> void:
+	_descriptor = {}
+	if _host_capture != null:
+		_host_capture.call("on_host_disconnected")
 	_set_revo2_hand_control_unlocked(false)
 	_clear_blueprint_runtime()
 	_sdk_mode = false
@@ -2586,71 +2358,8 @@ func _is_deadman_held(hand: int) -> bool:
 	return false
 
 
-func _configure_robot_video_stream(descriptor: Dictionary) -> void:
-	if not _robot_view or not _robot_view.has_method("configure_video_stream"):
-		return
-	var feed := _extract_primary_video_feed(descriptor)
-	if feed.is_empty():
-		feed = {
-			"width": 1280,
-			"height": 720,
-			"stereo": false,
-		}
-	_last_video_feed = feed
-	_robot_view.configure_video_stream(feed)
-
-
-func _extract_primary_video_feed(descriptor: Dictionary) -> Dictionary:
-	var feeds: Array = descriptor.get("video_feeds", [])
-	for feed_variant in feeds:
-		if feed_variant is Dictionary:
-			var feed: Dictionary = feed_variant
-			if int(feed.get("port", 0)) > 0:
-				return feed
-	return {}
-
-
-## [issue 005 / item 1+2] Decide which transport to use for the
-## negotiated video feed.
-func _select_video_transport(feed: Dictionary) -> String:
-	var transport := str(feed.get("transport", "tcp")).to_lower()
-	var udp_port := int(feed.get("udp_port", 0))
-	if transport == "udp" and udp_port > 0:
-		return "udp"
-	if transport == "auto" and udp_port > 0:
-		return "udp"
-	return "tcp"
-
-
-func _on_robot_found(
-	robot_name: String,
-	ip: String,
-	pose_port: int,
-	video_port: int,
-	telemetry_port: int,
-	device_type: String,
-	device_name: String
-) -> void:
-	# Discovery feed drives both (1) auto-reconnect of the video stream
-	# when the descriptor matches the currently connected host, and (2)
-	# the SettingsPanel's "Discovered" dropdown (per the D launch flow).
-	if telemetry_port <= 0:
-		telemetry_port = pose_port + TELEMETRY_PORT_OFFSET
-	_known_robots[_operator_discovery_key(ip, pose_port)] = {
-		"name": robot_name,
-		"ip": ip,
-		"pose_port": pose_port,
-		"video_port": video_port,
-		"telemetry_port": telemetry_port,
-		"device_type": device_type,
-		"device_name": device_name,
-		"protocol": "operator",
-		# Marks which listener owns this entry. The XRoboToolkit beacon defers to
-		# native announcements only for metadata, not for endpoint identity.
-		"source": "operator",
-	}
-	# Push live update to the panel iff it's currently visible — when the
-	# panel is open, the dropdown should mirror discovery in real time.
+## Mirror discovery into the settings dropdown while the page is open.
+func _on_discovery_changed() -> void:
 	if (
 		_settings_panel
 		and _settings_panel.visible
@@ -2658,188 +2367,6 @@ func _on_robot_found(
 		and _settings_ui.has_method("set_discovery_state")
 	):
 		_push_discovery_to_settings_ui()
-	if (
-		_tcp_handler.is_connected_to_robot()
-		and _tcp_handler.get_host() == ip
-		and _tcp_handler.get_port() == pose_port
-	):
-		_active_telemetry_port = telemetry_port
-		_connect_telemetry_stream(ip)
-		_connect_video_stream(ip, pose_port)
-
-
-## XRoboToolkit's beacon carries only an address and a clock reading — no name,
-## no ports, no device type. Everything else is filled from the protocol's fixed
-## service port so the entry can sit in the same dropdown as native robots.
-func _start_xrt_discovery() -> void:
-	# XRoboToolkit compatibility is Pico-only; other platforms never listen for
-	# its beacon, so its hosts never appear in the discovery dropdown.
-	if not PicoPlatformAdapter.is_pico_build():
-		return
-	var script: Variant = load(XROBOT_TOOLKIT_DISCOVERY_PATH)
-	if script == null:
-		push_warning("[Operator] Cannot load the XRoboToolkit discovery listener")
-		return
-	var instance: Variant = script.new()
-	if not (instance is Node):
-		push_warning("[Operator] Cannot instantiate the XRoboToolkit discovery listener")
-		return
-	_xrt_discovery = instance
-	_xrt_discovery.name = "XRobotToolkitDiscovery"
-	_xrt_discovery.connect("host_found", Callable(self, "_on_xrt_host_found"))
-	_xrt_discovery.connect("host_lost", Callable(self, "_on_xrt_host_lost"))
-	add_child(_xrt_discovery)
-	_xrt_discovery.call("start_scan")
-
-
-func _xrt_robot_name(ip: String) -> String:
-	return "XRoboToolkit %s" % ip
-
-
-func _on_xrt_host_found(ip: String, port: int, _timestamp_ms: int) -> void:
-	var robot_name := _xrt_robot_name(ip)
-	var info := {
-		"name": robot_name,
-		"ip": ip,
-		"pose_port": port,
-		"video_port": 0,
-		"telemetry_port": 0,
-		"device_type": XROBOT_TOOLKIT_DEVICE_TYPE,
-		"device_name": "",
-		"source": XROBOT_TOOLKIT_DEVICE_TYPE,
-		# Consumed by the settings panel to preselect the matching protocol, so
-		# picking a beacon from the dropdown connects without a second manual
-		# choice the user has no way to know they need to make.
-		"protocol": "xrobot_toolkit_v1",
-	}
-	_known_robots[_xrt_discovery_key(ip, port)] = info
-	if (
-		_settings_panel
-		and _settings_panel.visible
-		and _settings_ui
-		and _settings_ui.has_method("set_discovery_state")
-	):
-		_push_discovery_to_settings_ui()
-
-
-func _on_xrt_host_lost(ip: String) -> void:
-	var removed := false
-	for key in _known_robots.keys():
-		var existing: Dictionary = _known_robots[key]
-		if (
-			str(existing.get("source", "")) == XROBOT_TOOLKIT_DEVICE_TYPE
-			and _known_robot_ip(key, existing) == ip
-		):
-			_known_robots.erase(key)
-			removed = true
-	if not removed:
-		return
-	if (
-		_settings_panel
-		and _settings_panel.visible
-		and _settings_ui
-		and _settings_ui.has_method("set_discovery_state")
-	):
-		_push_discovery_to_settings_ui()
-
-
-func _on_robot_lost(_robot_name: String, ip: String, pose_port: int) -> void:
-	var key := _operator_discovery_key(ip, pose_port)
-	var info: Dictionary = _known_robots.get(key, {})
-	if info.is_empty():
-		return
-	var endpoint_was_active: bool = (
-		_tcp_handler.is_connected_to_robot()
-		and _tcp_handler.get_host() == ip
-		and _tcp_handler.get_port() == pose_port
-	)
-	if not _known_robots.erase(key):
-		return
-	if endpoint_was_active and _video_tcp_handler.is_connected_to_robot():
-		_video_tcp_handler.disconnect_from_robot()
-	if endpoint_was_active and _video_udp_handler.is_connected_to_robot():
-		_video_udp_handler.disconnect_from_robot()
-	if endpoint_was_active and _telemetry_tcp_handler.is_connected_to_robot():
-		_telemetry_tcp_handler.disconnect_from_robot()
-	if (
-		_settings_panel
-		and _settings_panel.visible
-		and _settings_ui
-		and _settings_ui.has_method("set_discovery_state")
-	):
-		_push_discovery_to_settings_ui()
-
-
-func _connect_video_stream(ip: String, pose_port: int = 0) -> void:
-	if not _manual_video_options.is_empty():
-		_connect_configured_video(_manual_video_options, false)
-		return
-	if ip.is_empty():
-		return
-
-	# Resolve the TCP port: prefer the descriptor's primary feed, then
-	# the discovery announcement, then the legacy default.
-	var tcp_port := 12345
-	var info := _find_known_robot(ip, "operator", pose_port)
-	if not info.is_empty():
-		tcp_port = int(info.get("video_port", tcp_port))
-	if int(_last_video_feed.get("port", 0)) > 0:
-		tcp_port = int(_last_video_feed["port"])
-
-	var transport := _select_video_transport(_last_video_feed)
-	var udp_port := int(_last_video_feed.get("udp_port", 0))
-
-	# If the active transport is already pointed at the right host+port,
-	# don't churn the connection — that flushes decoder state.
-	if transport == "tcp":
-		if (
-			_video_tcp_handler.is_connected_to_robot()
-			and _video_tcp_handler.get_host() == ip
-			and _video_tcp_handler.get_port() == tcp_port
-		):
-			_video_udp_handler.disconnect_from_robot()
-			_active_video_transport = "tcp"
-			return
-	else:
-		if (
-			_video_udp_handler.is_connected_to_robot()
-			and _video_udp_handler.get_host() == ip
-			and _video_udp_handler.get_port() == udp_port
-		):
-			_video_tcp_handler.disconnect_from_robot()
-			_active_video_transport = "udp"
-			return
-
-	# Tear down whichever handler is currently active before bringing up
-	# the new one — never run both at once or we'd see duplicate frames.
-	_video_tcp_handler.disconnect_from_robot()
-	_video_udp_handler.disconnect_from_robot()
-
-	# Reconfigure the decoder for the new transport. We must NOT pass an empty
-	# descriptor: it falls through to the hard-coded {1280x720} default feed,
-	# which has no `codec` field and so silently resets the decoder MIME from
-	# `video/hevc` back to `video/avc` — feeding HEVC NALs into an AVC
-	# MediaCodec produces zero output frames. Wrap the cached `_last_video_feed`
-	# (which carries codec/stereo/dimensions from the real descriptor) in a
-	# descriptor-shape envelope so the same feed is re-extracted unchanged.
-	var configure_arg: Dictionary = {}
-	if not _last_video_feed.is_empty():
-		configure_arg = {"video_feeds": [_last_video_feed]}
-
-	if transport == "udp":
-		print("[Operator] Connecting video stream (UDP) to %s:%d" % [ip, udp_port])
-		_active_video_transport = "udp"
-		_configure_robot_video_stream(configure_arg)
-		_video_udp_handler.connect_to_video_stream(ip, udp_port)
-		if _robot_view and _robot_view.has_method("set_packet_source"):
-			_robot_view.set_packet_source(_video_udp_handler)
-	else:
-		print("[Operator] Connecting video stream (TCP) to %s:%d" % [ip, tcp_port])
-		_active_video_transport = "tcp"
-		_configure_robot_video_stream(configure_arg)
-		_video_tcp_handler.connect_to_video_stream(ip, tcp_port)
-		if _robot_view and _robot_view.has_method("set_packet_source"):
-			_robot_view.set_packet_source(_video_tcp_handler)
 
 
 func _robot_type_display(robot_type: String) -> String:
@@ -2932,14 +2459,10 @@ func _stop_active_target() -> void:
 
 
 func _disconnect_outside_media() -> void:
-	if _tcp_handler:
+	if _host_session:
+		_host_session.disconnect_all()
+	elif _tcp_handler:
 		_tcp_handler.disconnect_from_robot()
-	if _video_tcp_handler:
-		_video_tcp_handler.disconnect_from_robot()
-	if _video_udp_handler:
-		_video_udp_handler.disconnect_from_robot()
-	if _telemetry_tcp_handler:
-		_telemetry_tcp_handler.disconnect_from_robot()
 	# The XRobotToolkit FPV session is outside media too. Leaving it running
 	# across a target switch kept its socket open to the old host and left it
 	# wired up as the robot view's packet source, so the next target rendered

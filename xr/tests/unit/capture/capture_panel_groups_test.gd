@@ -8,7 +8,7 @@ const BuildInfo := preload("res://scripts/app/build_info.gd")
 
 
 func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
-	var panel: Node = CapturePanelScript.new(false)
+	var panel: Node = CapturePanelScript.new()
 	var root := Engine.get_main_loop().root as Window
 	root.add_child(panel)
 

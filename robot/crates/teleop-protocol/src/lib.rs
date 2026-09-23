@@ -22,6 +22,10 @@
 //!   its controls, telemetry, video feeds, and safety policy.
 //! * [`blueprint`] — mode-independent Blueprint definitions, latest state
 //!   snapshots, and headset interaction events.
+//! * [`streams`] — host-declared headset capture streams
+//!   (`DeviceDescriptor.capture_streams`), the `StreamsStatus` /
+//!   `StreamsControl` ctrl commands, and the bridge-injected session media
+//!   transport (`DeviceDescriptor.media`).
 //! * [`adapter`] — the boundary message enums [`BridgeToAdapter`] /
 //!   [`AdapterToBridge`] plus the paired [`BridgeCodec`] / [`AdapterCodec`]
 //!   that frame them as `[4B len LE][JSON]`.
@@ -36,6 +40,7 @@ pub mod adapter;
 pub mod blueprint;
 pub mod blueprint_spec;
 pub mod descriptor;
+pub mod streams;
 pub mod transport;
 pub mod wire;
 pub mod xr_state;
@@ -44,6 +49,7 @@ pub use adapter::*;
 pub use blueprint::*;
 pub use blueprint_spec::*;
 pub use descriptor::*;
+pub use streams::*;
 pub use transport::*;
 pub use wire::*;
 pub use xr_state::*;

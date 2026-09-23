@@ -11,7 +11,8 @@
 #       ▲                  ▲
 #       │ adb reverse      │ adb reverse
 #       ▼                  ▼
-#   Quest app, Live Feed mode
+#   Quest app, Ego capture with Output "ingest" (Live Feed is an Ego Output;
+#   launched with operator.mode=ego + operator.capture.output=ingest)
 #       - live-push sends RGB HEVC packets, depth frames, and head poses
 #       - live-pull receives dense-map chunks and renders point meshes
 #
@@ -385,7 +386,11 @@ build_and_install() {
 send_live_feed_start_intent() {
   run_adb shell am start \
     -n "$PKG/$ACT" \
-    --es operator.mode live_feed \
+    --es operator.mode ego \
+    --es operator.capture.output ingest \
+    --es operator.capture.server_host 127.0.0.1 \
+    --es operator.capture.server_port "$PUSH_PORT" \
+    --es operator.capture.server_result_port "$PULL_PORT" \
     --ez operator.capture.auto_start true \
     --es operator.capture.auto_stop_seconds "$CAPTURE_SECONDS" \
     --es operator.capture.interaction_mode head \

@@ -12,7 +12,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use teleop_protocol::Endpoint;
+use teleop_protocol::{CaptureStreamsConfig, Endpoint};
 
 /// Default service name advertised over mDNS / UDP discovery.
 pub const DEFAULT_NAME: &str = "xr-bridge";
@@ -26,6 +26,10 @@ pub const DEFAULT_DISCOVERY_PORT: u16 = 63900;
 pub const DEFAULT_POSE_UDP_PORT: u16 = 63902;
 /// Default TCP port for the dedicated telemetry stream.
 pub const DEFAULT_TELEMETRY_PORT: u16 = 63903;
+/// Default TCP port for session media_up (headset → host OLCP push).
+pub const DEFAULT_MEDIA_UP_PORT: u16 = 63905;
+/// Default TCP port for session media_down (host → headset OLCP results).
+pub const DEFAULT_MEDIA_DOWN_PORT: u16 = 63906;
 
 /// SDK consumers opt into calibrated body/independent-tracker data explicitly.
 pub fn default_xr_streams() -> Vec<String> {
@@ -79,6 +83,16 @@ pub struct BridgeConfig {
     pub telemetry_port: u16,
     /// Raw streams advertised by SDK mode; adapter descriptors remain authoritative.
     pub xr_streams: Vec<String>,
+    /// Headset capture streams declared by SDK mode (`None` keeps the
+    /// descriptor unchanged). Adapter mode uses the adapter descriptor's own
+    /// `capture_streams` instead.
+    pub capture_streams: Option<CaptureStreamsConfig>,
+    /// SDK-mode session media_up TCP port (OLCP push from the headset). Media
+    /// is served only when `capture_streams` is declared; `0` on either media
+    /// port disables it. Adapter mode never serves media.
+    pub media_up_port: u16,
+    /// SDK-mode session media_down TCP port (OLCP results to the headset).
+    pub media_down_port: u16,
     /// Video relay configuration (Annex-B source → XR wire protocol).
     pub video: VideoConfig,
 }
@@ -159,6 +173,9 @@ impl Default for BridgeConfig {
             pose_udp_port: DEFAULT_POSE_UDP_PORT,
             telemetry_port: DEFAULT_TELEMETRY_PORT,
             xr_streams: default_xr_streams(),
+            capture_streams: None,
+            media_up_port: DEFAULT_MEDIA_UP_PORT,
+            media_down_port: DEFAULT_MEDIA_DOWN_PORT,
             video: VideoConfig::default(),
         }
     }

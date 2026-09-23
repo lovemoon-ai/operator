@@ -66,7 +66,10 @@ scanner, SpatialMP4/FFmpeg stack, Live Push, and native hand-capture extension â
 both its `.so` and its `.gdextension` descriptor. They also omit the static
 `operator_capture_stack` export feature and disable camera, microphone, audio
 configuration, and broad external-storage permissions. Their resource filter
-drops the Capture, Live Feed and VR scenes and the scripts only those modes use.
+drops the Capture and VR scenes and the scripts only those modes use, including
+the capture pipeline and its sources; the host-capture composition is loaded by
+path, so a Teleop APK that meets a host declaring `capture_streams` reports
+every stream `unsupported` instead of failing to start.
 They retain AHB video, MuJoCo, retargeting, and Pico OpenXR, so both Outside
 Robot and Inside Robot Teleop keep working.
 
@@ -170,8 +173,8 @@ The launcher script `xr/scripts/app/launcher/mode_select.gd` handles
 automation mode intent extras and routes to:
 
 - `teleop`
-- `ego_capture`
-- `live_feed`
+- `ego_capture` (`live_feed` and `live` are accepted aliases; streaming is the
+  `ingest` Output of this mode)
 - `vr`
 - `mujoco`
 

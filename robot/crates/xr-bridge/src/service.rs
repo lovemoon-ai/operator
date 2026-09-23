@@ -17,7 +17,7 @@ use teleop_protocol::{
 use crate::adapter_client::AdapterClient;
 use crate::config::{BridgeConfig, VideoFeedConfig};
 use crate::pose_udp_server::UdpDropStats;
-use crate::sdk::BlueprintStreams;
+use crate::sdk::{BlueprintStreams, StreamsChannels};
 use crate::video::{Codec, VideoFeed, VideoFeedSource};
 use crate::wire_runtime::TimedCommand;
 use crate::{
@@ -42,6 +42,7 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
 
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
     descriptor.normalize_for_outside();
+    sanitize_capture_streams(&mut descriptor);
     let blueprint_compatible = client.blueprint_compatible();
     descriptor.capabilities.insert(
         BLUEPRINT_CAPABILITY.to_string(),
@@ -73,6 +74,7 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
         state_rx: blueprint_state_rx,
         event_tx: blueprint_event_tx,
     };
+    let streams = StreamsChannels::new();
 
     let (device_cmd_tx, device_cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
     let (telemetry_tx, telemetry_rx) = watch::channel(DeviceTelemetry::default());
@@ -93,13 +95,14 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
 
     tokio::try_join!(
         discovery::run(&config, &device_type, &device_name),
-        pose_server::run_with_blueprint(
+        pose_server::run_with_blueprint_and_streams(
             config.pose_port,
             descriptor.clone(),
             device_cmd_tx.clone(),
             telemetry_rx.clone(),
             latency.clone(),
             blueprint,
+            streams.clone(),
         ),
         pose_udp_server::run(
             config.pose_udp_port,
@@ -109,12 +112,13 @@ pub async fn run_adapter_mode(config: BridgeConfig) -> Result<()> {
             udp_stats,
         ),
         telemetry_server::run(config.telemetry_port, telemetry_rx),
-        forward::run_with_blueprint_events(
+        forward::run_with_blueprint_events_and_streams(
             descriptor,
             device_cmd_rx,
             client,
             latency.clone(),
             blueprint_event_rx,
+            streams,
         ),
         latency::run_aggregator(latency.clone()),
         video::run(video_feeds),
@@ -193,6 +197,21 @@ fn build_video_only_descriptor(config: &BridgeConfig) -> Result<DeviceDescriptor
     append_video_feed_infos(&mut descriptor, &config.video.feeds);
     descriptor.normalize_for_outside();
     Ok(descriptor)
+}
+
+/// The headset must never see a capture-stream declaration it cannot honour;
+/// an invalid adapter declaration is dropped rather than forwarded. The
+/// `media` block is session-owned and the adapter path serves no media, so an
+/// adapter-authored one is always removed: the headset then reports declared
+/// streams `unsupported` (capture media requires the embedded `XrSession`).
+fn sanitize_capture_streams(descriptor: &mut DeviceDescriptor) {
+    if let Some(Err(error)) = descriptor.capture_streams.as_ref().map(|c| c.validate()) {
+        tracing::warn!("Dropping invalid capture_streams from adapter descriptor: {error}");
+        descriptor.capture_streams = None;
+    }
+    if descriptor.media.take().is_some() {
+        tracing::warn!("Dropping adapter-authored media block; only the bridge issues media");
+    }
 }
 
 pub(crate) fn video_feed_relays(feeds: &[VideoFeedConfig]) -> Result<Vec<VideoFeed>> {
@@ -322,5 +341,39 @@ video:
             descriptor.capabilities.get("video"),
             Some(&serde_json::Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn adapter_capture_streams_survive_normalization_and_invalid_ones_are_dropped() {
+        let capture: teleop_protocol::CaptureStreamsConfig =
+            serde_json::from_value(serde_json::json!({
+                "streams": [{"name": "rgb.hevc", "required": true, "max_hz": 4, "eye": "left"}],
+                "local_tasks": [{"kind": "upload", "endpoint_ref": "lab-ingest"}]
+            }))
+            .unwrap();
+        let mut descriptor: DeviceDescriptor = serde_json::from_value(serde_json::json!({
+            "device": {"type": "hosted", "name": "Hosted"},
+            "control_schema": {},
+            "capture_streams": capture,
+            "media": {"protocol": "olcp.v1", "push_port": 1, "result_port": 2, "auth_token": "adapter"}
+        }))
+        .unwrap();
+        descriptor.normalize_for_outside();
+        sanitize_capture_streams(&mut descriptor);
+        let frame = crate::wire_runtime::build_descriptor_frame(&descriptor);
+        let sent: serde_json::Value = serde_json::from_slice(&frame.data).unwrap();
+        assert_eq!(
+            sent["capture_streams"],
+            serde_json::to_value(&capture).unwrap()
+        );
+        assert!(sent.get("media").is_none(), "adapters never author media");
+
+        descriptor.capture_streams.as_mut().unwrap().local_tasks[0].endpoint_ref =
+            Some("https://evil.example/upload".into());
+        sanitize_capture_streams(&mut descriptor);
+        assert!(descriptor.capture_streams.is_none());
+        let frame = crate::wire_runtime::build_descriptor_frame(&descriptor);
+        let sent: serde_json::Value = serde_json::from_slice(&frame.data).unwrap();
+        assert!(sent.get("capture_streams").is_none());
     }
 }

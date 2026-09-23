@@ -6,16 +6,21 @@ use std::time::Duration;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use tokio::sync::{mpsc, oneshot, watch};
 
 use operator::BlueprintPublisher;
-use teleop_protocol::{Blueprint, BlueprintEvent, BlueprintState, XrStateFrame};
+use teleop_protocol::{
+    Blueprint, BlueprintEvent, BlueprintState, CaptureStreamsConfig, StreamsControl, XrStateFrame,
+};
 use xr_bridge::config::{
     default_xr_streams, validate_video_feeds, validate_xr_streams, BridgeConfig, VideoConfig,
     VideoFeedConfig,
 };
+use xr_bridge::media::{MediaChannels, MediaDownError, MediaFrame};
 use xr_bridge::sdk::{
-    run_sdk_mode_with_startup_and_blueprint, state_channel, BlueprintStreams, XrStateStats,
+    run_sdk_mode_with_startup_blueprint_and_streams, state_channel, BlueprintStreams,
+    StreamsChannels, StreamsControlError, XrStateStats,
 };
 
 const MAX_PENDING_BLUEPRINT_EVENTS: usize = 256;
@@ -104,6 +109,10 @@ struct SharedState {
     latest: Mutex<LatestState>,
     changed: Condvar,
     stats: Mutex<Option<Arc<XrStateStats>>>,
+    /// Capture-stream ctrl channels of the current run; `None` before start.
+    streams: Mutex<Option<StreamsChannels>>,
+    /// Session media relay of the current run; `None` before start.
+    media: Mutex<Option<MediaChannels>>,
     blueprint_events: Mutex<BlueprintEventState>,
     blueprint_event_changed: Condvar,
 }
@@ -149,7 +158,7 @@ impl BlueprintEventState {
 
 #[pyclass]
 struct NativeSession {
-    config: BridgeConfig,
+    config: Mutex<BridgeConfig>,
     shared: Arc<SharedState>,
     blueprint: Arc<BlueprintPublisher>,
     shutdown: Mutex<Option<watch::Sender<bool>>>,
@@ -167,7 +176,10 @@ impl NativeSession {
         telemetry_port = 63903,
         discovery_unicast_targets = Vec::new(),
         streams = None,
-        video_feeds_json = "[]".to_string()
+        video_feeds_json = "[]".to_string(),
+        capture_streams_json = None,
+        media_up_port = 63905,
+        media_down_port = 63906
     ))]
     fn new(
         name: String,
@@ -178,6 +190,9 @@ impl NativeSession {
         discovery_unicast_targets: Vec<String>,
         streams: Option<Vec<String>>,
         video_feeds_json: String,
+        capture_streams_json: Option<String>,
+        media_up_port: u16,
+        media_down_port: u16,
     ) -> PyResult<Self> {
         let streams = streams.unwrap_or_else(default_xr_streams);
         validate_xr_streams(&streams).map_err(|error| PyValueError::new_err(error.to_string()))?;
@@ -201,11 +216,17 @@ impl NativeSession {
             telemetry_port,
             discovery_unicast_targets: targets,
             xr_streams: streams,
+            capture_streams: capture_streams_json
+                .as_deref()
+                .map(parse_capture_streams)
+                .transpose()?,
+            media_up_port,
+            media_down_port,
             video: VideoConfig { feeds: video_feeds },
             ..BridgeConfig::default()
         };
         Ok(Self {
-            config,
+            config: Mutex::new(config),
             shared: Arc::new(SharedState::default()),
             blueprint: Arc::new(BlueprintPublisher::new()),
             shutdown: Mutex::new(None),
@@ -228,8 +249,14 @@ impl NativeSession {
             let _ = finished.join();
         }
 
-        let config = self.config.clone();
+        let config = self
+            .config
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("native session config lock poisoned"))?
+            .clone();
         let shared = self.shared.clone();
+        let media = MediaChannels::new();
+        let streams = StreamsChannels::with_media(media.clone());
         let blueprint_rx = self.blueprint.blueprint_receiver();
         let blueprint_state_rx = self.blueprint.state_receiver();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -237,7 +264,7 @@ impl NativeSession {
             .shutdown
             .lock()
             .map_err(|_| PyRuntimeError::new_err("native session shutdown lock poisoned"))?;
-        reset_for_start(&shared)?;
+        reset_for_start(&shared, &streams, &media)?;
         let (startup_tx, startup_rx) = oneshot::channel();
 
         let thread = match std::thread::Builder::new()
@@ -250,6 +277,7 @@ impl NativeSession {
                     startup_tx,
                     blueprint_rx,
                     blueprint_state_rx,
+                    streams,
                 )
             }) {
             Ok(thread) => thread,
@@ -326,6 +354,92 @@ impl NativeSession {
 
     fn blueprint_spec_version(&self) -> u32 {
         operator::SPEC_VERSION
+    }
+
+    /// Latest validated headset `StreamsStatus` JSON; `None` before the
+    /// connected headset reports and after it disconnects.
+    fn streams_status_json(&self) -> PyResult<Option<String>> {
+        self.streams()?
+            .and_then(|streams| streams.latest_status())
+            .map(|status| serde_json::to_string(status.as_ref()))
+            .transpose()
+            .map_err(|error| PyRuntimeError::new_err(format!("serializing StreamsStatus: {error}")))
+    }
+
+    /// Queue a `StreamsControl` for the connected headset, in order.
+    /// `ValueError`: invalid payload. `RuntimeError`: the session is not
+    /// running, no headset is connected, the headset lacks
+    /// `capture_streams_v1`, or the ordered queue is full.
+    fn send_streams_control_json(&self, payload: &str) -> PyResult<()> {
+        let control: StreamsControl = serde_json::from_str(payload)
+            .map_err(|error| PyValueError::new_err(format!("invalid StreamsControl: {error}")))?;
+        control
+            .validate()
+            .map_err(|error| PyValueError::new_err(format!("invalid StreamsControl: {error}")))?;
+        let streams = self
+            .streams()?
+            .filter(|_| self.is_running())
+            .ok_or_else(|| PyRuntimeError::new_err("pyoperator session is not running"))?;
+        streams.send_control(control).map_err(|error| match error {
+            StreamsControlError::Invalid(_) => PyValueError::new_err(error.to_string()),
+            _ => PyRuntimeError::new_err(error.to_string()),
+        })
+    }
+
+    /// Next headset media_up frame as `(frame_type, flags, pts_ns,
+    /// duration_ns, payload)`, in arrival order. `pts_ns` is untouched
+    /// headset `godot_ticks_ns`. Returns `None` on timeout or once the
+    /// session stops; waits with the GIL released.
+    #[pyo3(signature = (timeout_seconds = None))]
+    fn poll_media_frame<'py>(
+        &self,
+        py: Python<'py>,
+        timeout_seconds: Option<f64>,
+    ) -> PyResult<Option<(u8, u16, u64, u64, Bound<'py, PyBytes>)>> {
+        if timeout_seconds.is_some_and(|value| value < 0.0 || !value.is_finite()) {
+            return Err(PyValueError::new_err(
+                "timeout_seconds must be finite and non-negative",
+            ));
+        }
+        let Some(media) = self.media()? else {
+            return Ok(None);
+        };
+        let frame =
+            py.allow_threads(move || media.recv_up(timeout_seconds.map(Duration::from_secs_f64)));
+        Ok(frame.map(|frame| {
+            (
+                frame.frame_type,
+                frame.flags,
+                frame.pts_ns,
+                frame.duration_ns,
+                PyBytes::new(py, &frame.payload),
+            )
+        }))
+    }
+
+    /// Send one OLCP frame to the headset's media_down (result) connection,
+    /// in order; blocks with the GIL released while its queue is full.
+    /// `RuntimeError`: not running or no media_down client. `ValueError`:
+    /// payload larger than 32 MiB.
+    fn send_media_down_frame(
+        &self,
+        py: Python<'_>,
+        frame_type: u8,
+        flags: u16,
+        pts_ns: u64,
+        duration_ns: u64,
+        payload: &[u8],
+    ) -> PyResult<()> {
+        let media = self
+            .media()?
+            .filter(|_| self.is_running())
+            .ok_or_else(|| PyRuntimeError::new_err("pyoperator session is not running"))?;
+        let frame = MediaFrame::new(frame_type, flags, pts_ns, duration_ns, payload.to_vec());
+        py.allow_threads(move || media.send_down(frame))
+            .map_err(|error| match error {
+                MediaDownError::TooLarge(_) => PyValueError::new_err(error.to_string()),
+                MediaDownError::NotConnected => PyRuntimeError::new_err(error.to_string()),
+            })
     }
 
     fn latest_json(&self) -> PyResult<Option<String>> {
@@ -440,7 +554,11 @@ impl NativeSession {
             .latest
             .lock()
             .map_err(|_| PyRuntimeError::new_err("native state lock poisoned"))?;
-        let value = if let Some(stats) = stats {
+        let capture_streams_supported = self
+            .streams()?
+            .is_some_and(|streams| streams.headset_supported());
+        let media = self.media()?.map(|media| media.stats()).unwrap_or_default();
+        let mut value = if let Some(stats) = stats {
             serde_json::json!({
                 "running": latest.running,
                 "connected": stats.connected(),
@@ -449,6 +567,7 @@ impl NativeSession {
                 "last_frame_id": stats.last_frame_id(),
                 "last_timestamp_ns": stats.last_timestamp_ns(),
                 "last_error": latest.error.clone().or_else(|| stats.last_error()),
+                "capture_streams_supported": capture_streams_supported,
             })
         } else {
             serde_json::json!({
@@ -459,11 +578,45 @@ impl NativeSession {
                 "last_frame_id": 0,
                 "last_timestamp_ns": 0,
                 "last_error": latest.error,
+                "capture_streams_supported": capture_streams_supported,
             })
         };
+        value["media_up_connected"] = media.up_connected.into();
+        value["media_down_connected"] = media.down_connected.into();
+        value["media_up_frames"] = media.up_frames.into();
+        value["media_up_dropped"] = media.up_dropped.into();
         serde_json::to_string(&value)
             .map_err(|error| PyRuntimeError::new_err(format!("serializing stats: {error}")))
     }
+}
+
+impl NativeSession {
+    fn streams(&self) -> PyResult<Option<StreamsChannels>> {
+        Ok(self
+            .shared
+            .streams
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("native streams lock poisoned"))?
+            .clone())
+    }
+
+    fn media(&self) -> PyResult<Option<MediaChannels>> {
+        Ok(self
+            .shared
+            .media
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("native media lock poisoned"))?
+            .clone())
+    }
+}
+
+fn parse_capture_streams(payload: &str) -> PyResult<CaptureStreamsConfig> {
+    let capture_streams: CaptureStreamsConfig = serde_json::from_str(payload)
+        .map_err(|error| PyValueError::new_err(format!("invalid capture_streams_json: {error}")))?;
+    capture_streams
+        .validate()
+        .map_err(|error| PyValueError::new_err(format!("invalid capture_streams: {error}")))?;
+    Ok(capture_streams)
 }
 
 impl Drop for NativeSession {
@@ -488,6 +641,7 @@ fn run_background(
     startup_tx: oneshot::Sender<std::result::Result<(), String>>,
     blueprint_rx: watch::Receiver<Option<Arc<Blueprint>>>,
     blueprint_state_rx: watch::Receiver<Option<Arc<BlueprintState>>>,
+    streams: StreamsChannels,
 ) {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -512,7 +666,7 @@ fn run_background(
     let result = runtime.block_on(async {
         let (blueprint_event_tx, mut blueprint_event_rx) =
             mpsc::channel(MAX_PENDING_BLUEPRINT_EVENTS);
-        let service = run_sdk_mode_with_startup_and_blueprint(
+        let service = run_sdk_mode_with_startup_blueprint_and_streams(
             config,
             sink,
             shutdown_rx,
@@ -522,6 +676,7 @@ fn run_background(
                 state_rx: blueprint_state_rx,
                 event_tx: blueprint_event_tx,
             },
+            streams,
         );
         tokio::pin!(service);
         loop {
@@ -559,11 +714,28 @@ fn run_background(
     }
 }
 
-fn reset_for_start(shared: &SharedState) -> PyResult<()> {
+fn reset_for_start(
+    shared: &SharedState,
+    streams: &StreamsChannels,
+    media: &MediaChannels,
+) -> PyResult<()> {
     *shared
         .stats
         .lock()
         .map_err(|_| PyRuntimeError::new_err("native stats lock poisoned"))? = None;
+    *shared
+        .streams
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("native streams lock poisoned"))? =
+        Some(streams.clone());
+    let previous_media = shared
+        .media
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("native media lock poisoned"))?
+        .replace(media.clone());
+    if let Some(previous) = previous_media {
+        previous.close();
+    }
     let mut latest = shared
         .latest
         .lock()
@@ -584,6 +756,12 @@ fn reset_for_start(shared: &SharedState) -> PyResult<()> {
 }
 
 fn finish_with_error(shared: &SharedState, error: String) {
+    // Wake media pollers; the relay is gone with the service.
+    if let Ok(media) = shared.media.lock() {
+        if let Some(media) = media.as_ref() {
+            media.close();
+        }
+    }
     if let Ok(mut state) = shared.latest.lock() {
         state.running = false;
         if !error.is_empty() {

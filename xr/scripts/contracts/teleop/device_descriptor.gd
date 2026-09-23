@@ -95,4 +95,10 @@ static func parse(d: Dictionary) -> Dictionary:
 	elif d.has("input_contract"):
 		errors.append("'input_contract' must be an object")
 
+	# Host-declared capture streams (capture_streams_v1). Invalid blocks are
+	# ignored by the host capture composition; they are reported here.
+	if d.has("capture_streams"):
+		for error_v in StreamsContract.parse_capture_streams(d.get("capture_streams")).get("errors", []):
+			errors.append(str(error_v))
+
 	return {"descriptor": d, "errors": errors}

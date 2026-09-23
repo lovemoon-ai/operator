@@ -4,8 +4,8 @@ extends RefCounted
 const SensorFrameTypeScript := preload("res://scripts/contracts/sensor/frame_types.gd")
 
 ## v2 core/capture (WP4): adapter that consumes canonical SensorFrames and
-## calls the existing writer surface (SessionSpoolWriter / LivePushWriter /
-## LiveFeedNetworkWriter) with byte-identical arguments. This keeps WP4
+## calls the existing writer surface (SessionSpoolWriter / LivePushWriter)
+## with byte-identical arguments. This keeps WP4
 ## behavior-compatible: samplers emit SensorFrames; the on-disk/on-wire
 ## formats are unchanged because the writer methods receive exactly the same
 ## args as before.

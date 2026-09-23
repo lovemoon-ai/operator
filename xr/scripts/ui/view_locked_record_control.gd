@@ -105,7 +105,7 @@ var _settings_ring: HoldRing
 var _cursor: Panel
 var _mode := "controllers"
 var _recording := false
-var _live_feed_mode := false
+var _streaming_only := false
 var _hold_action := ""
 var _hold_seconds := 0.0
 var _suppress_primary_pressed := false
@@ -156,8 +156,8 @@ func show_for_mode(mode: String) -> void:
 	_update_controls()
 
 
-func set_live_feed_mode(enabled: bool) -> void:
-	_live_feed_mode = enabled
+func set_streaming_only(enabled: bool) -> void:
+	_streaming_only = enabled
 	_update_controls()
 
 
@@ -174,7 +174,7 @@ func set_recording(recording: bool) -> void:
 	_update_controls()
 
 func update_elapsed_seconds(seconds: float) -> void:
-	if not _recording or _live_feed_mode:
+	if not _recording or _streaming_only:
 		return
 	var total_seconds := int(seconds)
 	_timer_label.text = "%02d:%02d" % [total_seconds / 60, total_seconds % 60]
@@ -418,9 +418,9 @@ func _make_ring(slot: Control, diameter: float) -> HoldRing:
 	return ring
 
 func _update_controls() -> void:
-	_timer_label.visible = _recording and not _live_feed_mode
+	_timer_label.visible = _recording and not _streaming_only
 	if _breathing_indicator != null:
-		_breathing_indicator.set_active(_recording and _live_feed_mode)
+		_breathing_indicator.set_active(_recording and _streaming_only)
 	_settings_button.get_parent().visible = not _recording
 	_primary_button.get_parent().visible = _mode != "head"
 	_primary_button.text = tr("UI_STOP") if _recording else tr("UI_START")

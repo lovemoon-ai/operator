@@ -89,6 +89,36 @@ controller-only streaming and a fresh body request's settings prompt/blocked
 publication. Complete the actual tracker setup/confirmation/Connect round trip
 manually; the tests never attest calibration on the user's behalf.
 
+## Headset capture streams
+
+Declare the headset media this host wants; the user grants the envelope once
+on the headset. Granted streams arrive as OLCP samples on `xr.capture`:
+
+```python
+from operator_xr import BridgeConfig, CaptureStream, CaptureStreamsConfig, XrSession
+
+capture = CaptureStreamsConfig(
+    streams=(CaptureStream("rgb.hevc", required=True, max_hz=4, eye="left"),),
+)
+with XrSession(BridgeConfig(capture_streams=capture)) as xr:
+    status = xr.streams_status()  # None until the headset answers
+    if status is not None and status.is_active("rgb.hevc"):
+        xr.streams_control({"rgb.hevc": {"hz": 2}})  # stays inside the envelope
+    for sample in xr.capture.frames():  # OLCP samples from successive push sessions
+        if sample.kind == "rgb_packet":
+            ...
+```
+
+A fresh `auth_token` is generated on every `start()` unless configured.
+`xr.capture` is `None` without `capture_streams`. An older headset without
+`capture_streams_v1` is reported as every stream `denied` / `unsupported`;
+`streams_control()` then raises `RuntimeError`. OLCP `pts_ns` and
+`XrFrame.timestamp_ns` share the headset timebase:
+`operator_xr.live_feed.align_by_timestamp(samples, frames)` pairs them, and
+`SessionStartSample.session_start_godot_ticks_us` / `session_start_unix_us`
+anchor wall-clock time. Hosted adapters use
+`make_descriptor(capture_streams=...)` with `hosted.HostedStreams`.
+
 ## Blueprint UI
 
 Any Operator mode can consume a Blueprint without loading source-provided XR

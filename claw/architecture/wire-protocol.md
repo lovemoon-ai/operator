@@ -7,6 +7,48 @@ Operator uses several independent wire contracts. Keep them separate:
 - OLCP Live Feed streams between XR and a server.
 - TUS uploads from XR ego capture to web ingest.
 
+## Headset timebase
+
+The headset has exactly one sampling timebase, `godot_ticks_ns`: the Godot
+`Time.get_ticks_usec()` domain expressed in nanoseconds. OpenXR `XrTime`,
+Android `System.nanoTime()`, and Camera2 sensor timestamps are all mapped into
+it through captured offsets. This table is the single timebase contract for
+every wire and file format that carries headset sample times:
+
+| Data | Where it is stamped | Domain |
+| --- | --- | --- |
+| Head / controller / hand pose (Ego tracks, OLCP) | `pose_sampler.resolve_pose_timestamp_ns`: OpenXR predicted display time (`XrTime`, `CLOCK_MONOTONIC`) + `getXrTimeToGodotTicksOffsetNs`, else Godot ticks | `godot_ticks_ns` |
+| RGB (HEVC) | Encoder `bufferInfo.presentationTimeUs * 1000`; the camera plugin maps Camera2 sensor timestamps into the same domain | `godot_ticks_ns` |
+| Depth | `depth_timestamp_source_priority: [openxr_runtime_display_time, godot_async_callback_ticks]` | `godot_ticks_ns` |
+| Audio | `AudioCapture`: `System.nanoTime() + clockMonotonicToGodotTicksOffsetNs`; AAC frame 0 is anchored at the first microphone read | `godot_ticks_ns` |
+| SpatialMP4 `operator_static` | `session_start_unix_us`, `session_start_godot_ticks_us`, `timebase_hz=1e6`, `media_pts_domain="godot_ticks_ns"`, `media_pts_clock="clock_monotonic_ns"` | contract record |
+| OLCP `pts_ns` | Kotlin `enqueue(Frame(type, flags, timestampNs, ...))` passes the GDScript timestamp through unchanged; `session_start` carries `session_start_godot_ticks_us` | `godot_ticks_ns` |
+| `XrStateFrame.timestamp_ns` / `sample_timestamp_ns` | `XrTrackingSource`, one timestamp per tick with the pose row's definition: predicted display time + the capture plugin's `XrTime` offset, else the sampling instant (builds without the capture plugin, such as the teleop profile). XrStateSink copies the `SensorFrame` timestamp; only a Pico body record's own `source_timestamp_ns` differs, and v1 strips it | `godot_ticks_ns` |
+
+Alignment between Ego tracks therefore depends on every sampler stamping in the
+same domain, not on any writer-side conversion. OLCP samples and
+`XrStateFrame` share both domain and instant with the Ego tracks.
+
+Rules:
+
+- Samplers, encoders, plugins, `SessionSpoolWriter`, and `LivePushWriter` own
+  timestamping. Component extraction moves code only; the timestamp a
+  `SensorFrame` carries reaches every sink unchanged.
+- There is no session-relative conversion on the wire. A consumer that needs
+  relative time subtracts `session_start_godot_ticks_us` itself;
+  `operator_xr.live_feed.SessionStartSample` exposes it, and
+  `operator_xr.live_feed.align_by_timestamp` pairs OLCP samples with `XrFrame`s
+  by timestamp.
+- `XrStateFrame` timestamp semantics changed once, with the host-session
+  channel unification: `xr_tracking_sampler` stamped the sampling instant
+  (`_ticks_usec()*1000`, or TrackingProvider's read instant for head,
+  controllers and controller input). Since `XrStateSink` replaced it, every
+  `timestamp_ns` / `sample_timestamp_ns` in a frame is the tick's pose
+  timestamp. With the predicted display time this is about one frame later
+  than before. Field names, shape and domain are unchanged. Consumers checked:
+  xr-bridge only reports the last value in its stats, `operator_xr` replay
+  paces by deltas, and light-o1 / retargeting never read these timestamps.
+
 ## Teleop Command TCP
 
 Default port: `63901`.
@@ -26,7 +68,9 @@ XR implementation:
 - `xr/scripts/network/tcp_handler.gd`
 - `xr/scripts/network/session.gd`
 - `xr/scripts/input/command_sender.gd`
-- `xr/scripts/input/xr_state_sender.gd`
+- `xr/scripts/input/xr_state_sender.gd` (`xr_state` channel), fed by
+  `xr/scripts/components/sources/xr_tracking_source.gd` →
+  `xr/scripts/components/sinks/xr_state_sink.gd`
 
 Rust implementation:
 
@@ -72,6 +116,110 @@ SDK stream, and a newer connection replaces the old socket. `frame_id` is local
 to the headset process and may reset after reconnect, so consumers treat a
 different id as the next snapshot rather than assuming it is globally
 monotonic.
+
+### Host-declared capture streams
+
+A host that wants headset media (camera, depth, OLCP pose streams) declares it
+in the descriptor next to `xr_stream`. Rust:
+`robot/crates/teleop-protocol/src/streams.rs`; Python:
+`operator_xr.capture` (`BridgeConfig.capture_streams`).
+
+```json
+"capture_streams": {
+  "schema_version": 1,
+  "streams": [
+    {"name": "rgb.hevc",  "required": true,  "max_hz": 4, "max_bitrate_bps": 2000000, "eye": "left"},
+    {"name": "depth.u16", "required": false, "max_hz": 5}
+  ],
+  "local_tasks": [
+    {"kind": "record", "container": "spatialmp4", "streams": ["rgb.hevc", "head_pose.json"]},
+    {"kind": "upload", "endpoint_ref": "lab-ingest"}
+  ]
+}
+```
+
+- **Envelope.** The block declares the *set* of streams and their *upper
+  limits* (`max_hz`, `max_bitrate_bps`, `eye` ∈ `left` / `mono` / `stereo`).
+  That envelope is what the user grants, once per (host address, declaration
+  hash); the descriptor is resent after every `Hello`, so a reconnect with the
+  same declaration does not ask again. Stream names use the OLCP vocabulary
+  (`rgb.hevc`, `depth.u16`, `head_pose.json`, `controller_pose.json`,
+  `controller_input.json`, `hand_joints.json`).
+- **`required` never blocks the connection.** A denied required stream only
+  changes `StreamsStatus` and prompt priority; the host degrades itself.
+- **The transport belongs to the session, not the declaration.** A host
+  application never names an address, port or token. For a capture-capable
+  headset, `xr-bridge` injects a sibling `media` block into the descriptor it
+  sends on that connection:
+
+  ```json
+  "media": {"protocol": "olcp.v1", "push_port": 63905, "result_port": 63906,
+            "auth_token": "<minted per headset connection>"}
+  ```
+
+  The headset pushes granted streams as OLCP sessions to the *connected peer's
+  address* (never a declared one) on `push_port`, and pulls results from
+  `result_port`, carrying the in-band `auth_token` (see
+  [Live Feed OLCP](#live-feed-olcp) for the frame format, which is identical).
+  The token is valid only while that ctrl connection owns the session: when it
+  ends or is replaced, both media connections close. `media` is absent when the
+  headset lacks `capture_streams_v1`, when the host declares no
+  `capture_streams`, and on the adapter path, which serves no media.
+- **`local_tasks`** ask the headset to `record` locally or `upload` to an
+  ingest endpoint. `endpoint_ref` names an endpoint already configured and
+  verified on the headset; URLs and `host[:port]` values are rejected.
+
+The headset advertises `capture_streams_v1` in `Hello.capabilities` when it
+understands the block, plus `stream.<name>` (for example `stream.rgb.hevc`) for
+every stream it can produce. Two ctrl commands then use the same TCP envelope.
+They are not Blueprint messages:
+
+- `StreamsStatus` (headset → host, `operator.streams_status.v1`), sent after
+  negotiation, permission changes, capability narrowing, and each
+  `StreamsControl`. Stream `state` ∈ `pending` / `active` / `paused` /
+  `denied`; local task `state` ∈ `pending` / `running` / `idle` / `denied` /
+  `failed`. Optional `reason` ∈ `permission_denied` / `revoked` /
+  `unsupported` / `limit` / `unknown_endpoint`; `limit` accompanies an
+  active/paused stream whose parameters were clipped to the envelope.
+
+  ```json
+  {"schema": "operator.streams_status.v1",
+   "streams": {"rgb.hevc":  {"state": "active", "hz": 4, "bitrate_bps": 2000000, "eye": "left"},
+               "depth.u16": {"state": "denied", "reason": "permission_denied"}},
+   "local_tasks": {"record": {"state": "running"},
+                   "upload": {"state": "denied", "reason": "unknown_endpoint"}}}
+  ```
+
+- `StreamsControl` (host → headset, `operator.streams_control.v1`) adjusts
+  parameters inside the granted envelope without re-asking the user. Every
+  field is optional (`hz` > 0, `bitrate_bps` > 0, `paused`; `local_tasks`
+  entries take `running`). The headset clips out-of-envelope values and reports
+  `limit`.
+
+  ```json
+  {"schema": "operator.streams_control.v1",
+   "streams": {"rgb.hevc": {"hz": 2, "bitrate_bps": 1000000, "paused": false}},
+   "local_tasks": {"record": {"running": true}}}
+  ```
+
+`xr-bridge` keeps the latest validated `StreamsStatus` (latest-wins, cleared
+when that connection ends) and queues `StreamsControl` in order, forwarding it
+only to a headset that advertised `capture_streams_v1`. On the adapter boundary
+they travel as `BridgeToAdapter::StreamsStatus` (sent only to adapters whose
+descriptor declares `capture_streams`) and `AdapterToBridge::StreamsControl`;
+the bridge drops an invalid adapter declaration instead of forwarding it. The
+standalone hosted path exposes them through `operator_xr.hosted.HostedStreams`,
+which declares streams but carries no media: capture media requires the
+embedded `XrSession`, whose `BridgeConfig.media_up_port` / `media_down_port`
+(default `63905` / `63906`) are the ports the bridge advertises.
+
+Compatibility:
+
+| Headset | Host | Behaviour |
+| --- | --- | --- |
+| Old APK | declares `capture_streams` | Unknown field ignored; no `capture_streams_v1`, no `StreamsStatus`. The host treats every declared stream and task as `denied` / `unsupported` (`XrSession.streams_status()` synthesizes this) and never sends `StreamsControl`. |
+| New APK | no `capture_streams` | Descriptor unchanged; behaviour is exactly as before. |
+| New APK | declares `capture_streams` | Envelope prompt, `StreamsStatus`, `StreamsControl` as above. |
 
 ### Robot-authored Blueprint
 
@@ -616,7 +764,8 @@ valid. Receivers must bound decompression (the Python implementation uses
 XR push path:
 
 - `xr/scripts/app/modes/capture_app_base.gd`
-- `xr/scripts/app/composition/live_feed_composition.gd`
+- `xr/scripts/app/composition/ego_capture_composition.gd`
+- `xr/scripts/components/sinks/live_push_sink.gd`
 - `xr/addons/live-push/`
 
 XR pull path:

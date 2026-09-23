@@ -56,6 +56,65 @@ fn ground_grid_and_model_lighting_contract_round_trips() {
 }
 
 #[test]
+fn path_marker_and_dense_map_contract_round_trips() {
+    let spec: serde_json::Value = serde_json::from_str(BLUEPRINT_SPEC_JSON).unwrap();
+    let max_values = spec["primitives"]["path"]["bindings"]["points"]["max_length"]
+        .as_u64()
+        .unwrap() as usize;
+    let blueprint: Blueprint = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_SCHEMA, "blueprint_id": "nav", "revision": 1,
+        "components": [
+            {"id": "route", "type": "path", "properties": {"points": [0, 0, 0, 1, 0, 0], "width": 0.04},
+             "bindings": {"points": "path", "color": "color"}},
+            {"id": "goal", "type": "marker", "anchor": "right_controller", "properties": {"shape": "pin"},
+             "bindings": {"position": "goal", "color": "color", "text": "goal_text"}},
+            {"id": "map", "type": "dense_map", "properties": {"display": "minimap"},
+             "bindings": {"display": "display"}}
+        ]
+    })).unwrap();
+    blueprint.validate().unwrap();
+    let copy: Blueprint = serde_json::from_slice(&serde_json::to_vec(&blueprint).unwrap()).unwrap();
+    assert_eq!(copy, blueprint);
+    let mut state: BlueprintState = serde_json::from_value(serde_json::json!({
+        "schema": BLUEPRINT_STATE_SCHEMA, "blueprint_id": "nav", "blueprint_revision": 1,
+        "sequence": 1, "timestamp_ns": 1,
+        "values": {"path": vec![0.0; max_values], "color": "#00ff00", "goal": [1, 0, -2],
+                   "goal_text": "Goal", "display": "world"}
+    })).unwrap();
+    blueprint.validate_state(&state).unwrap();
+    for (key, value) in [
+        ("path", serde_json::json!(vec![0.0; max_values + 3])),
+        ("goal", serde_json::json!([1, 0])),
+        ("color", serde_json::json!("green")),
+        ("display", serde_json::json!(true)),
+    ] {
+        let mut bad = state.clone();
+        bad.values.insert(key.into(), value);
+        assert!(blueprint.validate_state(&bad).is_err(), "{key} must be rejected");
+    }
+    state.values.insert("path".into(), serde_json::json!(vec![0.0; max_values + 3]));
+    assert!(blueprint.validate_state(&state).unwrap_err().contains("at most"));
+    for (index, property, value) in [
+        (0, "width", serde_json::json!(0.6)),
+        (0, "points", serde_json::json!(vec![0.0; max_values + 3])),
+        (1, "size", serde_json::json!(0)),
+        (2, "scale", serde_json::json!(1.5)),
+    ] {
+        let mut bad = blueprint.clone();
+        bad.components[index].properties.insert(property.into(), value);
+        assert!(bad.validate().is_err(), "{property} must be rejected");
+    }
+    let mut world_only = blueprint.clone();
+    world_only.components[0].anchor = "head".into();
+    assert!(world_only.validate().is_err());
+    let mut duplicate = blueprint;
+    let mut second_map = duplicate.components[2].clone();
+    second_map.id = "other".into();
+    duplicate.components.push(second_map);
+    assert!(duplicate.validate().is_err());
+}
+
+#[test]
 fn controller_chord_and_menu_actions_have_distinct_contracts() {
     let blueprint: Blueprint = serde_json::from_value(serde_json::json!({
         "schema": BLUEPRINT_SCHEMA, "blueprint_id": "controls", "revision": 1,

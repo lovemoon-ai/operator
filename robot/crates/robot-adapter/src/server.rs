@@ -176,6 +176,9 @@ async fn handle_message(
         BridgeToAdapter::BlueprintEvent { .. } => {
             tracing::debug!("Ignoring Blueprint event for adapter without UI support");
         }
+        BridgeToAdapter::StreamsStatus { .. } => {
+            tracing::debug!("Ignoring StreamsStatus for adapter without capture streams");
+        }
         BridgeToAdapter::Shutdown => {
             tracing::info!("Shutdown received");
             return Ok(true);

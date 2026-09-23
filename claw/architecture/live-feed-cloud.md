@@ -7,26 +7,28 @@ over TUS.
 
 ## XR Entry Points
 
-- Scene: `xr/scenes/live_feed_app.tscn`
+Streaming is an Ego capture **Output**, not a mode of its own: the Ego mode
+records locally (`local`), streams to an ingest endpoint (`ingest`), or does
+both (`both`). Only the mounted sinks differ; sources, StreamBinding and
+timestamps are the same.
+
+- Scene: `xr/scenes/capture_app.tscn`
 - Scene script: `xr/scripts/app/modes/capture_app_base.gd`
-- Composition: `xr/scripts/app/composition/live_feed_composition.gd`
+- Composition: `xr/scripts/app/composition/ego_capture_composition.gd`
+- Session: `xr/scripts/session/ingest_session.gd` (N:1; QR or manual endpoint)
+- Sink: `xr/scripts/components/sinks/live_push_sink.gd`
 - XR-to-server addon: `xr/addons/live-push/`
-- Server-to-XR addon: `xr/addons/live-pull/`
+- Server-to-XR addon: `xr/addons/live-pull/`, rendered by
+  `xr/scripts/components/views/dense_map_view.gd`
 
-The scene attaches `capture_app_base.gd` directly and pins
-`capture_sink = "server"` as a scene property.
-(`xr/scripts/app/modes/live_feed_mode.gd` sets the same property in `_init()`
-but is currently unreferenced.) The composition creates a `LiveStreamSink`
-backed by `LivePushWriter`, then reuses the capture session controller and
-platform capture providers.
+The Output is chosen in the capture panel, or with the launch intent
+`--es operator.capture.output ingest` plus
+`operator.capture.server_host` / `server_port` / `server_result_port` /
+`server_auth_token`. `cicd/04_live_feed_e2e.sh` enters that way.
 
-The launcher card for this mode is controlled by
-`operator_feature_mode_live_feed`, which is currently `true` in every
-export preset, so the card is shown. The Live Feed E2E enters through the
-`operator.mode` intent extra regardless of the flag. See
-`claw/architecture/xr-client.md` for the launcher card contract and
-`claw/todo/host-declared-composition.md` for the plan that removes this
-entry point.
+A host session can also receive the same OLCP frames; see
+"Host-declared capture streams" in `wire-protocol.md`. The ingest server path
+described here is unchanged by that.
 
 ## Ports
 

@@ -5,7 +5,7 @@ extends Node
 
 const XrtProtocolScript = preload("res://scripts/compat/xrobot_toolkit/xrt_protocol.gd")
 const XrtTrackingEncoderScript = preload("res://scripts/compat/xrobot_toolkit/xrt_tracking_encoder.gd")
-const XrTrackingSamplerScript = preload("res://scripts/input/xr_tracking_sampler.gd")
+const XrTrackingSourceScript = preload("res://scripts/components/sources/xr_tracking_source.gd")
 
 const TRACKING_RATE_HZ := 72
 ## Matches TRACKING_RATE_HZ so Body ships on every frame, like the reference
@@ -55,7 +55,7 @@ func configure(
 	if sampler != null and sampler.has_method("shutdown"):
 		sampler.call("shutdown")
 	client = xrt_client
-	sampler = sampler_override if sampler_override != null else XrTrackingSamplerScript.new()
+	sampler = sampler_override if sampler_override != null else XrTrackingSourceScript.new()
 	sampler.set("tracking_provider", tracking_provider)
 	if sampler.has_signal("tracking_invalidated") and not sampler.is_connected("tracking_invalidated", _on_tracking_invalidated):
 		sampler.connect("tracking_invalidated", _on_tracking_invalidated)

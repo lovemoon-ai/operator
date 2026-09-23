@@ -78,6 +78,13 @@
       "script": "res://tests/unit/contracts/dual_trigger_hold_test.gd"
     },
     {
+      "id": "contracts.capture_streams",
+      "level": "unit",
+      "suite": "contracts.capture_streams",
+      "module": "core/teleop",
+      "script": "res://tests/unit/contracts/capture_streams_contract_test.gd"
+    },
+    {
       "id": "blueprint.controller_workflow",
       "level": "device",
       "suite": "contracts.controller_workflow",
@@ -127,11 +134,11 @@
       "script": "res://tests/unit/teleop/xrt_discovery_test.gd"
     },
     {
-      "id": "teleop.xr_tracking_sampler",
+      "id": "teleop.xr_tracking_source",
       "level": "unit",
       "suite": "teleop.compatibility",
       "module": "core/teleop",
-      "script": "res://tests/unit/teleop/xr_tracking_sampler_test.gd"
+      "script": "res://tests/unit/teleop/xr_tracking_source_test.gd"
     },
     {
       "id": "teleop.xrt_tracking_encoder",

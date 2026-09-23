@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use bytes::BytesMut;
 use teleop_protocol::{
     AdapterCodec, AdapterToBridge, Blueprint, BlueprintEvent, BlueprintState, BridgeCodec,
-    BridgeToAdapter, DeviceCommand, DeviceDescriptor, DeviceTelemetry, Pose6D, TelemetryValue,
+    BridgeToAdapter, DeviceCommand, DeviceDescriptor, DeviceTelemetry, Pose6D, StreamsControl,
+    StreamsStatus, TelemetryValue,
 };
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -66,6 +67,20 @@ fn sample_blueprint_event() -> BlueprintEvent {
     .unwrap()
 }
 
+fn sample_streams_status() -> StreamsStatus {
+    serde_json::from_str(
+        r#"{"schema":"operator.streams_status.v1","streams":{"rgb.hevc":{"state":"active","hz":4.0}},"local_tasks":{}}"#,
+    )
+    .unwrap()
+}
+
+fn sample_streams_control() -> StreamsControl {
+    serde_json::from_str(
+        r#"{"schema":"operator.streams_control.v1","streams":{"rgb.hevc":{"hz":2.0}}}"#,
+    )
+    .unwrap()
+}
+
 /// Encode each BridgeToAdapter variant with the BridgeCodec (encoder side),
 /// then decode it with the AdapterCodec (decoder side) — must match.
 #[test]
@@ -79,6 +94,11 @@ fn bridge_to_adapter_roundtrip_all_variants() {
         BridgeToAdapter::BlueprintEvent {
             event: Box::new(sample_blueprint_event()),
         },
+        BridgeToAdapter::StreamsStatus {
+            status: Some(Box::new(sample_streams_status())),
+        },
+        // The headset that reported went away.
+        BridgeToAdapter::StreamsStatus { status: None },
         BridgeToAdapter::Shutdown,
     ];
 
@@ -112,6 +132,9 @@ fn adapter_to_bridge_roundtrip_all_variants() {
         AdapterToBridge::Blueprint { blueprint: None },
         AdapterToBridge::BlueprintState {
             state: Box::new(sample_blueprint_state()),
+        },
+        AdapterToBridge::StreamsControl {
+            control: Box::new(sample_streams_control()),
         },
         AdapterToBridge::Event {
             kind: "warn".to_string(),

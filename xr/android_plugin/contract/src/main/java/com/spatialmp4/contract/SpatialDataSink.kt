@@ -474,8 +474,15 @@ object SpatialDataSinkRegistry {
     @Volatile
     private var activeSink: SpatialDataSink? = null
 
+    // Every sink that ever registered, in registration order. Lets a sink
+    // that tees the local recorder find it without a module dependency.
+    private val registered = java.util.concurrent.CopyOnWriteArrayList<SpatialDataSink>()
+
     @JvmStatic
     fun register(sink: SpatialDataSink) {
+        if (sink !is FanoutSpatialDataSink) {
+            registered.addIfAbsent(sink)
+        }
         activeSink = sink
     }
 
@@ -488,6 +495,106 @@ object SpatialDataSinkRegistry {
 
     @JvmStatic
     fun getActiveSink(): SpatialDataSink? = activeSink
+
+    /**
+     * The most recently registered sink other than [exclude] -- the local
+     * recorder when [exclude] is a network sink that wants to tee it.
+     */
+    @JvmStatic
+    fun findOtherSink(exclude: SpatialDataSink): SpatialDataSink? =
+        registered.lastOrNull { it !== exclude }
+}
+
+/**
+ * Feeds one provider session to several sinks, e.g. the local SpatialMP4
+ * recorder and a live push sink in the same capture. The first sink is
+ * primary: its start/finish results are the session's. A secondary sink that
+ * fails to start is skipped (it has already reported through onError), so a
+ * network failure never costs the local recording. Hot-path buffers are
+ * handed to each sink as an independent duplicate() view so one sink reading
+ * the buffer cannot move another's position. Timestamps pass through
+ * unchanged.
+ */
+class FanoutSpatialDataSink(sinks: List<SpatialDataSink>) : SpatialDataSink {
+    private val sinks: List<SpatialDataSink> = sinks.toList()
+
+    @Volatile
+    private var active: List<SpatialDataSink> = emptyList()
+
+    init {
+        require(this.sinks.isNotEmpty()) { "FanoutSpatialDataSink needs at least one sink" }
+    }
+
+    override val contractVersion: Int
+        get() = sinks.minOf { it.contractVersion }
+
+    override fun startSession(config: SessionConfig): Boolean {
+        val started = mutableListOf<SpatialDataSink>()
+        sinks.forEachIndexed { index, sink ->
+            if (sink.startSession(config)) {
+                started += sink
+            } else if (index == 0) {
+                started.forEach { it.finishSession() }
+                active = emptyList()
+                return false
+            }
+        }
+        active = started
+        return true
+    }
+
+    override fun finishSession(): String {
+        val finishing = active
+        active = emptyList()
+        var primaryResult = ""
+        finishing.forEachIndexed { index, sink ->
+            val result = sink.finishSession()
+            if (index == 0) {
+                primaryResult = result
+            }
+        }
+        return primaryResult
+    }
+
+    override fun onRgbCsd(config: RgbStreamConfig) {
+        active.forEach { it.onRgbCsd(config) }
+    }
+
+    override fun onDepthMetadata(width: Int, height: Int, intrinsics: Intrinsics) {
+        active.forEach { it.onDepthMetadata(width, height, intrinsics) }
+    }
+
+    override fun onRgbPacket(data: java.nio.ByteBuffer, ptsNs: Long, durationNs: Long, isKeyframe: Boolean) {
+        active.forEach { it.onRgbPacket(data.duplicate(), ptsNs, durationNs, isKeyframe) }
+    }
+
+    override fun onDepthFrame(payload: ByteArray, ptsNs: Long, durationNs: Long) {
+        active.forEach { it.onDepthFrame(payload, ptsNs, durationNs) }
+    }
+
+    override fun onAudioCsd(config: AudioStreamConfig) {
+        active.forEach { it.onAudioCsd(config) }
+    }
+
+    override fun onAudioPacket(data: java.nio.ByteBuffer, ptsNs: Long, durationNs: Long, isKeyframe: Boolean) {
+        active.forEach { it.onAudioPacket(data.duplicate(), ptsNs, durationNs, isKeyframe) }
+    }
+
+    override fun onAudioUnavailable(reason: String) {
+        active.forEach { it.onAudioUnavailable(reason) }
+    }
+
+    override fun onOperatorStaticMetadata(payload: ByteArray) {
+        active.forEach { it.onOperatorStaticMetadata(payload) }
+    }
+
+    override fun onRgbFrameIndex(eye: String, payload: ByteArray, ptsNs: Long, durationNs: Long) {
+        active.forEach { it.onRgbFrameIndex(eye, payload, ptsNs, durationNs) }
+    }
+
+    override fun onError(message: String) {
+        sinks.forEach { it.onError(message) }
+    }
 }
 
 /**

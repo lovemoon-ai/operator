@@ -1,6 +1,6 @@
 extends RefCounted
 
-const CASE_ID := "teleop.xr_tracking_sampler"
+const CASE_ID := "teleop.xr_tracking_source"
 
 
 class FakeProvider:
@@ -155,12 +155,18 @@ class SamplerSessions:
 
 
 class DeterministicSampler:
-	extends XrTrackingSampler
+	extends XrTrackingSource
 	var now_us := 0
 	var fake_bridge: Object
 
 	func _ticks_usec() -> int:
 		return now_us
+
+	## The pose timebase depends on the runtime's predicted display time and
+	## the capture plugin's XrTime offset. Pin it to the sampling instant so
+	## the case asserts frame shape, not the device it runs on.
+	func _pose_timestamp_ns(ticks_ns: int) -> int:
+		return ticks_ns
 
 	func _resolve_pico_bridge() -> void:
 		_pico_bridge = fake_bridge
@@ -187,7 +193,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 
 func _test_passive_consumer_demand(t: OperatorTestAssertions) -> void:
 	var sessions := TrackingSessionService.new()
-	var sampler := XrTrackingSampler.new()
+	var sampler := XrTrackingSource.new()
 	sampler.tracking_sessions = sessions
 	sampler.configure({"streams": ["head", "controllers"]})
 	t.is_false(sampler.tracking_report().get("needed", true), "UI inspection does not activate the sender")
@@ -234,6 +240,10 @@ func _test_snapshot_shape_and_default_rate(t: OperatorTestAssertions) -> void:
 		1.0,
 		"controller booleans retain v1 numeric encoding"
 	)
+	t.eq(first.get("head", {}).get("sample_timestamp_ns"), first.get("timestamp_ns"),
+		"head samples carry the tick's pose timestamp, not the provider's read instant")
+	t.eq(left_controller.get("input", {}).get("sample_timestamp_ns"), first.get("timestamp_ns"),
+		"controller input carries the tick's pose timestamp")
 	var body: Dictionary = first.get("body", {})
 	t.eq(body.get("joint_set"), "pico_bd_24", "Pico body uses the existing joint set")
 	t.eq(body.get("sample_timestamp_ns"), first.get("timestamp_ns"),
@@ -534,8 +544,7 @@ func _test_sender_filters_v1_body_extensions(t: OperatorTestAssertions) -> void:
 	sampler.fake_bridge = bridge
 	sampler.configure({"streams": ["body", "motion_trackers"]})
 	var snapshot := sampler.sample_frame()
-	var sender := XrStateSender.new()
-	var frame: Dictionary = sender.call("_frame_v1", snapshot)
+	var frame := XrStateSink.frame_v1(snapshot)
 	t.is_false(frame.has("predicted_display_time_ns"),
 		"v1 wire omits the sampler-only predicted display timestamp")
 	var body: Dictionary = frame.get("body", {})
@@ -560,7 +569,7 @@ func _test_sender_filters_v1_body_extensions(t: OperatorTestAssertions) -> void:
 	motion_sampler.tracking_provider = provider
 	motion_sampler.fake_bridge = FakePicoBridge.new()
 	motion_sampler.configure({"streams": ["motion_trackers"]})
-	var motion_frame: Dictionary = sender.call("_frame_v1", motion_sampler.sample_frame())
+	var motion_frame := XrStateSink.frame_v1(motion_sampler.sample_frame())
 	var motion: Dictionary = motion_frame.get("motion_trackers", [])[0]
 	t.eq(motion.keys(), ["id", "tracker_index", "pose", "battery_level"],
 		"v1 motion tracker keeps the existing wire fields and ordering")
@@ -571,4 +580,3 @@ func _test_sender_filters_v1_body_extensions(t: OperatorTestAssertions) -> void:
 		"v1 wire JSON does not expose new acceleration flags")
 
 	provider.free()
-	sender.free()

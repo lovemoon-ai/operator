@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from .models import BridgeStats, XrFrame, frame_from_json
 from .blueprint import BlueprintClient
+from .capture import CaptureStreamsConfig, StreamsControl, StreamsStatus, XrCapture
 
 try:
     from ._native import NativeSession as _NativeSession
@@ -105,6 +106,13 @@ class BridgeConfig:
     discovery_unicast_targets: tuple[str, ...] = ()
     streams: tuple[str, ...] = DEFAULT_XR_STREAMS
     video_feeds: tuple[VideoFeedConfig, ...] = ()
+    #: Headset capture streams to request (the permission envelope). ``None``
+    #: leaves the descriptor and session behaviour unchanged.
+    capture_streams: CaptureStreamsConfig | None = None
+    #: Session media ports (OLCP push from / results to the headset), bound
+    #: only when ``capture_streams`` is declared. ``0`` on either disables media.
+    media_up_port: int = 63905
+    media_down_port: int = 63906
 
     def __post_init__(self) -> None:
         if not isinstance(self.streams, (tuple, list)) or not self.streams:
@@ -124,6 +132,27 @@ class BridgeConfig:
         if len({feed.tcp_port for feed in feeds}) != len(feeds):
             raise ValueError("video feed tcp ports must not contain duplicates")
         object.__setattr__(self, "video_feeds", feeds)
+        if self.capture_streams is not None and not isinstance(
+            self.capture_streams, CaptureStreamsConfig
+        ):
+            raise ValueError("capture_streams must be a CaptureStreamsConfig or None")
+        for name in ("media_up_port", "media_down_port"):
+            port = getattr(self, name)
+            if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 65535:
+                raise ValueError(f"{name} must be in 0..65535 (0 disables media)")
+        # Media is bound only for a declared capture envelope, so ports that
+        # are never opened must not reject an otherwise valid configuration.
+        media_ports = (
+            [port for port in (self.media_up_port, self.media_down_port) if port]
+            if self.capture_streams is not None
+            else []
+        )
+        taken = {self.pose_port, self.telemetry_port, *(feed.tcp_port for feed in feeds)}
+        if len(set(media_ports)) != len(media_ports) or taken.intersection(media_ports):
+            raise ValueError(
+                "media ports must differ from each other and from the pose, telemetry, "
+                "and video TCP ports"
+            )
 
 
 class XrSession:
@@ -140,6 +169,16 @@ class XrSession:
                 "operator_xr native extension is not installed; run "
                 "`pip install -e ./python` from the Operator repository"
             ) from _native_import_error
+        capture = self.config.capture_streams
+        capture_kwargs = (
+            {
+                "capture_streams_json": json.dumps(
+                    capture.to_descriptor_dict(), separators=(",", ":"), allow_nan=False
+                )
+            }
+            if capture is not None
+            else {}
+        )
         self._native = factory(
             name=self.config.name,
             pose_port=self.config.pose_port,
@@ -152,8 +191,17 @@ class XrSession:
                 [feed.to_dict() for feed in self.config.video_feeds],
                 separators=(",", ":"),
             ),
+            media_up_port=self.config.media_up_port,
+            media_down_port=self.config.media_down_port,
+            **capture_kwargs,
         )
         self.blueprint = BlueprintClient(self._native, lambda: self.is_running)
+        #: Granted media for ``config.capture_streams``; ``None`` when none are declared.
+        self.capture: XrCapture | None = (
+            XrCapture(capture, self._native, lambda: self.is_running)
+            if capture is not None
+            else None
+        )
 
     def start(self) -> "XrSession":
         self._native.start()
@@ -206,4 +254,53 @@ class XrSession:
             last_frame_id=int(data.get("last_frame_id", 0)),
             last_timestamp_ns=int(data.get("last_timestamp_ns", 0)),
             last_error=data.get("last_error"),
+            capture_streams_supported=bool(data.get("capture_streams_supported", False)),
+            media_up_connected=bool(data.get("media_up_connected", False)),
+            media_down_connected=bool(data.get("media_down_connected", False)),
+            media_up_frames=int(data.get("media_up_frames", 0)),
+            media_up_dropped=int(data.get("media_up_dropped", 0)),
         )
+
+    def streams_status(self) -> StreamsStatus | None:
+        """Latest headset answer to ``capture_streams``.
+
+        ``None`` while no headset is connected or it has not reported yet. A
+        connected headset without ``capture_streams_v1`` (older Operator XR)
+        yields every declared stream and task as ``denied``/``unsupported``.
+        """
+        payload = self._native.streams_status_json()
+        if payload is not None:
+            return StreamsStatus.from_json(payload)
+        capture = self.config.capture_streams
+        if capture is None:
+            return None
+        stats = self.stats()
+        if stats.connected and not stats.capture_streams_supported:
+            return StreamsStatus.unsupported(capture)
+        return None
+
+    def streams_control(
+        self,
+        streams: StreamsControl | Mapping[str, Any] | None = None,
+        *,
+        local_tasks: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Adjust declared streams/tasks inside the envelope, e.g.
+        ``xr.streams_control({"rgb.hevc": {"hz": 2}})``.
+
+        The headset clips out-of-envelope values and reports ``limit``.
+        Raises ``ValueError`` for undeclared names or invalid values and
+        ``RuntimeError`` when the session is not running, no headset is
+        connected, or the headset lacks ``capture_streams_v1``.
+        """
+        capture = self.config.capture_streams
+        if capture is None:
+            raise RuntimeError("streams_control requires BridgeConfig.capture_streams")
+        if isinstance(streams, StreamsControl):
+            if local_tasks is not None:
+                raise ValueError("pass local_tasks inside the StreamsControl")
+            control = streams
+        else:
+            control = StreamsControl(streams=streams or {}, local_tasks=local_tasks or {})
+        control.validate_for(capture)
+        self._native.send_streams_control_json(control.to_json())

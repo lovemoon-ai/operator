@@ -38,7 +38,7 @@ OPERATOR_BUILD_PROFILE := $(strip $(OPERATOR_BUILD_PROFILE))
 OPERATOR_QUICK_ENTRY ?=
 OPERATOR_QUICK_ENTRY := $(strip $(OPERATOR_QUICK_ENTRY))
 VALID_OPERATOR_BUILD_PROFILES := full teleop
-VALID_OPERATOR_QUICK_ENTRIES := launcher teleop ego_capture live_feed
+VALID_OPERATOR_QUICK_ENTRIES := launcher teleop ego_capture
 
 ifeq ($(filter $(OPERATOR_BUILD_PROFILE),$(VALID_OPERATOR_BUILD_PROFILES)),)
 $(error Unsupported OPERATOR_BUILD_PROFILE='$(OPERATOR_BUILD_PROFILE)'; expected one of: $(VALID_OPERATOR_BUILD_PROFILES))
@@ -342,8 +342,10 @@ run:
 	$(ADB) shell am start -n $(package)/$(activity) $(mode_extra)
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
 
+# Live Feed is the Ego capture Output "ingest" (streams to the configured
+# live server instead of, or with "both", alongside a local recording).
 run-live-feed:
-	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode live_feed
+	$(ADB) shell am start -n $(package)/$(activity) --es operator.mode ego --es operator.capture.output ingest
 	$(ADB) logcat -c | $(ADB) logcat | grep -e "Operator" -e "godot" -e "OpenXR"
 
 run-live-capture: run-live-feed

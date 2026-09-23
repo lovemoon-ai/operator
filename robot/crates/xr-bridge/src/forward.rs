@@ -31,11 +31,12 @@ use anyhow::Result;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 
-use teleop_protocol::{BlueprintEvent, DeviceDescriptor};
+use teleop_protocol::{BlueprintEvent, DeviceDescriptor, StreamsControl, StreamsStatus};
 
 use crate::adapter_client::AdapterClient;
 use crate::latency::{self, LatencyFrame, LatencyRecorder};
 use crate::safety::{DeviceSafety, SafetyResult};
+use crate::sdk::{StreamsChannels, StreamsControlError};
 use crate::wire_runtime::TimedCommand;
 
 /// Watchdog poll period: a quarter of the command timeout, clamped to a sane
@@ -56,7 +57,7 @@ pub async fn run(
     client: AdapterClient,
     latency: Arc<LatencyRecorder>,
 ) -> Result<()> {
-    run_inner(descriptor, cmd_rx, client, latency, None).await
+    run_inner(descriptor, cmd_rx, client, latency, None, None).await
 }
 
 /// Run the control loop and forward robot-authored blueprint interactions.
@@ -73,6 +74,30 @@ pub async fn run_with_blueprint_events(
         client,
         latency,
         Some(blueprint_event_rx),
+        None,
+    )
+    .await
+}
+
+/// [`run_with_blueprint_events`] plus capture-stream routing: headset
+/// `StreamsStatus` goes to the adapter (only when its descriptor declared
+/// `capture_streams`, so older adapters never see the new message) and
+/// adapter `StreamsControl` goes to the headset via `streams`.
+pub async fn run_with_blueprint_events_and_streams(
+    descriptor: Arc<DeviceDescriptor>,
+    cmd_rx: watch::Receiver<Option<TimedCommand>>,
+    client: AdapterClient,
+    latency: Arc<LatencyRecorder>,
+    blueprint_event_rx: mpsc::Receiver<BlueprintEvent>,
+    streams: StreamsChannels,
+) -> Result<()> {
+    run_inner(
+        descriptor,
+        cmd_rx,
+        client,
+        latency,
+        Some(blueprint_event_rx),
+        Some(streams),
     )
     .await
 }
@@ -83,8 +108,20 @@ async fn run_inner(
     mut client: AdapterClient,
     latency: Arc<LatencyRecorder>,
     mut blueprint_event_rx: Option<mpsc::Receiver<BlueprintEvent>>,
+    streams: Option<StreamsChannels>,
 ) -> Result<()> {
     let mut safety = DeviceSafety::new(&descriptor);
+    let mut streams_status_rx = streams
+        .as_ref()
+        .filter(|_| descriptor.capture_streams.is_some())
+        .map(StreamsChannels::status);
+    // Both directions follow the same gate: an adapter that declared no
+    // (or an invalid, stripped) `capture_streams` neither hears about the
+    // headset's streams nor gets to control them.
+    let mut streams_control_rx = match &streams {
+        Some(_) if descriptor.capture_streams.is_some() => client.take_streams_control(),
+        _ => None,
+    };
 
     let timeout = descriptor.safety.timeout();
     let period = watchdog_period(timeout);
@@ -110,6 +147,32 @@ async fn run_inner(
                         }
                     }
                     None => blueprint_event_rx = None,
+                }
+            }
+            changed = optional_status_changed(&mut streams_status_rx) => {
+                let Some(receiver) = streams_status_rx.as_mut().filter(|_| changed.is_ok()) else {
+                    streams_status_rx = None;
+                    continue;
+                };
+                // A cleared status (the reporting headset disconnected) is
+                // forwarded too, so the adapter stops believing the last report.
+                let status = receiver.borrow_and_update().clone();
+                let status = status.map(|status| status.as_ref().clone());
+                if let Err(error) = client.send_streams_status(status).await {
+                    tracing::error!("Forwarding StreamsStatus to adapter failed: {error}");
+                }
+            }
+            control = receive_streams_control(&mut streams_control_rx) => {
+                let (Some(control), Some(streams)) = (control, &streams) else {
+                    streams_control_rx = None;
+                    continue;
+                };
+                match streams.send_control(control) {
+                    Ok(()) => {}
+                    Err(error @ (StreamsControlError::NotConnected | StreamsControlError::Unsupported)) => {
+                        tracing::debug!("Dropping adapter StreamsControl: {error}");
+                    }
+                    Err(error) => tracing::warn!("Dropping adapter StreamsControl: {error}"),
                 }
             }
             // Incoming command from the headset (via pose_server / pose_udp_server).
@@ -183,6 +246,24 @@ async fn run_inner(
     }
 }
 
+async fn optional_status_changed(
+    receiver: &mut Option<watch::Receiver<Option<Arc<StreamsStatus>>>>,
+) -> Result<(), watch::error::RecvError> {
+    match receiver {
+        Some(receiver) => receiver.changed().await,
+        None => pending().await,
+    }
+}
+
+async fn receive_streams_control(
+    receiver: &mut Option<mpsc::Receiver<StreamsControl>>,
+) -> Option<StreamsControl> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => pending().await,
+    }
+}
+
 async fn receive_blueprint_event(
     receiver: &mut Option<mpsc::Receiver<BlueprintEvent>>,
 ) -> Option<BlueprintEvent> {
@@ -204,8 +285,8 @@ mod tests {
     use tokio_util::codec::Framed;
 
     use teleop_protocol::{
-        listen, AdapterCodec, AdapterToBridge, AxisDef, BridgeToAdapter, ControlSchema,
-        DeviceCommand, DeviceInfo, DeviceSafetyConfig, Endpoint, TelemetrySchema,
+        listen, AdapterCodec, AdapterToBridge, AxisDef, BridgeToAdapter, CaptureStreamsConfig,
+        ControlSchema, DeviceCommand, DeviceInfo, DeviceSafetyConfig, Endpoint, TelemetrySchema,
     };
 
     /// What the mock adapter recorded from the bridge.
@@ -246,7 +327,8 @@ mod tests {
                     BridgeToAdapter::Stop { .. } => {
                         state_task.lock().await.stops += 1;
                     }
-                    BridgeToAdapter::BlueprintEvent { .. } => {}
+                    BridgeToAdapter::BlueprintEvent { .. }
+                    | BridgeToAdapter::StreamsStatus { .. } => {}
                     BridgeToAdapter::Shutdown => break,
                 }
             }
@@ -403,5 +485,210 @@ mod tests {
         );
 
         forward.abort();
+    }
+
+    /// Headset status reaches a declaring adapter; adapter control reaches
+    /// the capture-capable headset connection, in order.
+    #[tokio::test]
+    async fn routes_capture_streams_ctrl_between_adapter_and_headset() {
+        let mut desc = descriptor_with_throttle(60_000);
+        desc.capture_streams = Some(CaptureStreamsConfig::default());
+        let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let endpoint = listener.endpoint();
+        let adapter_desc = desc.clone();
+        let (status_tx, mut status_rx) = mpsc::channel(4);
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let conn = listener.accept().await.unwrap();
+            let mut framed = Framed::new(conn, AdapterCodec);
+            let mut go_rx = Some(go_rx);
+            while let Some(Ok(message)) = framed.next().await {
+                match message {
+                    BridgeToAdapter::Hello => {
+                        framed
+                            .send(AdapterToBridge::Descriptor(Box::new(adapter_desc.clone())))
+                            .await
+                            .unwrap();
+                        go_rx.take().unwrap().await.unwrap();
+                        for hz in [2.0, 3.0] {
+                            let mut control = StreamsControl::default();
+                            control.streams.insert(
+                                "rgb.hevc".into(),
+                                teleop_protocol::StreamControl {
+                                    hz: Some(hz),
+                                    ..Default::default()
+                                },
+                            );
+                            framed
+                                .send(AdapterToBridge::StreamsControl {
+                                    control: Box::new(control),
+                                })
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    BridgeToAdapter::StreamsStatus { status } => {
+                        status_tx.send(status.map(|status| *status)).await.unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut client = AdapterClient::connect(&endpoint).await.unwrap();
+        client.handshake().await.unwrap();
+        let streams = StreamsChannels::new();
+        let (attachment, control_rx) = streams.attach(true);
+        let mut control_rx = control_rx.expect("capture-capable headset gets a queue");
+        let (_cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let forward = tokio::spawn(run_with_blueprint_events_and_streams(
+            Arc::new(desc),
+            cmd_rx,
+            client,
+            LatencyRecorder::new(),
+            event_rx,
+            streams.clone(),
+        ));
+        go_tx.send(()).unwrap();
+
+        for hz in [2.0, 3.0] {
+            let control = tokio::time::timeout(StdDuration::from_secs(2), control_rx.recv())
+                .await
+                .expect("StreamsControl did not reach the headset queue")
+                .unwrap();
+            assert_eq!(control.streams["rgb.hevc"].hz, Some(hz));
+        }
+
+        let status: StreamsStatus = serde_json::from_str(
+            r#"{"schema":"operator.streams_status.v1","streams":{"rgb.hevc":{"state":"active","hz":3.0}}}"#,
+        )
+        .unwrap();
+        attachment.publish(status.clone());
+        let forwarded = tokio::time::timeout(StdDuration::from_secs(2), status_rx.recv())
+            .await
+            .expect("StreamsStatus did not reach the adapter")
+            .unwrap();
+        assert_eq!(forwarded, Some(status));
+
+        // The reporting headset goes away: the adapter must be told, or it
+        // keeps believing capture is still running.
+        drop(attachment);
+        let cleared = tokio::time::timeout(StdDuration::from_secs(2), status_rx.recv())
+            .await
+            .expect("cleared StreamsStatus did not reach the adapter")
+            .unwrap();
+        assert_eq!(cleared, None);
+        forward.abort();
+    }
+
+    /// An adapter whose descriptor declares no capture streams (or whose
+    /// declaration was stripped as invalid) may not steer the headset's
+    /// camera: the control direction follows the same gate as status.
+    #[tokio::test]
+    async fn undeclared_adapter_cannot_control_capture_streams() {
+        let desc = descriptor_with_throttle(60_000);
+        assert!(desc.capture_streams.is_none());
+        let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let endpoint = listener.endpoint();
+        let adapter_desc = desc.clone();
+        tokio::spawn(async move {
+            let conn = listener.accept().await.unwrap();
+            let mut framed = Framed::new(conn, AdapterCodec);
+            while let Some(Ok(message)) = framed.next().await {
+                if matches!(message, BridgeToAdapter::Hello) {
+                    framed
+                        .send(AdapterToBridge::Descriptor(Box::new(adapter_desc.clone())))
+                        .await
+                        .unwrap();
+                    let mut control = StreamsControl::default();
+                    control.streams.insert(
+                        "rgb.hevc".into(),
+                        teleop_protocol::StreamControl {
+                            hz: Some(30.0),
+                            ..Default::default()
+                        },
+                    );
+                    framed
+                        .send(AdapterToBridge::StreamsControl {
+                            control: Box::new(control),
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+
+        let mut client = AdapterClient::connect(&endpoint).await.unwrap();
+        client.handshake().await.unwrap();
+        let streams = StreamsChannels::new();
+        let (_attachment, control_rx) = streams.attach(true);
+        let mut control_rx = control_rx.expect("capture-capable headset gets a queue");
+        let (_cmd_tx, cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let forward = tokio::spawn(run_with_blueprint_events_and_streams(
+            Arc::new(desc),
+            cmd_rx,
+            client,
+            LatencyRecorder::new(),
+            event_rx,
+            streams.clone(),
+        ));
+
+        let queued = tokio::time::timeout(StdDuration::from_millis(300), control_rx.recv()).await;
+        assert!(
+            queued.is_err(),
+            "an undeclared adapter must not reach the headset"
+        );
+        forward.abort();
+    }
+
+    #[tokio::test]
+    async fn streams_channels_report_connection_and_capability_errors() {
+        let streams = StreamsChannels::new();
+        let control = StreamsControl::default();
+        assert_eq!(
+            streams.send_control(control.clone()),
+            Err(StreamsControlError::NotConnected)
+        );
+        let (legacy, no_queue) = streams.attach(false);
+        assert!(no_queue.is_none());
+        assert!(!streams.headset_supported());
+        assert_eq!(
+            streams.send_control(control.clone()),
+            Err(StreamsControlError::Unsupported)
+        );
+        let invalid = StreamsControl {
+            schema: "wrong".into(),
+            ..StreamsControl::default()
+        };
+        assert!(matches!(
+            streams.send_control(invalid),
+            Err(StreamsControlError::Invalid(_))
+        ));
+
+        // A newer capable headset takes over; the old guard no longer owns it.
+        let (current, queue) = streams.attach(true);
+        let _queue = queue.unwrap();
+        drop(legacy);
+        assert!(streams.headset_supported());
+        let status: StreamsStatus =
+            serde_json::from_str(r#"{"schema":"operator.streams_status.v1"}"#).unwrap();
+        current.publish(status);
+        assert!(streams.latest_status().is_some());
+        for _ in 0..16 {
+            streams.send_control(control.clone()).unwrap();
+        }
+        assert_eq!(
+            streams.send_control(control),
+            Err(StreamsControlError::QueueFull)
+        );
+        drop(current);
+        assert!(!streams.headset_supported());
+        assert!(streams.latest_status().is_none());
     }
 }

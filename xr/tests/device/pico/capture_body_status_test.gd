@@ -36,7 +36,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		t.eq(after.get(key), before.get(key), "unconfirmed demand does not start or switch %s" % key)
 	sessions.release(teleop_owner)
 	t.is_false(sessions.summary()["needed"], "last release removes demand")
-	var panel := CapturePanel.new(false)
+	var panel := CapturePanel.new()
 	(Engine.get_main_loop() as SceneTree).root.add_child(panel)
 	var label: Label = panel.get("_tracker_status_label")
 	var button: Button = panel.get("_tracker_connect_button")

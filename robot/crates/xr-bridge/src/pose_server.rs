@@ -29,14 +29,15 @@ use tokio_util::codec::Framed;
 
 use teleop_protocol::{
     Blueprint, BlueprintEvent, BlueprintState, DeviceCommand, DeviceDescriptor, DeviceTelemetry,
-    XrStateFrame, BLUEPRINT_CAPABILITY, BLUEPRINT_COMMAND, BLUEPRINT_EVENT_COMMAND,
-    BLUEPRINT_SPEC_CAPABILITY, BLUEPRINT_STATE_COMMAND, DEDICATED_TELEMETRY_CAPABILITY,
-    XR_STATE_SCHEMA_VERSION,
+    StreamsControl, StreamsStatus, XrStateFrame, BLUEPRINT_CAPABILITY, BLUEPRINT_COMMAND,
+    BLUEPRINT_EVENT_COMMAND, BLUEPRINT_SPEC_CAPABILITY, BLUEPRINT_STATE_COMMAND,
+    CAPTURE_STREAMS_CAPABILITY, DEDICATED_TELEMETRY_CAPABILITY, STREAMS_CONTROL_COMMAND,
+    STREAMS_STATUS_COMMAND, XR_STATE_SCHEMA_VERSION,
 };
 
 use crate::latency::{self, LatencyRecorder};
 use crate::protocol::{CommandCodec, CommandFrame};
-use crate::sdk::{BlueprintStreams, XrStateSink};
+use crate::sdk::{BlueprintStreams, StreamsChannels, XrStateSink};
 use crate::wire_runtime::{build_descriptor_frame, TimedCommand};
 
 /// Tokio tasks detach when their handle is dropped. Connection-local tasks
@@ -57,6 +58,7 @@ struct ConnectionContext {
     latency: Arc<LatencyRecorder>,
     xr_state_sink: Option<XrStateSink>,
     blueprint: Option<BlueprintStreams>,
+    streams: Option<StreamsChannels>,
 }
 
 /// Run the command server, binding `port` on all interfaces. Never returns
@@ -90,6 +92,32 @@ pub async fn run_with_blueprint(
         latency,
         None,
         Some(blueprint),
+        None,
+    )
+    .await
+}
+
+/// Adapter-backed variant that also routes capture-stream
+/// `StreamsStatus` / `StreamsControl` through `streams`.
+pub async fn run_with_blueprint_and_streams(
+    port: u16,
+    descriptor: Arc<DeviceDescriptor>,
+    device_cmd_tx: watch::Sender<Option<TimedCommand>>,
+    telemetry_rx: watch::Receiver<DeviceTelemetry>,
+    latency: Arc<LatencyRecorder>,
+    blueprint: BlueprintStreams,
+    streams: StreamsChannels,
+) -> Result<()> {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    run_on_inner(
+        listener,
+        descriptor,
+        device_cmd_tx,
+        telemetry_rx,
+        latency,
+        None,
+        Some(blueprint),
+        Some(streams),
     )
     .await
 }
@@ -112,6 +140,7 @@ pub async fn run_with_xr_state(
         latency,
         Some(xr_state_sink),
         None,
+        None,
     )
     .await
 }
@@ -132,6 +161,7 @@ pub async fn run_on_with_xr_state(
         telemetry_rx,
         latency,
         Some(xr_state_sink),
+        None,
         None,
     )
     .await
@@ -155,6 +185,32 @@ pub async fn run_on_with_xr_state_and_blueprint(
         latency,
         Some(xr_state_sink),
         blueprint,
+        None,
+    )
+    .await
+}
+
+/// SDK variant with Blueprint and capture-stream ctrl routing.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_on_with_xr_state_blueprint_and_streams(
+    listener: TcpListener,
+    descriptor: Arc<DeviceDescriptor>,
+    device_cmd_tx: watch::Sender<Option<TimedCommand>>,
+    telemetry_rx: watch::Receiver<DeviceTelemetry>,
+    latency: Arc<LatencyRecorder>,
+    xr_state_sink: XrStateSink,
+    blueprint: Option<BlueprintStreams>,
+    streams: Option<StreamsChannels>,
+) -> Result<()> {
+    run_on_inner(
+        listener,
+        descriptor,
+        device_cmd_tx,
+        telemetry_rx,
+        latency,
+        Some(xr_state_sink),
+        blueprint,
+        streams,
     )
     .await
 }
@@ -176,10 +232,12 @@ pub async fn run_on(
         latency,
         None,
         None,
+        None,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_on_inner(
     listener: TcpListener,
     descriptor: Arc<DeviceDescriptor>,
@@ -188,6 +246,7 @@ async fn run_on_inner(
     latency: Arc<LatencyRecorder>,
     xr_state_sink: Option<XrStateSink>,
     blueprint: Option<BlueprintStreams>,
+    streams: Option<StreamsChannels>,
 ) -> Result<()> {
     tracing::info!("Command server listening on {}", listener.local_addr()?);
     let mut active_sdk_connection: Option<JoinHandle<()>> = None;
@@ -204,6 +263,7 @@ async fn run_on_inner(
             latency: latency.clone(),
             xr_state_sink: xr_state_sink.clone(),
             blueprint: blueprint.clone(),
+            streams: streams.clone(),
         };
         let sdk_mode = context.xr_state_sink.is_some();
         let connection_sink = context.xr_state_sink.clone();
@@ -257,6 +317,7 @@ async fn handle_connection(
         latency,
         xr_state_sink,
         blueprint,
+        streams,
     } = context;
     let mut framed = Framed::new(socket, CommandCodec);
     let mut blueprint_enabled = false;
@@ -265,6 +326,10 @@ async fn handle_connection(
     let mut negotiated_active_blueprint = None;
     let mut pending_initial_blueprint_state = None;
     let mut send_legacy_telemetry = true;
+    let mut streams_attachment = None;
+    let mut streams_control_rx = None;
+    // Held for the connection's lifetime: dropping it revokes the media token.
+    let mut media_attachment = None;
 
     // --- Phase 1: Handshake (sequential, before split) ---
     let handshake_timeout = tokio::time::Duration::from_secs(5);
@@ -318,7 +383,33 @@ async fn handle_connection(
                     send_legacy_telemetry,
                     "Blueprint capability negotiated for {addr}"
                 );
-                let resp = build_descriptor_frame(&descriptor);
+                if let Some(streams) = &streams {
+                    let capture_streams_supported =
+                        hello_supports_capability(&frame.data, CAPTURE_STREAMS_CAPABILITY);
+                    let declared = descriptor.capture_streams.is_some();
+                    // Session-owned media: only for a capable headset of a
+                    // declaring host whose bridge serves media.
+                    media_attachment = streams
+                        .media()
+                        .filter(|_| capture_streams_supported && declared)
+                        .and_then(|media| media.attach());
+                    tracing::info!(
+                        capture_streams_supported,
+                        declared,
+                        media = media_attachment.is_some(),
+                        "Capture streams negotiated for {addr}"
+                    );
+                    let (attachment, control_rx) = streams.attach(capture_streams_supported);
+                    streams_attachment = Some(attachment);
+                    streams_control_rx = control_rx;
+                }
+                let resp = match &media_attachment {
+                    Some(media) => build_descriptor_frame(&DeviceDescriptor {
+                        media: Some(media.transport().clone()),
+                        ..(*descriptor).clone()
+                    }),
+                    None => build_descriptor_frame(&descriptor),
+                };
                 framed.send(resp).await?;
                 tracing::info!("Sent DeviceDescriptor to {addr}");
                 if blueprint_enabled {
@@ -442,6 +533,7 @@ async fn handle_connection(
         negotiated_state_rx,
         negotiated_active_blueprint,
         pending_initial_blueprint_state,
+        streams_control_rx,
         send_legacy_telemetry,
     )));
 
@@ -513,6 +605,19 @@ async fn handle_connection(
                     };
                     if outbound_tx.send(pong).await.is_err() {
                         // Writer is gone. Break the loop on the next recv error.
+                    }
+                }
+                STREAMS_STATUS_COMMAND => {
+                    let Some(attachment) = &streams_attachment else {
+                        tracing::debug!("Ignoring StreamsStatus without a capture-streams session");
+                        continue;
+                    };
+                    match serde_json::from_slice::<StreamsStatus>(&frame.data) {
+                        Ok(status) => match status.validate() {
+                            Ok(()) => attachment.publish(status),
+                            Err(error) => tracing::warn!("Invalid StreamsStatus: {error}"),
+                        },
+                        Err(error) => tracing::warn!("Bad StreamsStatus JSON: {error}"),
                     }
                 }
                 BLUEPRINT_EVENT_COMMAND => {
@@ -592,6 +697,7 @@ async fn write_outbound(
     mut state_rx: Option<watch::Receiver<Option<Arc<BlueprintState>>>>,
     mut active_blueprint: Option<Arc<Blueprint>>,
     mut pending_state: Option<Arc<BlueprintState>>,
+    mut streams_control_rx: Option<mpsc::Receiver<StreamsControl>>,
     send_legacy_telemetry: bool,
 ) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
@@ -618,6 +724,19 @@ async fn write_outbound(
             direct = direct_rx.recv() => {
                 let Some(frame) = direct else { break; };
                 frame
+            }
+            control = optional_recv(&mut streams_control_rx) => {
+                let Some(control) = control else {
+                    streams_control_rx = None;
+                    continue;
+                };
+                match json_frame(STREAMS_CONTROL_COMMAND, &control) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        tracing::warn!("Could not serialize StreamsControl: {error}");
+                        continue;
+                    }
+                }
             }
             changed = optional_watch_changed(&mut blueprint_rx) => {
                 if changed.is_err() {
@@ -699,6 +818,13 @@ async fn optional_watch_changed<T>(
 ) -> Result<(), watch::error::RecvError> {
     match receiver {
         Some(receiver) => receiver.changed().await,
+        None => pending().await,
+    }
+}
+
+async fn optional_recv<T>(receiver: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
         None => pending().await,
     }
 }
@@ -824,6 +950,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
         ));
 
@@ -859,6 +986,7 @@ mod tests {
             Some(state_rx),
             initial_blueprint,
             Some(Arc::new(test_blueprint_state(2))),
+            None,
             false,
         ));
 

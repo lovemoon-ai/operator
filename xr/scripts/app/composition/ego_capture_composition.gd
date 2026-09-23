@@ -1,95 +1,116 @@
 class_name EgoCaptureComposition
 extends RefCounted
-## v2 app/composition (WP6): composition root for the ego-capture mode.
+## Composition root for capture: interprets an output selection into mounted
+## sinks, a canonical-frame fanout and a capture lifecycle controller.
 ##
-## Given the mode's writer engine, samplers, and scene-owned callables it
-## builds the v2 capture stack (sinks + StreamBinding fanout + writer
-## adapter + CaptureSessionController) exactly as capture_app.gd wired it
-## inline before WP6. capture_app.gd remains the scene-lifecycle script
-## (its path is load-bearing for tests/02_ego_record.sh); this class owns
-## the "what gets composed" decisions so they can be exercised by the WP7
-## harness with fake platforms/sinks.
-##
-## Behavior note: depth/body/motion-tracker availability is still gated at
-## the capture-options level via the capture provider's reported support
-## (see effective_capture_options) — identical to pre-v2 behavior. A
-## missing capability degrades the option set; the manifest records the
-## stream as absent with today's reasons text.
+## The output (`capture_options.capture_output`) is decided by the user in
+## Ego mode and by the host declaration in a host session:
+##   local  — SpatialMp4Sink (local SpatialMP4 recording; uploads may follow)
+##   ingest — LivePushSink to the session-injected endpoint (OLCP media_up)
+##   both   — one capture feeding both; the local recording is primary
+## Sources are identical for every output; only the wiring differs
+## (CapturePipeline instantiates and drives them).
 
 const SessionSpoolWriterScript := preload("res://scripts/core/capture/session_spool_writer.gd")
-const CaptureProviderRegistryScript := preload("res://scripts/xr/capture_provider_registry.gd")
+
+const OUTPUT_LOCAL := "local"
+const OUTPUT_INGEST := "ingest"
+const OUTPUT_BOTH := "both"
+const OUTPUTS := [OUTPUT_LOCAL, OUTPUT_INGEST, OUTPUT_BOTH]
 
 
-## Phase 1: writer engine + sinks + canonical-frame fanout.
-## Returns {writer, frame_sink, spatialmp4_sink, upload_sink}.
-## The samplers are configured against `writer` by the scene before phase 2.
+static func normalize_output(value: Variant) -> String:
+	var output := str(value).strip_edges().to_lower()
+	return output if OUTPUTS.has(output) else OUTPUT_LOCAL
+
+
+static func records_locally(output: String) -> bool:
+	return output != OUTPUT_INGEST
+
+
+static func streams_to_ingest(output: String) -> bool:
+	return output != OUTPUT_LOCAL
+
+
+## Phase 1: every sink engine a capture can mount. The output selection only
+## decides which of them wire() connects, so switching outputs never rebuilds
+## plugin bindings or the upload queue.
+## Returns {spatialmp4_sink, live_push_sink, upload_sink}.
 static func build_io() -> Dictionary:
-	var writer: Object = SessionSpoolWriterScript.new()
-	var spatialmp4_sink := SpatialMp4Sink.new(writer)
-	var binding := StreamBinding.new()
-	binding.add_sink(spatialmp4_sink)
 	return {
-		"writer": writer,
-		"frame_sink": binding,
-		"spatialmp4_sink": spatialmp4_sink,
-		# EgoUploader drains user://ego_upload_queue.json for ego capture
-		# only. The sink owns the uploader instance (same queue file / TUS
-		# behavior / signals); the scene keeps node lifecycle + UI glue.
+		"spatialmp4_sink": SpatialMp4Sink.new(SessionSpoolWriterScript.new()),
+		"live_push_sink": LivePushSink.new(),
+		# EgoUploader drains user://ego_upload_queue.json. The sink owns the
+		# uploader instance (queue file / TUS behavior / signals); the scene
+		# keeps node lifecycle + UI glue.
 		"upload_sink": UploadQueueSink.new(),
 	}
 
 
-## Phase 2: capture lifecycle controller over the phase-1 stack.
+## Binds platform sink plugins (muxer, live push) and the camera provider to
+## the engines. Idempotent: plugin singletons may register late.
+static func bind_plugins(io: Dictionary, platform: PlatformRegistry, camera_plugin: Object) -> void:
+	var spatialmp4 := io.get("spatialmp4_sink") as SpatialMp4Sink
+	var live_push := io.get("live_push_sink") as LivePushSink
+	if spatialmp4.plugin() == null:
+		spatialmp4.bind_plugin(platform.muxer_plugin())
+	if live_push.plugin() == null:
+		live_push.bind_plugin(platform.live_server_plugin())
+	if camera_plugin == null:
+		return
+	# Stage 2b split every write* RPC to the muxer plugin, and the spool
+	# writer also needs the provider for device identity. Missing either
+	# hand-off silently no-ops every pose / depth / hand / input frame.
+	for writer_v in [spatialmp4.writer(), live_push.writer()]:
+		var writer: Object = writer_v
+		if writer != null and writer.has_method("set_android_plugin"):
+			writer.set_android_plugin(camera_plugin)
+
+
+## Phase 2: wiring for one output selection.
+## Returns {output, local, ingest, frame_sink (StreamBinding), writer (the
+## primary session writer: session paths and clock anchors), writer_adapter}.
+static func wire(io: Dictionary, output: String) -> Dictionary:
+	var normalized := normalize_output(output)
+	var binding := StreamBinding.new()
+	var adapters: Array = []
+	var primary_writer: Object = null
+	if records_locally(normalized):
+		var spatialmp4 := io.get("spatialmp4_sink") as SpatialMp4Sink
+		binding.add_sink(spatialmp4)
+		adapters.append(SpoolWriterAdapter.new(spatialmp4.writer()))
+		primary_writer = spatialmp4.writer()
+	if streams_to_ingest(normalized):
+		var live_push := io.get("live_push_sink") as LivePushSink
+		binding.add_sink(live_push)
+		adapters.append(LiveWriterAdapter.new(live_push.writer()))
+		if primary_writer == null:
+			primary_writer = live_push.writer()
+	var writer_adapter: CaptureWriterAdapter = adapters[0] if adapters.size() == 1 else WriterFanoutAdapter.new(adapters)
+	return {
+		"output": normalized,
+		"local": records_locally(normalized),
+		"ingest": streams_to_ingest(normalized),
+		"frame_sink": binding,
+		"writer": primary_writer,
+		"writer_adapter": writer_adapter,
+	}
+
+
+## Phase 3: capture lifecycle controller over the wiring.
 ## deps:
 ##   pose_sampler / depth_sampler / body_motion_sampler: configured Nodes
-##   permission_check: Callable -> bool (storage readiness)
-##   stop_live_pull: Callable (live-pull disconnect, ego mode only)
-static func build_controller(io: Dictionary, deps: Dictionary) -> CaptureSessionController:
-	var writer_adapter := SpoolWriterAdapter.new(io.get("writer"))
-	# Legacy stop order, preserved exactly: body_motion.stop -> live-pull
-	# disconnect -> depth.stop -> writer.close (inside the controller).
-	var stop_chain: Array = [deps.get("body_motion_sampler")]
-	if deps.has("stop_live_pull"):
-		stop_chain.append(deps.get("stop_live_pull"))
-	stop_chain.append(deps.get("depth_sampler"))
+##   permission_check: Callable -> bool (storage / calibration readiness)
+static func build_controller(wiring: Dictionary, deps: Dictionary) -> CaptureSessionController:
+	# Stop order, preserved: body_motion.stop -> depth.stop -> writer.close
+	# (inside the controller). The ingest result channel stays connected so
+	# algorithm results keep arriving after the push stops.
 	var controller := CaptureSessionController.new()
 	controller.configure({
-		"writer_adapter": writer_adapter,
-		"permission_check": deps.get("permission_check"),
+		"writer_adapter": wiring.get("writer_adapter"),
+		"permission_check": deps.get("permission_check", Callable()),
 		"option_samplers": [deps.get("pose_sampler"), deps.get("body_motion_sampler")],
-		"stop_chain": stop_chain,
-		"live_mode": false,
+		"stop_chain": [deps.get("body_motion_sampler"), deps.get("depth_sampler")],
+		"live_mode": not bool(wiring.get("local", true)),
 	})
 	return controller
-
-
-## Provider-capability gating of the requested capture options (moved
-## verbatim from capture_app.gd in WP6). Shared by the live-feed mode.
-## Vendor-name decisions live behind CaptureProviderRegistry helpers so no
-## device-name strings appear at the app layer.
-static func effective_capture_options(options: Dictionary, camera_plugin: Object) -> Dictionary:
-	var effective := options.duplicate(true)
-	if camera_plugin != null:
-		var provider_name := CaptureProviderRegistryScript.provider_name(camera_plugin)
-		if not provider_name.is_empty():
-			effective["capture_provider"] = provider_name
-		if not CaptureProviderRegistryScript.supports_depth(camera_plugin):
-			effective["record_depth"] = false
-		if not CaptureProviderRegistryScript.supports_body_motion(camera_plugin):
-			effective["record_body_tracking"] = false
-			effective["record_motion_trackers"] = false
-		# Motion trackers (PICO XR_PICO_motion_tracking) are PICO-only even
-		# when the provider reports body-motion support — Quest's body data
-		# comes purely from the Meta vendor AAR's XR_FB_body_tracking +
-		# XR_META_body_tracking_full_body extensions, no external trackers.
-		if not CaptureProviderRegistryScript.supports_motion_trackers(camera_plugin):
-			effective["record_motion_trackers"] = false
-		if CaptureProviderRegistryScript.provider_uses_pico_bridge(provider_name) \
-				and bool(effective.get("record_body_tracking", false)):
-			# PICO full-body capture and independent tracker capture are separate
-			# runtime modes. Keep the manifest aligned with the sampler, which
-			# must not request independent trackers while body tracking is active.
-			effective["record_motion_trackers"] = false
-		if not CaptureProviderRegistryScript.provider_supports_audio_capture(provider_name):
-			effective["record_audio"] = false
-	return effective

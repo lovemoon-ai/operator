@@ -117,6 +117,15 @@ class BridgeStats:
     last_frame_id: int = 0
     last_timestamp_ns: int = 0
     last_error: str | None = None
+    #: The connected headset advertised ``capture_streams_v1``.
+    capture_streams_supported: bool = False
+    #: Session media connections (only served with ``capture_streams``).
+    media_up_connected: bool = False
+    media_down_connected: bool = False
+    #: Frames relayed from media_up, and those dropped — shed under
+    #: back-pressure, or discarded with a session whose headset was replaced.
+    media_up_frames: int = 0
+    media_up_dropped: int = 0
 
 
 def _pose(data: Mapping[str, Any] | None) -> Pose | None:

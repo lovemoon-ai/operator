@@ -5,11 +5,11 @@ extends RefCounted
 const CASE_ID := "contracts.feature_registry"
 
 ## Every launcher card, Exit included, must be a plain product feature.
-## The retired operator_launcher_card_* alias system is gone.
+## The retired operator_launcher_card_* alias system is gone. (Live Feed is
+## an Ego capture Output now; its retired mode feature stays declared, off.)
 const EXPECTED_CARD_FEATURES := [
 	"mode_teleop",
 	"mode_ego_capture",
-	"mode_live_feed",
 	"mode_vr",
 	"mode_exit",
 ]

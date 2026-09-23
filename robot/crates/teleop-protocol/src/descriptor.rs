@@ -52,6 +52,14 @@ pub struct DeviceDescriptor {
     /// Omitted for existing robot descriptors, preserving their wire shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub xr_stream: Option<XrStreamConfig>,
+    /// Optional host-declared headset capture streams (the permission
+    /// envelope). Omitted when not declared, preserving the existing shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_streams: Option<crate::streams::CaptureStreamsConfig>,
+    /// Session-owned media transport. Only xr-bridge injects it (per headset
+    /// connection); host applications never author it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<crate::streams::MediaTransport>,
     /// Canonical operator input channels accepted by this service.
     #[serde(default)]
     pub input_contract: InputContract,
@@ -92,6 +100,8 @@ impl Default for DeviceDescriptor {
             video_feeds: Vec::new(),
             safety: DeviceSafetyConfig::default(),
             xr_stream: None,
+            capture_streams: None,
+            media: None,
             input_contract: InputContract::default(),
             capabilities: HashMap::new(),
         }

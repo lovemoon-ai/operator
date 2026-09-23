@@ -70,6 +70,12 @@ const RGB_CODEC_H264 := "h264"
 const RGB_CODEC_VALUES := [RGB_CODEC_HEVC, RGB_CODEC_H264]
 const DEFAULT_RGB_CODEC := RGB_CODEC_HEVC
 const DEFAULT_EXPORT_COORDINATE_SPACE := OpenXRExportSpace.DEFAULT
+# Where a capture goes (EgoCaptureComposition outputs). Kept as literals so the
+# panel does not depend on the capture composition scripts.
+const OUTPUT_LOCAL := "local"
+const OUTPUT_INGEST := "ingest"
+const OUTPUT_BOTH := "both"
+const OUTPUT_VALUES := [OUTPUT_LOCAL, OUTPUT_INGEST, OUTPUT_BOTH]
 
 # Auto-detected input source ("hands" or "controllers") used for the title-bar
 # indicator + record-stream defaults. The current pointer mode is still owned
@@ -124,7 +130,9 @@ var _tracker_confirm_slot: PanelContainer
 var _storage_refresh_accum := STORAGE_REFRESH_SECONDS
 var _storage_plugin: Object
 var _storage_plugin_checked := false
-var _live_server_mode := false
+var _capture_output := OUTPUT_LOCAL
+var _capture_output_button: Button
+var _capture_output_menu: VBoxContainer
 var _capture_provider_name := RGB_PROVIDER_DEFAULT
 var _rgb_resolution_button: Button
 var _rgb_resolution_menu: VBoxContainer
@@ -165,15 +173,12 @@ var _live_server_required_timer: Timer
 const LIVE_SERVER_REQUIRED_VISIBLE_S := 5.0
 
 
-func _init(live_server_mode: bool = false) -> void:
-	_live_server_mode = live_server_mode
-	var title_key := "UI_LIVE_FEED_SETTINGS_TITLE" if _live_server_mode else "UI_CAPTURE_SETTINGS_TITLE"
+func _init() -> void:
 	# Two-column layout: left sidebar of group names, right pane holds the
 	# active group's controls. Each group has its own scroll, so adding new
 	# fields only grows the affected group instead of stretching the panel.
-	_setup_two_column_panel(VIEWPORT_SIZE, Vector2(0.63, 0.54), title_key, "UI_SAVE", 2, true)
-	if not _live_server_mode:
-		_setup_upload_health_request()
+	_setup_two_column_panel(VIEWPORT_SIZE, Vector2(0.63, 0.54), "UI_CAPTURE_SETTINGS_TITLE", "UI_SAVE", 2, true)
+	_setup_upload_health_request()
 	set_options(_load_settings())
 
 
@@ -211,7 +216,7 @@ func _setup_upload_health_request() -> void:
 
 func _process(delta: float) -> void:
 	super._process(delta)
-	if not visible or _live_server_mode:
+	if not visible:
 		return
 	_storage_refresh_accum += delta
 	if _storage_refresh_accum >= STORAGE_REFRESH_SECONDS:
@@ -257,23 +262,17 @@ func get_options() -> Dictionary:
 	options["rgb_resolution"] = "" if rgb_resolution == Vector2i.ZERO else _resolution_text(rgb_resolution)
 	options["rgb_fps"] = _selected_rgb_fps()
 	options["rgb_codec"] = _selected_rgb_codec()
-	if _live_server_mode:
-		options["server_host"] = _configured_server_host()
-		options["server_port"] = _configured_server_port()
-		options["server_result_port"] = _configured_result_port()
-		options["server_auth_token"] = _server_token.text.strip_edges() if _server_token != null else ""
-		options["save_root"] = ""
-		options["upload_url"] = ""
-		options["upload_token"] = ""
-		options["upload_on_finalize"] = false
-		options["keep_local_after_upload"] = true
-	else:
-		options["show_hand_skeleton_overlay"] = _toggle_enabled_or_default("show_hand_skeleton_overlay")
-		options["save_root"] = _configured_save_root()
-		options["upload_url"] = _upload_url.text.strip_edges() if _upload_url else ""
-		options["upload_token"] = _upload_token
-		options["upload_on_finalize"] = _toggle_enabled("upload_on_finalize") and _upload_url_can_auto_upload()
-		options["keep_local_after_upload"] = _toggle_enabled("keep_local_after_upload")
+	options["capture_output"] = _capture_output
+	options["server_host"] = _configured_server_host()
+	options["server_port"] = _configured_server_port()
+	options["server_result_port"] = _configured_result_port()
+	options["server_auth_token"] = _server_token.text.strip_edges() if _server_token != null else ""
+	options["show_hand_skeleton_overlay"] = _toggle_enabled_or_default("show_hand_skeleton_overlay")
+	options["save_root"] = _configured_save_root()
+	options["upload_url"] = _upload_url.text.strip_edges() if _upload_url else ""
+	options["upload_token"] = _upload_token
+	options["upload_on_finalize"] = _toggle_enabled("upload_on_finalize") and _upload_url_can_auto_upload()
+	options["keep_local_after_upload"] = _toggle_enabled("keep_local_after_upload")
 	return options
 
 
@@ -304,6 +303,8 @@ func set_options(options: Dictionary) -> void:
 		options.get("export_coordinate_space", DEFAULT_EXPORT_COORDINATE_SPACE))
 	_refresh_rgb_selects()
 	_refresh_export_coordinate_space_select()
+	_capture_output = normalize_capture_output(str(options.get("capture_output", OUTPUT_LOCAL)))
+	_refresh_capture_output_select()
 	if _save_root != null:
 		var save_root := str(options.get("save_root", DEFAULT_SAVE_ROOT)).strip_edges()
 		_save_root.text = DEFAULT_SAVE_ROOT if save_root.is_empty() else save_root
@@ -322,14 +323,12 @@ func set_options(options: Dictionary) -> void:
 	if _server_token != null:
 		_server_token.text = str(options.get("server_auth_token", ""))
 	_storage_refresh_accum = STORAGE_REFRESH_SECONDS
-	if is_inside_tree() and not _live_server_mode:
+	if is_inside_tree():
 		_refresh_storage_usage()
 
 
 func open() -> void:
 	super.open()
-	if _live_server_mode:
-		return
 	_show_upload_main_menu()
 	_storage_refresh_accum = STORAGE_REFRESH_SECONDS
 	_refresh_storage_usage()
@@ -355,21 +354,12 @@ func set_live_server_defaults(host: String, port: int, token: String = "", resul
 
 
 func show_live_server_settings() -> void:
-	if _live_server_mode:
-		select_group("live")
 	open()
+	select_group("live")
 
 
 func _build_settings_content(parent: VBoxContainer) -> void:
 	build_two_column(parent)
-
-	if _live_server_mode:
-		# Live Feed shows only the server connection settings. Which streams
-		# are captured is negotiated with the server (see the capture_request
-		# frame) rather than picked here, so the local recording groups
-		# (streams / display / outputs / storage / upload) are omitted.
-		_build_live_server_group()
-		return
 
 	# Control-mode picker used to live here as an OptionButton (controllers /
 	# hands / head). It moved out of the UI per the auto-detect redesign --
@@ -432,8 +422,13 @@ func _build_settings_content(parent: VBoxContainer) -> void:
 
 	# --- Outputs group -----------------------------------------------------
 	var outputs := register_group("outputs", "UI_OUTPUTS", "check")
+	_add_capture_output_control(outputs)
 	_add_export_coordinate_space_control(outputs)
 	_add_rgb_recording_controls(outputs)
+	# --- Live server group ------------------------------------------------
+	# Used when the Output streams to an ingest server. Which streams it gets
+	# is negotiated with the server (capture_request), shown read-only here.
+	_build_live_server_group()
 	# --- Storage group -----------------------------------------------------
 	var storage := register_group("storage", "UI_GROUP_STORAGE", "plug")
 
@@ -601,13 +596,14 @@ func _build_live_server_group() -> void:
 
 
 func _on_confirm_requested() -> void:
-	# Live-feed mode requires a configured + connected live server before the
-	# user can leave settings — otherwise capture starts pointing at a dead
-	# endpoint. Surface the reason inline next to the host input instead of
-	# silently failing the dependent steps later.
-	if _live_server_mode:
+	# An Output that streams to an ingest server requires a configured +
+	# connected server before the user can leave settings — otherwise capture
+	# starts pointing at a dead endpoint. Surface the reason inline next to the
+	# host input instead of silently failing the dependent steps later.
+	if _capture_output != OUTPUT_LOCAL:
 		var blocker := _live_server_save_blocker()
 		if blocker != "":
+			select_group("live")
 			_show_live_server_required_callout(blocker)
 			return
 	var options := get_options()
@@ -981,6 +977,51 @@ func _rebuild_rgb_codec_select() -> void:
 	_rgb_codec_button.text = _rgb_codec_label(selected_codec)
 	if _rgb_codec_menu != null:
 		_rgb_codec_menu.visible = false
+
+
+static func normalize_capture_output(value: String) -> String:
+	var output := value.strip_edges().to_lower()
+	return output if OUTPUT_VALUES.has(output) else OUTPUT_LOCAL
+
+
+func _add_capture_output_control(parent: VBoxContainer) -> void:
+	_add_field_label(parent, tr("UI_CAPTURE_OUTPUT"))
+	_capture_output_button = _make_rgb_dropdown_button()
+	_capture_output_button.pressed.connect(_on_capture_output_button_pressed)
+	add_interactive(parent, _capture_output_button)
+	_capture_output_menu = _make_rgb_dropdown_menu()
+	parent.add_child(_capture_output_menu)
+	for output_v in OUTPUT_VALUES:
+		var output := str(output_v)
+		_add_rgb_menu_option(_capture_output_menu, _capture_output_label(output), _on_capture_output_option_pressed.bind(output))
+	_refresh_capture_output_select()
+
+
+func _capture_output_label(output: String) -> String:
+	match output:
+		OUTPUT_INGEST:
+			return tr("UI_CAPTURE_OUTPUT_INGEST")
+		OUTPUT_BOTH:
+			return tr("UI_CAPTURE_OUTPUT_BOTH")
+	return tr("UI_CAPTURE_OUTPUT_LOCAL")
+
+
+func _refresh_capture_output_select() -> void:
+	if _capture_output_button == null:
+		return
+	_capture_output_button.text = _capture_output_label(_capture_output)
+	if _capture_output_menu != null:
+		_capture_output_menu.visible = false
+
+
+func _on_capture_output_button_pressed() -> void:
+	if _capture_output_menu != null:
+		_capture_output_menu.visible = not _capture_output_menu.visible
+
+
+func _on_capture_output_option_pressed(output: String) -> void:
+	_capture_output = normalize_capture_output(output)
+	_refresh_capture_output_select()
 
 
 func _add_rgb_recording_controls(parent: VBoxContainer) -> void:
@@ -1768,10 +1809,7 @@ func _default_value_for_key(key: String) -> Variant:
 
 
 func _mode_default_options() -> Dictionary:
-	var defaults := _default_options()
-	if _live_server_mode:
-		defaults.erase("show_hand_skeleton_overlay")
-	return defaults
+	return _default_options()
 
 
 static func load_settings() -> Dictionary:
@@ -1824,6 +1862,7 @@ static func _default_options() -> Dictionary:
 		"rgb_fps": DEFAULT_RGB_FPS,
 		"rgb_codec": DEFAULT_RGB_CODEC,
 		"export_coordinate_space": DEFAULT_EXPORT_COORDINATE_SPACE,
+		"capture_output": OUTPUT_LOCAL,
 		"server_host": DEFAULT_LIVE_SERVER_HOST,
 		"server_port": DEFAULT_LIVE_SERVER_PORT,
 		"server_result_port": DEFAULT_LIVE_RESULT_PORT,

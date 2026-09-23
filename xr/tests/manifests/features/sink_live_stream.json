@@ -1,7 +1,7 @@
 {
   "id": "sink_live_stream",
   "feature": "operator_feature_sink_live_stream",
-  "owner": "sinks/live_stream",
+  "owner": "components/sinks/live_push_sink",
   "required_features": [],
   "required_capabilities": [
     "LIVE_STREAM_SERVER"

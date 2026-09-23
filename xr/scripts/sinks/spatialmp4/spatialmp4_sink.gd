@@ -9,7 +9,10 @@ extends SensorSink
 
 const SessionSpoolWriterScript := preload("res://scripts/core/capture/session_spool_writer.gd")
 
+signal recorder_error(message: String)
+
 var _writer: Object
+var _plugin: Object
 
 
 func _init(writer_obj: Object = null) -> void:
@@ -21,6 +24,32 @@ func _init(writer_obj: Object = null) -> void:
 ## set_android_plugin / set_muxer_plugin, session timestamps, ...).
 func writer() -> Object:
 	return _writer
+
+
+## Binds the SpatialMP4 muxer plugin (Kotlin SpatialDataSink). Idempotent.
+func bind_plugin(plugin: Object) -> void:
+	if plugin == null or plugin == _plugin:
+		return
+	_plugin = plugin
+	if _writer != null and _writer.has_method("set_muxer_plugin"):
+		_writer.set_muxer_plugin(plugin)
+	plugin.connect("camera_error", func(message: String) -> void: recorder_error.emit(message))
+	print("SpatialMp4MuxerPlugin singleton bound (contract v%d)" % int(plugin.call("getMuxerContractVersion")))
+
+
+func plugin() -> Object:
+	return _plugin
+
+
+func pop_plugin_metrics() -> Dictionary:
+	if _plugin == null:
+		return {}
+	var raw: Variant = _plugin.call("popMuxerMetricsJson")
+	if typeof(raw) == TYPE_STRING and not String(raw).is_empty():
+		var parsed: Variant = JSON.parse_string(String(raw))
+		if typeof(parsed) == TYPE_DICTIONARY:
+			return parsed
+	return {}
 
 
 ## Hands, body joints and motion trackers are written directly to the muxer

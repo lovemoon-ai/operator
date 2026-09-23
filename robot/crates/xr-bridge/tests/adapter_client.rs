@@ -17,9 +17,9 @@ use tokio_util::codec::Framed;
 
 use teleop_protocol::{
     listen, AdapterCodec, AdapterToBridge, AxisDef, Blueprint, BlueprintEvent, BlueprintState,
-    BridgeToAdapter, ControlSchema, DeviceCommand, DeviceDescriptor, DeviceInfo,
-    DeviceSafetyConfig, DeviceTelemetry, Endpoint, TelemetryValue, BLUEPRINT_CAPABILITY,
-    BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256,
+    BridgeToAdapter, CaptureStreamsConfig, ControlSchema, DeviceCommand, DeviceDescriptor,
+    DeviceInfo, DeviceSafetyConfig, DeviceTelemetry, Endpoint, StreamsControl, StreamsStatus,
+    TelemetryValue, BLUEPRINT_CAPABILITY, BLUEPRINT_SPEC_HASH_CAPABILITY, SPEC_SHA256,
 };
 
 use xr_bridge::adapter_client::AdapterClient;
@@ -118,7 +118,7 @@ async fn spawn_mock_adapter(descriptor: DeviceDescriptor) -> MockAdapter {
                     }
                 }
                 BridgeToAdapter::Stop { .. } | BridgeToAdapter::Shutdown => break,
-                BridgeToAdapter::BlueprintEvent { .. } => {}
+                BridgeToAdapter::BlueprintEvent { .. } | BridgeToAdapter::StreamsStatus { .. } => {}
             }
         }
     });
@@ -163,7 +163,7 @@ async fn spawn_bursting_adapter(descriptor: DeviceDescriptor, frames: u64) -> En
                 }
                 BridgeToAdapter::Stop { .. } | BridgeToAdapter::Shutdown => break,
                 BridgeToAdapter::Command(_) => {}
-                BridgeToAdapter::BlueprintEvent { .. } => {}
+                BridgeToAdapter::BlueprintEvent { .. } | BridgeToAdapter::StreamsStatus { .. } => {}
             }
         }
     });
@@ -341,6 +341,7 @@ async fn blueprint_streams_round_trip_across_adapter_client() {
                 }
                 BridgeToAdapter::Command(_)
                 | BridgeToAdapter::Stop { .. }
+                | BridgeToAdapter::StreamsStatus { .. }
                 | BridgeToAdapter::Shutdown => {}
             }
         }
@@ -350,22 +351,8 @@ async fn blueprint_streams_round_trip_across_adapter_client() {
     let mut blueprint_rx = client.blueprint();
     let mut state_rx = client.blueprint_state();
     client.handshake().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(2), blueprint_rx.changed())
-        .await
-        .expect("blueprint did not arrive")
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), state_rx.changed())
-        .await
-        .expect("state did not arrive")
-        .unwrap();
-    assert_eq!(
-        blueprint_rx.borrow_and_update().as_ref().unwrap().as_ref(),
-        &blueprint
-    );
-    assert_eq!(
-        state_rx.borrow_and_update().as_ref().unwrap().as_ref(),
-        &state
-    );
+    assert_eq!(wait_for_some(&mut blueprint_rx).await.as_ref(), &blueprint);
+    assert_eq!(wait_for_some(&mut state_rx).await.as_ref(), &state);
 
     client.send_blueprint_event(event.clone()).await.unwrap();
     assert_eq!(
@@ -434,20 +421,8 @@ async fn blueprint_replacement_clears_previous_state() {
     let mut blueprint_rx = client.blueprint();
     let mut state_rx = client.blueprint_state();
     client.handshake().await.unwrap();
-    blueprint_rx.changed().await.unwrap();
-    state_rx.changed().await.unwrap();
-    assert_eq!(
-        blueprint_rx.borrow_and_update().as_ref().unwrap().revision,
-        1
-    );
-    assert_eq!(
-        state_rx
-            .borrow_and_update()
-            .as_ref()
-            .unwrap()
-            .blueprint_revision,
-        1
-    );
+    assert_eq!(wait_for_some(&mut blueprint_rx).await.revision, 1);
+    assert_eq!(wait_for_some(&mut state_rx).await.blueprint_revision, 1);
 
     replace_tx.send(()).unwrap();
     state_rx.changed().await.unwrap();
@@ -508,6 +483,87 @@ async fn incompatible_adapter_blueprint_spec_is_rejected() {
     assert!(blueprint_rx.borrow().is_none());
 }
 
+#[tokio::test]
+async fn capture_streams_ctrl_round_trips_across_adapter_client() {
+    let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+        .await
+        .expect("bind mock adapter");
+    let endpoint = listener.endpoint();
+    let capture: CaptureStreamsConfig = serde_json::from_str(
+        r#"{"schema_version":1,"streams":[{"name":"rgb.hevc","required":true,"max_hz":4}]}"#,
+    )
+    .unwrap();
+    let valid: StreamsControl = serde_json::from_str(
+        r#"{"schema":"operator.streams_control.v1","streams":{"rgb.hevc":{"hz":2.0}}}"#,
+    )
+    .unwrap();
+    let invalid: StreamsControl = serde_json::from_str(
+        r#"{"schema":"operator.streams_control.v1","streams":{"rgb.hevc":{"hz":0.0}}}"#,
+    )
+    .unwrap();
+    let status: StreamsStatus = serde_json::from_str(
+        r#"{"schema":"operator.streams_status.v1","streams":{"rgb.hevc":{"state":"active","hz":2.0}}}"#,
+    )
+    .unwrap();
+    let mut descriptor = test_descriptor();
+    descriptor.capture_streams = Some(capture.clone());
+    let sent_valid = valid.clone();
+    let (status_tx, status_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let conn = listener.accept().await.expect("accept");
+        let mut framed = Framed::new(conn, AdapterCodec);
+        while let Some(message) = framed.next().await {
+            match message.expect("decode") {
+                BridgeToAdapter::Hello => {
+                    framed
+                        .send(AdapterToBridge::Descriptor(Box::new(descriptor.clone())))
+                        .await
+                        .unwrap();
+                    for control in [invalid.clone(), sent_valid.clone()] {
+                        framed
+                            .send(AdapterToBridge::StreamsControl {
+                                control: Box::new(control),
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+                BridgeToAdapter::StreamsStatus { status } => {
+                    let _ = status_tx.send(status.map(|status| *status));
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let mut client = AdapterClient::connect(&endpoint).await.unwrap();
+    let mut controls = client.take_streams_control().expect("control receiver");
+    assert!(client.take_streams_control().is_none());
+    let got = client.handshake().await.unwrap();
+    assert_eq!(got.capture_streams, Some(capture));
+
+    let control = tokio::time::timeout(Duration::from_secs(2), controls.recv())
+        .await
+        .expect("StreamsControl did not arrive")
+        .expect("control channel closed");
+    assert_eq!(
+        control, valid,
+        "invalid control must be dropped, valid kept"
+    );
+
+    client
+        .send_streams_status(Some(status.clone()))
+        .await
+        .unwrap();
+    let forwarded: Option<StreamsStatus> = tokio::time::timeout(Duration::from_secs(2), status_rx)
+        .await
+        .expect("status did not reach adapter")
+        .unwrap();
+    assert_eq!(forwarded, Some(status));
+}
+
 /// Poll the mock's received-command buffer until at least one command lands.
 async fn wait_for_one_command(received: &Arc<Mutex<Vec<DeviceCommand>>>) -> DeviceCommand {
     for _ in 0..200 {
@@ -517,4 +573,26 @@ async fn wait_for_one_command(received: &Arc<Mutex<Vec<DeviceCommand>>>) -> Devi
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("mock adapter never received a command");
+}
+
+/// Wait until a watch channel actually holds a value.
+///
+/// `AdapterClient` clears `blueprint_state` to `None` before publishing a new
+/// `Blueprint` (see `adapter_client.rs`), and `watch::Sender::send` marks the
+/// channel changed even when the value is unchanged. A single `changed()` can
+/// therefore observe that `None` clear rather than the state that follows, so
+/// waiting for one notification is racy; wait for the value instead.
+async fn wait_for_some<T: Clone + Send + Sync + 'static>(
+    rx: &mut tokio::sync::watch::Receiver<Option<T>>,
+) -> T {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(value) = rx.borrow_and_update().clone() {
+                return value;
+            }
+            rx.changed().await.expect("watch channel closed");
+        }
+    })
+    .await
+    .expect("watch channel never produced a value")
 }

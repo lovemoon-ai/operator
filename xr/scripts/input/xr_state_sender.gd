@@ -1,16 +1,13 @@
 class_name XrStateSender
 extends Node
-## Publishes one complete XR device-state snapshot per render sample.
+## The host session's `xr_state` channel: one XrStateFrame per render sample.
 ##
-## Tracking capture and slow-stream caching live in XrTrackingSampler. This
-## sender keeps the existing XrStateFrame v1 wire schema stable while handling
-## stream cadence and transport delivery.
+## XrTrackingSource samples into its StreamBinding and XrStateSink encodes the
+## tick; this channel owns stream cadence, the tracking interlock and transport
+## delivery on the ctrl connection.
 
-const XrTrackingSamplerScript := preload("res://scripts/input/xr_tracking_sampler.gd")
 const SCHEMA_VERSION := 1
 const DEFAULT_RATE_HZ := 72
-const V1_BODY_JOINT_FIELDS := ["joint", "flags", "tracked", "radius_m", "pose"]
-const V1_MOTION_TRACKER_FIELDS := ["id", "tracker_index", "pose", "battery_level"]
 
 signal frame_sent(frame_id: int, timestamp_ns: int)
 signal tracking_blocked(report: Dictionary)
@@ -20,7 +17,7 @@ var tcp_handler: TcpHandler
 var _sending := false
 var _min_send_interval := 1.0 / float(DEFAULT_RATE_HZ)
 var _time_since_last_send := 0.0
-var _tracking_sampler: XrTrackingSampler
+var _tracking_sampler: XrTrackingSource
 var _tracking_interlocked := false
 var _has_published_tracking := false
 
@@ -111,7 +108,7 @@ func _process(delta: float) -> void:
 	if not sampler.snapshot_tracking_ready(snapshot):
 		_on_tracking_invalidated({"phase": "waiting_body"})
 		return
-	var frame := _frame_v1(snapshot)
+	var frame := XrStateSink.frame_v1(snapshot)
 	if _send_frame(frame) == OK:
 		_has_published_tracking = true
 		frame_sent.emit(int(frame.get("frame_id", 0)), int(frame.get("timestamp_ns", 0)))
@@ -122,9 +119,9 @@ func _send_frame(frame: Dictionary) -> Error:
 	return tcp_handler.send_latest_command("XrStateFrame", payload)
 
 
-func _ensure_sampler() -> XrTrackingSampler:
+func _ensure_sampler() -> XrTrackingSource:
 	if _tracking_sampler == null:
-		_tracking_sampler = XrTrackingSamplerScript.new()
+		_tracking_sampler = XrTrackingSource.new()
 		_tracking_sampler.tracking_invalidated.connect(_on_tracking_invalidated)
 	_tracking_sampler.tracking_provider = tracking_provider
 	return _tracking_sampler
@@ -150,52 +147,3 @@ func _disconnect_for_tracking(report: Dictionary) -> void:
 		tcp_handler.disconnect_from_robot()
 	tracking_blocked.emit(report)
 
-
-func _frame_v1(snapshot: Dictionary) -> Dictionary:
-	var frame := snapshot.duplicate(true)
-	frame.erase("predicted_display_time_ns")
-	var body_v: Variant = frame.get("body", null)
-	if body_v is Dictionary:
-		var body := body_v as Dictionary
-		body.erase("source_timestamp_ns")
-		var joints_v: Variant = body.get("joints", [])
-		if joints_v is Array:
-			body["joints"] = _body_joints_v1(
-				joints_v as Array,
-				int(body.get("sample_timestamp_ns", frame.get("timestamp_ns", 0))),
-			)
-	var trackers_v: Variant = frame.get("motion_trackers", [])
-	if trackers_v is Array:
-		frame["motion_trackers"] = _filter_records(
-			trackers_v as Array, V1_MOTION_TRACKER_FIELDS)
-	return frame
-
-
-## Field projection only. Which joints exist is the sampler's decision per
-## source: PICO reports a fixed set and keeps every entry regardless of `flags`,
-## while the Godot XRBodyTracker branch already drops `flags == 0` at the point
-## of capture. Dropping untracked joints again here would hand a v1 consumer a
-## short array and mis-index every joint after the gap.
-func _body_joints_v1(records: Array, sample_timestamp_ns: int) -> Array:
-	var filtered := _filter_records(records, V1_BODY_JOINT_FIELDS)
-	for joint_v in filtered:
-		var joint := joint_v as Dictionary
-		var pose_v: Variant = joint.get("pose", null)
-		if pose_v is Dictionary:
-			var pose := pose_v as Dictionary
-			pose["sample_timestamp_ns"] = sample_timestamp_ns
-	return filtered
-
-
-func _filter_records(records: Array, allowed_fields: Array) -> Array:
-	var filtered: Array = []
-	for record_v in records:
-		if not (record_v is Dictionary):
-			continue
-		var record := record_v as Dictionary
-		var output := {}
-		for field in allowed_fields:
-			if record.has(field):
-				output[field] = record[field]
-		filtered.append(output)
-	return filtered

@@ -30,7 +30,7 @@ const KNOWN_KEYS := [
 	"server_port",
 	"server_result_port",
 	"save_root",
-	"capture_sink",
+	"capture_output",
 	"capture_provider",
 	"upload_on_finalize",
 	"upload_endpoint",
@@ -60,7 +60,7 @@ var server_host: String = ""
 var server_port: int = 0
 var server_result_port: int = 0
 var save_root: String = ""
-var capture_sink: String = ""
+var capture_output: String = ""
 var capture_provider: String = ""
 var upload_on_finalize: bool = false
 var upload_endpoint: String = ""
@@ -136,7 +136,7 @@ func _assign(key: String, value: Variant) -> void:
 		"server_port": server_port = int(value)
 		"server_result_port": server_result_port = int(value)
 		"save_root": save_root = str(value)
-		"capture_sink": capture_sink = str(value)
+		"capture_output": capture_output = str(value)
 		"capture_provider": capture_provider = str(value)
 		"upload_on_finalize": upload_on_finalize = bool(value)
 		"upload_endpoint": upload_endpoint = str(value)
@@ -168,7 +168,7 @@ func _read(key: String) -> Variant:
 		"server_port": return server_port
 		"server_result_port": return server_result_port
 		"save_root": return save_root
-		"capture_sink": return capture_sink
+		"capture_output": return capture_output
 		"capture_provider": return capture_provider
 		"upload_on_finalize": return upload_on_finalize
 		"upload_endpoint": return upload_endpoint

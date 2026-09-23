@@ -1,5 +1,4 @@
-## CaptureWriterAdapter over the existing LiveFeedNetworkWriter /
-## LivePushWriter (unchanged). Live sessions have no finalized on-disk path;
+## CaptureWriterAdapter over the existing LivePushWriter (unchanged). Live sessions have no finalized on-disk path;
 ## the adapter still reports saved_path() via the writer's own accessors so
 ## behavior matches the pre-WP3 direct calls (capture_app never reads the
 ## saved path in live-feed mode).

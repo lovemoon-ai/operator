@@ -123,8 +123,13 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	control_frame_gizmo.visible = true
 	settings.visible = true
 	settings_button.visible = false
-	controller._video_tcp_handler = tcp
-	controller._video_udp_handler = udp
+	# Video transports belong to the host session; the controller drives them
+	# through it.
+	var host_session := HostSession.new()
+	host_session.video_tcp_handler = tcp
+	host_session.video_udp_handler = udp
+	host_session.video_view = robot_view
+	controller._host_session = host_session
 	controller._xrt_video_session = xrt
 	controller._robot_view = robot_view
 	controller._settings_panel = settings
@@ -337,6 +342,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		"native Operator preview restores Blueprint visibility (visible)")
 
 	controller.free()
+	host_session.free()
 	outside_target.free()
 	tcp.free()
 	udp.free()

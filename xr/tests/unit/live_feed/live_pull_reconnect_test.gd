@@ -76,7 +76,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	# Authenticated QR/default configuration must survive the settings form.
 	# The token control was accidentally replaced by the stream readout, causing
 	# every authenticated push session to send an empty token.
-	var panel = CapturePanelScript.new(true)
+	var panel = CapturePanelScript.new()
 	t.is_true(panel._server_token != null, "live server token control exists")
 	panel.set_live_server_defaults("10.0.0.2", 64010, "qr-secret", 64012)
 	var options: Dictionary = panel.get_options()
@@ -95,7 +95,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	# Live Feed transmits but does not create a local recording. Its active
 	# indicator must therefore breathe without presenting a recording timer.
 	var record_control = RecordControlScript.new()
-	record_control.set_live_feed_mode(true)
+	record_control.set_streaming_only(true)
 	record_control.set_recording(true)
 	t.is_false(record_control._timer_label.visible, "live feed hides elapsed timer")
 	t.is_true(
@@ -106,7 +106,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		record_control._breathing_indicator._active,
 		"breathing transmission indicator animates while active",
 	)
-	record_control.set_live_feed_mode(false)
+	record_control.set_streaming_only(false)
 	t.is_true(record_control._timer_label.visible, "recording mode still shows timer")
 	t.is_false(
 		record_control._breathing_indicator.visible,

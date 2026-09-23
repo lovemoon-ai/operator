@@ -184,6 +184,47 @@
       },
       "events": {}
     },
+    "path": {
+      "host": "node3d",
+      "implementation": "path",
+      "singleton": false,
+      "default_anchor": "world",
+      "anchors": ["world"],
+      "user_visibility_override": true,
+      "properties": {
+        "points": {"type": "number_array", "default": [], "max_length": 6144},
+        "color": {"type": "color", "default": "#33ccff"},
+        "width": {"type": "number", "default": 0.05, "minimum": 0.005, "maximum": 0.5},
+        "closed": {"type": "boolean", "default": false},
+        "no_depth_test": {"type": "boolean", "default": false}
+      },
+      "bindings": {
+        "points": {"type": "number_array", "max_length": 6144, "required": false},
+        "color": {"type": "color", "required": false}
+      },
+      "events": {}
+    },
+    "marker": {
+      "host": "node3d",
+      "implementation": "marker",
+      "singleton": false,
+      "default_anchor": "world",
+      "anchors": ["world", "head", "left_controller", "right_controller", "left_palm", "right_palm"],
+      "user_visibility_override": true,
+      "properties": {
+        "shape": {"type": "string", "default": "sphere"},
+        "color": {"type": "color", "default": "#ffc233"},
+        "size": {"type": "number", "default": 0.15, "minimum": 0.01, "maximum": 2},
+        "text": {"type": "string", "default": ""},
+        "pulse": {"type": "boolean", "default": false}
+      },
+      "bindings": {
+        "position": {"type": "number_array", "length": 3, "required": false},
+        "color": {"type": "color", "required": false},
+        "text": {"type": "string", "required": false}
+      },
+      "events": {}
+    },
     "menu_item": {
       "host": "system_menu",
       "implementation": "menu_item",
@@ -360,6 +401,24 @@
       "user_visibility_override": true,
       "properties": {},
       "bindings": {},
+      "events": {}
+    },
+    "dense_map": {
+      "host": "external_view",
+      "implementation": "dense_map",
+      "singleton": true,
+      "default_anchor": "world",
+      "anchors": ["world"],
+      "user_visibility_override": true,
+      "properties": {
+        "display": {"type": "string", "default": "world"},
+        "scale": {"type": "number", "default": 0.2, "minimum": 0.01, "maximum": 1},
+        "distance": {"type": "number", "default": 1.0, "minimum": 0.2, "maximum": 5},
+        "height_below_head": {"type": "number", "default": 0.3, "minimum": -1, "maximum": 2}
+      },
+      "bindings": {
+        "display": {"type": "string", "required": false}
+      },
       "events": {}
     }
   }

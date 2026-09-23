@@ -21,6 +21,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 use crate::blueprint::{Blueprint, BlueprintEvent, BlueprintState};
 use crate::descriptor::DeviceDescriptor;
+use crate::streams::{StreamsControl, StreamsStatus};
 use crate::wire::{DeviceCommand, DeviceTelemetry};
 
 /// Maximum allowed frame length (16 MiB). A length prefix larger than this is
@@ -39,6 +40,11 @@ pub enum BridgeToAdapter {
     Stop { reason: String },
     /// An interaction emitted by a Blueprint primitive.
     BlueprintEvent { event: Box<BlueprintEvent> },
+    /// Latest headset capture-stream status, or `None` once the reporting
+    /// headset disconnected (the adapter must not keep believing the last
+    /// report). Only sent to adapters whose descriptor declared
+    /// `capture_streams`.
+    StreamsStatus { status: Option<Box<StreamsStatus>> },
     /// Tell the adapter to shut down cleanly.
     Shutdown,
 }
@@ -55,6 +61,9 @@ pub enum AdapterToBridge {
     Blueprint { blueprint: Option<Box<Blueprint>> },
     /// Publish the latest state for the active Blueprint.
     BlueprintState { state: Box<BlueprintState> },
+    /// Adjust declared capture streams inside the granted envelope. Forwarded
+    /// only to headsets that advertise `capture_streams_v1`.
+    StreamsControl { control: Box<StreamsControl> },
     /// An out-of-band event/log line (e.g. a warning or state change).
     Event { kind: String, msg: String },
 }

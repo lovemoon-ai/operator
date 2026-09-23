@@ -117,14 +117,23 @@ TELEOP_REQUIRED_EXCLUDES = frozenset({
     "addons/spatial_capture_contract/**",
     "addons/spatialmp4_muxer/**",
     "scenes/capture_app.tscn",
-    "scenes/live_feed_app.tscn",
     "scenes/vr_mode.tscn",
+    "scripts/app/composition/capture_pipeline.gd*",
+    "scripts/app/composition/host_capture_composition.gd*",
     "scripts/app/modes/capture_app_base.gd*",
+    "scripts/components/sinks/live_push_sink.gd*",
+    "scripts/components/sources/audio_source.gd*",
+    "scripts/components/sources/camera_source.gd*",
+    "scripts/components/sources/depth_source.gd*",
+    "scripts/components/sources/hand_source.gd*",
     "scripts/core/capture/**",
-    "scripts/sinks/live_stream/**",
+    "scripts/session/ingest_session.gd*",
     "scripts/sinks/spatialmp4/**",
     "scripts/sinks/upload/**",
 })
+# Live Feed is an Ego capture Output (ingest) now; its launcher mode option
+# stays declared for preset compatibility but must be off everywhere.
+RETIRED_FEATURE_OPTIONS = ("operator_feature_mode_live_feed",)
 PICO_OPENXR_EXCLUDE = "addons/pico_openxr/**"
 MAKE_PRESET_VARIABLES = (
     ("FULL_QUEST_EXPORT_PRESET", "Meta Quest"),
@@ -737,7 +746,14 @@ def main():
                     "(d) production preset '%s' enables operator_feature_test_harness" % pname
                 )
 
-        # (f) retired launcher-card options must not reappear
+        # (f) retired launcher-card options must not reappear, and retired
+        # mode features must stay off
+        for name in RETIRED_FEATURE_OPTIONS:
+            if enabled.get(name, False):
+                errors.append(
+                    "(f) preset '%s' enables retired %s (Live Feed is an Ego Output now)"
+                    % (pname, name)
+                )
         for name in sorted(options):
             if name.startswith(RETIRED_OPTION_PREFIX):
                 errors.append(

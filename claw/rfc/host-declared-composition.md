@@ -1,7 +1,8 @@
 # TODO: Host 声明式组合（Host-declared composition）重构方案
 
-状态：方案已讨论定稿（第三轮复核后），分步实施尚未开始
-记录日期：2026-09-22
+状态：第 0–6 步已实现（含导航例子 `examples/lightnav`）。主机端仅设备用例未跑（无头显）：`cicd/02`、`cicd/04`、`cicd/08`、`xr_module_harness`、第二道门。
+记录日期：2026-09-22（实施：2026-09-23）
+第 6 步未决问题 2 的决定：`media_up` 复用 OLCP v1 帧格式，由 xr-bridge 在自己的端口组（默认 63905 / 63906）中继；地址与 `auth_token` 由会话注入描述符的 `media` 块，host 程序永不声明传输。
 关联：`claw/todo/blueprint-text-input.md`（头显内文本输入，本方案第 4 步的一个 view 原语）
 
 ## 0. 术语

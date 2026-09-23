@@ -1,9 +1,9 @@
 # Blueprint Architecture
 
-Blueprint is Operator's mode-independent declarative XR UI contract. A source
+Blueprint is Operator's mode-independent declarative XR UI contract. A host
 publishes a versioned component tree, latest-wins state snapshots, and receives
 ordered interaction events. The headset owns rendering and interaction; a
-source cannot send executable code, Godot scenes, shaders, or arbitrary resource
+host cannot send executable code, Godot scenes, shaders, or arbitrary resource
 paths. The `robot_model` primitive accepts a restricted data-only model asset.
 
 The current production adapter connects Blueprint to Outside Robot Teleop. The
@@ -19,7 +19,7 @@ Inside Robot remains independent because it has no external robot session.
 - supported anchors and transform fields;
 - every primitive's host kind, implementation key, singleton rule, and allowed
   anchors;
-- property names, types, defaults, and numeric ranges;
+- property names, types, defaults, numeric ranges, and array length bounds;
 - state bindings, required bindings, binding groups, and emitted events;
 - whether a primitive supports headset-side visibility overrides.
 
@@ -44,7 +44,8 @@ instead of silently producing bindings that no runtime understands.
 
 Generated conformance cases define the accepted value types. Python, Rust, and
 GDScript tests all execute those same cases. Array lengths and numeric ranges
-are part of each binding contract, and a state key reused by multiple
+are part of each binding contract (`length` is exact, `max_length` an upper
+bound), and a state key reused by multiple
 components must have the same value contract; whether a binding is required on
 the component, or carries implementation semantics such as freshness, does not
 change the value type of that shared key. String colors use HTML hexadecimal
@@ -77,7 +78,7 @@ application input bindings and their state; disconnect destroys that scope and
 cancels pending input/acknowledgements. Runtime ownership, not an ID/action-name
 prefix, determines authority. Only events from the locally created system runtime
 reach the allowlisted `connection.toggle` and `view.recenter` handlers. Robot
-events continue through the session to their source, even if they use those names.
+events continue through the session to their host, even if they use those names.
 
 The system menu reconnects the selected/saved endpoint and disconnects through
 the existing connection manager. It cannot receive a new endpoint from remote
@@ -186,7 +187,7 @@ Python, hosted Python, and native robot adapters behaviorally identical.
 `BlueprintRuntime` is a reusable XR host under `xr/scripts/blueprint/`. It
 accepts only validated `Blueprint` and `BlueprintState` dictionaries and emits:
 
-- `event_emitted` for interactions that must return to the source;
+- `event_emitted` for interactions that must return to the host;
 - `external_view_changed` for primitives implemented by an owning mode rather
   than by a new scene node, such as `video_panel`.
 
@@ -206,10 +207,10 @@ mapping instead of adding mode checks to the runtime.
 
 ## Compatibility Negotiation
 
-Blueprint is enabled only when the source, bridge, and headset use the exact
+Blueprint is enabled only when the host, bridge, and headset use the exact
 same generated primitive spec:
 
-- the source descriptor advertises `blueprint_v1=true` and
+- the host descriptor advertises `blueprint_v1=true` and
   `blueprint_spec_sha256=<digest>`;
 - the headset `Hello.capabilities` advertises both `blueprint_v1` and
   `blueprint_v1@sha256:<digest>`;
@@ -253,11 +254,38 @@ dynamic props without inventing dummy joints or shipping executable scenes.
 
 ## Version 1 Primitives
 
-The canonical spec currently defines `robot_model`, `ground_grid`, `model_lighting`, `label`, `status_lamp`, `menu_item`, `palm_menu`, `controller_menu`, `input_binding`,
-`fingertip_tactile`, `video_panel`, `controller_help`, `control_frame`, and
-`operation_trajectory`. Consult `specs/blueprint/v1.json` for the authoritative
+The canonical spec currently defines `robot_model`, `ground_grid`, `model_lighting`, `label`, `status_lamp`, `path`, `marker`, `menu_item`, `palm_menu`, `controller_menu`, `input_binding`,
+`fingertip_tactile`, `video_panel`, `controller_help`, `control_frame`,
+`operation_trajectory`, and `dense_map`. Consult `specs/blueprint/v1.json` for the authoritative
 property, binding, anchor, event, and constraint definitions; prose documents
 must not duplicate those tables as normative definitions.
+
+## Navigation Overlays: Path, Marker, and Dense Map
+
+`path` and `marker` let a host such as a navigation service draw a route and
+its goals. `path` is a world-anchored polyline in the component's local XR
+frame (metres, Y up). `points` is a flat `[x0, y0, z0, x1, ...]` array bounded
+by the spec's `max_length` (2048 points); a trailing partial point is ignored
+with a warning. The headset draws a constant-width unshaded tube, rebuilding
+the mesh only when the points change; `closed` joins the last point to the first.
+
+`marker` is a `sphere`, `ring`, `arrow`, or `pin` of `size` metres with optional
+text. Its optional `position` binding offsets it within the component frame, so
+a moving goal needs no new revision. The contract language has no enums:
+authoring helpers reject unknown shapes and the headset falls back to a sphere
+with one warning. An arrow starts at the point and points along local -Z; a
+pin's tip is at the point. `pulse` animates scale only while visible.
+
+`dense_map` is a singleton external view. Its point-cloud content never travels
+through Blueprint: it arrives on the host's `media_down` result stream (dense
+map chunks and map transform). Blueprint only gates visibility and presentation.
+`display` is `world` (the cloud rendered 1:1 at the host-supplied map transform)
+or `minimap` (a `scale`d preview `distance` metres ahead of and
+`height_below_head` metres below the viewer, keeping the map's heading). The
+owning mode maps it onto `scripts/components/views/dense_map_view.gd` and
+treats unknown values as `world`. In Teleop the view is mounted under the
+external view and pulls results from the session's own `media` result port, so
+the same component serves a host session and an ingest session.
 
 ## Robot Presentation: Ground and Lighting
 
@@ -293,7 +321,7 @@ not run it, import it, or read `xr/assets/robots/` or bundled joint tables.
 Adding a new Outside robot requires no headset rebuild once its asset profile
 is supported. This renderer does not start Inside Robot, a retargeter, or physics.
 
-The source declares `asset_sha256`, `asset_size`, `asset_port`, and a complete
+The host declares `asset_sha256`, `asset_size`, `asset_port`, and a complete
 ordered `joint_names` list. The connected transport supplies the peer hostname;
 Blueprint cannot supply a different host or an arbitrary URL/path. XR downloads
 `http://<connected-peer>:<asset_port>/blueprint-assets/<sha256>.glb` asynchronously,

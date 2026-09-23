@@ -54,3 +54,11 @@ func on_frame(frame: SensorFrame) -> Variant:
 			continue
 		result = bool(sink_result) or (result != null and bool(result))
 	return result
+
+
+## Closes one sampling tick: sinks that assemble per-tick records (XrStateSink)
+## flush here, so a tick is assembled without yielding between its frames.
+func end_of_tick() -> void:
+	for sink in _sinks:
+		if (sink as Object).has_method("end_of_tick"):
+			(sink as Object).call("end_of_tick")

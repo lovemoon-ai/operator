@@ -11,7 +11,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 	t.eq(pose.coordinate_space, "openxr_play_space", "pose frames default to the active OpenXR play space")
 	t.eq(pose.frame_type, SensorFrameType.POSE, "PoseFrame builds a POSE frame")
 	var local_pose := PoseFrame.build(
-		1_001, Transform3D.IDENTITY, true, false,
+		1_001, Transform3D.IDENTITY, true,
 		OpenXRExportSpace.coordinate_space_id(OpenXRExportSpace.LOCAL))
 	t.eq(local_pose.coordinate_space, "openxr_local", "pose builder preserves the selected reference space")
 	var floor_controller := ControllerFrame.build_pose(
@@ -34,7 +34,7 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 
 	# Non-positive timestamp rejected.
 	var stale := PoseFrame.build(0, Transform3D.IDENTITY, true)
-	var stale_errors := stale.validate()
+	var stale_errors: Array = stale.validate()
 	t.is_true(stale_errors.size() > 0, "timestamp_ns <= 0 must be rejected")
 
 	# Pose-like frames without a coordinate space are invalid at module

@@ -12,8 +12,13 @@ signal telemetry_received(data: Dictionary)
 signal blueprint_received(blueprint: Dictionary)
 signal blueprint_cleared()
 signal blueprint_state_received(state: Dictionary)
+## A host StreamsControl (capture_streams_v1), already shape-validated.
+signal streams_control_received(control: Dictionary)
 
 var tcp_handler: TcpHandler
+## Capabilities this build adds to Hello beyond the fixed set (e.g.
+## capture_streams_v1 and stream.<name> when a capture stack is present).
+var extra_capabilities: Array = []
 var _handshake_done: bool = false
 var _is_legacy: bool = false
 var _blueprint_enabled: bool = false
@@ -28,26 +33,31 @@ func start_handshake() -> void:
 	_is_legacy = false
 	_handshake_timer = 0.0
 	# Send Hello
-	var hello := hello_payload()
+	var hello := hello_payload(extra_capabilities)
 	var json_bytes = JSON.stringify(hello).to_utf8_buffer()
 	tcp_handler.send_command("Hello", json_bytes)
 	print("[Session] Hello sent, waiting for DeviceDescriptor...")
 
 
-static func hello_payload() -> Dictionary:
+static func hello_payload(extra: Array = []) -> Dictionary:
+	var capabilities: Array = [
+		"xr_state_v1",
+		DEDICATED_TELEMETRY_CAPABILITY,
+		BlueprintPrimitiveSpec.CAPABILITY,
+		BlueprintPrimitiveSpec.SPEC_CAPABILITY,
+		"hand_tracking",
+		"body_tracking",
+		"motion_trackers",
+		"controller",
+	]
+	for capability_v in extra:
+		var capability := str(capability_v)
+		if not capability.is_empty() and not capabilities.has(capability):
+			capabilities.append(capability)
 	return {
 		"version": "2.0",
 		"client": "godot",
-		"capabilities": [
-			"xr_state_v1",
-			DEDICATED_TELEMETRY_CAPABILITY,
-			BlueprintPrimitiveSpec.CAPABILITY,
-			BlueprintPrimitiveSpec.SPEC_CAPABILITY,
-			"hand_tracking",
-			"body_tracking",
-			"motion_trackers",
-			"controller",
-		],
+		"capabilities": capabilities,
 	}
 
 
@@ -147,6 +157,17 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 				return true
 			push_warning("[Session] BlueprintState payload must be an object")
 			return true
+		StreamsContract.CONTROL_COMMAND:
+			if not extra_capabilities.has(StreamsContract.CAPABILITY):
+				push_warning("[Session] Ignoring StreamsControl: capture streams were not advertised")
+				return true
+			var control_result := StreamsContract.parse_control(JSON.parse_string(data.get_string_from_utf8()))
+			var control_errors: Array = control_result.get("errors", [])
+			if control_errors.is_empty():
+				streams_control_received.emit(control_result.get("control", {}) as Dictionary)
+			else:
+				push_warning("[Session] Invalid StreamsControl: %s" % str(control_errors))
+			return true
 	return false
 
 
@@ -178,6 +199,18 @@ func send_blueprint_event(event: Dictionary) -> Error:
 		return ERR_INVALID_DATA
 	return tcp_handler.send_command(
 		BlueprintPrimitiveSpec.EVENT_COMMAND, JSON.stringify(event).to_utf8_buffer()
+	)
+
+
+## Reports the effective capture-stream composition to the host
+## (operator.streams_status.v1). Only sent when capture streams were advertised.
+func send_streams_status(status: Dictionary) -> Error:
+	if tcp_handler == null or not tcp_handler.is_connected_to_robot():
+		return ERR_CONNECTION_ERROR
+	if not extra_capabilities.has(StreamsContract.CAPABILITY):
+		return ERR_UNAVAILABLE
+	return tcp_handler.send_command(
+		StreamsContract.STATUS_COMMAND, JSON.stringify(status).to_utf8_buffer()
 	)
 
 
