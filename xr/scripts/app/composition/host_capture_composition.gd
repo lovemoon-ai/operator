@@ -208,8 +208,10 @@ func _task_state_for(decision: String, running: bool) -> Dictionary:
 	return {"state": "running" if running else "idle"}
 
 
+## Recording is a local task the host must declare; without a `record` task the
+## session only pushes media (no shared storage, no local file).
 func _record_running() -> bool:
-	return _record_wanted and _planner.media_up_running()
+	return _record_wanted and not _declared_task("record").is_empty() and _planner.media_up_running()
 
 
 func _upload_pending() -> bool:
@@ -258,6 +260,10 @@ func _start_capture(output: String, options: Dictionary, signature: String, epoc
 	if not _pipeline.start(_pipeline.effective_options(options)):
 		_running_signature = ""
 		push_warning("[HostCapture] capture did not start")
+		# Report what actually runs: the host must not keep seeing `active`
+		# for a camera that never started.
+		_capture_failed = true
+		call_deferred("_replan")
 	_refresh_ui()
 
 

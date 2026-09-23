@@ -99,6 +99,13 @@
       "script": "res://tests/unit/capture/stream_planner_test.gd"
     },
     {
+      "id": "capture.host_capture_composition",
+      "level": "unit",
+      "suite": "capture.pipeline",
+      "module": "core/capture",
+      "script": "res://tests/unit/capture/host_capture_composition_test.gd"
+    },
+    {
       "id": "capture.endpoint_registry",
       "level": "unit",
       "suite": "capture.pipeline",
