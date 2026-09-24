@@ -312,10 +312,17 @@ func _start_capture(output: String, options: Dictionary, signature: String, epoc
 		return
 	_pipeline.set_output(output, Callable(self, "_storage_ready"))
 	if output == OUTPUT_BOTH and not _storage_ready():
-		# Android shows its shared-storage page. Not a capture failure: the
-		# start is re-planned when the app resumes.
 		_running_signature = ""
-		_awaiting_storage = true
+		if _pipeline.camera.storage_request_opened:
+			# Android shows its shared-storage page: re-planned on resume.
+			_awaiting_storage = true
+		else:
+			# Nothing was put in front of the user (output directory not
+			# writable, no activity), so no resume will come: deny `record`
+			# for this session and keep streaming.
+			push_warning("[HostCapture] local recording storage unavailable; the record task is denied")
+			_storage_denied = true
+			call_deferred("_replan")
 		_refresh_ui()
 		return
 	# media_up is the session's own channel: the connected peer's address and

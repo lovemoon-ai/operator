@@ -320,23 +320,30 @@ class PicoCapturePlugin(godot: Godot) : GodotPlugin(godot) {
     }
 
     @UsedByGodot
-    fun requestStoragePermission() {
-        val activity = mainActivity ?: return
-        if (hasStoragePermission()) return
+    // True when a settings page or permission dialog was opened for the user.
+    fun requestStoragePermission(): Boolean {
+        val activity = mainActivity ?: return false
+        if (hasStoragePermission()) return false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val packageUri = Uri.parse("package:${activity.packageName}")
-            try {
+            return try {
                 activity.startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, packageUri))
+                true
             } catch (_: Exception) {
-                activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                try {
+                    activity.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                    true
+                } catch (_: Exception) {
+                    false
+                }
             }
-            return
         }
         ActivityCompat.requestPermissions(
             activity,
             arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
             REQUEST_STORAGE_PERMISSION
         )
+        return true
     }
 
     @UsedByGodot

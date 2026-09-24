@@ -60,6 +60,14 @@ class StereoHevcEncoder(
     private val rateGate = RgbRateGate(max(fps, 1))
     private val frameDurationUs: Long
         get() = rateGate.intervalUs
+    // The codec's GOP and rate control are sized for `fps`. While fewer frames
+    // are delivered, a keyframe is requested every ~1 s of delivered frames
+    // (0 = the codec's own 1 s interval applies) and after every rate change.
+    @Volatile
+    private var keyframeEveryFrames = 0
+    @Volatile
+    private var syncPending = false
+    private var deliveredSinceSync = 0
     private val normalizedCodec = RgbVideoCodec.normalize(rgbCodec)
     private val codecMimeType = mimeTypeForCodec(normalizedCodec)
     private val codecLabel = labelForCodec(normalizedCodec)
@@ -219,28 +227,45 @@ class StereoHevcEncoder(
         if (codec != null) {
             drainEncoder(false)
         }
-        return rateGate.accept(timestampNs)
+        if (!rateGate.accept(timestampNs)) {
+            return false
+        }
+        val every = keyframeEveryFrames
+        if (syncPending || (every > 0 && deliveredSinceSync >= every)) {
+            syncPending = false
+            deliveredSinceSync = 0
+            setCodecParameter(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0, "keyframe request")
+        }
+        deliveredSinceSync++
+        return true
+    }
+
+    private fun setCodecParameter(key: String, value: Int, what: String) {
+        try {
+            codec?.setParameters(Bundle().apply { putInt(key, value) })
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "could not apply $codecLabel $what live: ${error.message}")
+        }
     }
 
     /**
      * Changes the delivered rate and bitrate of the running capture without a
      * restart. [fps] cannot exceed the capture rate the camera runs at; a
-     * non-positive [bitrateBps] keeps the current bitrate.
+     * non-positive [bitrateBps] keeps the configured bitrate.
      */
     fun setTargetRate(fps: Int, bitrateBps: Int): Boolean {
         if (!rateGate.setTargetFps(fps)) {
             return false
         }
-        if (bitrateBps > 0) {
-            try {
-                codec?.setParameters(Bundle().apply {
-                    putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrateBps)
-                })
-            } catch (error: IllegalStateException) {
-                Log.w(TAG, "could not change $codecLabel bitrate live: ${error.message}")
-            }
-        }
-        Log.i(TAG, "$codecLabel delivered rate $fps fps of capture ${this.fps} fps, bitrate $bitrateBps")
+        val captureFps = max(this.fps, 1)
+        val target = if (bitrateBps > 0) bitrateBps else bitrate
+        // Rate control budgets bits per frame at the capture rate; scale so
+        // the delivered frames average the requested bitrate.
+        val codecBitrate = (target.toLong() * captureFps / fps).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        keyframeEveryFrames = if (fps < captureFps) fps else 0
+        syncPending = true
+        setCodecParameter(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, codecBitrate, "bitrate")
+        Log.i(TAG, "$codecLabel delivered rate $fps fps of capture $captureFps fps, bitrate $target (codec $codecBitrate)")
         return true
     }
 

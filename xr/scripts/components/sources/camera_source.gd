@@ -27,6 +27,7 @@ const PICO_CAMERA_FAIL_WARN_INTERVAL_US := 5_000_000
 
 ## The provider plugin singleton (null until bound).
 var plugin: Object
+var storage_request_opened := false
 ## PICO OpenXR extension bridge, injected by the platform layer (may be null).
 var pico_bridge: Object
 var provider_name := ""
@@ -197,13 +198,15 @@ func has_storage_permission() -> bool:
 
 
 ## Shared-storage permission for local recordings. Requests it (and logs
-## `log_format % save_root`) while it is missing.
+## `log_format % save_root`) while it is missing; `storage_request_opened`
+## tells whether that request put a settings page or dialog in front.
 func storage_permission_ready(save_root: String, log_format: String) -> bool:
+	storage_request_opened = false
 	if plugin == null:
 		return false
 	if bool(plugin.call("hasStoragePermission")):
 		return true
-	plugin.call("requestStoragePermission")
+	storage_request_opened = plugin.call("requestStoragePermission") == true
 	print(log_format % save_root)
 	return false
 
