@@ -206,7 +206,7 @@ func storage_permission_ready(save_root: String, log_format: String) -> bool:
 		return false
 	if bool(plugin.call("hasStoragePermission")):
 		return true
-	storage_request_opened = plugin.call("requestStoragePermission") == true
+	storage_request_opened = bool(plugin.call("requestStoragePermission"))
 	print(log_format % save_root)
 	return false
 
