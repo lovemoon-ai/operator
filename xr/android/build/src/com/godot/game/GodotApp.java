@@ -77,7 +77,7 @@ public class GodotApp extends GodotActivity {
 	private static final String EXTRA_OPERATOR_AUTO_START_LEGACY = "operator_auto_start";
 	private static final String EXTRA_MUJOCO_DURATION = "mujoco.duration";
 	private static final String EXTRA_MUJOCO_MIN_FRAMES = "mujoco.min.frames";
-	// Headless synthetic teleop (cicd/07_so101_synthetic_teleop.sh): drives the
+	// Headless synthetic teleop (formerly cicd/07_so101_synthetic_teleop.sh): drives the
 	// real teleop command path from a scripted operator, no headset/human.
 	private static final String EXTRA_TELEOP_SYNTHETIC = "operator.teleop.synthetic";
 	private static final String EXTRA_TELEOP_HOST = "operator.teleop.host";

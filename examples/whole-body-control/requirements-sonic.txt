@@ -1,3 +1,0 @@
--r requirements-sonic-base.txt
-# GPU users: use requirements-sonic-gpu.txt instead; never install both ORT packages.
-onnxruntime==1.23.2

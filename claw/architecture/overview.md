@@ -354,4 +354,5 @@ is all that is needed to bring it back.
 - Build and device procedures: `build-and-deploy.md`
 - Wire contracts: `wire-protocol.md`
 - Live Feed server integration: `live-feed-cloud.md`
-- Worked host-declared composition example: `examples/lightnav/README.md`
+- Worked host-declared composition examples: the `lightnav` and `live-feed-demo`
+  projects (outside this repository)

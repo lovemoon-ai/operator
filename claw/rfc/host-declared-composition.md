@@ -1,6 +1,6 @@
 # TODO: Host 声明式组合（Host-declared composition）重构方案
 
-状态：第 0–6 步已实现（含导航例子 `examples/lightnav`）。主机端仅设备用例未跑（无头显）：`cicd/02`、`cicd/04`、`cicd/08`、`xr_module_harness`、第二道门。
+状态：第 0–6 步已实现（含导航例子 `lightnav`，已移出仓库）。主机端仅设备用例未跑（无头显）：`cicd/02`、`cicd/04`、`cicd/08`、`xr_module_harness`、第二道门。
 记录日期：2026-09-22（实施：2026-09-23）
 第 6 步未决问题 2 的决定：`media_up` 复用 OLCP v1 帧格式，由 xr-bridge 在自己的端口组（默认 63905 / 63906）中继；地址与 `auth_token` 由会话注入描述符的 `media` 块，host 程序永不声明传输。
 关联：`claw/todo/blueprint-text-input.md`（头显内文本输入，本方案第 4 步的一个 view 原语）
@@ -344,7 +344,7 @@ xr/scripts/
 | 5 | `local_tasks`（record / upload）+ `EndpointRegistry` + 指示 | host 可编排"推流同时本地录制并上传到已验证端点"；第二道门再跑一次（record 任务复用 `SpatialMp4Sink`，打戳不变） | 2、3 |
 | 6 | host 会话通道统一：`media_up` 用会话自身地址/鉴权，删 `capture_streams.sink`；`XrStateSink` 取代 `xr_state_sender` + `xr_tracking_sampler`（`xr_state` 时间戳语义变化写入 wire-protocol.md）；ingest 会话保留 OLCP | host 会话只开一组端口；`xr_tracking_sampler.gd` 删除；Ego pose track 字节级不变；第二道门通过 | 3、4、5 |
 
-导航例子 `examples/lightnav` 分两阶段：**阶段 A** 不依赖头显改动——用今天的 Live Feed 模式（`LiveFeedReceiver`）做 host 侧客户端、几何、状态机、`--replay`，轨迹先在桌面 / rerun 显示，同时充当第 3 步 API 的真实消费者；**阶段 B** 依赖第 1、3、4 步，把轨迹搬进头显（第 4 步可先只做 `path` / `marker`）。
+导航例子 `lightnav`（已移出仓库）分两阶段：**阶段 A** 不依赖头显改动——用今天的 Live Feed 模式（`LiveFeedReceiver`）做 host 侧客户端、几何、状态机、`--replay`，轨迹先在桌面 / rerun 显示，同时充当第 3 步 API 的真实消费者；**阶段 B** 依赖第 1、3、4 步，把轨迹搬进头显（第 4 步可先只做 `path` / `marker`）。
 
 ## 5. 风险与边界
 

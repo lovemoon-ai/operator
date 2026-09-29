@@ -118,7 +118,8 @@ Device abstraction and concrete robot drivers. It owns:
 - pose mapping (the single operator→robot retarget, shared by all drivers);
 - MuJoCo SO-101 driver path (`mujoco_so101`, spawns the sim as a subprocess);
 - real SO-101 driver path (`lerobot_link`, listens for a LeRobot `vr_operator`
-  plugin that owns IK and the Feetech bus);
+  plugin that owns IK and the Feetech bus; the plugin now lives in the
+  `so101-dual-arm` project, whose Python host replaces this path);
 - dual real SO-101 path with one endpoint and one plugin process per arm;
 - server that consumes bridge-side commands.
 
@@ -147,7 +148,7 @@ adapters use `liboperator` for shared SDK behavior and follow the adapter wire
 boundary as it evolves; unknown messages must not be mistaken for motion
 commands.
 
-`examples/unitree-g1d/` is the first such client. It is a C++17 process
+The `unitree-g1d` project (outside this repository) is the first such client. It is a C++17 process
 using Unitree SDK2/DDS and serves the standard `[4-byte little-endian
 length][JSON]` protocol over UDS or TCP. It controls the mobile base and lift,
 and runs a self-contained G1-D 7-DoF IK solver for both arms. Each arm accepts a
@@ -162,12 +163,8 @@ to the adapter and is never granted by Blueprint UI state.
 
 Key paths:
 
-- `examples/unitree-g1d/README.md`
-- `examples/unitree-g1d/src/main.cpp`
-- `examples/unitree-g1d/src/unitree_backend.cpp`
-- `examples/unitree-g1d/config/unitree_g1d_descriptor.json`
-- `examples/unitree-g1d/config/unitree_g1d_blueprint.json`
-- `examples/unitree-g1d/config/unitree_g1d_bridge.yaml`
+- `unitree-g1d`: `README.md`, `src/main.cpp`, `src/unitree_backend.cpp`,
+  `config/unitree_g1d_{descriptor,blueprint}.json`, `config/unitree_g1d_bridge.yaml`
 - `cpp/liboperator/include/operator/operator.hpp`
 
 ## Runtime Responsibilities
@@ -179,7 +176,7 @@ The robot side keeps these concerns separate even when they run inside
 - process composition belongs in `robot-service`;
 - network fan-out and video transport belong in `xr-bridge`;
 - device control and safety belong in `robot-adapter`;
-- vendor-native device control may live in `examples/`, behind the same
+- vendor-native device control lives in separate projects, behind the same
   adapter protocol boundary;
 - Python process embedding belongs in `pyoperator-native` and `python/`;
 - scenario-level verification belongs in `e2e-tests` or top-level shell tests.
@@ -230,15 +227,15 @@ cargo run -p robot-service -- --config configs/mujoco_so101.yaml
 Run the G1-D native adapter and the existing bridge as two processes:
 
 ```bash
-# Terminal 1, from the repository root
-examples/unitree-g1d/build/operator-g1d-client \
+# Terminal 1, from the unitree-g1d project
+build/operator-g1d-client \
   --backend mock \
-  --descriptor examples/unitree-g1d/config/unitree_g1d_descriptor.json \
-  --blueprint examples/unitree-g1d/config/unitree_g1d_blueprint.json
+  --descriptor config/unitree_g1d_descriptor.json \
+  --blueprint config/unitree_g1d_blueprint.json
 
-# Terminal 2, from the repository root
+# Terminal 2, from this repository's root
 cargo run --manifest-path rust/Cargo.toml -p xr-bridge -- \
-  --config examples/unitree-g1d/config/unitree_g1d_bridge.yaml
+  --config /path/to/unitree-g1d/config/unitree_g1d_bridge.yaml
 ```
 
 The real SO-101 path runs as **two processes**: `robot-service` does not touch
@@ -249,7 +246,7 @@ and a LeRobot `vr_operator` teleoperator plugin dials in.
 # Terminal 1
 cargo run -p robot-service -- --config configs/so101_real.yaml
 
-# Terminal 2 (venv with lerobot_teleoperator_vr_operator installed)
+# Terminal 2 (the so101-dual-arm project's venv, which installs its plugin/)
 lerobot-teleoperate \
   --teleop.type=vr_operator \
   --teleop.endpoint=uds:/tmp/lerobot-vr.sock \

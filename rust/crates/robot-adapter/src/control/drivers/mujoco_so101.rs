@@ -1,7 +1,7 @@
 //! MuJoCo SO-101 simulator driver.
 //!
 //! Speaks the stdin/stdout JSON-line protocol exported by
-//! `examples/mujuco-arm-so101/sim_so101.py bridge`. Lets the same control
+//! `sim_so101.py bridge` from the so101-mujuco project. Lets the same control
 //! pipeline that drives a real SO-101 arm drive the MuJoCo simulator instead —
 //! useful for headless testing, demos without hardware, and reproducing
 //! operator sessions deterministically.

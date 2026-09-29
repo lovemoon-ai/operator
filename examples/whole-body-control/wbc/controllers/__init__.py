@@ -1,1 +1,0 @@
-"""Whole-body control example."""

@@ -4,7 +4,7 @@
 # does not spawn Python; it listens on `arm.lerobot.endpoint`, and a LeRobot
 # `vr_operator` teleoperator plugin dials in.
 #
-# Terminal 1 (from `robot/`):
+# Terminal 1 (from `rust/`):
 #
 #     cargo run -p robot-service -- --config configs/so101_real.yaml
 #
@@ -25,7 +25,8 @@
 #
 # Required Python environment:
 #
-# - `pip install -e plugins/lerobot-teleop/python`  (pulls lerobot[kinematics])
+# - the `vr_operator` plugin from the so101-dual-arm project (`uv sync` there;
+#   pulls lerobot[kinematics]). That project's Python host replaces this path.
 # - `so101_new_calib.urdf` fetched from the SO-ARM100 repo (not vendored by LeRobot)
 # - access to the Feetech serial port, passed to LeRobot via `--robot.port`
 #

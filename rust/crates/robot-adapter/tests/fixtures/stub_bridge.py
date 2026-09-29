@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny stand-in for examples/mujuco-arm-so101/sim_so101.py `bridge` mode.
+"""Tiny stand-in for so101-mujuco's sim_so101.py `bridge` mode.
 
 Speaks the same stdin/stdout JSON-line protocol the real MuJoCo bridge does,
 but with no MuJoCo dependency — so the driver's framing (ready handshake +

@@ -11,7 +11,7 @@
 #
 # First-time sim setup:
 #
-#     cd examples/mujuco-arm-so101 && make env
+#     cd /path/to/so101-mujuco && make env   # the so101-mujuco project
 #
 # The adapter spawns `python sim_so101.py bridge` as a subprocess and speaks the
 # stdin/stdout JSON-line protocol (see
@@ -51,14 +51,14 @@ adapter:
     # adapter's CWD; the recommended CWD is `robot/`. Switch to absolute paths
     # if you launch from elsewhere.
     mujoco:
-      python: "../examples/mujuco-arm-so101/.venv/bin/mjpython" # mac required
-      script: "../examples/mujuco-arm-so101/sim_so101.py"
+      python: "../../operator-projects/so101-mujuco/.venv/bin/mjpython" # mac required; adjust to your so101-mujuco checkout
+      script: "../../operator-projects/so101-mujuco/sim_so101.py"
       # mj_step calls per outbound ctrl write. Driver clamps to [1, 50].
       steps_per_write: 3
       extra_args: ["--viewer"]
 
     # Joint limits in degrees, applied positionally per joint. ~5° inside the
-    # MuJoCo actuator ranges in examples/mujuco-arm-so101/assets/so101/so101.xml.
+    # MuJoCo actuator ranges in so101-mujuco's assets/so101/so101.xml.
     safety:
       joint_limits_deg:
         - [-105.0,  105.0]    # shoulder_pan

@@ -126,8 +126,6 @@ python python/examples/blueprint.py
 # Complete operator_xr custom-robot teleop + Blueprint example.
 python python/examples/custom_robot.py
 
-# BrainCo Revo2 dual-hand hosted Blueprint example.
-python3 examples/brainco-revo2/revo2_thor_service.py --help
 ```
 
 Web ingest and review app commands run from `web/`:
@@ -138,13 +136,9 @@ npm install
 npm run dev
 ```
 
-MuJoCo example:
-
-```bash
-cd examples/mujuco-arm-so101
-make env
-make run-sim
-```
+Examples: Operator example projects now live outside this repository (for example `~/ws/operator-projects/<name>`) — `lightnav`, `live-feed-demo`, `light-o1`,
+`so101-mujuco`, `so101-dual-arm`, `brainco-revo2`, `wbc-sonic-scalebfm`. Each pins
+`operator-xr>=1.0,<2`.
 
 ## Join group
 

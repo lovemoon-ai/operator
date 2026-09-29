@@ -5,7 +5,7 @@ Recorded: 2026-09-21
 
 ## Why
 
-`examples/light-o1` drives a Unitree G1 from natural-language prompts. The
+The `light-o1` project (outside this repository) drives a Unitree G1 from natural-language prompts. The
 shipped Blueprint v1 spec has no way for the wearer to *type* text: prompts
 are chosen from a host-published library through `menu_item` rows, and
 arbitrary text has to be entered on the host terminal. The headset already
@@ -49,7 +49,7 @@ The generator must learn nothing new: `string` properties/bindings and a
 
 - `pyoperator.BlueprintComponent.text_input(...)` factory and Rust/C++ parity
   through the shared `operator` core (validation is spec-driven already).
-- `examples/light-o1`: replace the host-terminal path with a `text_input` row
+- `light-o1` project: replace the host-terminal path with a `text_input` row
   whose event calls `MotionSession.submit()`; keep the library rows.
 
 ## Validation

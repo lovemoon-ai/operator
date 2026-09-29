@@ -453,5 +453,5 @@ mode is intentionally separate from the embedded `xr_bridge.start()` mode.
 Pass a `operator_xr.hosted.HostedBlueprint` to `serve`, `serve_async`, or
 `create_server` to publish the same Blueprint/state/event contract through the
 standalone bridge. The BrainCo Revo2 service is the reference hosted example.
-Its runnable entry point is
-`examples/brainco-revo2/revo2_thor_service.py`.
+Its runnable entry point is `revo2_thor_service.py` in the `brainco-revo2`
+project (outside this repository).

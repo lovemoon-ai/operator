@@ -79,10 +79,6 @@ conductor.log
 .conductor/worktrees/
 .conductor/attachments
 
-# SO-101 mesh STLs (fetched by examples/mujuco-arm-so101/prepare.sh
-# from upstream mujoco_menagerie — kept out of the repo to save ~17 MB)
-examples/mujuco-arm-so101/assets/so101/assets/*.stl
-
 # godot_openxr_vendors prebuilt binaries (fetched by
 # xr/addons/godotopenxrvendors/prepare.sh from upstream release —
 # kept out of the repo to save ~18 MB).
@@ -134,17 +130,11 @@ xr/dist/
 cicd/results/
 cicd/logs
 
-# uv-managed lerobot teleop env built by cicd/prepare_lerobot_so101.sh
-cicd/.lerobot-venv/
-
 # qa
 claw/qa-artifacts
 xr/artifacts/
 tests/logs
 tests/results
-
-# editable install metadata from prepare_lerobot_so101.sh
-plugins/lerobot-teleop/python/*.egg-info/
 
 *.log
 *.pid

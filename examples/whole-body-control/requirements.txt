@@ -1,7 +1,0 @@
-# Common host simulation/tracking/testing dependencies. Install operator_xr
-# from ../../python, then the requirements for your selected controller.
-# Both controller runtimes are tested with NumPy 2.
-numpy>=2,<3
-scipy>=1.13
-mujoco>=3.3.6,<4
-glfw>=2.9

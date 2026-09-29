@@ -378,7 +378,7 @@ its tracking timestamp. A late model with stale state remains hidden.
 
 Unlike low-rate status UI, robot state can update at policy frequency; latest-wins
 snapshots still prevent unbounded queues. Structural definitions are not resent
-per sample. `examples/whole-body-control` demonstrates host ScaleBFM or SONIC +
+per sample. The `wbc-sonic-scalebfm` project (outside this repository) demonstrates host ScaleBFM or SONIC +
 MuJoCo with this component, returning actual simulated state rather than target
 joint commands. The example shares session lifecycle, tracking validation and
 presentation; each controller owns its point selection, calibration, policy

@@ -463,7 +463,7 @@ server port: 63910
 result port: 63912
 ```
 
-`python/operator_xr/live_feed/server.py` 是 `operator_xr` 中的 reference server。它展示 OLCP v1 parse、queue、depth/head-pose 点云 worker、独立 result port 和与当前 `live-pull` 对齐的 110-116 result frame type。`examples/live-feed-demo/operator_live_feed_server.py` 只保留兼容入口。生产 VGGT-SLAM2 服务器可以复用这个边界，但应替换 worker、持久化策略和 result client 重连策略。
+`python/operator_xr/live_feed/server.py` 是 `operator_xr` 中的 reference server。它展示 OLCP v1 parse、queue、depth/head-pose 点云 worker、独立 result port 和与当前 `live-pull` 对齐的 110-116 result frame type。安装 `operator_xr` 后可直接用 `operator-live-feed` 启动；`live-feed-demo` 项目（已移出仓库）改为演示 host 声明式采集下的同一深度融合。生产 VGGT-SLAM2 服务器可以复用这个边界，但应替换 worker、持久化策略和 result client 重连策略。
 
 ## 接入检查清单
 
@@ -486,6 +486,5 @@ result port: 63912
 - `xr/addons/live-pull/live_pull_client.gd`
 - `xr/addons/live-pull/live_pull_dense_map_view.gd`
 - `python/operator_xr/live_feed/server.py`
-- `examples/live-feed-demo/operator_live_feed_server.py`（兼容入口）
 - `claw/architecture/live-feed-cloud.md`
 - `claw/architecture/wire-protocol.md`

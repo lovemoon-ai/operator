@@ -13,7 +13,9 @@
 //! non-trivial bridge-side IK target, and asserts the reported `joint_angles`
 //! telemetry CHANGES (the sim actually moved).
 //!
-//! Requires the MuJoCo venv (created by `examples/mujuco-arm-so101 make env`).
+//! Requires the so101-mujuco project's venv (`make env` there). Set
+//! `SO101_MUJOCO_DIR`, or keep it next to this checkout at
+//! `../operator-projects/so101-mujuco`.
 //! If the python binary is missing, the test skips (prints + returns) rather
 //! than failing. Paths are absolute, computed from CARGO_MANIFEST_DIR; override
 //! with MUJOCO_PYTHON / MUJOCO_SCRIPT.
@@ -32,6 +34,12 @@ use xr_bridge::adapter_client::AdapterClient;
 
 /// Repo root = e2e-tests manifest dir → up three (`crates/e2e-tests` →
 /// `crates` → `robot` → repo root).
+fn so101_mujuco_dir() -> std::path::PathBuf {
+    std::env::var_os("SO101_MUJOCO_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("../operator-projects/so101-mujuco"))
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -45,14 +53,14 @@ fn mujoco_python() -> PathBuf {
     if let Ok(p) = std::env::var("MUJOCO_PYTHON") {
         return PathBuf::from(p);
     }
-    repo_root().join("examples/mujuco-arm-so101/.venv/bin/python")
+    so101_mujuco_dir().join(".venv/bin/python")
 }
 
 fn mujoco_script() -> PathBuf {
     if let Ok(p) = std::env::var("MUJOCO_SCRIPT") {
         return PathBuf::from(p);
     }
-    repo_root().join("examples/mujuco-arm-so101/sim_so101.py")
+    so101_mujuco_dir().join("sim_so101.py")
 }
 
 fn arm_config(python: &str, script: &str) -> ArmConfig {
@@ -123,7 +131,7 @@ async fn mujoco_round_trip_moves_joints() {
 
     if !python.exists() {
         eprintln!(
-            "skipping: no mujoco venv at {} (run `cd examples/mujuco-arm-so101 && make env`)",
+            "skipping: no mujoco venv at {} (run `make env` in the so101-mujuco project)",
             python.display()
         );
         return;

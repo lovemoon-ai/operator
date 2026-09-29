@@ -89,11 +89,11 @@ fn default_driver_write_timeout_ms() -> u64 {
 /// Settings for the MuJoCo SO-101 simulator driver (`driver = "mujoco_so101"`).
 /// The driver spawns `<python> <script> bridge [extra_args ...]` as a
 /// subprocess and speaks the JSON-line protocol defined in
-/// `examples/mujuco-arm-so101/sim_so101.py`.
+/// `sim_so101.py` in the so101-mujuco project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MujocoConfig {
     /// Python interpreter to invoke. Default `"python3"`. Set to the venv's
-    /// `python` (e.g. `examples/mujuco-arm-so101/.venv/bin/python`) to avoid
+    /// `python` (e.g. the so101-mujuco project's `.venv/bin/python`) to avoid
     /// relying on PATH. Relative paths resolve against the adapter CWD.
     #[serde(default = "default_mujoco_python")]
     pub python: String,
@@ -348,8 +348,8 @@ arm:
     mirror: true
   driver_write_timeout_ms: 60
   mujoco:
-    python: "../examples/mujuco-arm-so101/.venv/bin/python"
-    script: "../examples/mujuco-arm-so101/sim_so101.py"
+    python: "../../operator-projects/so101-mujuco/.venv/bin/python"
+    script: "../../operator-projects/so101-mujuco/sim_so101.py"
     steps_per_write: 3
 "#;
         let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();
@@ -494,8 +494,8 @@ adapter:
       mirror: true
     driver_write_timeout_ms: 60
     mujoco:
-      python: "../examples/mujuco-arm-so101/.venv/bin/python"
-      script: "../examples/mujuco-arm-so101/sim_so101.py"
+      python: "../../operator-projects/so101-mujuco/.venv/bin/python"
+      script: "../../operator-projects/so101-mujuco/sim_so101.py"
       steps_per_write: 3
 "#;
         let cfg = AdapterConfig::from_yaml_str(yaml).unwrap();

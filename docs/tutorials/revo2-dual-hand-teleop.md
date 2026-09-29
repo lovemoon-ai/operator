@@ -142,7 +142,7 @@ safety state governs the whole upper body.
 ## Thor Standalone Robot Service
 
 For isolated hand tuning before merging with the G1 adapter, deploy the
-`examples/brainco-revo2` service as one self-contained bundle to Thor.
+`brainco-revo2` project's service (outside this repository) as one self-contained bundle to Thor.
 `revo2_thor_service.py` is the only robot-side entry point: it owns both serial
 ports, runs the guarded hand loop, hosts the operator_xr adapter on loopback,
 and supervises `xr-bridge`.
@@ -177,7 +177,7 @@ cargo build --release -p xr-bridge
 cd ..
 
 rm -rf /tmp/operator-hand
-install -D -m 0755 examples/brainco-revo2/revo2_thor_service.py \
+install -D -m 0755 /path/to/brainco-revo2/revo2_thor_service.py \
   /tmp/operator-hand/revo2_thor_service.py
 install -D -m 0755 rust/target/release/xr-bridge \
   /tmp/operator-hand/bin/xr-bridge

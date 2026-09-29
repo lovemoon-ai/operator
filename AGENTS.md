@@ -11,7 +11,9 @@ collection.
 - `xr/` - Godot 4.5 Android XR client APK. It runs in-headset.
 - `web/` - local ingest and review app for egocentric recordings.
 - `claw/` - current architecture documentation.
-- `examples/mujuco-arm-so101/` - MuJoCo SO-101 simulation.
+- Examples (LightNav, Live Feed, Light-O1, SO-101 sim and real arms, BrainCo
+  Revo2, whole-body control) are separate projects outside this repository that
+  depend on `operator-xr` 1.x; `python/examples/` keeps the SDK's own samples.
 
 ## XR Side
 

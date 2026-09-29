@@ -207,9 +207,9 @@ Two runnable examples show the two directions:
 ## Example Server
 
 `python/operator_xr/live_feed/server.py` is the current runnable server
-implementation. It is packaged with `operator_xr`, while
-`examples/live-feed-demo/operator_live_feed_server.py` remains a compatibility
-entry point. The server:
+implementation. It is packaged with `operator_xr` (`operator-live-feed`); the
+`live-feed-demo` project now shows the same depth fusion as a host-declared
+capture host instead. The server:
 
 - accepts OLCP v1 live-push frames;
 - validates a static Quest capability profile;
