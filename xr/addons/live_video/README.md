@@ -40,6 +40,6 @@ For Operator receivers, keep sending packet dictionaries to `report_video_packet
 
 ## RTSP
 
-The Godot plugin does not open RTSP URLs directly. It expects Annex-B H.264 access units. RTSP is supported through the existing `robot/crates/xr-bridge` relay: RTSP input is pulled by ffmpeg, converted to Annex-B H.264, and republished over the existing TCP/UDP XR video protocol that `LiveVideoView.report_video_packet()` consumes.
+The Godot plugin does not open RTSP URLs directly. It expects Annex-B H.264 access units. RTSP is supported through the existing `rust/crates/xr-bridge` relay: RTSP input is pulled by ffmpeg, converted to Annex-B H.264, and republished over the existing TCP/UDP XR video protocol that `LiveVideoView.report_video_packet()` consumes.
 
 Direct RTSP inside this plugin would require a new source adapter, likely an Android native/Kotlin RTSP client or an ffmpeg/GStreamer integration that emits Annex-B H.264 access units into `submit_h264_access_unit()`.

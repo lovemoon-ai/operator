@@ -30,7 +30,7 @@
 # are re-verified against the pinned sha256.
 #
 # NOT covered here (host-level, install separately):
-#   - Rust toolchain for robot/   (https://rustup.rs)
+#   - Rust toolchain for rust/    (https://rustup.rs)
 #   - Python 3 venv for python/   (cd python && python3 -m venv .venv)
 #   - an Android XR device for runtime tests
 #
@@ -372,4 +372,4 @@ log "verifying toolchain via env.sh"
 log "done. Next steps:"
 log "  source $TOOLS/env.sh"
 log "  cd $REPO_ROOT/xr && make build-quest        # or build-pico"
-log "  (robot/ needs rustup; python/ needs a venv — see AGENTS.md)"
+log "  (rust/ needs rustup; python/ needs a venv — see AGENTS.md)"

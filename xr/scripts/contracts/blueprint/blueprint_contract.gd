@@ -27,20 +27,29 @@ static func parse_blueprint(value: Dictionary) -> Dictionary:
 	var ids := {}
 	var singleton_types := {}
 	var binding_contracts := {}
+	var ignored: Array[String] = []
+	var ignored_state_keys := {}
+	var supported: Array = []
 	for component_v in components:
 		if not component_v is Dictionary:
 			errors.append("every component must be an object")
 			continue
+		var component := _without_unknown_fields(component_v as Dictionary, ignored, ignored_state_keys)
+		if component.is_empty():
+			continue
+		supported.append(component)
 		_validate_component(
-			component_v as Dictionary,
+			component,
 			ids,
 			singleton_types,
 			binding_contracts,
 			errors,
 		)
+	var blueprint := value.duplicate()
+	blueprint["components"] = supported
 	if errors.is_empty():
 		var shared := {}
-		for component_v in components:
+		for component_v in supported:
 			var component: Dictionary = component_v
 			for item in preload("res://scripts/contracts/blueprint/menu_declarations.gd").entries(component, primitive(str(component["type"]))):
 				var key: String = item["item_key"]
@@ -49,7 +58,52 @@ static func parse_blueprint(value: Dictionary) -> Dictionary:
 				if shared.has(key) and shared[key] != item["contract"]:
 					errors.append("conflicting shared menu item: %s" % key)
 				shared[key] = item["contract"]
-	return {"blueprint": value, "errors": errors}
+	for state_key in binding_contracts:
+		ignored_state_keys.erase(state_key)
+	return {
+		"blueprint": blueprint,
+		"errors": errors,
+		"ignored": ignored,
+		"ignored_state_keys": ignored_state_keys.keys(),
+	}
+
+
+## A newer minor blueprint_v1 host may use primitives, properties or bindings
+## this headset predates. Drop them (reported in `ignored`) instead of
+## rejecting the whole Blueprint; returns {} for an unknown component type.
+## State keys only those dropped bindings used are collected so BlueprintState
+## values for them can be skipped rather than rejected.
+static func _without_unknown_fields(
+	component: Dictionary, ignored: Array[String], ignored_state_keys: Dictionary
+) -> Dictionary:
+	var component_type_v: Variant = component.get("type")
+	var bindings_v: Variant = component.get("bindings")
+	if component_type_v is String and not (component_type_v as String).is_empty() \
+			and primitive(component_type_v as String).is_empty():
+		ignored.append("component %s of type %s" % [str(component.get("id", "")), component_type_v])
+		if bindings_v is Dictionary:
+			for state_key_v in (bindings_v as Dictionary).values():
+				ignored_state_keys[str(state_key_v)] = true
+		return {}
+	var primitive_spec := primitive(str(component_type_v))
+	if primitive_spec.is_empty():
+		return component
+	var result := component.duplicate()
+	for field_name in ["properties", "bindings"]:
+		var values_v: Variant = component.get(field_name)
+		if not values_v is Dictionary:
+			continue
+		var specs := primitive_spec.get(field_name, {}) as Dictionary
+		var kept := {}
+		for name_v in values_v as Dictionary:
+			if name_v is String and not specs.has(name_v) and not (name_v as String).strip_edges().is_empty():
+				ignored.append("%s %s.%s" % [field_name.trim_suffix("s"), str(component.get("id", "")), name_v])
+				if field_name == "bindings":
+					ignored_state_keys[str((values_v as Dictionary)[name_v])] = true
+			else:
+				kept[name_v] = (values_v as Dictionary)[name_v]
+		result[field_name] = kept
+	return result
 
 
 static func parse_state(value: Dictionary) -> Dictionary:

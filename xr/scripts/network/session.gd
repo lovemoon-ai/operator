@@ -26,6 +26,12 @@ var _descriptor: Dictionary = {}
 var _handshake_timer: float = 0.0
 const HANDSHAKE_TIMEOUT: float = 3.0
 const DEDICATED_TELEMETRY_CAPABILITY := "dedicated_telemetry_v1"
+## Published 0.2.x bridges enable Blueprint only when Hello carries their exact
+## spec hash. This headset reads that additive subset of blueprint_v1, so it
+## keeps advertising it; 1.x peers match on blueprint_v1 alone. Frozen list.
+const LEGACY_BLUEPRINT_SPEC_CAPABILITIES := [
+	"blueprint_v1@sha256:85fc4ff0499ed3dbc3949778f9d5ba57806c2ab5632693be909108af1e4395b2",
+]
 
 
 func start_handshake() -> void:
@@ -45,6 +51,7 @@ static func hello_payload(extra: Array = []) -> Dictionary:
 		DEDICATED_TELEMETRY_CAPABILITY,
 		BlueprintPrimitiveSpec.CAPABILITY,
 		BlueprintPrimitiveSpec.SPEC_CAPABILITY,
+	] + LEGACY_BLUEPRINT_SPEC_CAPABILITIES + [
 		"hand_tracking",
 		"body_tracking",
 		"motion_trackers",
@@ -95,7 +102,7 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 		BlueprintPrimitiveSpec.BLUEPRINT_COMMAND:
 			if not _blueprint_enabled:
 				push_warning(
-					"[Session] Ignoring Blueprint without an exact descriptor spec match"
+					"[Session] Ignoring Blueprint from a host without blueprint_v1"
 				)
 				return true
 			var blueprint_json := data.get_string_from_utf8()
@@ -110,6 +117,10 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 					parsed_blueprint as Dictionary
 				)
 				var blueprint_errors: Array = blueprint_result.get("errors", [])
+				var ignored: Array = blueprint_result.get("ignored", [])
+				if not ignored.is_empty():
+					push_warning("[Session] Blueprint entries unsupported by this headset, ignored: %s" % str(ignored))
+				parsed_blueprint = blueprint_result.get("blueprint", parsed_blueprint)
 				if blueprint_errors.is_empty():
 					print(
 						"[Session] Blueprint received id=%s revision=%d components=%d"
@@ -128,7 +139,7 @@ func handle_command(command: String, data: PackedByteArray) -> bool:
 		BlueprintPrimitiveSpec.STATE_COMMAND:
 			if not _blueprint_enabled:
 				push_warning(
-					"[Session] Ignoring BlueprintState without an exact descriptor spec match"
+					"[Session] Ignoring BlueprintState from a host without blueprint_v1"
 				)
 				return true
 			var parsed_state: Variant = JSON.parse_string(data.get_string_from_utf8())
@@ -254,8 +265,7 @@ static func descriptor_supports_blueprint(descriptor: Dictionary) -> bool:
 	if not capabilities_v is Dictionary:
 		return false
 	var capabilities := capabilities_v as Dictionary
-	return (
-		capabilities.get(BlueprintPrimitiveSpec.CAPABILITY) == true
-		and str(capabilities.get(BlueprintPrimitiveSpec.SPEC_HASH_CAPABILITY, ""))
-			== BlueprintPrimitiveSpec.SPEC_SHA256
-	)
+	# Compatibility is the major contract (blueprint_v1); minor spec additions
+	# on either side are skipped by BlueprintContract, so the hash is only
+	# diagnostic.
+	return capabilities.get(BlueprintPrimitiveSpec.CAPABILITY) == true

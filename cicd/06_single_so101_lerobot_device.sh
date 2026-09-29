@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Device smoke test for the real SO-101 path via the LeRobot `vr_operator` plugin.
 #
-# Replaces the deleted `robot/crates/robot-adapter/tests/so101_real_hardware.rs`,
+# Replaces the deleted `rust/crates/robot-adapter/tests/so101_real_hardware.rs`,
 # whose `#[ignore]`-gated tests drove the Feetech bus by spawning
 # `scripts/so101_real_control.py`. That script and its Rust driver are gone: the
 # hardware is now owned by LeRobot's `so101_follower`, driven by
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ROBOT_DIR="$ROOT/robot"
+ROBOT_DIR="$ROOT/rust"
 
 # Make the environment READY before anything else: create/refresh the uv-managed
 # lerobot venv, auto-detect the serial port, and locate the URDF. This EXPORTS

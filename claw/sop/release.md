@@ -9,7 +9,7 @@ APK. A release publishes the Pico and Quest APKs to GitHub Releases and
 
 - `VERSION` holds `MAJOR.MINOR.PATCH`.
   `python3 scripts/version.py set <version>` writes it together with its only
-  other copies, `robot/Cargo.toml` (`[workspace.package]`, plus `Cargo.lock`)
+  other copies, `rust/Cargo.toml` (`[workspace.package]`, plus `Cargo.lock`)
   and `xr/project.godot` (`application/config/version`); Python and C++ read
   it at build time.
   `python3 scripts/version.py check [--tag v<version>]` fails on any drift.
@@ -200,7 +200,7 @@ git diff --check
 5. Commit and tag.
 
 ```bash
-git add VERSION robot/Cargo.toml robot/Cargo.lock xr/project.godot
+git add VERSION rust/Cargo.toml rust/Cargo.lock xr/project.godot
 git diff --cached --quiet || git commit -m "release v${VERSION}"
 git tag -a "v${VERSION}" -m "Operator v${VERSION}"
 python3 scripts/version.py check --tag "v${VERSION}"

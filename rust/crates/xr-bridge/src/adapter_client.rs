@@ -158,31 +158,22 @@ impl AdapterClient {
         };
 
         // Split: write half stays on the client; read half goes to the reader.
+        // blueprint_v1 is the compatibility contract; minor spec differences
+        // are reconciled per Blueprint by `retain_supported`.
         self.blueprint_compatible = descriptor
             .capabilities
             .get(BLUEPRINT_CAPABILITY)
             .and_then(serde_json::Value::as_bool)
-            == Some(true)
-            && descriptor
-                .capabilities
-                .get(BLUEPRINT_SPEC_HASH_CAPABILITY)
-                .and_then(serde_json::Value::as_str)
-                == Some(SPEC_SHA256);
-        if descriptor
+            == Some(true);
+        let adapter_spec = descriptor
             .capabilities
-            .get(BLUEPRINT_CAPABILITY)
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
-            && !self.blueprint_compatible
-        {
-            tracing::warn!(
-                expected = SPEC_SHA256,
-                actual = descriptor
-                    .capabilities
-                    .get(BLUEPRINT_SPEC_HASH_CAPABILITY)
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("missing"),
-                "Adapter Blueprint spec does not match bridge; Blueprint stream disabled"
+            .get(BLUEPRINT_SPEC_HASH_CAPABILITY)
+            .and_then(serde_json::Value::as_str);
+        if self.blueprint_compatible && adapter_spec != Some(SPEC_SHA256) {
+            tracing::info!(
+                bridge = SPEC_SHA256,
+                adapter = adapter_spec.unwrap_or("missing"),
+                "Adapter uses another blueprint_v1 minor spec; unknown entries will be dropped"
             );
         }
 
@@ -294,6 +285,7 @@ impl AdapterClient {
         let streams_control_tx = self.streams_control_tx.clone();
         let handle = tokio::spawn(async move {
             let mut active_blueprint: Option<Arc<Blueprint>> = None;
+            let mut ignored_state_keys = std::collections::HashSet::new();
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(msg) => {
@@ -308,9 +300,20 @@ impl AdapterClient {
                                     );
                                     continue;
                                 }
-                                let blueprint = blueprint
-                                    .as_ref()
-                                    .map(|value| Arc::new(value.as_ref().clone()));
+                                let mut blueprint =
+                                    blueprint.as_ref().map(|value| value.as_ref().clone());
+                                let mut next_ignored_state_keys = Default::default();
+                                if let Some(blueprint) = &mut blueprint {
+                                    let (ignored, state_keys) = blueprint.retain_supported();
+                                    if !ignored.is_empty() {
+                                        tracing::warn!(
+                                            ?ignored,
+                                            "Blueprint entries unsupported by this bridge dropped"
+                                        );
+                                    }
+                                    next_ignored_state_keys = state_keys;
+                                }
+                                let blueprint = blueprint.map(Arc::new);
                                 if let Some(blueprint) = &blueprint {
                                     if let Err(error) = blueprint.validate() {
                                         tracing::warn!(
@@ -334,6 +337,7 @@ impl AdapterClient {
                                 // values from the previous one.
                                 let _ = blueprint_state_tx.send(None);
                                 active_blueprint = blueprint.clone();
+                                ignored_state_keys = next_ignored_state_keys;
                                 let _ = blueprint_tx.send(blueprint);
                             }
                             AdapterToBridge::BlueprintState { state } => {
@@ -349,14 +353,15 @@ impl AdapterClient {
                                     );
                                     continue;
                                 };
-                                if let Err(error) = blueprint.validate_state(state) {
+                                let mut state = state.as_ref().clone();
+                                state.values.retain(|key, _| !ignored_state_keys.contains(key));
+                                if let Err(error) = blueprint.validate_state(&state) {
                                     tracing::warn!(
                                         "Dropping invalid BlueprintState from adapter: {error}"
                                     );
                                     continue;
                                 }
-                                let _ =
-                                    blueprint_state_tx.send(Some(Arc::new(state.as_ref().clone())));
+                                let _ = blueprint_state_tx.send(Some(Arc::new(state)));
                             }
                             AdapterToBridge::StreamsControl { control } => {
                                 if let Err(error) = control.validate() {

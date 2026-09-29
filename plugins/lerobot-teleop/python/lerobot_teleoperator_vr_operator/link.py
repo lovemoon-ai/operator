@@ -1,7 +1,7 @@
 """Socket client, framing codec, and background reader for the `vr_operator` link.
 
 Mirror image of the Rust `LinkCodec` in
-`robot/crates/robot-adapter/src/control/drivers/lerobot_link.rs`.
+`rust/crates/robot-adapter/src/control/drivers/lerobot_link.rs`.
 
 Framing is ``[4B len LE][JSON]``. The Rust adapter listens; this module dials in
 as a client and reconnects with backoff, so either process may restart without

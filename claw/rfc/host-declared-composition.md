@@ -350,7 +350,7 @@ xr/scripts/
 
 - **设备验证依赖**：第 1b 步触碰 Quest 字节缓冲编码、Pico 零拷贝管线，只能真机回归；拆出 1a 是为了缩小每轮真机验证的爆炸半径。apex 无 Godot，APK 需在有 XR 工具链的机器上构建。
 - **时间戳链路是冻结契约**：3.7 的硬规则与两道门是第 1、5、6 步的门禁，不是建议。第 6 步 `xr_state` 时间戳语义变化是唯一有意的例外，须先写文档再改代码。
-- **spec hash 锁三端**：每次 Blueprint spec 变更要求 pyoperator、xr-bridge、APK 同一 checkout 发布（现状已如此）。`capture_streams` 先不进 spec 生成。
+- **Blueprint spec 按大版本兼容**：`blueprint_v1` 内只增不改，各端丢弃不认识的原语/属性/绑定，hash 仅作诊断（见 `claw/architecture/blueprint.md`）；pyoperator、xr-bridge、APK 不必同一 checkout 发布。`capture_streams` 先不进 spec 生成。
 - **Rust 桥改动**：第 3 步 `capture_streams` / `StreamsStatus` / `StreamsControl` 要改 `teleop-protocol`（含 `BridgeToAdapter`）、xr-bridge、pyoperator-native；第 6 步改动更大。
 - **性能与热**：host 场景已在渲染视频 + `robot_model`，再加 HEVC 编码；信封上限由本地限幅兜底，第 3 步验收含实测。声明层绝不承载流；权限层在 ctrl 通道上是低速事件。
 - **不做的事**：不把 source/sink 变成 Blueprint 原语；不做通用 DI 框架；不让 host 声明安全互锁、system permission、平台选择、边界策略、校准；不引入第二个时基；不把 ingest 会话并入 host 会话。

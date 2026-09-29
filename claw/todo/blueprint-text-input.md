@@ -56,5 +56,5 @@ The generator must learn nothing new: `string` properties/bindings and a
 
 - `python3 scripts/generate_blueprint_spec.py --check`, `cicd/validate_xr_features.py`.
 - `bash cicd/xr_module_harness.sh --suite teleop.settings` plus the new
-  `blueprint` device case on Quest and Pico; the APK must be rebuilt because
-  the spec hash changes and all three sides must match.
+  `blueprint` device case on Quest and Pico. A new primitive is a minor,
+  additive change: older APKs and hosts drop it and keep the rest working.

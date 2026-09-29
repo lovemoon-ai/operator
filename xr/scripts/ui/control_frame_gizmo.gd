@@ -10,7 +10,7 @@ extends Node3D
 ## The frame and the lateral convention are taken from TELEMETRY, not re-derived
 ## here: the retarget's `mirror`/`scale` live in robot-side config, and a client
 ## that recomputed the rule would silently start lying the moment that config
-## changed. See `robot/configs/so101_real_descriptor.yaml` (telemetry_schema:
+## changed. See `rust/configs/so101_real_descriptor.yaml` (telemetry_schema:
 ## operator_frame / pose_mirror).
 
 ## Arm length in metres. Small enough to sit on the controller without hiding it.

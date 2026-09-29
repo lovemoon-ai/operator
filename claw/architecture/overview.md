@@ -3,7 +3,7 @@
 Operator has five runtime surfaces:
 
 - `xr/` - in-headset Godot Android client.
-- `robot/` - Rust Operator SDK core, bridge, protocol, and adapter crates.
+- `rust/` - Rust Operator SDK core, bridge, protocol, and adapter crates.
 - `cpp/` - `liboperator`, the C++ SDK over the Rust core's stable C ABI.
 - `python/` - Python-first in-process XR, robot, retargeting, and IK API.
 - `web/` - local ingest and review app for ego recordings.
@@ -84,7 +84,7 @@ component model lives under `xr/scripts/components/` and is described in
 ## Repository Boundaries
 
 ```text
-robot/
+rust/
   crates/operator          public Rust SDK and shared behavior
   crates/operator-c        stable C ABI used by liboperator
   crates/teleop-protocol   internal wire types and codecs

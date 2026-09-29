@@ -122,6 +122,8 @@ var _event_sequence := 0
 var _state_values: Dictionary = {}
 var _blueprint_components: Array = []
 var _binding_contracts: Dictionary = {}
+## State keys bound only by entries this headset ignored (newer minor spec).
+var _ignored_state_keys: Array = []
 var _components: Dictionary = {}
 var _component_order: Array[String] = []
 var _dynamic_components: Array = []
@@ -153,12 +155,13 @@ func configure(
 		_external_view_implementations.append(str(implementation))
 
 
-func apply_blueprint(blueprint: Dictionary) -> bool:
-	var parsed := BlueprintContract.parse_blueprint(blueprint)
+func apply_blueprint(source_blueprint: Dictionary) -> bool:
+	var parsed := BlueprintContract.parse_blueprint(source_blueprint)
 	var errors: Array = parsed.get("errors", [])
 	if not errors.is_empty():
 		warning_raised.emit("Invalid Blueprint: %s" % str(errors))
 		return false
+	var blueprint: Dictionary = parsed["blueprint"]
 	for component_v in blueprint.get("components", []):
 		var component := component_v as Dictionary
 		var primitive_spec := BlueprintContract.primitive(str(component.get("type", "")))
@@ -198,6 +201,7 @@ func apply_blueprint(blueprint: Dictionary) -> bool:
 	_blueprint_revision = int(blueprint.get("revision", 0))
 	_blueprint_components = (blueprint.get("components", []) as Array).duplicate(true)
 	_binding_contracts = BlueprintContract.compile_binding_contracts(_blueprint_components)
+	_ignored_state_keys = parsed.get("ignored_state_keys", [])
 	_load_user_overrides()
 	for component_v in blueprint.get("components", []):
 		var component := component_v as Dictionary
@@ -245,6 +249,11 @@ func apply_state(state: Dictionary) -> bool:
 	if sequence <= _last_state_sequence:
 		return false
 	var values_v: Variant = state.get("values", {})
+	if values_v is Dictionary and not _ignored_state_keys.is_empty():
+		var supported_values := (values_v as Dictionary).duplicate()
+		for state_key in _ignored_state_keys:
+			supported_values.erase(state_key)
+		values_v = supported_values
 	if values_v is Dictionary:
 		var value_errors := BlueprintContract.validate_bound_values(
 			_blueprint_components,
@@ -300,6 +309,7 @@ func clear() -> void:
 	_state_values.clear()
 	_blueprint_components.clear()
 	_binding_contracts.clear()
+	_ignored_state_keys = []
 	_user_visibility_overrides.clear()
 	_blueprint_id = ""
 	_blueprint_revision = 0

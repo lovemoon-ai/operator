@@ -227,7 +227,7 @@ device APIs and vendor plugins.
 
 ## Robot Builds
 
-Run from `robot/`:
+Run from `rust/`:
 
 ```bash
 cargo build --release
@@ -247,7 +247,7 @@ The Rust workspace contains:
 The root `VERSION` file holds the one release version (SemVer, e.g. `0.2.0` or
 `0.3.0-rc.1`) for all components:
 
-- Rust: `robot/Cargo.toml` `[workspace.package] version`, inherited by every crate.
+- Rust: `rust/Cargo.toml` `[workspace.package] version`, inherited by every crate.
 - Python: `operator_xr` (published on PyPI as `operator-xr`) uses
   `dynamic = ["version"]`, so maturin takes the Cargo version (`0.3.0-rc.1`
   becomes `0.3.0rc1`). Read it with `operator_xr.__version__` or
@@ -266,6 +266,16 @@ fails if anything has drifted. Releases follow `claw/sop/release.md`. Pushing a
 `operator-xr` wheels (Linux x86_64/aarch64, macOS arm64) and an sdist, then
 publishes them through PyPI Trusted Publishing. Pre-release tags publish as PyPI
 pre-releases, which `pip` only installs with `--pre` or an exact version.
+
+Compatibility follows SemVer from 1.0.0. Hosts, examples, and robot projects
+pin a major (`operator-xr>=1,<2`) and must keep working with any APK,
+`xr-bridge`, and SDK of that major without code changes or rebuilds. Minor and
+patch releases may only add: new Blueprint primitives, optional properties and
+bindings, new optional descriptor fields and capabilities, new SDK functions
+and keyword arguments with defaults. Receivers ignore what they do not know
+(see `blueprint.md` Compatibility Negotiation). Removing or renaming anything,
+changing a default's meaning, or making a field required is a major release
+and a new wire contract version (`blueprint_v2`, ...).
 
 ## Web App
 

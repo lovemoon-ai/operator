@@ -46,7 +46,7 @@ operator-retargeting = "operator_xr.services.retargeting:main"
 operator-live-feed = "operator_xr.live_feed:main"
 
 [tool.maturin]
-manifest-path = "../robot/crates/pyoperator-native/Cargo.toml"
+manifest-path = "../rust/crates/pyoperator-native/Cargo.toml"
 python-source = "."
 module-name = "operator_xr._native"
 bindings = "pyo3"

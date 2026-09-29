@@ -87,10 +87,10 @@ make ship-pico
 > no depth. See [Build & Install the XR App](claw/develop/build-app.md) for the
 > `prepare.sh --build-patched` step.
 
-Robot-side Rust commands run from `robot/`:
+Robot-side Rust commands run from `rust/`:
 
 ```bash
-cd robot
+cd rust
 cargo build --release
 cargo test
 

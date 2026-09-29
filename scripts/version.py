@@ -4,7 +4,7 @@
 `VERSION` at the repo root is the source of truth (SemVer: 0.2.0, 0.2.0-rc.1).
 Only two other files carry a literal copy, and `set` rewrites both:
 
-  robot/Cargo.toml   [workspace.package] version, inherited by every crate.
+  rust/Cargo.toml   [workspace.package] version, inherited by every crate.
                      Python (maturin, `dynamic = ["version"]`) and the C ABI
                      `operator_version()` take their version from here.
   xr/project.godot   application/config/version; the operator-features export
@@ -28,7 +28,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "VERSION"
-CARGO_TOML = ROOT / "robot" / "Cargo.toml"
+CARGO_TOML = ROOT / "rust" / "Cargo.toml"
 PROJECT_GODOT = ROOT / "xr" / "project.godot"
 
 # Pre-release tags are limited to the ones maturin maps onto PEP 440
@@ -63,7 +63,7 @@ def check(tag: str | None) -> list[str]:
         found = _field(path, pattern)
         if found != version:
             errors.append(f"{path.relative_to(ROOT)} has {found!r}, VERSION has {version!r}")
-    for crate in sorted((ROOT / "robot" / "crates").glob("*/Cargo.toml")):
+    for crate in sorted((ROOT / "rust" / "crates").glob("*/Cargo.toml")):
         if "\nversion.workspace = true\n" not in crate.read_text():
             errors.append(f"{crate.relative_to(ROOT)} must use `version.workspace = true`")
     if tag is not None and tag != f"v{version}":
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         _replace(CARGO_TOML, CARGO_VERSION, args.version)
         _replace(PROJECT_GODOT, GODOT_VERSION, args.version)
         # Refresh the workspace crates' entries in Cargo.lock only.
-        subprocess.run(["cargo", "update", "--workspace"], cwd=ROOT / "robot", check=True)
+        subprocess.run(["cargo", "update", "--workspace"], cwd=ROOT / "rust", check=True)
     errors = check(getattr(args, "tag", None))
     for error in errors:
         print(f"error: {error}", file=sys.stderr)

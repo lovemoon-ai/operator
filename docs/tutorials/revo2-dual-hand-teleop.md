@@ -172,16 +172,16 @@ A mismatch disables only Blueprint and is reported explicitly in the bridge
 log; tracking, control, telemetry, and video can otherwise remain connected.
 
 ```bash
-cd robot
+cd rust
 cargo build --release -p xr-bridge
 cd ..
 
 rm -rf /tmp/operator-hand
 install -D -m 0755 examples/brainco-revo2/revo2_thor_service.py \
   /tmp/operator-hand/revo2_thor_service.py
-install -D -m 0755 robot/target/release/xr-bridge \
+install -D -m 0755 rust/target/release/xr-bridge \
   /tmp/operator-hand/bin/xr-bridge
-install -D -m 0644 robot/configs/revo2_tuning.yaml \
+install -D -m 0644 rust/configs/revo2_tuning.yaml \
   /tmp/operator-hand/config/revo2_tuning.yaml
 mkdir -p \
   /tmp/operator-hand/lib/operator_xr/integrations \

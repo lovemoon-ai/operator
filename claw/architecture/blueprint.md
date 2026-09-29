@@ -32,7 +32,7 @@ python3 scripts/generate_blueprint_spec.py
 The generator writes checked-in bindings for all three consumers:
 
 - `python/operator_xr/_blueprint_spec.py`
-- `robot/crates/teleop-protocol/src/blueprint_spec.rs`
+- `rust/crates/teleop-protocol/src/blueprint_spec.rs`
 - `xr/scripts/contracts/blueprint/blueprint_spec.gd`
 
 `python3 scripts/generate_blueprint_spec.py --check` fails when a generated
@@ -162,7 +162,7 @@ robot Blueprint/session, not applied to the system menu or its lamps.
 
 ## SDK Ownership
 
-`robot/crates/operator` is the authoritative publisher implementation. It owns
+`rust/crates/operator` is the authoritative publisher implementation. It owns
 Blueprint and state validation, patch merging, sequence allocation, descriptor
 capability injection, adapter-envelope serialization, and inbound event
 validation. `teleop-protocol` provides the internal wire data types; robot
@@ -207,23 +207,30 @@ mapping instead of adding mode checks to the runtime.
 
 ## Compatibility Negotiation
 
-Blueprint is enabled only when the host, bridge, and headset use the exact
-same generated primitive spec:
+Blueprint is enabled when the host and the headset both speak the major
+contract `blueprint_v1`; the generated spec digest is diagnostic only:
 
 - the host descriptor advertises `blueprint_v1=true` and
   `blueprint_spec_sha256=<digest>`;
-- the headset `Hello.capabilities` advertises both `blueprint_v1` and
-  `blueprint_v1@sha256:<digest>`;
-- `xr-bridge` compares both sides with its generated digest before forwarding
-  any Blueprint, state, or event message;
-- the headset independently checks the returned descriptor capability and hash
-  before accepting Blueprint or state messages or sending events.
+- the headset `Hello.capabilities` advertises `blueprint_v1`,
+  `blueprint_v1@sha256:<digest>`, and the frozen 0.2.x digest that published
+  0.2 bridges still require;
+- `xr-bridge` and the headset enable Blueprint on `blueprint_v1` alone and only
+  log a digest difference.
+
+Within `blueprint_v1` the spec only grows: new primitives, optional
+properties, and bindings. Each consumer drops entries its spec does not define
+(`Blueprint::retain_supported` when the bridge receives an adapter Blueprint,
+`BlueprintContract.parse_blueprint` on the headset), logs them, and skips state
+keys only those dropped bindings used. Everything else in the Blueprint keeps
+working, so hosts, bridges, and APKs of different 1.x releases interoperate.
+Renaming or removing a primitive, property, or binding, changing a value
+contract, or making a field required is a breaking change: it needs a new
+`blueprint_v2` contract and a major release.
 
 The hosted Python adapter adds these descriptor capabilities only when a
-`HostedBlueprint` publisher is attached. A mismatch disables Blueprint with an
-explicit bridge log while leaving control, telemetry, and video transport
-available. Deploy the Python package, `xr-bridge`, and headset APK from the same
-checkout whenever the canonical spec changes.
+`HostedBlueprint` publisher is attached. Without `blueprint_v1` on either side,
+Blueprint is off while control, telemetry, and video transport stay available.
 
 ## Data Flow And Performance
 

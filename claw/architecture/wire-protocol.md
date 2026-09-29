@@ -74,10 +74,10 @@ XR implementation:
 
 Rust implementation:
 
-- `robot/crates/teleop-protocol/src/wire.rs`
-- `robot/crates/teleop-protocol/src/transport.rs`
-- `robot/crates/xr-bridge/src/pose_server.rs`
-- `robot/crates/robot-adapter/src/server.rs`
+- `rust/crates/teleop-protocol/src/wire.rs`
+- `rust/crates/teleop-protocol/src/transport.rs`
+- `rust/crates/xr-bridge/src/pose_server.rs`
+- `rust/crates/robot-adapter/src/server.rs`
 
 The v2 session starts with Hello and device descriptor negotiation. Old peers
 can still fall back to the legacy path through `Session`.
@@ -87,7 +87,7 @@ can still fall back to the legacy path through `Session`.
 An SDK-mode descriptor contains `xr_stream` with schema version, requested
 rate, and stream names. The XR client then sends `XrStateFrame` on the same TCP
 envelope. Its JSON payload is defined by
-`robot/crates/teleop-protocol/src/xr_state.rs` and contains:
+`rust/crates/teleop-protocol/src/xr_state.rs` and contains:
 
 - one `frame_id` and headset monotonic `timestamp_ns`;
 - head pose, both controllers and their complete input maps;
@@ -121,7 +121,7 @@ monotonic.
 
 A host that wants headset media (camera, depth, OLCP pose streams) declares it
 in the descriptor next to `xr_stream`. Rust:
-`robot/crates/teleop-protocol/src/streams.rs`; Python:
+`rust/crates/teleop-protocol/src/streams.rs`; Python:
 `operator_xr.capture` (`BridgeConfig.capture_streams`).
 
 ```json
@@ -230,16 +230,15 @@ integration; VR operation or Realtime Feed can reuse the same contract through
 their own lifecycle adapters. Inside Robot does not currently use it because it
 has no external robot session.
 
-Capability negotiation is content-addressed. A Blueprint-producing descriptor
-must contain both `blueprint_v1: true` and
+Capability negotiation is by major contract. A Blueprint-producing
+descriptor contains `blueprint_v1: true` and, for diagnostics,
 `blueprint_spec_sha256: <generated digest>`. The headset advertises
-`blueprint_v1` plus `blueprint_v1@sha256:<generated digest>` in `Hello`.
-`xr-bridge` enables the stream only when both hashes equal its own generated
-digest. A hosted adapter without a `HostedBlueprint` does not advertise either
-descriptor capability. A mismatch is logged and disables only Blueprint; the
-control, telemetry, and video paths remain connected. The headset also verifies
-the descriptor hash itself instead of relying only on the bridge's forwarding
-decision.
+`blueprint_v1`, `blueprint_v1@sha256:<generated digest>`, and the frozen 0.2.x
+digest in `Hello`. `xr-bridge` and the headset each enable Blueprint when the
+peer has `blueprint_v1`; a digest difference means another minor spec, whose
+unknown primitives, properties, and bindings the receiver drops (see
+`blueprint.md`). A hosted adapter without a `HostedBlueprint` does not
+advertise either descriptor capability.
 
 Blueprint uses the command TCP connection and three versioned JSON payloads:
 
@@ -724,8 +723,8 @@ Relevant paths:
 
 - `xr/scripts/app/modes/teleop_controller.gd`
 - `xr/scripts/contracts/teleop/device_descriptor.gd`
-- `robot/crates/teleop-protocol/src/descriptor.rs`
-- `robot/configs/*descriptor*.yaml`
+- `rust/crates/teleop-protocol/src/descriptor.rs`
+- `rust/configs/*descriptor*.yaml`
 
 ## Live Feed OLCP
 

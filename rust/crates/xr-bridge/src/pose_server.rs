@@ -342,20 +342,16 @@ async fn handle_connection(
                     hello_supports_capability(&frame.data, BLUEPRINT_SPEC_CAPABILITY);
                 send_legacy_telemetry =
                     !hello_supports_capability(&frame.data, DEDICATED_TELEMETRY_CAPABILITY);
+                // blueprint_v1 is the compatibility contract. Minor spec
+                // differences are reconciled by each consumer dropping entries
+                // it does not know, so the spec hash is diagnostic only.
                 let source_has_blueprint_stream = blueprint.is_some()
                     && descriptor
                         .capabilities
                         .get(BLUEPRINT_CAPABILITY)
                         .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                    && descriptor
-                        .capabilities
-                        .get(teleop_protocol::BLUEPRINT_SPEC_HASH_CAPABILITY)
-                        .and_then(serde_json::Value::as_str)
-                        == Some(teleop_protocol::SPEC_SHA256);
-                blueprint_enabled = source_has_blueprint_stream
-                    && headset_advertises_blueprint
-                    && headset_blueprint_spec_matches;
+                        == Some(true);
+                blueprint_enabled = source_has_blueprint_stream && headset_advertises_blueprint;
                 if let Some(sink) = &xr_state_sink {
                     if !hello_supports_xr_state(&frame.data) {
                         let error = format!(
@@ -366,13 +362,10 @@ async fn handle_connection(
                     }
                 }
                 tracing::info!("Hello received from {addr}");
-                if source_has_blueprint_stream
-                    && headset_advertises_blueprint
-                    && !headset_blueprint_spec_matches
-                {
-                    tracing::warn!(
-                        expected = BLUEPRINT_SPEC_CAPABILITY,
-                        "Blueprint disabled for {addr}: headset primitive spec does not match bridge"
+                if blueprint_enabled && !headset_blueprint_spec_matches {
+                    tracing::info!(
+                        bridge = BLUEPRINT_SPEC_CAPABILITY,
+                        "Headset {addr} uses another blueprint_v1 minor spec; it drops entries it does not know"
                     );
                 }
                 tracing::info!(

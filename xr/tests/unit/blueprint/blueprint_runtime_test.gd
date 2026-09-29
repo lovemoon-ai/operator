@@ -86,16 +86,28 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 				BlueprintPrimitiveSpec.SPEC_HASH_CAPABILITY: BlueprintPrimitiveSpec.SPEC_SHA256,
 			},
 		}),
-		"headset accepts only the exact generated descriptor spec hash",
+		"headset accepts its own descriptor spec hash",
 	)
-	t.is_false(
+	t.is_true(
 		SessionScript.descriptor_supports_blueprint({
 			"capabilities": {
 				BlueprintPrimitiveSpec.CAPABILITY: true,
-				BlueprintPrimitiveSpec.SPEC_HASH_CAPABILITY: "stale",
+				BlueprintPrimitiveSpec.SPEC_HASH_CAPABILITY: "older-or-newer-minor",
 			},
 		}),
-		"headset rejects a stale descriptor spec hash",
+		"headset accepts any blueprint_v1 host regardless of minor spec hash",
+	)
+	t.is_false(
+		SessionScript.descriptor_supports_blueprint({
+			"capabilities": {BlueprintPrimitiveSpec.SPEC_HASH_CAPABILITY: BlueprintPrimitiveSpec.SPEC_SHA256},
+		}),
+		"headset requires blueprint_v1",
+	)
+	t.is_true(
+		(SessionScript.hello_payload().get("capabilities", []) as Array).has(
+			SessionScript.LEGACY_BLUEPRINT_SPEC_CAPABILITIES[0]
+		),
+		"Hello keeps the spec capability published 0.2.x bridges require",
 	)
 	t.is_true(
 		SessionScript.DEDICATED_TELEMETRY_CAPABILITY \
@@ -231,6 +243,28 @@ func run(_ctx: Dictionary, t: OperatorTestAssertions) -> void:
 		(BlueprintContract.parse_blueprint(invalid_transform).get("errors", []) as Array).is_empty(),
 		"a non-object transform cannot be replaced silently by generated defaults",
 	)
+	var newer_minor := compatible_bindings.duplicate(true)
+	newer_minor["blueprint_id"] = "newer-minor"
+	((newer_minor["components"] as Array)[0] as Dictionary)["properties"] = {"future_style": "x"}
+	((newer_minor["components"] as Array)[0] as Dictionary)["bindings"] = {
+		"text": "shared", "future_glow": "glow",
+	}
+	(newer_minor["components"] as Array).append(
+		{"id": "hologram", "type": "future_hologram", "bindings": {"visible": "holo_on"}}
+	)
+	var newer_parsed := BlueprintContract.parse_blueprint(newer_minor)
+	t.is_true(
+		(newer_parsed.get("errors", []) as Array).is_empty(),
+		"a newer minor Blueprint parses once unknown entries are dropped",
+	)
+	t.eq(
+		((newer_parsed["blueprint"] as Dictionary)["components"] as Array).size(), 2,
+		"an unknown primitive type is dropped, known components stay",
+	)
+	t.eq((newer_parsed.get("ignored", []) as Array).size(), 3, "every dropped entry is reported")
+	var ignored_keys: Array = newer_parsed.get("ignored_state_keys", [])
+	ignored_keys.sort()
+	t.eq(ignored_keys, ["glow", "holo_on"], "state keys only dropped bindings used are ignorable")
 	var origin := XROrigin3D.new()
 	var camera := XRCamera3D.new()
 	var left_controller := XRController3D.new()

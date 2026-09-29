@@ -435,7 +435,7 @@ async fn blueprint_replacement_clears_previous_state() {
 }
 
 #[tokio::test]
-async fn incompatible_adapter_blueprint_spec_is_rejected() {
+async fn other_minor_adapter_blueprint_drops_unknown_entries() {
     let listener = listen(&Endpoint::Tcp("127.0.0.1:0".parse().unwrap()))
         .await
         .expect("bind mock adapter");
@@ -450,7 +450,7 @@ async fn incompatible_adapter_blueprint_spec_is_rejected() {
             let mut descriptor = test_descriptor();
             descriptor.capabilities.insert(
                 BLUEPRINT_SPEC_HASH_CAPABILITY.to_string(),
-                serde_json::Value::String("different-spec".to_string()),
+                serde_json::Value::String("newer-minor-spec".to_string()),
             );
             framed
                 .send(AdapterToBridge::Descriptor(Box::new(descriptor)))
@@ -460,10 +460,24 @@ async fn incompatible_adapter_blueprint_spec_is_rejected() {
                 .send(AdapterToBridge::Blueprint {
                     blueprint: Some(Box::new(
                         serde_json::from_str(
-                            r#"{"schema":"operator.blueprint.v1","blueprint_id":"stale","revision":1,"components":[]}"#,
+                            r#"{"schema":"operator.blueprint.v1","blueprint_id":"newer","revision":1,"components":[
+                                {"id":"status","type":"label","properties":{"future_style":1},"bindings":{"text":"status","future_glow":"glow"}},
+                                {"id":"holo","type":"future_hologram","bindings":{"visible":"holo_on"}}]}"#,
                         )
                         .unwrap(),
                     )),
+                })
+                .await
+                .unwrap();
+            framed
+                .send(AdapterToBridge::BlueprintState {
+                    state: Box::new(
+                        serde_json::from_str(
+                            r#"{"schema":"operator.blueprint_state.v1","blueprint_id":"newer","blueprint_revision":1,"sequence":1,"timestamp_ns":1,
+                                "values":{"status":"ok","glow":true,"holo_on":true}}"#,
+                        )
+                        .unwrap(),
+                    ),
                 })
                 .await
                 .unwrap();
@@ -473,14 +487,24 @@ async fn incompatible_adapter_blueprint_spec_is_rejected() {
 
     let mut client = AdapterClient::connect(&endpoint).await.unwrap();
     let mut blueprint_rx = client.blueprint();
+    let mut state_rx = client.blueprint_state();
     client.handshake().await.unwrap();
-    assert!(!client.blueprint_compatible());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), blueprint_rx.changed())
-            .await
-            .is_err()
-    );
-    assert!(blueprint_rx.borrow().is_none());
+    assert!(client.blueprint_compatible());
+    tokio::time::timeout(Duration::from_secs(1), blueprint_rx.wait_for(Option::is_some))
+        .await
+        .expect("blueprint relayed")
+        .unwrap();
+    let blueprint = blueprint_rx.borrow().clone().unwrap();
+    assert_eq!(blueprint.components.len(), 1);
+    assert!(blueprint.components[0].properties.is_empty());
+    assert_eq!(blueprint.components[0].bindings.len(), 1);
+    tokio::time::timeout(Duration::from_secs(1), state_rx.wait_for(Option::is_some))
+        .await
+        .expect("state relayed")
+        .unwrap();
+    let state = state_rx.borrow().clone().unwrap();
+    assert_eq!(state.values.len(), 1);
+    assert_eq!(state.values["status"], "ok");
 }
 
 #[tokio::test]

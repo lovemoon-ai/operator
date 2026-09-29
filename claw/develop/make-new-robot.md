@@ -29,7 +29,7 @@ There are two different levels of "robot simulation" in this repo:
 
 2. A controllable teleop simulator.
 
-   This requires robot-side work in `robot/`, usually a driver, descriptor, and
+   This requires robot-side work in `rust/`, usually a driver, descriptor, and
    config. The existing SO-101 simulator is the pattern. Do not assume a new
    URDF/XML asset is enough for end-to-end teleop control.
 
@@ -63,12 +63,12 @@ Optional XR integration:
 
 Controllable simulator integration:
 
-- `robot/configs/*.yaml` - adapter runtime config.
-- `robot/configs/*descriptor*.yaml` - controls, joints, and feeds advertised to
+- `rust/configs/*.yaml` - adapter runtime config.
+- `rust/configs/*descriptor*.yaml` - controls, joints, and feeds advertised to
   XR.
-- `robot/crates/robot-adapter/src/control/drivers/` - concrete control driver.
-- `robot/crates/robot-adapter/src/devices/mod.rs` - `device_type` dispatch.
-- `robot/crates/robot-adapter/src/config.rs` - config schema and defaults.
+- `rust/crates/robot-adapter/src/control/drivers/` - concrete control driver.
+- `rust/crates/robot-adapter/src/devices/mod.rs` - `device_type` dispatch.
+- `rust/crates/robot-adapter/src/config.rs` - config schema and defaults.
 
 ## Naming And Layout
 
@@ -300,13 +300,13 @@ If the new robot needs teleop control, add a robot-side implementation.
 
 Minimum surfaces to evaluate:
 
-- `robot/configs/<robot>.yaml`
-- `robot/configs/<robot>_descriptor.yaml`
-- `robot/crates/robot-adapter/src/control/drivers/<robot>.rs`
-- `robot/crates/robot-adapter/src/control/drivers/mod.rs`
-- `robot/crates/robot-adapter/src/devices/mod.rs`
-- `robot/crates/robot-adapter/src/config.rs`
-- e2e or driver tests under `robot/crates/*/tests/`
+- `rust/configs/<robot>.yaml`
+- `rust/configs/<robot>_descriptor.yaml`
+- `rust/crates/robot-adapter/src/control/drivers/<robot>.rs`
+- `rust/crates/robot-adapter/src/control/drivers/mod.rs`
+- `rust/crates/robot-adapter/src/devices/mod.rs`
+- `rust/crates/robot-adapter/src/config.rs`
+- e2e or driver tests under `rust/crates/*/tests/`
 
 The descriptor must match the controls and joints the XR app will send. Do not
 publish a joint name in the descriptor unless the driver can apply it safely.

@@ -62,7 +62,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ROBOT_DIR="$ROOT/robot"
+ROBOT_DIR="$ROOT/rust"
 
 # --- arm topology: one arm, or two --------------------------------------------
 #

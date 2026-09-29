@@ -10,7 +10,7 @@ lerobot-teleoperate --teleop.type=vr_operator --robot.type=so101_follower --robo
 ## How it fits together
 
 This is the Python half of the `lerobot_link` arm driver in the Operator Rust
-adapter (`robot/crates/robot-adapter/src/control/drivers/lerobot_link.rs`). Two
+adapter (`rust/crates/robot-adapter/src/control/drivers/lerobot_link.rs`). Two
 processes, split along a deliberate line:
 
 | | owns |
@@ -58,7 +58,7 @@ explicitly is the supported route.
 
 Two terminals. Start order does not matter.
 
-**Terminal 1** — the adapter (from `robot/`):
+**Terminal 1** — the adapter (from `rust/`):
 
 ```bash
 cargo run -p robot-service -- --config configs/so101_real.yaml

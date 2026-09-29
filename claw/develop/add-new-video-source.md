@@ -18,9 +18,9 @@ XR-side consumers:
 
 Robot-side producers:
 
-- `robot/crates/xr-bridge/src/video/`
-- `robot/configs/*.yaml`
-- `robot/configs/*descriptor*.yaml`
+- `rust/crates/xr-bridge/src/video/`
+- `rust/configs/*.yaml`
+- `rust/configs/*descriptor*.yaml`
 
 ## Steps
 

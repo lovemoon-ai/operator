@@ -15,7 +15,7 @@ resolver = "2"
 
 # Every crate inherits this; it must equal /VERSION (scripts/version.py).
 [workspace.package]
-version = "0.2.0"
+version = "1.0.0"
 
 [profile.release]
 opt-level = 3

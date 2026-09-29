@@ -3,7 +3,7 @@ extends RefCounted
 ## Host-declared capture streams: the descriptor's `capture_streams` envelope,
 ## the session-owned `media` transport block, and the ctrl commands
 ## StreamsStatus (headset -> host) / StreamsControl (host -> headset). Mirrors
-## robot/crates/teleop-protocol/src/streams.rs; see
+## rust/crates/teleop-protocol/src/streams.rs; see
 ## claw/architecture/wire-protocol.md, "Host-declared capture streams".
 ## Pure validation and encoding: no engine singletons, no transport.
 

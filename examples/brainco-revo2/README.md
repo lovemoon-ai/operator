@@ -21,14 +21,14 @@ or shutdown sends a hold command and relocks control.
 ## Thor/Orin ARM64 Build
 
 Thor reports `aarch64` from `uname -m`. Do not copy
-`robot/target/release/xr-bridge` from an x86-64 development machine: that file
+`rust/target/release/xr-bridge` from an x86-64 development machine: that file
 is a host binary and fails on Thor with `Exec format error`.
 
 Cross-build a static ARM64 binary from an x86-64 host:
 
 ```bash
 rustup target add aarch64-unknown-linux-musl
-cd robot
+cd rust
 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
   cargo build --release -p xr-bridge --target aarch64-unknown-linux-musl
 
@@ -63,13 +63,13 @@ the same checkout whenever `specs/blueprint/v1.json` changes.
 Build `xr-bridge`, connect the Revo2 serial interfaces, and run:
 
 ```bash
-cd robot
+cd rust
 cargo build --release -p xr-bridge
 cd ..
 
 python3 examples/brainco-revo2/revo2_thor_service.py \
-  --xr-bridge robot/target/release/xr-bridge \
-  --bridge-config robot/configs/revo2_tuning.yaml \
+  --xr-bridge rust/target/release/xr-bridge \
+  --bridge-config rust/configs/revo2_tuning.yaml \
   --check
 ```
 
@@ -77,8 +77,8 @@ Run without motion first:
 
 ```bash
 python3 examples/brainco-revo2/revo2_thor_service.py \
-  --xr-bridge robot/target/release/xr-bridge \
-  --bridge-config robot/configs/revo2_tuning.yaml
+  --xr-bridge rust/target/release/xr-bridge \
+  --bridge-config rust/configs/revo2_tuning.yaml
 ```
 
 Only after clearing the workspace and confirming the serial identities, add

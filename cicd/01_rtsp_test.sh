@@ -266,13 +266,13 @@ ok "log dir: $LOG_DIR"
 # --- Build xr-bridge --------------------------------------------------------
 if [ "$SKIP_BUILD" = "0" ]; then
     step "Build xr-bridge (release)"
-    (cd "$ROOT/robot" && cargo build --release -p xr-bridge --quiet 2>&1 | tee "$LOG_DIR/cargo-build.log")
+    (cd "$ROOT/rust" && cargo build --release -p xr-bridge --quiet 2>&1 | tee "$LOG_DIR/cargo-build.log")
     ok "built"
 else
     note "skip-build set; using existing binary"
 fi
 
-XB="$ROOT/robot/target/release/xr-bridge"
+XB="$ROOT/rust/target/release/xr-bridge"
 if [ ! -x "$XB" ]; then
     err "xr-bridge binary not found at $XB — drop --skip-build or run cargo build first"
     exit 1

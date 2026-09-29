@@ -1,9 +1,9 @@
 # Rust Side Architecture
 
-`robot/` is a Rust workspace for the robot/server side of Operator.
+`rust/` is a Rust workspace for the robot/server side of Operator.
 
 ```text
-robot/
+rust/
   Cargo.toml
   configs/
     xr-bridge-default.yaml
@@ -36,8 +36,8 @@ same implementation through bindings.
 
 Key paths:
 
-- `robot/crates/operator/src/lib.rs`
-- `robot/crates/operator-c/src/lib.rs`
+- `rust/crates/operator/src/lib.rs`
+- `rust/crates/operator-c/src/lib.rs`
 - `cpp/liboperator/include/operator/operator.hpp`
 
 `operator-c` exports the stable C ABI as `liboperator.a` and `liboperator.so`.
@@ -56,11 +56,11 @@ Internal protocol crate used by the public SDK and robot services. It owns:
 
 Key paths:
 
-- `robot/crates/teleop-protocol/src/wire.rs`
-- `robot/crates/teleop-protocol/src/descriptor.rs`
-- `robot/crates/teleop-protocol/src/transport.rs`
-- `robot/crates/teleop-protocol/src/adapter.rs`
-- `robot/crates/teleop-protocol/src/xr_state.rs`
+- `rust/crates/teleop-protocol/src/wire.rs`
+- `rust/crates/teleop-protocol/src/descriptor.rs`
+- `rust/crates/teleop-protocol/src/transport.rs`
+- `rust/crates/teleop-protocol/src/adapter.rs`
+- `rust/crates/teleop-protocol/src/xr_state.rs`
 
 ### `robot-service`
 
@@ -70,10 +70,10 @@ adapter endpoint. This is the default process to run next to a robot.
 
 Key paths:
 
-- `robot/crates/robot-service/src/main.rs`
-- `robot/configs/mujoco_so101.yaml`
-- `robot/configs/so101_real.yaml`
-- `robot/configs/so101_dual_real.yaml`
+- `rust/crates/robot-service/src/main.rs`
+- `rust/configs/mujoco_so101.yaml`
+- `rust/configs/so101_real.yaml`
+- `rust/configs/so101_dual_real.yaml`
 
 ### `xr-bridge`
 
@@ -89,14 +89,14 @@ Bridge between XR clients and robot/video sources. It owns:
 
 Key paths:
 
-- `robot/crates/xr-bridge/src/main.rs`
-- `robot/crates/xr-bridge/src/service.rs`
-- `robot/crates/xr-bridge/src/discovery.rs`
-- `robot/crates/xr-bridge/src/pose_server.rs`
-- `robot/crates/xr-bridge/src/pose_udp_server.rs`
-- `robot/crates/xr-bridge/src/telemetry_server.rs`
-- `robot/crates/xr-bridge/src/video/`
-- `robot/crates/xr-bridge/src/sdk.rs`
+- `rust/crates/xr-bridge/src/main.rs`
+- `rust/crates/xr-bridge/src/service.rs`
+- `rust/crates/xr-bridge/src/discovery.rs`
+- `rust/crates/xr-bridge/src/pose_server.rs`
+- `rust/crates/xr-bridge/src/pose_udp_server.rs`
+- `rust/crates/xr-bridge/src/telemetry_server.rs`
+- `rust/crates/xr-bridge/src/video/`
+- `rust/crates/xr-bridge/src/sdk.rs`
 
 ### `pyoperator-native`
 
@@ -127,11 +127,11 @@ ever receive robot base-frame targets.
 
 Key paths:
 
-- `robot/crates/robot-adapter/src/main.rs`
-- `robot/crates/robot-adapter/src/device.rs`
-- `robot/crates/robot-adapter/src/devices/`
-- `robot/crates/robot-adapter/src/control/`
-- `robot/crates/robot-adapter/src/server.rs`
+- `rust/crates/robot-adapter/src/main.rs`
+- `rust/crates/robot-adapter/src/device.rs`
+- `rust/crates/robot-adapter/src/devices/`
+- `rust/crates/robot-adapter/src/control/`
+- `rust/crates/robot-adapter/src/server.rs`
 
 ### `e2e-tests`
 
@@ -210,11 +210,11 @@ not select Unitree/Galbot/SO101 profiles or connect to retargeting-service on
 the robot's behalf. If an outside robot needs retargeting-service, that is an
 internal robot-side dependency behind `robot-service`.
 
-Current config examples live in `robot/configs/`.
+Current config examples live in `rust/configs/`.
 
 ## Common Commands
 
-Run from `robot/`:
+Run from `rust/`:
 
 ```bash
 cargo build --release
@@ -237,7 +237,7 @@ examples/unitree-g1d/build/operator-g1d-client \
   --blueprint examples/unitree-g1d/config/unitree_g1d_blueprint.json
 
 # Terminal 2, from the repository root
-cargo run --manifest-path robot/Cargo.toml -p xr-bridge -- \
+cargo run --manifest-path rust/Cargo.toml -p xr-bridge -- \
   --config examples/unitree-g1d/config/unitree_g1d_bridge.yaml
 ```
 

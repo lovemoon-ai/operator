@@ -520,7 +520,7 @@ adapter:
 
     #[test]
     fn shipped_mujoco_config_file_parses() {
-        // The config file shipped under robot/configs/ must parse and resolve
+        // The config file shipped under rust/configs/ must parse and resolve
         // a mujoco arm device.
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),

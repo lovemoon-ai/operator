@@ -250,49 +250,57 @@ async fn blueprint_state_and_event_round_trip() {
 }
 
 #[tokio::test]
-async fn blueprint_requires_matching_headset_spec_capability() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (cmd_tx, _cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
-    let (_telemetry_tx, telemetry_rx) = watch::channel(DeviceTelemetry::default());
-    let (xr_sink, _xr_state_rx) = state_channel();
-    let (_blueprint_tx, blueprint_rx) = watch::channel(Some(Arc::new(blueprint())));
-    let (_state_tx, state_rx) = watch::channel(Some(Arc::new(state(1, false))));
-    let (event_tx, _event_rx) = mpsc::channel(4);
-    let server = tokio::spawn(pose_server::run_on_with_xr_state_and_blueprint(
-        listener,
-        Arc::new(descriptor()),
-        cmd_tx,
-        telemetry_rx,
-        LatencyRecorder::new(),
-        xr_sink,
-        Some(BlueprintStreams {
-            blueprint_rx,
-            state_rx,
-            event_tx,
-        }),
-    ));
+async fn blueprint_negotiates_on_major_capability_only() {
+    // blueprint_v1 without this bridge's spec hash (another minor) still
+    // receives the Blueprint; a headset without blueprint_v1 does not.
+    for (hello, expect_blueprint) in [
+        (&br#"{"version":"2.0","capabilities":["xr_state_v1","blueprint_v1"]}"#[..], true),
+        (&br#"{"version":"2.0","capabilities":["xr_state_v1"]}"#[..], false),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (cmd_tx, _cmd_rx) = watch::channel::<Option<TimedCommand>>(None);
+        let (_telemetry_tx, telemetry_rx) = watch::channel(DeviceTelemetry::default());
+        let (xr_sink, _xr_state_rx) = state_channel();
+        let (_blueprint_tx, blueprint_rx) = watch::channel(Some(Arc::new(blueprint())));
+        let (_state_tx, state_rx) = watch::channel(Some(Arc::new(state(1, false))));
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let server = tokio::spawn(pose_server::run_on_with_xr_state_and_blueprint(
+            listener,
+            Arc::new(descriptor()),
+            cmd_tx,
+            telemetry_rx,
+            LatencyRecorder::new(),
+            xr_sink,
+            Some(BlueprintStreams {
+                blueprint_rx,
+                state_rx,
+                event_tx,
+            }),
+        ));
 
-    let socket = TcpStream::connect(address).await.unwrap();
-    let mut framed = Framed::new(socket, CommandCodec);
-    framed
-        .send(CommandFrame {
-            command: "Hello".into(),
-            data: br#"{"version":"2.0","capabilities":["xr_state_v1","blueprint_v1"]}"#.to_vec(),
-        })
+        let socket = TcpStream::connect(address).await.unwrap();
+        let mut framed = Framed::new(socket, CommandCodec);
+        framed
+            .send(CommandFrame {
+                command: "Hello".into(),
+                data: hello.to_vec(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            next_named(&mut framed, "DeviceDescriptor").await.command,
+            "DeviceDescriptor"
+        );
+        let received = timeout(
+            Duration::from_millis(200),
+            next_named(&mut framed, "Blueprint"),
+        )
         .await
-        .unwrap();
-    assert_eq!(
-        next_named(&mut framed, "DeviceDescriptor").await.command,
-        "DeviceDescriptor"
-    );
-    assert!(timeout(
-        Duration::from_millis(100),
-        next_named(&mut framed, "Blueprint")
-    )
-    .await
-    .is_err());
-    server.abort();
+        .is_ok();
+        assert_eq!(received, expect_blueprint);
+        server.abort();
+    }
 }
 
 #[tokio::test]

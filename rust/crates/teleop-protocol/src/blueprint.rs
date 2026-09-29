@@ -154,6 +154,53 @@ pub struct Blueprint {
 }
 
 impl Blueprint {
+    /// Drop primitives, properties and bindings this build's spec does not
+    /// define, so a newer minor `blueprint_v1` peer degrades gracefully
+    /// instead of losing the whole Blueprint. Returns a description of each
+    /// dropped entry and the state keys that only dropped bindings used.
+    pub fn retain_supported(&mut self) -> (Vec<String>, HashSet<String>) {
+        let mut ignored = Vec::new();
+        let mut ignored_state_keys = HashSet::new();
+        self.components.retain_mut(|component| {
+            let Some(primitive) = primitive_spec(&component.component_type) else {
+                ignored.push(format!(
+                    "component {:?} of type {:?}",
+                    component.id, component.component_type
+                ));
+                ignored_state_keys.extend(component.bindings.values().cloned());
+                return false;
+            };
+            let known = |field: &str, name: &str| {
+                primitive
+                    .get(field)
+                    .and_then(Value::as_object)
+                    .is_some_and(|specs| specs.contains_key(name))
+            };
+            component.properties.retain(|name, _| {
+                let keep = known("properties", name);
+                if !keep {
+                    ignored.push(format!("property {}.{name}", component.id));
+                }
+                keep
+            });
+            component.bindings.retain(|name, state_key| {
+                let keep = known("bindings", name);
+                if !keep {
+                    ignored.push(format!("binding {}.{name}", component.id));
+                    ignored_state_keys.insert(state_key.clone());
+                }
+                keep
+            });
+            true
+        });
+        for component in &self.components {
+            for state_key in component.bindings.values() {
+                ignored_state_keys.remove(state_key);
+            }
+        }
+        (ignored, ignored_state_keys)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != BLUEPRINT_SCHEMA {
             return Err(format!(

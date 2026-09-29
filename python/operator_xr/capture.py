@@ -10,7 +10,7 @@ granted streams over the host session's own media channel (OLCP frames on
 :class:`StreamsControl` adjusts parameters inside the envelope during the
 session.
 
-Mirrors ``robot/crates/teleop-protocol/src/streams.rs``; see
+Mirrors ``rust/crates/teleop-protocol/src/streams.rs``; see
 ``claw/architecture/wire-protocol.md``.
 """
 

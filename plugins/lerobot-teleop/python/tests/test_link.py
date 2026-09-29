@@ -2,7 +2,7 @@
 
 Pure protocol/unit tests: no adapter, no headset, no hardware, no placo. The
 byte-exact frames below are transcribed from the Rust `LinkCodec` tests in
-`robot/crates/robot-adapter/src/control/drivers/lerobot_link.rs`, so these fail
+`rust/crates/robot-adapter/src/control/drivers/lerobot_link.rs`, so these fail
 if either side's wire format drifts.
 """
 

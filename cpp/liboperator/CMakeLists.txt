@@ -6,15 +6,15 @@ option(LIBOPERATOR_BUILD_TESTS "Build liboperator C++ tests" OFF)
 set(LIBOPERATOR_LIBRARY "" CACHE FILEPATH "Path to liboperator shared/static library")
 if(NOT LIBOPERATOR_LIBRARY)
   find_file(LIBOPERATOR_STATIC_LIBRARY NAMES liboperator.a PATHS
-    "${CMAKE_CURRENT_LIST_DIR}/../../robot/target/release"
-    "${CMAKE_CURRENT_LIST_DIR}/../../robot/target/debug"
+    "${CMAKE_CURRENT_LIST_DIR}/../../rust/target/release"
+    "${CMAKE_CURRENT_LIST_DIR}/../../rust/target/debug"
     NO_DEFAULT_PATH)
   if(LIBOPERATOR_STATIC_LIBRARY)
     set(LIBOPERATOR_LIBRARY "${LIBOPERATOR_STATIC_LIBRARY}")
   else()
     find_library(LIBOPERATOR_DISCOVERED_LIBRARY NAMES operator PATHS
-      "${CMAKE_CURRENT_LIST_DIR}/../../robot/target/release"
-      "${CMAKE_CURRENT_LIST_DIR}/../../robot/target/debug"
+      "${CMAKE_CURRENT_LIST_DIR}/../../rust/target/release"
+      "${CMAKE_CURRENT_LIST_DIR}/../../rust/target/debug"
       NO_DEFAULT_PATH)
     set(LIBOPERATOR_LIBRARY "${LIBOPERATOR_DISCOVERED_LIBRARY}")
   endif()

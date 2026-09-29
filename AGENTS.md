@@ -5,7 +5,7 @@
 Operator is a unified toolkit for teleoperation and egocentric data
 collection.
 
-- `robot/` - Rust crates for `teleop-protocol`, `xr-bridge`, and
+- `rust/` - Rust crates for `teleop-protocol`, `xr-bridge`, and
   `robot-adapter`.
 - `python/` - Python-first `operator_xr` package, examples, and tests.
 - `xr/` - Godot 4.5 Android XR client APK. It runs in-headset.
@@ -69,9 +69,9 @@ and the loader then reads a ZIP header instead of ELF (`bad ELF magic:
 device can be repaired with `--no-incremental` without wiping app data, or with
 `make uninstall && make install-quest`.
 
-## Robot Side
+## Rust Side
 
-Run from `robot/`.
+Run from `rust/`.
 
 ```bash
 cargo build --release
